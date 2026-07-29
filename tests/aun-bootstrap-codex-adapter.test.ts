@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createCodexBootstrapAdapter } from '../bin/aun/bootstrap-adapter-codex'
+import { bootstrapDigest } from '../core/aun-bootstrap-state'
+import { createCodexBootstrapAdapter, expectedBootstrapMcpTuple } from '../bin/aun/bootstrap-adapter-codex'
 import type { BootstrapStageContext } from '../bin/aun/bootstrap-types'
 
 const context = {
@@ -47,6 +48,38 @@ function exactGet(overrides: Record<string, unknown> = {}) {
     transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
     ...overrides,
   })
+}
+
+function absentPrestateMutation(
+  candidateContext: BootstrapStageContext,
+  recoveryAdmission: boolean,
+) {
+  const tuple = expectedBootstrapMcpTuple(candidateContext, {
+    bunPath: '/bin/bun',
+    serverEntry: 'server.ts',
+    run: async () => ({ exitCode: 1, stdout: '', stderr: '' }),
+  })
+  const tupleDigest = bootstrapDigest(tuple)
+  return {
+    mutation_id: `hard-crash-${recoveryAdmission ? 'open' : 'observed'}`,
+    stage: 'B4_MCP_REGISTRATION' as const,
+    kind: 'mcp_registration' as const,
+    owner_key: `codex:aun:${candidateContext.runId}`,
+    before_digest: bootstrapDigest({ absent: true }),
+    intended_after_digest: tupleDigest,
+    actual_after_digest: recoveryAdmission ? null : tupleDigest,
+    rollback_action: 'conditional remove fixture',
+    rollback_status: 'not_run' as const,
+    rollback_payload: {
+      created_by_run: true,
+      tuple_digest: tupleDigest,
+      admitted_run_id: candidateContext.runId,
+      admitted_repo_head: candidateContext.repoHead,
+      admitted_provider_root_digest: bootstrapDigest(candidateContext.providerRootAuthority?.canonicalRoot),
+      admitted_provider_authority_digest: candidateContext.providerRootAuthority?.authorityTupleDigest,
+      ...(recoveryAdmission ? { recovery_admission: true } : {}),
+    },
+  }
 }
 
 describe('aun bootstrap Codex adapter', () => {
@@ -307,6 +340,173 @@ describe('aun bootstrap Codex adapter', () => {
         rollback_result: 'NO_GO_ROLLBACK_UNVERIFIED',
         remove_calls: removeCalls,
         intended_tuple_preserved: added,
+      }))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('absent-prestate conditional remove recovers exactly after SIGKILL with no false no-effect receipt', async () => {
+    const repoRoot = process.cwd()
+    const childScript = String.raw`
+      import { existsSync, rmSync } from 'node:fs'
+      import { join } from 'node:path'
+      const source = await import(process.env.HARD_REPO + '/bin/aun/bootstrap-adapter-codex.ts')
+      const state = await import(process.env.HARD_REPO + '/core/aun-bootstrap-state.ts')
+      const root = process.env.HARD_ROOT
+      const recoveryAdmission = process.env.HARD_MODE === 'open'
+      const crashBoundary = process.env.HARD_BOUNDARY
+      const crashAt = (boundary) => { if (crashBoundary === boundary) process.kill(process.pid, 'SIGKILL') }
+      const candidateContext = {
+        runId: 'hard-crash-run', agentId: 'codex-probe', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+        repoRoot: '/repo', workspaceRoot: '/workspace', repoHead: 'a'.repeat(40), dryRun: false,
+        env: { DATABASE_URL: 'postgresql:///probe', AUN_BOOTSTRAP_CHANNEL_PORT: '8891', AUN_BOOTSTRAP_PROCESS_RUNTIME: 'codex', CODEX_HOME: root },
+        priorState: {},
+        providerRootAuthority: {
+          existingTarget: false, canonicalSourceField: 'clean_host_default', canonicalRoot: root,
+          canonicalRootDigest: 'canonical-root', canonicalRealpathDigest: 'canonical-realpath',
+          projectionMatches: true, callerMismatch: false, authorityTupleDigest: 'authority-tuple-v1',
+        },
+      }
+      const tuple = source.expectedBootstrapMcpTuple(candidateContext, {
+        bunPath: '/bin/bun', serverEntry: 'server.ts', run: async () => ({ exitCode: 1, stdout: '', stderr: '' }),
+      })
+      const tupleDigest = state.bootstrapDigest(tuple)
+      const environment = {
+        AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
+        AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+      }
+      const exactGet = JSON.stringify({
+        name: 'aun', enabled: true,
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+      })
+      const adapter = source.createCodexBootstrapAdapter({
+        bunPath: '/bin/bun', serverEntry: 'server.ts',
+        afterOwnedTupleArtifactDisplaced: () => crashAt('move'),
+        afterOwnedTuplePrivateRemove: () => crashAt('remove'),
+        afterOwnedTupleLiveCommit: () => crashAt('commit'),
+        run: async (_command, args, options) => {
+          const config = join(options.env.CODEX_HOME, 'config.toml')
+          const present = existsSync(config)
+          const joined = args.join(' ')
+          if (joined === 'mcp get aun --json') return present
+            ? { exitCode: 0, stdout: exactGet, stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+          if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(present ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+          if (joined === 'mcp remove aun') { rmSync(config, { force: true }); return { exitCode: 0, stdout: 'removed', stderr: '' } }
+          return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+        },
+      })
+      await adapter.rollbackRuntimeRegistration(candidateContext, {
+        mutation_id: 'hard-crash-child', stage: 'B4_MCP_REGISTRATION', kind: 'mcp_registration',
+        owner_key: 'codex:aun:hard-crash-run', before_digest: state.bootstrapDigest({ absent: true }),
+        intended_after_digest: tupleDigest, actual_after_digest: recoveryAdmission ? null : tupleDigest,
+        rollback_action: 'conditional remove fixture', rollback_status: 'not_run',
+        rollback_payload: {
+          created_by_run: true, tuple_digest: tupleDigest, admitted_run_id: 'hard-crash-run', admitted_repo_head: 'a'.repeat(40),
+          admitted_provider_root_digest: state.bootstrapDigest(root), admitted_provider_authority_digest: 'authority-tuple-v1',
+          ...(recoveryAdmission ? { recovery_admission: true } : {}),
+        },
+      })
+      process.exit(91)
+    `
+
+    for (const recoveryAdmission of [false, true]) for (const boundary of ['move', 'remove', 'commit'] as const) {
+      const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), `aun-codex-hard-crash-${boundary}-${recoveryAdmission ? 'open' : 'observed'}-`)))
+      const configPath = join(root, 'config.toml')
+      writeFileSync(configPath, '[mcp_servers.aun]\ncommand = "/bin/bun"\n', { mode: 0o600 })
+      const candidateContext: BootstrapStageContext = {
+        ...withProviderAuthority(root),
+        runId: 'hard-crash-run',
+      }
+      const mutation = absentPrestateMutation(candidateContext, recoveryAdmission)
+      try {
+        const crashed = Bun.spawnSync([process.execPath, '-e', childScript], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            HARD_REPO: repoRoot,
+            HARD_ROOT: root,
+            HARD_MODE: recoveryAdmission ? 'open' : 'observed',
+            HARD_BOUNDARY: boundary,
+          },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        expect(crashed.exitCode).toBeNull()
+        expect(crashed.signalCode).toBe('SIGKILL')
+        expect(existsSync(configPath)).toBe(false)
+        expect(existsSync(join(root, '.config.toml.aun-remove-owned-hard-crash-run'))).toBe(true)
+        expect(existsSync(join(root, '.aun-bootstrap-remove-hard-crash-run', 'remove-state.json'))).toBe(true)
+
+        const adapter = createCodexBootstrapAdapter({
+          bunPath: '/bin/bun', serverEntry: 'server.ts',
+          run: async (_command, args, options) => {
+            const config = join(options.env.CODEX_HOME, 'config.toml')
+            const present = existsSync(config)
+            const joined = args.join(' ')
+            if (joined === 'mcp get aun --json') return present
+              ? { exitCode: 0, stdout: exactGet(), stderr: '' }
+              : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+            if (joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(present ? [{ name: 'aun', enabled: true }] : []), stderr: '' }
+            if (joined === 'mcp remove aun') { rmSync(config, { force: true }); return { exitCode: 0, stdout: 'removed', stderr: '' } }
+            return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+          },
+        })
+        const recovered = await adapter.rollbackRuntimeRegistration(candidateContext, mutation)
+        expect(recovered.ok).toBe(true)
+        expect(recovered.readinessPredicates?.provider_owned_tuple_crash_recovery_verified).toBe(true)
+        expect(recovered.readinessPredicates?.recovery_admission_no_effect).not.toBe(true)
+        expect(existsSync(configPath)).toBe(false)
+        expect(existsSync(join(root, '.config.toml.aun-remove-owned-hard-crash-run'))).toBe(false)
+        expect(existsSync(join(root, '.aun-bootstrap-remove-hard-crash-run'))).toBe(false)
+        console.log(JSON.stringify({
+          fixture: 'B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY',
+          boundary,
+          recovery_admission: recoveryAdmission,
+          child_exit_signal: crashed.signalCode,
+          exact_recovery: recovered.ok,
+          false_no_effect_receipt: recovered.readinessPredicates?.recovery_admission_no_effect === true,
+          residue: false,
+        }))
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  })
+
+  test('implicit PostgreSQL authority fails closed when live DATABASE_URL readback is unavailable', async () => {
+    const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-codex-implicit-pg-authority-')))
+    let addCalls = 0
+    const candidateContext: BootstrapStageContext = {
+      ...withProviderAuthority(root, 'stale-recorded-authority'),
+      env: {
+        ...withProviderAuthority(root).env,
+        DATABASE_URL: 'postgresql://127.0.0.1:1/unreachable?connect_timeout=1',
+      },
+      priorState: { schema_version: 'shirube-v3/aun-bootstrap-run/v1' } as any,
+    }
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args) => {
+        const joined = args.join(' ')
+        if (joined === 'mcp get aun --json') return { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        if (joined === 'mcp list --json') return { exitCode: 0, stdout: '[]', stderr: '' }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') addCalls++
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    })
+    try {
+      const result = await adapter.applyMcpRegistration(candidateContext)
+      expect(result.ok).toBe(false)
+      expect(result.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(addCalls).toBe(0)
+      console.log(JSON.stringify({
+        fixture: 'B4_IMPLICIT_POSTGRES_AUTHORITY_UNAVAILABLE',
+        database_url_present: true,
+        agent_com_db_present: false,
+        provider_mutations: addCalls,
+        result: 'NO_GO_ROLLBACK_UNVERIFIED',
       }))
     } finally {
       rmSync(root, { recursive: true, force: true })
