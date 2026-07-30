@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
 import type { BootstrapExecutionPorts, BootstrapStageContext } from '../../bin/aun/bootstrap-types'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
+import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
   renderStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
@@ -27,6 +28,194 @@ afterEach(() => {
 })
 
 describe('aun bootstrap clean-host journal', () => {
+  test('existing Codex target root authority comes only from metadata.codex_home and projection equality', async () => {
+    const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-root-db-')))
+    roots.push(home)
+    const codexRoot = join(home, '.codex')
+    mkdirSync(codexRoot, { mode: 0o700 })
+    const wrongRoot = join(home, '.wrong-codex')
+    mkdirSync(wrongRoot, { mode: 0o700 })
+    const wrongConfig = join(wrongRoot, 'config.toml')
+    writeFileSync(wrongConfig, 'wrong-profile-must-remain-byte-identical\n', { mode: 0o640 })
+    const wrongBefore = { bytes: readFileSync(wrongConfig), stat: statSync(wrongConfig) }
+    const databaseName = `aun_bootstrap_root_${process.pid}_${Date.now()}`
+    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
+    postgresDatabases.push(databaseName)
+    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const repoRoot = join(import.meta.dir, '..', '..')
+    const env = { ...process.env, HOME: home, DATABASE_URL: databaseUrl, AGENT_COM_DB: 'postgres' } as Record<string, string>
+    expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
+    expect(Bun.spawnSync([
+      'psql', databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
+      join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
+    ], { cwd: repoRoot, env }).exitCode).toBe(0)
+    const db = new PgAdapter(databaseUrl)
+    await db.execute(
+      `INSERT INTO agents (
+         agent_id, display_name, agent_type, runtime, metadata,
+         runtime_engine_preference, ordinary_projection
+       ) VALUES ($1, $2, 'bot', 'TUI', $3::jsonb, 'codex', $4::jsonb)`,
+      ['root-authority', 'Root authority fixture', JSON.stringify({ codex_home: codexRoot }), JSON.stringify({ provider_config_root: codexRoot })],
+    )
+    const exact = await bootstrapInternal.resolveProviderRootAuthority({
+      agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
+    })
+    expect(exact.ok).toBe(true)
+    if (!exact.ok) throw new Error('expected exact root authority')
+    expect(exact.authority).toMatchObject({
+      existingTarget: true,
+      canonicalSourceField: 'metadata.codex_home',
+      canonicalRoot: codexRoot,
+      projectionMatches: true,
+      callerMismatch: true,
+    })
+    const wrongAfter = statSync(wrongConfig)
+    expect(readFileSync(wrongConfig).equals(wrongBefore.bytes)).toBe(true)
+    expect({ dev: wrongAfter.dev, ino: wrongAfter.ino, mode: wrongAfter.mode & 0o777, size: wrongAfter.size })
+      .toEqual({ dev: wrongBefore.stat.dev, ino: wrongBefore.stat.ino, mode: wrongBefore.stat.mode & 0o777, size: wrongBefore.stat.size })
+    await db.execute(`UPDATE agents SET ordinary_projection = $2::jsonb WHERE agent_id = $1`, [
+      'root-authority', JSON.stringify({ provider_config_root: '/tmp/conflict' }),
+    ])
+    const conflict = await bootstrapInternal.resolveProviderRootAuthority({
+      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+    })
+    expect(conflict).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_CONFLICT' })
+    await db.execute(`UPDATE agents SET metadata = '{}'::jsonb WHERE agent_id = $1`, ['root-authority'])
+    const missing = await bootstrapInternal.resolveProviderRootAuthority({
+      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+    })
+    expect(missing).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    const symlinkRoot = join(home, '.codex-link')
+    symlinkSync(codexRoot, symlinkRoot)
+    await db.execute(
+      `UPDATE agents SET metadata = jsonb_build_object('codex_home', $2::text), ordinary_projection = jsonb_build_object('provider_config_root', $2::text)
+        WHERE agent_id = $1`,
+      ['root-authority', symlinkRoot],
+    )
+    const ambiguous = await bootstrapInternal.resolveProviderRootAuthority({
+      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+    })
+    expect(ambiguous).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    await db.close()
+  }, 30_000)
+
+  test('B3 holds the exact desired outbox event from concurrent consumers and restores full preimages', async () => {
+    const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-b3-hold-')))
+    roots.push(home)
+    const codexRoot = join(home, '.codex')
+    mkdirSync(codexRoot, { mode: 0o700 })
+    const databaseName = `aun_bootstrap_b3_${process.pid}_${Date.now()}`
+    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
+    postgresDatabases.push(databaseName)
+    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const env = {
+      ...process.env,
+      HOME: home, AUN_HOME: join(home, '.aun'), DATABASE_URL: databaseUrl, AGENT_COM_DB: 'postgres',
+      AUN_BOOTSTRAP_CHANNEL_PORT: '8801', AUN_BOOTSTRAP_PROCESS_RUNTIME: 'codex',
+    } as Record<string, string>
+    expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
+    expect(Bun.spawnSync([
+      'psql', databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
+      join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
+    ], { cwd: repoRoot, env }).exitCode).toBe(0)
+    const profileSet = Bun.spawnSync([
+      process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b3-held',
+      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
+      '--channel-port', '8801', '--tmux-session', 'b3-session', '--enabled', 'true', '--execute',
+    ], { cwd: repoRoot, env })
+    expect(profileSet.exitCode).toBe(0)
+    const db = new PgAdapter(databaseUrl)
+    await db.execute(
+      `UPDATE agents SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($2::text), true),
+                         canonical_workspace = $4,
+                         canonical_home = $5,
+                         supervisor_identity = 'launchd:com.agent-comms.state-daemon',
+                         ordinary_communication_enrollment = true,
+                         ordinary_projection = $3::jsonb,
+                         desired_release_commit = $6,
+                         desired_release_tree = $7,
+                         desired_control_refs = $8::jsonb
+        WHERE agent_id = $1`,
+      [
+        'b3-held', codexRoot,
+        JSON.stringify({
+          owner: 'continuous-reconciler', provider_repo_root: repoRoot, provider_config_root: codexRoot,
+          daemon_checkout: join(home, '.agent-comms', 'state-daemon', 'releases', 'c'.repeat(40)),
+          schema_version: 'aun-configuration-projection/v1',
+        }),
+        repoRoot, home, 'c'.repeat(40), 'd'.repeat(40),
+        JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#preexisting-fixture']),
+      ],
+    )
+    const preAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
+    const preOutbox = await db.query<any>(
+      `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
+      ['b3-held'],
+    )
+    const run = async (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => {
+      const joined = args.join(' ')
+      if (command === 'git' && joined === 'rev-parse HEAD^{tree}') return { exitCode: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' }
+      if (command === 'tmux') return { exitCode: 0, stdout: 'b3-session\n', stderr: '' }
+      if (command === process.execPath && args[0] === 'cli/index.ts') {
+        const child = Bun.spawn([command, ...args], { cwd: options.cwd, env: options.env, stdout: 'pipe', stderr: 'pipe' })
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+        ])
+        return { exitCode, stdout, stderr }
+      }
+      return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+    }
+    const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+    const context: BootstrapStageContext = {
+      runId: 'b3-held-run', agentId: 'b3-held', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
+      priorState: { mutations: [] } as any,
+      providerRootAuthority: {
+        existingTarget: true, canonicalSourceField: 'metadata.codex_home', canonicalRoot: codexRoot,
+        canonicalRootDigest: bootstrapDigest(codexRoot), canonicalRealpathDigest: bootstrapDigest(codexRoot),
+        projectionMatches: true, callerMismatch: false,
+      },
+    }
+    const outcome = await ports.ensureAgentProfile(context)
+    expect(outcome.ok).toBe(true)
+    expect(outcome.mutation?.kind).toBe('configuration_desired')
+    const held = await db.query<any>(
+      `SELECT event_id, attempt_count, delivered_at, available_at::text AS available_at_text
+         FROM aun_configuration_desired_outbox
+        WHERE agent_id = $1 AND event_id = ANY($2::uuid[])`,
+      ['b3-held', outcome.mutation?.rollback_payload?.new_event_ids],
+    )
+    expect(held).toHaveLength(1)
+    expect(held[0]).toMatchObject({ attempt_count: 0, delivered_at: null, available_at_text: 'infinity' })
+    const concurrentlyVisible = await db.query<any>(
+      `SELECT event_id FROM aun_configuration_desired_outbox
+        WHERE agent_id = $1 AND delivered_at IS NULL AND available_at <= now()`,
+      ['b3-held'],
+    )
+    expect(concurrentlyVisible.filter((row) => String(row.event_id) === String(held[0].event_id))).toHaveLength(0)
+    const rolledBack = await ports.rollbackMutation(context, {
+      mutation_id: 'b3-held-mutation', stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run', ...outcome.mutation!,
+    })
+    expect(rolledBack.ok).toBe(true)
+    expect(rolledBack.readinessPredicates).toMatchObject({
+      held_run_event_delivery_count: 0,
+      compensating_event_count: 1,
+      exact_delete_count: 2,
+      broad_delete_count: 0,
+      trigger_disable_count: 0,
+      foreign_event_mutation_count: 0,
+    })
+    const finalAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
+    const finalOutbox = await db.query<any>(
+      `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
+      ['b3-held'],
+    )
+    expect(bootstrapDigest(finalAgent?.row)).toBe(bootstrapDigest(preAgent?.row))
+    expect(bootstrapDigest(finalOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
+    await db.close()
+  }, 30_000)
+
   for (const fixture of ['sqlite-new', 'sqlite-existing', 'postgres'] as const) test(`real default ${fixture} path performs genuine MCP recovery and separate-process ordinary receive`, async () => {
     const backend = fixture === 'postgres' ? 'postgres' : 'sqlite'
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-'))
@@ -118,6 +307,7 @@ describe('aun bootstrap clean-host journal', () => {
         : { exitCode: 1, stdout: '', stderr: 'MCP server aun not found', pid: ++syntheticPid }
       if (command === 'codex' && joined === 'mcp list --json') return { exitCode: 0, stdout: JSON.stringify(aunRegistered ? [{ name: 'aun', enabled: true }] : []), stderr: '', pid: ++syntheticPid }
       if (command === 'codex' && args.slice(0, 3).join(' ') === 'mcp add aun') {
+        mkdirSync(options.env.CODEX_HOME, { recursive: true, mode: 0o700 })
         aunRegistered = true
         return { exitCode: 0, stdout: 'added', stderr: '', pid: ++syntheticPid }
       }
@@ -516,7 +706,7 @@ describe('aun bootstrap clean-host journal', () => {
     stub('node', 'echo v20.20.0')
     stub('tmux', 'echo clean-host-session')
     stub('launchctl', 'exit 0')
-    stub('codex', 'echo codex-cli 1.0.0')
+    stub('codex', 'case "$*" in "mcp get wasurezu --json") exit 1;; *) echo codex-cli 1.0.0;; esac')
     stub('ps', 'exit 1')
     stub('lsof', 'exit 1')
     const dbPath = join(home, 'agent-com.db')
@@ -556,7 +746,9 @@ describe('aun bootstrap clean-host journal', () => {
     const result = await bootstrap({
       agentId: 'clean-host', runtime: 'codex', home, repoRoot: process.cwd(),
       env: { HOME: home, AUN_HOME: join(home, '.aun'), DISCORD_BOT_TOKEN: 'super-secret-value' },
-    }, { ports, run: async () => ({ exitCode: 0, stdout: `${'d'.repeat(40)}\n`, stderr: '' }) })
+    }, { ports, run: async (command, args) => command === 'codex' && args.join(' ') === 'mcp get wasurezu --json'
+      ? { exitCode: 1, stdout: '', stderr: 'not configured' }
+      : { exitCode: 0, stdout: `${'d'.repeat(40)}\n`, stderr: '' } })
     expect(result.status).toBe('READY')
     const path = join(home, '.aun', 'bootstrap', 'clean-host', `${result.run_id}.json`)
     expect(statSync(path).mode & 0o777).toBe(0o600)

@@ -37,6 +37,10 @@ export type BootstrapReasonCode =
   | 'NO_GO_MCP_REGISTRATION'
   | 'NO_GO_MCP_READBACK'
   | 'NO_GO_PROVIDER_ADAPTER_MISMATCH'
+  | 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING'
+  | 'NO_GO_PROVIDER_ROOT_CONFLICT'
+  | 'NO_GO_PROVIDER_NATIVE_JSON_INVALID'
+  | 'NO_GO_PROVIDER_ARTIFACT_AMBIGUOUS'
   | 'NO_GO_MEMORY_RECOVERY'
   | 'NO_GO_RUNTIME_RECEIPT'
   | 'NO_GO_INSTALL_PLAN'
@@ -69,7 +73,7 @@ export type BootstrapCommandResult = {
 export type BootstrapMutation = {
   mutation_id: string
   stage: BootstrapStage
-  kind: 'db' | 'profile' | 'mcp_registration' | 'memory_readiness' | 'daemon' | 'queue_smoke' | 'configuration'
+  kind: 'db' | 'profile' | 'configuration_desired' | 'mcp_registration' | 'memory_readiness' | 'daemon' | 'queue_smoke' | 'configuration'
   owner_key: string
   before_digest: string | null
   intended_after_digest: string | null
@@ -133,6 +137,8 @@ export type BootstrapStageOutcome = {
   /** Canonical digest of the live native target readback for stage sealing/resume. */
   readbackDigest?: string
   mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
+  /** Ordered mutations performed by one compound stage. */
+  mutations?: Array<Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>>
   resolvedRuntime?: BootstrapResolvedRuntime
 }
 
@@ -148,6 +154,26 @@ export type BootstrapStageContext = {
   env: Record<string, string>
   priorState: BootstrapRunState
   abortSignal?: AbortSignal
+  /**
+   * Persist an exact rollback admission before a stage makes its first
+   * protected external mutation. The runner owns the durable journal; stage
+   * adapters only describe the intended fence.
+   */
+  admitRecoveryMutation?: (
+    mutation: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>,
+  ) => void
+  /** Remove an admission only after native readback proves no mutation occurred. */
+  cancelRecoveryAdmission?: (ownerKey: string) => void
+  providerRootAuthority?: {
+    existingTarget: boolean
+    canonicalSourceField: 'metadata.codex_home' | 'clean_host_default'
+    canonicalRoot: string
+    canonicalRootDigest: string
+    canonicalRealpathDigest: string
+    projectionMatches: boolean
+    callerMismatch: boolean
+    authorityTupleDigest?: string
+  }
 }
 
 export interface BootstrapExecutionPorts {
@@ -173,6 +199,7 @@ export interface BootstrapRuntimeAdapter {
   planRuntimeStart(context: BootstrapStageContext): Promise<BootstrapStageOutcome>
   verifyRuntimeIdentity(context: BootstrapStageContext): Promise<BootstrapStageOutcome>
   rollbackRuntimeRegistration(context: BootstrapStageContext, mutation: BootstrapMutation): Promise<BootstrapStageOutcome>
+  finalizeRuntimeRegistration?(context: BootstrapStageContext, mutation: BootstrapMutation): Promise<BootstrapStageOutcome>
 }
 
 export type BootstrapOptions = {

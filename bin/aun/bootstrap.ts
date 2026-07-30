@@ -1,7 +1,21 @@
-import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
@@ -131,6 +145,149 @@ function removeSqliteArtifacts(path: string): void {
   for (const candidate of [path, `${path}-wal`, `${path}-shm`]) rmSync(candidate, { force: true })
 }
 
+type DurableArtifactIdentity = {
+  path: string
+  realpath: string
+  device: number
+  inode: number
+  uid: number
+  gid: number
+  mode: number
+  size: number
+  nlink: number
+  sha256: string
+}
+
+type ConfigurationDesiredRollbackArtifact = {
+  schema_version: 'aun-bootstrap-configuration-desired-rollback/v1'
+  run_id: string
+  agent_id: string
+  pre_agent_row: Record<string, unknown>
+  post_agent_row: Record<string, unknown>
+  pre_outbox_rows: Array<Record<string, unknown>>
+  post_outbox_rows: Array<Record<string, unknown>>
+  new_event_ids: string[]
+}
+
+function configurationDesiredControlledRow(row: Record<string, unknown>): Record<string, unknown> {
+  const metadata = jsonRecord(row.metadata)
+  return {
+    profile_enabled: row.profile_enabled,
+    runtime_engine_preference: row.runtime_engine_preference,
+    home_directory: row.home_directory,
+    canonical_workspace: row.canonical_workspace,
+    canonical_home: row.canonical_home,
+    channel_port: row.channel_port,
+    supervisor_identity: row.supervisor_identity,
+    expected_provider_identity: row.expected_provider_identity,
+    expected_provider_identity_ref: row.expected_provider_identity_ref,
+    provider_token_source_ref: row.provider_token_source_ref,
+    ordinary_communication_enrollment: row.ordinary_communication_enrollment,
+    ordinary_projection: row.ordinary_projection,
+    desired_release_commit: row.desired_release_commit,
+    desired_release_tree: row.desired_release_tree,
+    desired_control_refs: row.desired_control_refs,
+    desired_revision: row.desired_revision,
+    desired_digest: row.desired_digest,
+    desired_updated_at: row.desired_updated_at,
+    desired_updated_by: row.desired_updated_by,
+    metadata_codex_home: metadata.codex_home ?? null,
+  }
+}
+
+function sha256Bytes(value: Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function fsyncDirectory(path: string): void {
+  const fd = openSync(path, 'r')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+function durableArtifactIdentity(path: string): DurableArtifactIdentity {
+  const link = lstatSync(path)
+  if (link.isSymbolicLink() || !link.isFile()) throw new Error('rollback artifact identity invalid')
+  const actual = statSync(path)
+  if ((actual.mode & 0o777) !== 0o600 || actual.nlink !== 1) throw new Error('rollback artifact permissions invalid')
+  return {
+    path,
+    realpath: realpathSync(path),
+    device: Number(actual.dev),
+    inode: Number(actual.ino),
+    uid: Number(actual.uid),
+    gid: Number(actual.gid),
+    mode: actual.mode & 0o777,
+    size: actual.size,
+    nlink: actual.nlink,
+    sha256: sha256Bytes(readFileSync(path)),
+  }
+}
+
+function sameDurableArtifactIdentity(actual: DurableArtifactIdentity, expected: unknown): boolean {
+  if (!expected || typeof expected !== 'object') return false
+  const value = expected as Record<string, unknown>
+  return actual.path === value.path
+    && actual.realpath === value.realpath
+    && actual.device === Number(value.device)
+    && actual.inode === Number(value.inode)
+    && actual.uid === Number(value.uid)
+    && actual.gid === Number(value.gid)
+    && actual.mode === Number(value.mode)
+    && actual.size === Number(value.size)
+    && actual.nlink === Number(value.nlink)
+    && actual.sha256 === value.sha256
+}
+
+function configurationDesiredArtifactPath(home: string, env: Record<string, string>, agentId: string, runId: string): string {
+  return join(bootstrapStateRoot(home, env), validateBootstrapAgentId(agentId), `${runId}.configuration-desired.rollback.json`)
+}
+
+function writeConfigurationDesiredArtifact(
+  home: string,
+  env: Record<string, string>,
+  artifact: ConfigurationDesiredRollbackArtifact,
+): DurableArtifactIdentity {
+  const path = configurationDesiredArtifactPath(home, env, artifact.agent_id, artifact.run_id)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  chmodSync(dir, 0o700)
+  const dirIdentity = lstatSync(dir)
+  if (dirIdentity.isSymbolicLink() || !dirIdentity.isDirectory()) throw new Error('rollback artifact directory invalid')
+  const body = Buffer.from(`${JSON.stringify(artifact)}\n`, 'utf8')
+  const fd = openSync(path, 'wx', 0o600)
+  try {
+    writeFileSync(fd, body)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  chmodSync(path, 0o600)
+  fsyncDirectory(dir)
+  return durableArtifactIdentity(path)
+}
+
+function readConfigurationDesiredArtifact(
+  identity: unknown,
+  digest: unknown,
+): { artifact: ConfigurationDesiredRollbackArtifact; identity: DurableArtifactIdentity } {
+  if (!identity || typeof identity !== 'object') throw new Error('rollback artifact identity absent')
+  const path = String((identity as Record<string, unknown>).path ?? '')
+  if (!isAbsolute(path) || !existsSync(path)) throw new Error('rollback artifact absent')
+  const actualIdentity = durableArtifactIdentity(path)
+  if (!sameDurableArtifactIdentity(actualIdentity, identity)) throw new Error('rollback artifact identity drift')
+  const artifact = JSON.parse(readFileSync(path, 'utf8')) as ConfigurationDesiredRollbackArtifact
+  if (artifact.schema_version !== 'aun-bootstrap-configuration-desired-rollback/v1'
+    || bootstrapDigest(artifact) !== digest) throw new Error('rollback artifact digest mismatch')
+  return { artifact, identity: actualIdentity }
+}
+
+function removeConfigurationDesiredArtifact(identity: DurableArtifactIdentity): void {
+  const actual = durableArtifactIdentity(identity.path)
+  if (!sameDurableArtifactIdentity(actual, identity)) throw new Error('rollback artifact removal fence mismatch')
+  rmSync(identity.path)
+  fsyncDirectory(dirname(identity.path))
+}
+
 function initialState(input: {
   runId: string
   agentId: string
@@ -219,6 +376,7 @@ function outcomeReadbackDigest(outcome: BootstrapStageOutcome): string {
     readiness_predicates: outcome.readinessPredicates ?? {},
     resolved_runtime: outcome.resolvedRuntime ?? null,
     mutation_actual_after_digest: outcome.mutation?.actual_after_digest ?? null,
+    mutation_actual_after_digests: outcome.mutations?.map((mutation) => mutation.actual_after_digest) ?? [],
   })
 }
 
@@ -252,8 +410,8 @@ function resultFromState(
       ? {
           blocking: true,
           actor_agent_id: state.agent_id,
-          action: `Resolve ${reasonCodes.join(', ') || 'the failed bootstrap predicate'}, then resume this exact run.`,
-          deliver_via: `aun bootstrap --agent-id ${state.agent_id} --runtime ${state.resolved_runtime ?? state.requested_runtime} --resume ${state.run_id} --json`,
+          action: `Resolve ${reasonCodes.join(', ') || 'the failed bootstrap predicate'}; this failed run is terminal, so start one new bootstrap run only after rollback is verified.`,
+          deliver_via: `aun bootstrap --agent-id ${state.agent_id} --runtime ${state.resolved_runtime ?? state.requested_runtime} --json`,
           exact_input_refs: [state.run_id, state.input_digest],
         }
       : {
@@ -284,7 +442,9 @@ async function withDeadline(
       ? {
           ...outcome,
           ok: false,
-          reasonCodes: [outcome.mutation ? 'NO_GO_POST_MUTATION_READBACK' : 'NO_GO_STAGE_TIMEOUT'],
+          reasonCodes: [outcome.mutation || (outcome.mutations?.length ?? 0) > 0
+            ? 'NO_GO_POST_MUTATION_READBACK'
+            : 'NO_GO_STAGE_TIMEOUT'],
           evidenceRefs: [...(outcome.evidenceRefs ?? []), `stage-timeout-after-close:${stage}`],
         }
       : outcome
@@ -365,6 +525,14 @@ async function providerInputSnapshot(input: {
       : ['mcp', 'get', 'wasurezu'], {
       cwd: input.repoRoot, env: input.env, timeoutMs: 30_000,
     })
+    let wasurezuReadback: unknown = { exit_code: wasurezu.exitCode }
+    if (wasurezu.exitCode === 0) {
+      try {
+        wasurezuReadback = JSON.parse(wasurezu.stdout)
+      } catch {
+        throw new Error('NO_GO_PROVIDER_NATIVE_JSON_INVALID')
+      }
+    }
     return {
       runtime,
       executable,
@@ -375,7 +543,7 @@ async function providerInputSnapshot(input: {
         ? input.env.CODEX_HOME || join(input.home, '.codex')
         : input.env.CLAUDE_CONFIG_DIR || join(input.home, '.claude')),
       wasurezu_native_exit: wasurezu.exitCode,
-      wasurezu_native_readback_digest: bootstrapDigest({ stdout: wasurezu.stdout, stderr: wasurezu.stderr }),
+      wasurezu_native_readback_digest: bootstrapDigest(wasurezuReadback),
     }
   }))
   return Object.fromEntries(entries.map((entry) => [entry.runtime, entry]))
@@ -434,6 +602,180 @@ async function withBootstrapDb<T>(
     return await fn(db)
   } finally {
     await db.close().catch(() => {})
+  }
+}
+
+type ProviderRootAuthority = NonNullable<BootstrapStageContext['providerRootAuthority']>
+
+function jsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { return {} }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function providerRootAuthorityTupleDigest(agentId: string, row: Record<string, unknown>): string {
+  const metadata = jsonRecord(row.metadata)
+  const projection = jsonRecord(row.ordinary_projection)
+  return bootstrapDigest({
+    agent_id: String(row.agent_id ?? agentId),
+    repo_url: typeof row.repo_url === 'string' ? row.repo_url : null,
+    workspace_path: typeof row.workspace_path === 'string'
+      ? row.workspace_path
+      : typeof row.canonical_workspace === 'string'
+        ? row.canonical_workspace
+        : typeof row.home_directory === 'string'
+          ? row.home_directory
+          : null,
+    config_profile: {
+      runtime_engine_preference: String(row.runtime_engine_preference ?? '').toLowerCase() || null,
+      metadata_codex_home: typeof metadata.codex_home === 'string' ? metadata.codex_home : null,
+    },
+    provider_binding: {
+      expected_provider_identity_ref: typeof row.expected_provider_identity_ref === 'string'
+        ? row.expected_provider_identity_ref
+        : null,
+      provider_token_source_ref: typeof row.provider_token_source_ref === 'string'
+        ? row.provider_token_source_ref
+        : null,
+      projection_provider_config_root: typeof projection.provider_config_root === 'string'
+        ? projection.provider_config_root
+        : null,
+    },
+    projection_digest: bootstrapDigest(projection),
+  })
+}
+
+async function resolveProviderRootAuthority(input: {
+  agentId: string
+  requestedRuntime: BootstrapOptions['runtime']
+  env: Record<string, string>
+  home: string
+  repoRoot: string
+}): Promise<{
+  ok: true
+  authority: ProviderRootAuthority | null
+} | {
+  ok: false
+  reasonCode: BootstrapReasonCode
+  evidenceRef: string
+}> {
+  const canonicalHome = existsSync(input.home) ? realpathSync(input.home) : resolve(input.home)
+  const cleanRoot = join(canonicalHome, '.codex')
+  const cleanAuthority = (): ProviderRootAuthority => ({
+    existingTarget: false,
+    canonicalSourceField: 'clean_host_default',
+    canonicalRoot: cleanRoot,
+    canonicalRootDigest: bootstrapDigest(cleanRoot),
+    canonicalRealpathDigest: bootstrapDigest(existsSync(cleanRoot) ? realpathSync(cleanRoot) : cleanRoot),
+    projectionMatches: true,
+    callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== cleanRoot),
+    authorityTupleDigest: bootstrapDigest({
+      agent_id: input.agentId,
+      repo_url: null,
+      workspace_path: null,
+      config_profile: { runtime_engine_preference: null, metadata_codex_home: null },
+      provider_binding: {
+        expected_provider_identity_ref: null,
+        provider_token_source_ref: null,
+        projection_provider_config_root: null,
+      },
+      projection_digest: bootstrapDigest({}),
+    }),
+  })
+  if (input.requestedRuntime === 'claude') return { ok: true, authority: null }
+
+  const explicit = input.env.AGENT_COM_DB?.trim().toLowerCase()
+  const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(input.env.DATABASE_URL))
+  // Generation-2 desired-state root authority is a PostgreSQL SSOT surface.
+  // SQLite bootstrap remains clean-host/local mode and cannot emulate the
+  // ordinary_projection equality fence.
+  if (!postgres) return { ok: true, authority: cleanAuthority() }
+
+  let row: Record<string, unknown> | null
+  try {
+    row = await withBootstrapDb(input.env, (db) => db.queryOne<Record<string, unknown>>(
+      `SELECT a.agent_id, a.metadata, a.runtime_engine_preference, a.home_directory,
+              a.provider_token_source_ref,
+              to_jsonb(a)->'canonical_workspace' AS canonical_workspace,
+              to_jsonb(a)->'expected_provider_identity_ref' AS expected_provider_identity_ref,
+              to_jsonb(a)->'ordinary_projection' AS ordinary_projection,
+              workspace.repo_url, workspace.local_path AS workspace_path
+         FROM agents a
+         LEFT JOIN LATERAL (
+           SELECT w.repo_url, w.local_path
+             FROM agent_workspace_bindings b
+             JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+            WHERE b.agent_id = a.agent_id AND b.active = true
+            ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+            LIMIT 1
+         ) workspace ON true
+        WHERE a.agent_id = $1`,
+      [input.agentId],
+    ), { readonly: true })
+  } catch {
+    return {
+      ok: false,
+      reasonCode: 'NO_GO_DB_CONNECT',
+      evidenceRef: `provider-root-db-readback:${bootstrapDigest({ agent_id: input.agentId, database: 'unavailable' })}`,
+    }
+  }
+  if (!row) return { ok: true, authority: cleanAuthority() }
+  const runtime = String(row.runtime_engine_preference ?? '').toLowerCase()
+  if (input.requestedRuntime === 'auto' && runtime !== 'codex') return { ok: true, authority: null }
+
+  const metadata = jsonRecord(row.metadata)
+  const projection = jsonRecord(row.ordinary_projection)
+  const rawRoot = typeof metadata.codex_home === 'string' ? metadata.codex_home : ''
+  if (!rawRoot || !isAbsolute(rawRoot) || normalize(rawRoot) !== rawRoot || resolve(rawRoot) !== rawRoot) {
+    return {
+      ok: false,
+      reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING',
+      evidenceRef: `provider-root-authority:${bootstrapDigest({
+        source: 'metadata.codex_home', present: Boolean(rawRoot), absolute: isAbsolute(rawRoot || '.'), normalized: false,
+      })}`,
+    }
+  }
+  let canonicalRealpath = ''
+  try {
+    const link = lstatSync(rawRoot)
+    canonicalRealpath = realpathSync(rawRoot)
+    if (link.isSymbolicLink() || !link.isDirectory() || canonicalRealpath !== rawRoot) throw new Error('invalid root')
+  } catch {
+    return {
+      ok: false,
+      reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING',
+      evidenceRef: `provider-root-authority:${bootstrapDigest({ source: 'metadata.codex_home', valid_identity: false })}`,
+    }
+  }
+  const projectedRoot = typeof projection.provider_config_root === 'string'
+    ? projection.provider_config_root
+    : ''
+  if (!projectedRoot || projectedRoot !== rawRoot) {
+    return {
+      ok: false,
+      reasonCode: 'NO_GO_PROVIDER_ROOT_CONFLICT',
+      evidenceRef: `provider-root-conflict:${bootstrapDigest({
+        canonical_root_digest: bootstrapDigest(rawRoot),
+        projection_present: Boolean(projectedRoot),
+        projection_matches: false,
+      })}`,
+    }
+  }
+  return {
+    ok: true,
+    authority: {
+      existingTarget: true,
+      canonicalSourceField: 'metadata.codex_home',
+      canonicalRoot: rawRoot,
+      canonicalRootDigest: bootstrapDigest(rawRoot),
+      canonicalRealpathDigest: bootstrapDigest(canonicalRealpath),
+      projectionMatches: true,
+      callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== rawRoot),
+      authorityTupleDigest: providerRootAuthorityTupleDigest(input.agentId, row),
+    },
   }
 }
 
@@ -802,7 +1144,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
 
   const ensureConfigurationDesiredState = async (
     context: BootstrapStageContext,
-  ): Promise<{ desired_revision: number; desired_digest: string; release_tree: string } | null> => {
+  ): Promise<{
+    desired_revision: number
+    desired_digest: string
+    release_tree: string
+    held_event_ids: string[]
+    mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
+  } | null> => {
     const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
     const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
     if (!postgres || !context.repoHead) return null
@@ -824,48 +1172,203 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ? nativeTreeResult.stdout.toString().trim()
         : ''
     if (!/^[0-9a-f]{40}$/.test(releaseTree)) throw new Error('configuration desired release tree unavailable')
-    return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
-      await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap:${context.runId}`])
-      await tx.execute(
-        `UPDATE agents SET
-           canonical_workspace = $2,
-           canonical_home = $3,
-           supervisor_identity = 'launchd:com.agent-comms.state-daemon',
-           ordinary_communication_enrollment = true,
-           ordinary_projection = $4::jsonb,
-           desired_release_commit = $5,
-           desired_release_tree = $6,
-           desired_control_refs = $7::jsonb
-         WHERE agent_id = $1`,
-        [
-          context.agentId, context.workspaceRoot, home,
-          JSON.stringify({
-            owner: 'continuous-reconciler',
-            provider_repo_root: context.repoRoot,
-            provider_config_root: context.resolvedRuntime === 'claude'
-              ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-              : env.CODEX_HOME || join(home, '.codex'),
-            daemon_checkout: join(defaultStateDaemonRestoreRoot(home), context.repoHead),
-            schema_version: 'aun-configuration-projection/v1',
-          }),
-          context.repoHead, releaseTree,
-          JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803']),
-        ],
-      )
-      const row = await tx.queryOne<any>(
-        `SELECT desired_revision, desired_digest, desired_release_tree
-           FROM agents WHERE agent_id = $1`,
-        [context.agentId],
-      )
-      if (!row || !Number.isSafeInteger(Number(row.desired_revision)) || !/^[0-9a-f]{64}$/.test(String(row.desired_digest ?? ''))) {
-        throw new Error('configuration desired state readback invalid')
+    let createdArtifact: DurableArtifactIdentity | null = null
+    let recoveryAdmitted = false
+    try {
+      return await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+        const preAgentResult = await tx.queryOne<{
+          row: Record<string, unknown>
+          repo_url: string | null
+          workspace_path: string | null
+        }>(
+          `SELECT to_jsonb(a) AS row, workspace.repo_url, workspace.local_path AS workspace_path
+             FROM agents a
+             LEFT JOIN LATERAL (
+               SELECT w.repo_url, w.local_path
+                 FROM agent_workspace_bindings b
+                 JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+                WHERE b.agent_id = a.agent_id AND b.active = true
+                ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+                LIMIT 1
+             ) workspace ON true
+            WHERE a.agent_id = $1
+            FOR UPDATE OF a`,
+          [context.agentId],
+        )
+        if (!preAgentResult?.row) throw new Error('configuration desired agent row unavailable')
+        const preAgentRow = preAgentResult.row
+        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
+          const liveMetadata = jsonRecord(preAgentRow.metadata)
+          const liveProjection = jsonRecord(preAgentRow.ordinary_projection)
+          const liveRoot = typeof liveMetadata.codex_home === 'string' ? liveMetadata.codex_home : ''
+          const liveProjectedRoot = typeof liveProjection.provider_config_root === 'string'
+            ? liveProjection.provider_config_root
+            : ''
+          const liveTupleDigest = providerRootAuthorityTupleDigest(context.agentId, {
+            ...preAgentRow,
+            repo_url: preAgentResult.repo_url,
+            workspace_path: preAgentResult.workspace_path,
+          })
+          const expectedTupleDigest = context.providerRootAuthority.authorityTupleDigest ?? liveTupleDigest
+          if (liveRoot !== context.providerRootAuthority.canonicalRoot
+            || liveProjectedRoot !== context.providerRootAuthority.canonicalRoot
+            || liveTupleDigest !== expectedTupleDigest) {
+            throw new Error('provider root authority drift under B3 row lock')
+          }
+        }
+        const preOutboxRows = (await tx.query<{ row: Record<string, unknown> }>(
+          `SELECT to_jsonb(o) AS row
+             FROM aun_configuration_desired_outbox o
+            WHERE agent_id = $1
+            ORDER BY event_id`,
+          [context.agentId],
+        )).map((item) => item.row)
+        const preEventIds = new Set(preOutboxRows.map((row) => String(row.event_id)))
+
+        await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap:${context.runId}`])
+        const updated = await tx.execute(
+          `UPDATE agents SET
+             canonical_workspace = $2,
+             canonical_home = $3,
+             supervisor_identity = 'launchd:com.agent-comms.state-daemon',
+             ordinary_communication_enrollment = true,
+             ordinary_projection = $4::jsonb,
+             desired_release_commit = $5,
+             desired_release_tree = $6,
+             desired_control_refs = $7::jsonb,
+             metadata = CASE WHEN $8::boolean
+               THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($9::text), true)
+               ELSE metadata END
+           WHERE agent_id = $1`,
+          [
+            context.agentId, context.workspaceRoot, home,
+            JSON.stringify({
+              owner: 'continuous-reconciler',
+              provider_repo_root: context.repoRoot,
+              provider_config_root: context.resolvedRuntime === 'claude'
+                ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
+                : context.providerRootAuthority?.canonicalRoot || env.CODEX_HOME || join(home, '.codex'),
+              daemon_checkout: join(defaultStateDaemonRestoreRoot(home), context.repoHead),
+              schema_version: 'aun-configuration-projection/v1',
+            }),
+            context.repoHead, releaseTree,
+            JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803']),
+            context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === false,
+            context.providerRootAuthority?.canonicalRoot ?? env.CODEX_HOME ?? join(home, '.codex'),
+          ],
+        )
+        if (updated.rowCount !== 1) throw new Error('configuration desired agent update rejected')
+        const postAgentResult = await tx.queryOne<{ row: Record<string, unknown> }>(
+          `SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`,
+          [context.agentId],
+        )
+        const postAgentRow = postAgentResult?.row
+        const desiredRevision = Number(postAgentRow?.desired_revision)
+        const desiredDigest = String(postAgentRow?.desired_digest ?? '')
+        if (!postAgentRow || !Number.isSafeInteger(desiredRevision) || desiredRevision < 1
+          || !/^[0-9a-f]{64}$/.test(desiredDigest)) {
+          throw new Error('configuration desired state readback invalid')
+        }
+        const postBeforeHold = (await tx.query<{ row: Record<string, unknown> }>(
+          `SELECT to_jsonb(o) AS row
+             FROM aun_configuration_desired_outbox o
+            WHERE agent_id = $1
+            ORDER BY event_id`,
+          [context.agentId],
+        )).map((item) => item.row)
+        const newEvents = postBeforeHold.filter((row) => !preEventIds.has(String(row.event_id)))
+        const changed = bootstrapDigest(configurationDesiredControlledRow(preAgentRow))
+          !== bootstrapDigest(configurationDesiredControlledRow(postAgentRow))
+        if ((!changed && newEvents.length !== 0) || (changed && newEvents.length !== 1)) {
+          throw new Error('configuration desired event cardinality invalid')
+        }
+        for (const event of newEvents) {
+          if (String(event.agent_id) !== context.agentId
+            || Number(event.desired_revision) !== desiredRevision
+            || String(event.desired_digest) !== desiredDigest
+            || event.delivered_at !== null
+            || Number(event.attempt_count) !== 0) {
+            throw new Error('configuration desired event identity invalid')
+          }
+          const held = await tx.execute(
+            `UPDATE aun_configuration_desired_outbox
+                SET available_at = 'infinity'::timestamptz
+              WHERE event_id = $1 AND agent_id = $2
+                AND desired_revision = $3 AND desired_digest = $4
+                AND delivered_at IS NULL AND attempt_count = 0`,
+            [String(event.event_id), context.agentId, desiredRevision, desiredDigest],
+          )
+          if (held.rowCount !== 1) throw new Error('configuration desired event hold rejected')
+        }
+        const postOutboxRows = (await tx.query<{ row: Record<string, unknown> }>(
+          `SELECT to_jsonb(o) AS row
+             FROM aun_configuration_desired_outbox o
+            WHERE agent_id = $1
+            ORDER BY event_id`,
+          [context.agentId],
+        )).map((item) => item.row)
+        const heldEventIds = newEvents.map((row) => String(row.event_id)).sort()
+        if (!changed) {
+          return {
+            desired_revision: desiredRevision,
+            desired_digest: desiredDigest,
+            release_tree: String(postAgentRow.desired_release_tree),
+            held_event_ids: [],
+          }
+        }
+        const artifact: ConfigurationDesiredRollbackArtifact = {
+          schema_version: 'aun-bootstrap-configuration-desired-rollback/v1',
+          run_id: context.runId,
+          agent_id: context.agentId,
+          pre_agent_row: preAgentRow,
+          post_agent_row: postAgentRow,
+          pre_outbox_rows: preOutboxRows,
+          post_outbox_rows: postOutboxRows,
+          new_event_ids: heldEventIds,
+        }
+        createdArtifact = writeConfigurationDesiredArtifact(home, env, artifact)
+        const artifactDigest = bootstrapDigest(artifact)
+        const mutation = {
+          kind: 'configuration_desired' as const,
+          owner_key: `configuration-desired:${context.runId}:${context.agentId}`,
+          before_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(preAgentRow), outbox: preOutboxRows }),
+          intended_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          actual_after_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          rollback_action: 'restore the exact locked agents/outbox preimage and delete only exact run/compensating events',
+          rollback_payload: {
+            created_by_run: true,
+            rollback_artifact_digest: artifactDigest,
+            rollback_artifact_identity: createdArtifact,
+            new_event_ids: heldEventIds,
+            desired_revision: desiredRevision,
+            desired_digest: desiredDigest,
+            post_union_digest: bootstrapDigest({ agent: configurationDesiredControlledRow(postAgentRow), outbox: postOutboxRows }),
+          },
+        }
+        context.admitRecoveryMutation?.({
+          ...mutation,
+          actual_after_digest: null,
+          rollback_payload: {
+            ...mutation.rollback_payload,
+            recovery_admission: true,
+            recovery_admission_phase: 'B3_PRE_COMMIT',
+          },
+        })
+        recoveryAdmitted = Boolean(context.admitRecoveryMutation)
+        return {
+          desired_revision: desiredRevision,
+          desired_digest: desiredDigest,
+          release_tree: String(postAgentRow.desired_release_tree),
+          held_event_ids: heldEventIds,
+          mutation,
+        }
+      }))
+    } catch (error) {
+      if (!recoveryAdmitted && createdArtifact && existsSync(createdArtifact.path)) {
+        try { removeConfigurationDesiredArtifact(createdArtifact) } catch { /* preserve an unverifiable artifact for manual recovery */ }
       }
-      return {
-        desired_revision: Number(row.desired_revision),
-        desired_digest: String(row.desired_digest),
-        release_tree: String(row.desired_release_tree),
-      }
-    }))
+      throw error
+    }
   }
 
   const configurationDesiredReadOnly = async (
@@ -905,6 +1408,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     candidateDigest: string
     outboxEventId: string | null
     previousObservedState: Record<string, unknown> | null
+    idempotent: boolean
   } | null> => {
     const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
     const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
@@ -912,9 +1416,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     if (Object.values(nativeReadback).some((digest) => !/^[0-9a-f]{64}$/.test(digest))) {
       throw new Error('configuration native readback digest unavailable')
     }
-    return withBootstrapDb(env, async (db) => {
-      const desired = await readConfigurationDesiredState(db, context.agentId)
+    const desiredMutation = context.priorState.mutations.find((mutation) => mutation.kind === 'configuration_desired')
+    const desiredPayload = desiredMutation?.rollback_payload ?? {}
+    const heldEventIds = Array.isArray(desiredPayload.new_event_ids)
+      ? desiredPayload.new_event_ids.map(String)
+      : []
+    if (heldEventIds.length > 1) throw new Error('configuration desired held event cardinality invalid')
+    return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+      const desired = await readConfigurationDesiredState(tx, context.agentId)
       if (!desired) throw new Error('configuration desired state unavailable')
+      if (desiredMutation && (Number(desiredPayload.desired_revision) !== desired.desiredRevision
+        || String(desiredPayload.desired_digest ?? '') !== desired.desiredDigest)) {
+        throw new Error('configuration desired mutation binding mismatch')
+      }
       const projection = desired.ordinaryProjection
       const providerRepoRoot = typeof projection.provider_repo_root === 'string'
         ? projection.provider_repo_root
@@ -940,7 +1454,41 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         daemonEntry: join(daemonCheckout, 'bin', 'state-daemon.ts'),
         restartRequired: true,
       })
-      const previousObservedState = await db.queryOne<Record<string, unknown>>(
+      if (context.priorState.terminal_status === 'READY' || context.priorState.terminal_status === 'IDEMPOTENT_READY') {
+        const observed = await tx.queryOne<Record<string, unknown>>(
+          `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
+                  release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
+                  launchctl_environment_digest, runtime_identity_digest, reconcile_status,
+                  drift_reason_codes, lease_id, fencing_token, observed_at
+             FROM aun_configuration_observed_state
+            WHERE host_id = $1 AND agent_id = $2`,
+          [candidate.hostId, candidate.agentId],
+        )
+        const event = heldEventIds.length === 1 ? await tx.queryOne<any>(
+          `SELECT event_id, desired_revision, desired_digest, attempt_count, delivered_at
+             FROM aun_configuration_desired_outbox
+            WHERE event_id = $1 AND agent_id = $2`,
+          [heldEventIds[0], desired.agentId],
+        ) : null
+        if (!observed
+          || Number(observed.observed_revision) !== desired.desiredRevision
+          || String(observed.observed_desired_digest) !== desired.desiredDigest
+          || String(observed.candidate_digest) !== candidate.candidateDigest
+          || (heldEventIds.length === 1 && (!event || Number(event.attempt_count) !== 1 || event.delivered_at === null
+            || Number(event.desired_revision) !== desired.desiredRevision || String(event.desired_digest) !== desired.desiredDigest))) {
+          throw new Error('configuration idempotent readback invalid')
+        }
+        return {
+          hostId: candidate.hostId,
+          desiredRevision: desired.desiredRevision,
+          desiredDigest: desired.desiredDigest,
+          candidateDigest: candidate.candidateDigest,
+          outboxEventId: event ? String(event.event_id) : null,
+          previousObservedState: observed,
+          idempotent: true,
+        }
+      }
+      const previousObservedState = await tx.queryOne<Record<string, unknown>>(
         `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
                 release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
                 launchctl_environment_digest, runtime_identity_digest, reconcile_status,
@@ -949,7 +1497,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           WHERE host_id = $1 AND agent_id = $2`,
         [candidate.hostId, candidate.agentId],
       )
-      const acquired = await acquireControlPlaneLease(db, {
+      const acquired = await acquireControlPlaneLease(tx, {
         scopeType: 'runtime_instance',
         scopeId: `configuration-reconciler:${candidate.hostId}`,
         purpose: 'maintenance',
@@ -960,7 +1508,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       })
       if (!acquired.ok) throw new Error('configuration reconciliation lease unavailable')
       try {
-        const recorded = await recordConfigurationObservedState(db, {
+        const recorded = await recordConfigurationObservedState(tx, {
           hostId: candidate.hostId,
           agentId: candidate.agentId,
           observedRevision: desired.desiredRevision,
@@ -978,17 +1526,22 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           fencingToken: acquired.lease.fencing_token,
         })
         if (!recorded) throw new Error('configuration observed state fence rejected')
-        const event = await db.queryOne<any>(
-          `SELECT event_id, desired_revision, desired_digest
+        const event = heldEventIds.length === 1 ? await tx.queryOne<any>(
+          `SELECT event_id, desired_revision, desired_digest, attempt_count,
+                  delivered_at, available_at::text AS available_at_text
              FROM aun_configuration_desired_outbox
-            WHERE agent_id = $1 AND desired_revision = $2 AND desired_digest = $3
-              AND delivered_at IS NULL
-            ORDER BY created_at DESC LIMIT 1`,
-          [desired.agentId, desired.desiredRevision, desired.desiredDigest],
-        )
+            WHERE event_id = $1 AND agent_id = $2
+              AND desired_revision = $3 AND desired_digest = $4
+            FOR UPDATE`,
+          [heldEventIds[0], desired.agentId, desired.desiredRevision, desired.desiredDigest],
+        ) : null
+        if (heldEventIds.length === 1 && (!event || event.delivered_at !== null
+          || Number(event.attempt_count) !== 0 || event.available_at_text !== 'infinity')) {
+          throw new Error('configuration exact held event readback invalid')
+        }
         if (event) {
           const delivered = await markConfigurationEventDelivered(
-            db, String(event.event_id), Number(event.desired_revision), String(event.desired_digest),
+            tx, String(event.event_id), Number(event.desired_revision), String(event.desired_digest),
           )
           if (!delivered) throw new Error('configuration outbox delivery receipt rejected')
         }
@@ -999,16 +1552,17 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           candidateDigest: candidate.candidateDigest,
           outboxEventId: event ? String(event.event_id) : null,
           previousObservedState,
+          idempotent: false,
         }
       } finally {
-        await releaseControlPlaneLease(db, {
+        await releaseControlPlaneLease(tx, {
           leaseId: acquired.lease.lease_id,
           fencingToken: acquired.lease.fencing_token,
           holderAgentId: context.agentId,
           holderRuntimeInstanceId: env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? null,
         })
       }
-    })
+    }))
   }
 
   const postgresSchemaDigest = async (): Promise<string> => withBootstrapDb(env, async (db) => {
@@ -1502,7 +2056,20 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         && existing.profile_enabled === true
       if (context.dryRun) return { ok: true, evidenceRefs: [`profile-plan:${bootstrapDigest(desired)}`], readinessPredicates: { profile_plan_unambiguous: true } }
       if (matches) {
-        const configuration = await ensureConfigurationDesiredState(context)
+        let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
+        try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+            evidenceRefs: [`configuration-desired-error:${bootstrapDigest(String(error))}`],
+          }
+        }
+        const configurationReadback = configuration ? {
+          desired_revision: configuration.desired_revision,
+          desired_digest: configuration.desired_digest,
+          release_tree: configuration.release_tree,
+          held_event_ids: configuration.held_event_ids,
+        } : null
         return {
           ok: true,
           evidenceRefs: [
@@ -1513,7 +2080,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             profile_readback_matches: true,
             configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
           },
-          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), configuration }),
+          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), configuration: configurationReadback }),
+          mutation: configuration?.mutation,
         }
       }
       if (existing) {
@@ -1551,7 +2119,21 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           mutation: observedMutation,
         }
       }
-      const configuration = await ensureConfigurationDesiredState(context)
+      let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
+      try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+          evidenceRefs: [`configuration-desired-error:${bootstrapDigest(String(error))}`],
+          mutation: observedMutation,
+        }
+      }
+      const configurationReadback = configuration ? {
+        desired_revision: configuration.desired_revision,
+        desired_digest: configuration.desired_digest,
+        release_tree: configuration.release_tree,
+        held_event_ids: configuration.held_event_ids,
+      } : null
       return {
         ok: true,
         evidenceRefs: [
@@ -1563,8 +2145,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           endpoint_allocated: true,
           configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
         },
-        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), configuration }),
-        mutation: observedMutation,
+        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), configuration: configurationReadback }),
+        mutations: configuration?.mutation
+          ? [observedMutation!, configuration.mutation]
+          : observedMutation ? [observedMutation] : [],
       }
     },
 
@@ -1862,6 +2446,47 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           evidenceRefs: [`configuration-first-reconcile-error:${bootstrapDigest(String(error))}`],
         }
       }
+      const configurationMutation = configuration && !configuration.idempotent ? {
+        kind: 'configuration' as const,
+        owner_key: `configuration:${context.runId}:${configuration.hostId}:${context.agentId}`,
+        before_digest: bootstrapDigest(configuration.previousObservedState ?? { absent: true }),
+        intended_after_digest: bootstrapDigest({
+          host_id: configuration.hostId,
+          agent_id: context.agentId,
+          desired_revision: configuration.desiredRevision,
+          desired_digest: configuration.desiredDigest,
+          candidate_digest: configuration.candidateDigest,
+        }),
+        actual_after_digest: bootstrapDigest({
+          host_id: configuration.hostId,
+          agent_id: context.agentId,
+          desired_revision: configuration.desiredRevision,
+          desired_digest: configuration.desiredDigest,
+          candidate_digest: configuration.candidateDigest,
+        }),
+        rollback_action: 'restore the exact prior observed projection and re-hold only the exact run desired event',
+        rollback_payload: {
+          host_id: configuration.hostId,
+          agent_id: context.agentId,
+          desired_revision: configuration.desiredRevision,
+          desired_digest: configuration.desiredDigest,
+          candidate_digest: configuration.candidateDigest,
+          outbox_event_id: configuration.outboxEventId,
+          previous_observed_state: configuration.previousObservedState,
+        },
+      } : undefined
+      const providerMutation = context.priorState.mutations.find((mutation) =>
+        mutation.kind === 'mcp_registration' && mutation.stage === 'B4_MCP_REGISTRATION')
+      if (providerMutation && providerMutation.rollback_payload?.backup_retained === true
+        && adapter.finalizeRuntimeRegistration) {
+        const finalized = await adapter.finalizeRuntimeRegistration(context, providerMutation)
+        if (!finalized.ok) {
+          return {
+            ...finalized,
+            mutation: configurationMutation,
+          }
+        }
+      }
       return {
         ok: true,
         evidenceRefs: [
@@ -1886,35 +2511,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           safe_d1: bootstrapDigest(safeD1),
           configuration,
         }),
-        mutation: configuration ? {
-          kind: 'configuration',
-          owner_key: `configuration:${context.runId}:${configuration.hostId}:${context.agentId}`,
-          before_digest: bootstrapDigest(configuration.previousObservedState ?? { absent: true }),
-          intended_after_digest: bootstrapDigest({
-            host_id: configuration.hostId,
-            agent_id: context.agentId,
-            desired_revision: configuration.desiredRevision,
-            desired_digest: configuration.desiredDigest,
-            candidate_digest: configuration.candidateDigest,
-          }),
-          actual_after_digest: bootstrapDigest({
-            host_id: configuration.hostId,
-            agent_id: context.agentId,
-            desired_revision: configuration.desiredRevision,
-            desired_digest: configuration.desiredDigest,
-            candidate_digest: configuration.candidateDigest,
-          }),
-          rollback_action: 'restore the exact prior observed projection and remove only the run-consumed desired event',
-          rollback_payload: {
-            host_id: configuration.hostId,
-            agent_id: context.agentId,
-            desired_revision: configuration.desiredRevision,
-            desired_digest: configuration.desiredDigest,
-            candidate_digest: configuration.candidateDigest,
-            outbox_event_id: configuration.outboxEventId,
-            previous_observed_state: configuration.previousObservedState,
-          },
-        } : undefined,
+        mutation: configurationMutation,
       }
     },
 
@@ -2061,6 +2658,245 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         readinessPredicates: { terminal_smoke_retained: true },
         readbackDigest: mutation.actual_after_digest ?? bootstrapDigest({ terminal_smoke_retained: true }),
       }
+      if (mutation.kind === 'configuration_desired') {
+        const payload = mutation.rollback_payload ?? {}
+        if (mutation.owner_key !== `configuration-desired:${context.runId}:${context.agentId}`
+          || payload.created_by_run !== true) {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        let artifactReadback: ReturnType<typeof readConfigurationDesiredArtifact>
+        try {
+          artifactReadback = readConfigurationDesiredArtifact(
+            payload.rollback_artifact_identity,
+            payload.rollback_artifact_digest,
+          )
+        } catch {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        const { artifact, identity } = artifactReadback
+        const artifactPostDigest = bootstrapDigest({
+          agent: configurationDesiredControlledRow(artifact.post_agent_row),
+          outbox: artifact.post_outbox_rows,
+        })
+        const artifactPreDigest = bootstrapDigest({
+          agent: configurationDesiredControlledRow(artifact.pre_agent_row),
+          outbox: artifact.pre_outbox_rows,
+        })
+        const admissionOpen = payload.recovery_admission === true && mutation.actual_after_digest === null
+        if (artifact.run_id !== context.runId || artifact.agent_id !== context.agentId
+          || artifactPostDigest !== (admissionOpen ? mutation.intended_after_digest : mutation.actual_after_digest)
+          || artifactPreDigest !== mutation.before_digest) {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        const restored = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+          const currentAgent = (await tx.queryOne<{ row: Record<string, unknown> }>(
+            `SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1 FOR UPDATE`,
+            [context.agentId],
+          ))?.row
+          const currentOutbox = (await tx.query<{ row: Record<string, unknown> }>(
+            `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o
+              WHERE agent_id = $1 ORDER BY event_id`,
+            [context.agentId],
+          )).map((item) => item.row)
+          const currentDigest = currentAgent
+            ? bootstrapDigest({ agent: configurationDesiredControlledRow(currentAgent), outbox: currentOutbox })
+            : null
+          if (admissionOpen && currentDigest === artifactPreDigest) {
+            return {
+              digest: artifactPreDigest,
+              compensatingEventCount: 0,
+              exactDeleteCount: 0,
+              recoveryAdmissionNoEffect: true,
+            }
+          }
+          if (!currentAgent || currentDigest !== artifactPostDigest) {
+            throw new Error('configuration desired rollback poststate fence mismatch')
+          }
+          const currentEventIds = new Set(currentOutbox.map((row) => String(row.event_id)))
+          const pre = artifact.pre_agent_row
+          await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap-rollback:${context.runId}`])
+          const restoredWatched = await tx.execute(
+            `UPDATE agents SET
+               profile_enabled = $2,
+               runtime_engine_preference = $3,
+               home_directory = $4,
+               canonical_workspace = $5,
+               canonical_home = $6,
+               channel_port = $7,
+               supervisor_identity = $8,
+               expected_provider_identity = $9::jsonb,
+               expected_provider_identity_ref = $10,
+               provider_token_source_ref = $11,
+               ordinary_communication_enrollment = $12,
+               ordinary_projection = $13::jsonb,
+               desired_release_commit = $14,
+               desired_release_tree = $15,
+               desired_control_refs = $16::jsonb
+             WHERE agent_id = $1`,
+            [
+              context.agentId,
+              pre.profile_enabled,
+              pre.runtime_engine_preference,
+              pre.home_directory,
+              pre.canonical_workspace,
+              pre.canonical_home,
+              pre.channel_port,
+              pre.supervisor_identity,
+              JSON.stringify(pre.expected_provider_identity ?? {}),
+              pre.expected_provider_identity_ref,
+              pre.provider_token_source_ref,
+              pre.ordinary_communication_enrollment,
+              JSON.stringify(pre.ordinary_projection ?? {}),
+              pre.desired_release_commit,
+              pre.desired_release_tree,
+              JSON.stringify(pre.desired_control_refs ?? []),
+            ],
+          )
+          if (restoredWatched.rowCount !== 1) throw new Error('configuration desired watched restore rejected')
+          const afterWatchedOutbox = (await tx.query<{ row: Record<string, unknown> }>(
+            `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o
+              WHERE agent_id = $1 ORDER BY event_id`,
+            [context.agentId],
+          )).map((item) => item.row)
+          const compensatingEvents = afterWatchedOutbox.filter((row) => !currentEventIds.has(String(row.event_id)))
+          const expectedCompensatingEventCount = artifact.pre_agent_row.desired_revision === null
+            ? 0
+            : artifact.new_event_ids.length
+          if (compensatingEvents.length !== expectedCompensatingEventCount) {
+            throw new Error('configuration desired compensating event cardinality invalid')
+          }
+          for (const event of compensatingEvents) {
+            const desiredRevision = Number(event.desired_revision)
+            const desiredDigest = String(event.desired_digest ?? '')
+            if (!Number.isSafeInteger(desiredRevision) || !/^[0-9a-f]{64}$/.test(desiredDigest)) {
+              throw new Error('configuration desired compensating event identity invalid')
+            }
+            const held = await tx.execute(
+              `UPDATE aun_configuration_desired_outbox SET available_at = 'infinity'::timestamptz
+                WHERE event_id = $1 AND agent_id = $2
+                  AND desired_revision = $3 AND desired_digest = $4
+                  AND delivered_at IS NULL AND attempt_count = 0`,
+              [String(event.event_id), context.agentId, desiredRevision, desiredDigest],
+            )
+            if (held.rowCount !== 1) throw new Error('configuration desired compensating event hold rejected')
+          }
+          let exactDeleteCount = 0
+          const runEvents = artifact.post_outbox_rows.filter((row) => artifact.new_event_ids.includes(String(row.event_id)))
+          const exactEvents = [...runEvents, ...compensatingEvents]
+          if (exactEvents.length !== artifact.new_event_ids.length + compensatingEvents.length) {
+            throw new Error('configuration desired exact event fence cardinality invalid')
+          }
+          for (const event of exactEvents) {
+            const eventId = String(event.event_id)
+            const desiredRevision = Number(event.desired_revision)
+            const desiredDigest = String(event.desired_digest ?? '')
+            const exactReadback = await tx.queryOne<Record<string, unknown>>(
+              `SELECT event_id, agent_id, desired_revision, desired_digest, delivered_at, attempt_count, available_at
+                 FROM aun_configuration_desired_outbox
+                WHERE event_id = $1 AND agent_id = $2 FOR UPDATE`,
+              [eventId, context.agentId],
+            )
+            if (!exactReadback
+              || Number(exactReadback.desired_revision) !== desiredRevision
+              || String(exactReadback.desired_digest) !== desiredDigest
+              || exactReadback.delivered_at !== null
+              || Number(exactReadback.attempt_count) !== 0
+              || (exactReadback.available_at !== Number.POSITIVE_INFINITY
+                && String(exactReadback.available_at).toLowerCase() !== 'infinity')) {
+              throw new Error('configuration desired exact event readback fence mismatch')
+            }
+            const removed = await tx.execute(
+              `DELETE FROM aun_configuration_desired_outbox
+                WHERE event_id = $1 AND agent_id = $2
+                  AND desired_revision = $3 AND desired_digest = $4
+                  AND delivered_at IS NULL AND attempt_count = 0
+                  AND available_at = 'infinity'::timestamptz`,
+              [eventId, context.agentId, desiredRevision, desiredDigest],
+            )
+            if (removed.rowCount !== 1) throw new Error('configuration desired exact event removal rejected')
+            exactDeleteCount += removed.rowCount
+          }
+          const preMetadata = jsonRecord(pre.metadata)
+          const restoredDerived = await tx.execute(
+            `UPDATE agents SET
+               desired_revision = $2,
+               desired_digest = $3,
+               desired_updated_at = $4,
+               desired_updated_by = $5,
+               metadata = CASE WHEN $6::boolean
+                 THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($7::text), true)
+                 ELSE COALESCE(metadata, '{}'::jsonb) - 'codex_home' END
+             WHERE agent_id = $1`,
+            [
+              context.agentId,
+              pre.desired_revision,
+              pre.desired_digest,
+              pre.desired_updated_at,
+              pre.desired_updated_by,
+              typeof preMetadata.codex_home === 'string',
+              typeof preMetadata.codex_home === 'string' ? preMetadata.codex_home : '',
+            ],
+          )
+          if (restoredDerived.rowCount !== 1) throw new Error('configuration desired derived restore rejected')
+          const finalAgent = (await tx.queryOne<{ row: Record<string, unknown> }>(
+            `SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`,
+            [context.agentId],
+          ))?.row
+          const finalOutbox = (await tx.query<{ row: Record<string, unknown> }>(
+            `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o
+              WHERE agent_id = $1 ORDER BY event_id`,
+            [context.agentId],
+          )).map((item) => item.row)
+          if (!finalAgent
+            || bootstrapDigest(configurationDesiredControlledRow(finalAgent))
+              !== bootstrapDigest(configurationDesiredControlledRow(artifact.pre_agent_row))
+            || bootstrapDigest(finalOutbox) !== bootstrapDigest(artifact.pre_outbox_rows)) {
+            throw new Error('configuration desired full preimage restore mismatch')
+          }
+          return {
+            digest: bootstrapDigest({ agent: finalAgent, outbox: finalOutbox }),
+            compensatingEventCount: compensatingEvents.length,
+            exactDeleteCount,
+            recoveryAdmissionNoEffect: false,
+          }
+        })).catch(() => null)
+        if (!restored) return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        try { removeConfigurationDesiredArtifact(identity) } catch {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        mutation.rollback_payload = {
+          ...payload,
+          rollback_artifact_deleted: true,
+          rollback_artifact_identity: {
+            path_digest: bootstrapDigest(identity.path),
+            sha256: identity.sha256,
+          },
+        }
+        return {
+          ok: true,
+          readinessPredicates: {
+            rollback_verified: true,
+            rollback_artifact_deleted: true,
+            held_run_event_delivery_count: 0,
+            compensating_event_count: restored.compensatingEventCount,
+            exact_delete_count: restored.exactDeleteCount,
+            broad_delete_count: 0,
+            trigger_disable_count: 0,
+            foreign_event_mutation_count: 0,
+            recovery_admission_no_effect: restored.recoveryAdmissionNoEffect,
+          },
+          evidenceRefs: [`configuration-desired-rollback:${bootstrapDigest({
+            final_digest: restored.digest,
+            compensating_event_count: restored.compensatingEventCount,
+            exact_delete_count: restored.exactDeleteCount,
+            broad_delete_count: 0,
+            trigger_disable_count: 0,
+            foreign_event_mutation_count: 0,
+            recovery_admission_no_effect: restored.recoveryAdmissionNoEffect,
+          })}`],
+          readbackDigest: restored.digest,
+        }
+      }
       if (mutation.kind === 'configuration') {
         const payload = mutation.rollback_payload ?? {}
         const hostId = String(payload.host_id ?? '')
@@ -2112,13 +2948,16 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             )
           }
           if (outboxEventId) {
-            const removedEvent = await tx.execute(
-              `DELETE FROM aun_configuration_desired_outbox
+            const restoredEvent = await tx.execute(
+              `UPDATE aun_configuration_desired_outbox
+                  SET delivered_at = NULL, attempt_count = 0,
+                      available_at = 'infinity'::timestamptz
                 WHERE event_id = $1 AND agent_id = $2
-                  AND desired_revision = $3 AND desired_digest = $4`,
+                  AND desired_revision = $3 AND desired_digest = $4
+                  AND delivered_at IS NOT NULL AND attempt_count = 1`,
               [outboxEventId, agentId, desiredRevision, desiredDigest],
             )
-            if (removedEvent.rowCount !== 1) throw new Error('configuration outbox rollback fence rejected')
+            if (restoredEvent.rowCount !== 1) throw new Error('configuration outbox rollback fence rejected')
           }
           const observed = await tx.queryOne<Record<string, unknown>>(
             `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
@@ -2130,18 +2969,25 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             [hostId, agentId],
           )
           const event = outboxEventId
-            ? await tx.queryOne('SELECT event_id FROM aun_configuration_desired_outbox WHERE event_id = $1', [outboxEventId])
+            ? await tx.queryOne<any>(
+                `SELECT event_id, attempt_count, delivered_at, available_at::text AS available_at_text
+                   FROM aun_configuration_desired_outbox WHERE event_id = $1`,
+                [outboxEventId],
+              )
             : null
           return { observed, event }
         })).catch(() => null)
         const restored = Boolean(readback)
-          && !readback!.event
+          && (!outboxEventId || (String(readback!.event?.event_id) === outboxEventId
+            && Number(readback!.event?.attempt_count) === 0
+            && readback!.event?.delivered_at === null
+            && readback!.event?.available_at_text === 'infinity'))
           && bootstrapDigest(readback!.observed ?? { absent: true }) === bootstrapDigest(previous ?? { absent: true })
         return restored
           ? {
               ok: true,
               readinessPredicates: { rollback_verified: true },
-              readbackDigest: bootstrapDigest({ observed: readback!.observed, outbox_event_absent: true }),
+              readbackDigest: bootstrapDigest({ observed: readback!.observed, outbox_event_held: Boolean(outboxEventId) }),
             }
           : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
@@ -2369,13 +3215,54 @@ export async function bootstrap(
   const stateStore = dependencies.stateStore ?? new FileBootstrapStateStore(bootstrapStateRoot(home, env))
   const runId = options.resumeRunId ?? options.rollbackRunId ?? `bootstrap-${(dependencies.uuid ?? randomUUID)()}`
   let state = options.resumeRunId || options.rollbackRunId ? stateStore.load(agentId, runId) : null
+  if (state && options.resumeRunId
+    && (state.terminal_status === 'NO_GO' || state.terminal_status === 'PARTIAL_ROLLBACK_NO_GO')) {
+    return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
+  }
   const requestedRuntimeForDigest = state?.requested_runtime ?? options.runtime
-  const providerSnapshot = await providerInputSnapshot({
-    requestedRuntime: requestedRuntimeForDigest, repoRoot, home, env, run: runCommand,
+  const rootResolution = await resolveProviderRootAuthority({
+    agentId,
+    requestedRuntime: requestedRuntimeForDigest,
+    env,
+    home,
+    repoRoot,
   })
+  if (rootResolution.ok && rootResolution.authority) {
+    // Target Codex commands always receive the canonical root. Caller/TUI
+    // values remain evidence-only and cannot fill or override it.
+    env.CODEX_HOME = rootResolution.authority.canonicalRoot
+  }
+  let providerSnapshot: Record<string, unknown> = {}
+  let providerSnapshotReason: BootstrapReasonCode | null = null
+  if (rootResolution.ok) {
+    try {
+      providerSnapshot = await providerInputSnapshot({
+        requestedRuntime: requestedRuntimeForDigest, repoRoot, home, env, run: runCommand,
+      })
+    } catch (error) {
+      providerSnapshotReason = String((error as Error).message).includes('NO_GO_PROVIDER_NATIVE_JSON_INVALID')
+        ? 'NO_GO_PROVIDER_NATIVE_JSON_INVALID'
+        : 'NO_GO_MCP_READBACK'
+      providerSnapshot = { invalid_provider_snapshot: providerSnapshotReason }
+    }
+  } else {
+    providerSnapshot = { provider_root_authority_error: rootResolution.reasonCode }
+  }
   const inputDigest = bootstrapInputDigest({
     agentId, requestedRuntime: requestedRuntimeForDigest, repoRoot, workspaceRoot, repoHead, home, env, providerSnapshot,
   })
+  if (!rootResolution.ok || providerSnapshotReason) {
+    const failed = state ?? initialState({ runId, agentId, runtime: options.runtime, inputDigest, repoRoot, workspaceRoot, repoHead })
+    const reason = !rootResolution.ok ? rootResolution.reasonCode : providerSnapshotReason!
+    const record = failed.stages.find((candidate) => candidate.stage === 'B1_DEPENDENCY_PREFLIGHT')!
+    record.status = 'failed'
+    record.started_at = nowIso()
+    record.completed_at = record.started_at
+    record.reason_codes = [reason]
+    record.evidence_refs = !rootResolution.ok ? [rootResolution.evidenceRef] : [`provider-snapshot:${bootstrapDigest({ reason })}`]
+    failed.terminal_status = 'NO_GO'
+    return resultFromState(failed, 'B1_DEPENDENCY_PREFLIGHT', 'NO_GO', [reason])
+  }
   if ((options.resumeRunId || options.rollbackRunId) && !state) {
     const missing = initialState({ runId, agentId, runtime: options.runtime, inputDigest, repoRoot, workspaceRoot, repoHead })
     return resultFromState(missing, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RUN_NOT_FOUND'])
@@ -2444,16 +3331,85 @@ export async function bootstrap(
     }
   }
 
+  let activeStageForAdmission: BootstrapStage | null = null
+  const fsyncRecoveryAdmissionState = () => {
+    if (!(stateStore instanceof FileBootstrapStateStore)) return
+    const path = join(stateStore.root, validateBootstrapAgentId(agentId), `${runId}.json`)
+    const identity = lstatSync(path)
+    if (identity.isSymbolicLink() || !identity.isFile() || identity.nlink !== 1) {
+      throw new Error('recovery admission journal identity invalid')
+    }
+    const fd = openSync(path, 'r')
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+    fsyncDirectory(dirname(path))
+  }
   const context = (abortSignal?: AbortSignal, priorState: BootstrapRunState = state!): BootstrapStageContext => ({
     runId, agentId, requestedRuntime: state!.requested_runtime, resolvedRuntime: state!.resolved_runtime,
     repoRoot, workspaceRoot, repoHead, dryRun: Boolean(options.dryRun), env, priorState, abortSignal,
+    admitRecoveryMutation: options.dryRun ? undefined : (reported) => {
+      const stage = activeStageForAdmission
+      if (!stage) throw new Error('recovery admission attempted outside an active bootstrap stage')
+      const recoveryFields = {
+        recovery_admission: true,
+        recovery_preimage_readback_fence: reported.before_digest,
+        recovery_intended_mutation_fence: reported.intended_after_digest,
+        recovery_ownership_predicate_digest: bootstrapDigest({
+          stage,
+          owner_key: reported.owner_key,
+          kind: reported.kind,
+          before_digest: reported.before_digest,
+          intended_after_digest: reported.intended_after_digest,
+          rollback_artifact_identity: reported.rollback_payload?.rollback_artifact_identity
+            ?? reported.rollback_payload?.private_backup_identity
+            ?? null,
+        }),
+        rollback_disposition: 'admitted_pending_effect',
+      }
+      const existing = state!.mutations.find((mutation) => mutation.stage === stage
+        && mutation.owner_key === reported.owner_key
+        && mutation.rollback_payload?.recovery_admission === true)
+      if (existing) {
+        Object.assign(existing, reported)
+        existing.rollback_payload = {
+          ...(reported.rollback_payload ?? {}),
+          ...recoveryFields,
+        }
+      } else {
+        state!.mutations.push({
+          mutation_id: `${runId}:${stage}:admission:${state!.mutations.length + 1}`,
+          stage,
+          rollback_status: 'not_run',
+          ...reported,
+          rollback_payload: {
+            ...(reported.rollback_payload ?? {}),
+            ...recoveryFields,
+          },
+        })
+      }
+      state!.updated_at = nowIso()
+      stateStore.save(state!)
+      fsyncRecoveryAdmissionState()
+    },
+    cancelRecoveryAdmission: options.dryRun ? undefined : (ownerKey) => {
+      const stage = activeStageForAdmission
+      if (!stage) throw new Error('recovery admission cancellation attempted outside an active bootstrap stage')
+      const before = state!.mutations.length
+      state!.mutations = state!.mutations.filter((mutation) => !(mutation.stage === stage
+        && mutation.owner_key === ownerKey
+        && mutation.rollback_payload?.recovery_admission === true))
+      if (state!.mutations.length === before) throw new Error('recovery admission cancellation target missing')
+      state!.updated_at = nowIso()
+      stateStore.save(state!)
+      fsyncRecoveryAdmissionState()
+    },
+    providerRootAuthority: rootResolution.authority ?? undefined,
   })
 
   try {
     if (options.rollbackRunId) {
       let allVerified = true
       for (const mutation of [...state.mutations].reverse()) {
-        if (mutation.rollback_status === 'verified') continue
+        if (mutation.rollback_status === 'verified' || mutation.rollback_status === 'skipped') continue
         const rollbackStartedAt = nowIso()
         mutation.rollback_status = 'attempting'
         mutation.rollback_payload = {
@@ -2485,6 +3441,13 @@ export async function bootstrap(
       state.updated_at = nowIso()
       stateStore.save(state)
       return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', state.terminal_status, allVerified ? [] : ['NO_GO_ROLLBACK_UNVERIFIED'])
+    }
+
+    if (options.resumeRunId && state.mutations.some((mutation) => mutation.rollback_payload?.recovery_admission === true)) {
+      state.terminal_status = 'NO_GO'
+      state.updated_at = nowIso()
+      stateStore.save(state)
+      return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
     }
 
     const priorReady = !options.resumeRunId && !options.dryRun ? stateStore.findLatestReady(agentId, inputDigest) : null
@@ -2558,7 +3521,13 @@ export async function bootstrap(
       record.started_at = nowIso()
       record.reason_codes = []
       const method = STAGE_METHOD[stage]
+      if (!options.dryRun) {
+        state.updated_at = nowIso()
+        stateStore.save(state)
+      }
+      activeStageForAdmission = stage
       const outcome = await boundedDeadline(stage, (signal) => ports[method](context(signal)))
+      activeStageForAdmission = null
       record.completed_at = nowIso()
       record.reason_codes = outcome.reasonCodes ?? []
       record.evidence_refs = outcome.evidenceRefs ?? []
@@ -2575,15 +3544,44 @@ export async function bootstrap(
         stateStore.save(state)
         return resultFromState(state, stage, 'NO_GO', ['NO_GO_RESUME_REVALIDATION'])
       }
-      let observedMutation: BootstrapMutation | null = null
-      if (outcome.mutation && !options.dryRun) {
-        observedMutation = {
-          mutation_id: `${runId}:${stage}:${state.mutations.length + 1}`,
-          stage,
-          rollback_status: 'not_run',
-          ...outcome.mutation,
+      if (!options.dryRun) {
+        const reportedMutations = [
+          ...(outcome.mutations ?? []),
+          ...(outcome.mutation ? [outcome.mutation] : []),
+        ]
+        const orderedStageMutations: BootstrapMutation[] = []
+        for (const reported of reportedMutations) {
+          const admitted = state.mutations.find((mutation) => mutation.stage === stage
+            && mutation.owner_key === reported.owner_key
+            && mutation.rollback_payload?.recovery_admission === true)
+          if (admitted) {
+            const admittedPayload = admitted.rollback_payload ?? {}
+            Object.assign(admitted, reported)
+            admitted.rollback_payload = {
+              ...admittedPayload,
+              ...(reported.rollback_payload ?? {}),
+              recovery_admission: false,
+              recovery_admission_phase: 'COMMITTED_AND_READ_BACK',
+            }
+            orderedStageMutations.push(admitted)
+            continue
+          }
+          const observed: BootstrapMutation = {
+            mutation_id: `${runId}:${stage}:${state.mutations.length + 1}`,
+            stage,
+            rollback_status: 'not_run',
+            ...reported,
+          }
+          orderedStageMutations.push(observed)
         }
-        state.mutations.push(observedMutation)
+        const reportedIds = new Set(orderedStageMutations.map((mutation) => mutation.mutation_id))
+        const unmatchedStageAdmissions = state.mutations.filter((mutation) => mutation.stage === stage
+          && !reportedIds.has(mutation.mutation_id))
+        state.mutations = [
+          ...state.mutations.filter((mutation) => mutation.stage !== stage),
+          ...orderedStageMutations,
+          ...unmatchedStageAdmissions,
+        ]
       }
       state.updated_at = nowIso()
       if (!outcome.ok) {
@@ -2593,32 +3591,39 @@ export async function bootstrap(
           refreshOwnedRollbackFences(state)
           state.updated_at = nowIso()
           stateStore.save(state)
-          if (observedMutation) {
+          let allRollbackVerified = true
+          for (const mutation of [...state.mutations].reverse()) {
+            if (mutation.rollback_status === 'verified' || mutation.rollback_status === 'skipped') continue
             const rollbackStartedAt = nowIso()
-            observedMutation.rollback_status = 'attempting'
-            observedMutation.rollback_payload = {
-              ...(observedMutation.rollback_payload ?? {}),
+            mutation.rollback_status = 'attempting'
+            mutation.rollback_payload = {
+              ...(mutation.rollback_payload ?? {}),
               rollback_disposition: 'attempting_after_failed_command',
               rollback_started_at: rollbackStartedAt,
             }
             state.updated_at = rollbackStartedAt
             stateStore.save(state)
-            const rollback = await boundedDeadline(stage, (signal) => ports.rollbackMutation(context(signal), observedMutation!))
+            const rollback = await boundedDeadline(mutation.stage, (signal) => ports.rollbackMutation(context(signal), mutation))
             const rollbackVerified = rollback.ok && Boolean(rollback.readbackDigest)
-            const durableMutation = state.mutations.find((candidate) => candidate.mutation_id === observedMutation!.mutation_id)
-            if (!durableMutation) throw new Error('observed mutation disappeared before rollback disposition')
-            durableMutation.rollback_status = rollbackVerified ? 'verified' : 'failed'
-            durableMutation.rollback_payload = {
-              ...(durableMutation.rollback_payload ?? {}),
+            mutation.rollback_status = rollbackVerified ? 'verified' : 'failed'
+            mutation.rollback_payload = {
+              ...(mutation.rollback_payload ?? {}),
               rollback_disposition: rollbackVerified ? 'verified_after_failed_command' : 'recovery_required_after_failed_command',
               rollback_completed_at: nowIso(),
               rollback_evidence_refs: rollback.evidenceRefs ?? [],
               rollback_readback_digest: rollback.readbackDigest ?? null,
             }
             state.evidence_refs = [...new Set([...state.evidence_refs, ...(rollback.evidenceRefs ?? [])])]
+            allRollbackVerified &&= rollbackVerified
+            if (rollbackVerified && mutation.kind !== 'db') refreshOwnedRollbackFences(state)
+            state.updated_at = nowIso()
+            stateStore.save(state)
+          }
+          if (!allRollbackVerified) {
+            state.terminal_status = 'PARTIAL_ROLLBACK_NO_GO'
             record.reason_codes = [...new Set([
               ...(record.reason_codes.length > 0 ? record.reason_codes : ['NO_GO_POST_MUTATION_READBACK']),
-              ...(!rollbackVerified ? ['NO_GO_POST_MUTATION_READBACK' as const] : []),
+              'NO_GO_ROLLBACK_UNVERIFIED',
             ])]
           }
           for (const sealed of state.stages) {
@@ -2667,4 +3672,6 @@ export const bootstrapInternal = {
   defaultCommandRunner,
   runStdioMcpRecovery,
   createDefaultPorts,
+  providerInputSnapshot,
+  resolveProviderRootAuthority,
 }
