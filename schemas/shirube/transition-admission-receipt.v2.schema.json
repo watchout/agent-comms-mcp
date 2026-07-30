@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shirube.dev/schemas/shirube/transition-admission-receipt.v2.schema.json",
+  "title": "Shirube Transition Admission Receipt v2",
+  "description": "Immutable receipt wire contract for an exactly-once, dependency-closed transition admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["receipt_payload", "payload_sha256"],
+  "properties": {
+    "receipt_payload": { "$ref": "#/$defs/receiptPayload" },
+    "payload_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "nullableString": { "type": ["string", "null"], "minLength": 1 },
+    "digest": { "type": "string", "pattern": "^(sha256:)?[a-f0-9]{64}$" },
+    "gitSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "receiptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_identity", "plan_binding", "subject_binding", "transition_binding", "delivery_binding", "integrity"],
+      "properties": {
+        "receipt_identity": { "$ref": "#/$defs/receiptIdentity" },
+        "plan_binding": { "$ref": "#/$defs/planBinding" },
+        "subject_binding": { "$ref": "#/$defs/subjectBinding" },
+        "transition_binding": { "$ref": "#/$defs/transitionBinding" },
+        "delivery_binding": { "$ref": "#/$defs/deliveryBinding" },
+        "integrity": { "$ref": "#/$defs/integrity" }
+      }
+    },
+    "receiptIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_id", "controller_adapter_id", "controller_issuer_agent_id", "controller_instance_id", "controller_version", "authoritative_store_revision"],
+      "properties": {
+        "receipt_id": { "type": "string", "pattern": "^TR-[A-Z0-9._:-]+$" },
+        "controller_adapter_id": { "$ref": "#/$defs/nonEmptyString" },
+        "controller_issuer_agent_id": { "$ref": "#/$defs/nonEmptyString" },
+        "controller_instance_id": { "$ref": "#/$defs/nonEmptyString" },
+        "controller_version": { "$ref": "#/$defs/nonEmptyString" },
+        "authoritative_store_revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "planBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_goal_run_id", "plan_id", "plan_digest", "generation", "graph_id", "node_id", "parent_graph_id", "parent_node_id"],
+      "properties": {
+        "root_goal_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "plan_id": { "$ref": "#/$defs/nonEmptyString" },
+        "plan_digest": { "$ref": "#/$defs/digest" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "graph_id": { "$ref": "#/$defs/nonEmptyString" },
+        "node_id": { "$ref": "#/$defs/nonEmptyString" },
+        "parent_graph_id": { "$ref": "#/$defs/nullableString" },
+        "parent_node_id": { "$ref": "#/$defs/nullableString" }
+      },
+      "oneOf": [
+        { "properties": { "parent_graph_id": { "type": "null" }, "parent_node_id": { "type": "null" } } },
+        { "properties": { "parent_graph_id": { "type": "string", "minLength": 1 }, "parent_node_id": { "type": "string", "minLength": 1 } } }
+      ]
+    },
+    "subjectBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject_tuple", "subject_tuple_digest"],
+      "properties": {
+        "subject_tuple": { "$ref": "#/$defs/subjectTuple" },
+        "subject_tuple_digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "subjectTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit_sha", "tree_sha", "release_id", "process_identity", "config_digest", "policy_digest", "environment"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "commit_sha": { "$ref": "#/$defs/gitSha" },
+        "tree_sha": { "$ref": "#/$defs/gitSha" },
+        "release_id": { "$ref": "#/$defs/nonEmptyString" },
+        "process_identity": { "$ref": "#/$defs/nonEmptyString" },
+        "config_digest": { "$ref": "#/$defs/digest" },
+        "policy_digest": { "$ref": "#/$defs/digest" },
+        "environment": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "transitionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_digest", "from_state_digest", "to_state_digest", "ready_set", "ready_set_digest", "selected_node_digest", "delivery_class", "delivery_subtype", "destination_kind", "destination_actor_agent_id", "destination_active_function", "destination_owner_principal_id", "destination_owner_authority_key", "owner_decision_schema", "protected_decision_key", "reason_code", "handoff_digest"],
+      "properties": {
+        "result_digest": { "$ref": "#/$defs/digest" },
+        "from_state_digest": { "$ref": "#/$defs/digest" },
+        "to_state_digest": { "$ref": "#/$defs/digest" },
+        "ready_set": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "ready_set_digest": { "$ref": "#/$defs/digest" },
+        "selected_node_digest": { "$ref": "#/$defs/digest" },
+        "delivery_class": { "enum": ["AUN_DELEGATE", "PROTECTED_DECISION"] },
+        "delivery_subtype": { "$ref": "#/$defs/nullableString" },
+        "destination_kind": { "enum": ["NONE", "AGENT_FUNCTION", "HUMAN_OWNER"] },
+        "destination_actor_agent_id": { "$ref": "#/$defs/nullableString" },
+        "destination_active_function": { "$ref": "#/$defs/nullableString" },
+        "destination_owner_principal_id": { "$ref": "#/$defs/nullableString" },
+        "destination_owner_authority_key": { "$ref": "#/$defs/nullableString" },
+        "owner_decision_schema": { "$ref": "#/$defs/nullableString" },
+        "protected_decision_key": { "$ref": "#/$defs/nullableString" },
+        "reason_code": { "$ref": "#/$defs/nonEmptyString" },
+        "handoff_digest": { "$ref": "#/$defs/digest" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "destination_kind": { "const": "NONE" } }, "required": ["destination_kind"] },
+          "then": { "properties": { "destination_actor_agent_id": { "type": "null" }, "destination_active_function": { "type": "null" }, "destination_owner_principal_id": { "type": "null" }, "destination_owner_authority_key": { "type": "null" }, "owner_decision_schema": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "destination_kind": { "const": "AGENT_FUNCTION" } }, "required": ["destination_kind"] },
+          "then": { "properties": { "destination_actor_agent_id": { "type": "string", "minLength": 1 }, "destination_active_function": { "type": "string", "minLength": 1 }, "destination_owner_principal_id": { "type": "null" }, "destination_owner_authority_key": { "type": "null" }, "owner_decision_schema": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "destination_kind": { "const": "HUMAN_OWNER" } }, "required": ["destination_kind"] },
+          "then": { "properties": { "destination_actor_agent_id": { "type": "null" }, "destination_active_function": { "type": "null" }, "destination_owner_principal_id": { "type": "string", "minLength": 1 }, "destination_owner_authority_key": { "type": "string", "minLength": 1 }, "owner_decision_schema": { "const": "shirube-v3/owner_decision/v1" } } }
+        }
+      ]
+    },
+    "deliveryBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["idempotency_key", "queue_permission", "maximum_hop_count", "issued_at", "expires_at"],
+      "properties": {
+        "idempotency_key": { "type": "string", "pattern": "^owd:v2:[a-f0-9]{64}$" },
+        "queue_permission": { "const": "ALLOW_EXACTLY_ONE" },
+        "maximum_hop_count": { "const": 1 },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalization", "hash_algorithm"],
+      "properties": {
+        "canonicalization": { "const": "RFC8785" },
+        "hash_algorithm": { "const": "SHA-256" }
+      }
+    }
+  }
+}
