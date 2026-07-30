@@ -28,6 +28,130 @@ afterEach(() => {
 })
 
 describe('aun bootstrap clean-host journal', () => {
+  test('B3 uses the validated explicit target tmux when the controller session differs in dry-run and live', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-'))
+    roots.push(home)
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const dbPath = join(home, 'target.db')
+    writeFileSync(dbPath, 'profile-readback-fixture')
+    const env = {
+      HOME: home,
+      AGENT_COM_DB: 'sqlite',
+      AGENT_COM_SQLITE_PATH: dbPath,
+      AUN_BOOTSTRAP_CHANNEL_PORT: '8801',
+      AUN_BOOTSTRAP_TMUX_SESSION: 'misell',
+      AUN_BOOTSTRAP_TMUX_PANE: '%52',
+      TMUX: '/private/tmp/tmux-controller/default,62097,4',
+      TMUX_PANE: '%9',
+      CODEX_SANDBOX: 'workspace-write',
+    }
+    const profile = {
+      runtime: 'TUI', runtime_engine_preference: 'codex', home_directory: repoRoot,
+      channel_port: 8801, tmux_session: 'misell', profile_enabled: true, profile_revision: 2,
+    }
+    const tmuxCalls: string[] = []
+    let profileSetCalls = 0
+    const run = async (command: string, args: string[]) => {
+      const joined = args.join(' ')
+      if (command === 'tmux') {
+        tmuxCalls.push(joined)
+        if (joined === '-V') return { exitCode: 0, stdout: 'tmux 3.6a\n', stderr: '' }
+        if (joined === 'has-session -t =misell') return { exitCode: 0, stdout: '', stderr: '' }
+        if (joined === 'display-message -p -t %52 #S') return { exitCode: 0, stdout: 'misell\n', stderr: '' }
+        if (joined === 'display-message -p -t %52 #{pane_id}') return { exitCode: 0, stdout: '%52\n', stderr: '' }
+        if (joined === 'display-message -p #S') return { exitCode: 0, stdout: 'discord-aun\n', stderr: '' }
+      }
+      if (command === process.execPath && joined.includes('agent profile get')) {
+        return { exitCode: 0, stdout: JSON.stringify({ profile }), stderr: '' }
+      }
+      if (command === process.execPath && joined === '--version') return { exitCode: 0, stdout: '1.3.11\n', stderr: '' }
+      if (command === 'node' && joined === '--version') return { exitCode: 0, stdout: 'v20.20.0\n', stderr: '' }
+      if (command === 'git' && joined === '--version') return { exitCode: 0, stdout: 'git version 2.50.0\n', stderr: '' }
+      if (command === 'launchctl' && joined === 'help') return { exitCode: 0, stdout: 'launchctl help\n', stderr: '' }
+      if (command === 'codex' && joined === '--version') return { exitCode: 0, stdout: 'codex-cli 1.0.0\n', stderr: '' }
+      if (command === 'ps') return { exitCode: 1, stdout: '', stderr: '' }
+      if (command === process.execPath && joined.includes('agent profile set')) profileSetCalls++
+      return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+    }
+    const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+    const baseContext = {
+      runId: 'target-tmux', agentId: 'misell', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), env,
+      priorState: { mutations: [] } as any,
+    } satisfies Omit<BootstrapStageContext, 'dryRun'>
+
+    const preflight = await ports.dependencyPreflight({ ...baseContext, dryRun: true })
+    expect(preflight.ok).toBe(true)
+    expect(env.AUN_BOOTSTRAP_TMUX_SESSION).toBe('misell')
+    expect(env.AUN_BOOTSTRAP_TMUX_PANE).toBe('%52')
+    expect(tmuxCalls).not.toContain('display-message -p #S:#I.#P')
+
+    for (const dryRun of [true, false]) {
+      const outcome = await ports.ensureAgentProfile({ ...baseContext, dryRun })
+      expect(outcome.ok).toBe(true)
+      expect(outcome.evidenceRefs?.some((ref) => ref.startsWith('tmux-explicit-target:'))).toBe(true)
+    }
+    expect(tmuxCalls.filter((call) => call === 'has-session -t =misell')).toHaveLength(2)
+    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #S')).toHaveLength(2)
+    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #{pane_id}')).toHaveLength(2)
+    expect(tmuxCalls).not.toContain('display-message -p #S')
+    expect(profileSetCalls).toBe(0)
+  })
+
+  test('B3 fails closed before profile mutation when the explicit pane is outside the target session', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-mismatch-'))
+    roots.push(home)
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const dbPath = join(home, 'target.db')
+    writeFileSync(dbPath, 'profile-readback-fixture')
+    const env = {
+      HOME: home,
+      AGENT_COM_DB: 'sqlite',
+      AGENT_COM_SQLITE_PATH: dbPath,
+      AUN_BOOTSTRAP_CHANNEL_PORT: '8801',
+      AUN_BOOTSTRAP_TMUX_SESSION: 'misell',
+      AUN_BOOTSTRAP_TMUX_PANE: '%52',
+      TMUX: '/private/tmp/tmux-controller/default,62097,4',
+      TMUX_PANE: '%9',
+    }
+    const profile = {
+      runtime: 'TUI', runtime_engine_preference: 'codex', home_directory: repoRoot,
+      channel_port: 8801, tmux_session: 'misell', profile_enabled: true, profile_revision: 2,
+    }
+    const tmuxCalls: string[] = []
+    let profileSetCalls = 0
+    const run = async (command: string, args: string[]) => {
+      const joined = args.join(' ')
+      if (command === 'tmux') {
+        tmuxCalls.push(joined)
+        if (joined === 'has-session -t =misell') return { exitCode: 0, stdout: '', stderr: '' }
+        if (joined === 'display-message -p -t %52 #S') return { exitCode: 0, stdout: 'discord-aun\n', stderr: '' }
+        if (joined === 'display-message -p -t %52 #{pane_id}') return { exitCode: 0, stdout: '%52\n', stderr: '' }
+      }
+      if (command === process.execPath && joined.includes('agent profile get')) {
+        return { exitCode: 0, stdout: JSON.stringify({ profile }), stderr: '' }
+      }
+      if (command === process.execPath && joined.includes('agent profile set')) profileSetCalls++
+      return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+    }
+    const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+    const baseContext = {
+      runId: 'target-tmux-mismatch', agentId: 'misell', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), env,
+      priorState: { mutations: [] } as any,
+    } satisfies Omit<BootstrapStageContext, 'dryRun'>
+
+    for (const dryRun of [true, false]) {
+      const outcome = await ports.ensureAgentProfile({ ...baseContext, dryRun })
+      expect(outcome.ok).toBe(false)
+      expect(outcome.reasonCodes).toEqual(['NO_GO_IDENTITY_MISMATCH'])
+      expect(outcome.evidenceRefs?.some((ref) => ref.startsWith('tmux-explicit-target:'))).toBe(true)
+    }
+    expect(tmuxCalls.filter((call) => call === 'has-session -t =misell')).toHaveLength(2)
+    expect(tmuxCalls).not.toContain('display-message -p #S')
+    expect(profileSetCalls).toBe(0)
+  })
+
   test('existing Codex target root authority comes only from metadata.codex_home and projection equality', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-root-db-')))
     roots.push(home)
