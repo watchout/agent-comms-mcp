@@ -824,6 +824,9 @@ describe('aun bootstrap Codex adapter', () => {
       { name: 'wrong-command', tuple: { ...legacy, transport: { ...legacy.transport, command: '/wrong/bun' } }, list: [{ name: 'aun', enabled: false }] },
       { name: 'wrong-argv', tuple: { ...legacy, transport: { ...legacy.transport, args: ['run', '/wrong/server.ts'] } }, list: [{ name: 'aun', enabled: false }] },
       { name: 'non-null-env', tuple: { ...legacy, transport: { ...legacy.transport, env: {} } }, list: [{ name: 'aun', enabled: false }] },
+      { name: 'custom-timeout', tuple: { ...legacy, startup_timeout_sec: 30 }, list: [{ name: 'aun', enabled: false }] },
+      { name: 'custom-cwd', tuple: { ...legacy, transport: { ...legacy.transport, cwd: '/foreign' } }, list: [{ name: 'aun', enabled: false }] },
+      { name: 'non-empty-env-vars', tuple: { ...legacy, transport: { ...legacy.transport, env_vars: ['FOREIGN=1'] } }, list: [{ name: 'aun', enabled: false }] },
       { name: 'extra-top-field', tuple: { ...legacy, foreign: true }, list: [{ name: 'aun', enabled: false }] },
       { name: 'extra-transport-field', tuple: { ...legacy, transport: { ...legacy.transport, foreign: true } }, list: [{ name: 'aun', enabled: false }] },
     ]
@@ -887,6 +890,88 @@ describe('aun bootstrap Codex adapter', () => {
       expect(result.ok).toBe(false)
       expect(result.reasonCodes).toEqual(['NO_GO_MCP_REGISTRATION'])
       expect(result.mutation).toBeUndefined()
+      expect(readFileSync(configPath).equals(original)).toBe(true)
+      expect(existsSync(join(root, `.aun-bootstrap-rollback-${context.runId}`))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('current Codex native JSON shape upgrades the exact disabled legacy tuple', async () => {
+    const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-codex-current-native-')))
+    const configPath = join(root, 'config.toml')
+    const original = Buffer.from('[mcp_servers.aun]\nenabled = false\nlegacy = "exact"\n')
+    const absentBytes = Buffer.from('[mcp_servers.other]\nenabled = true\n')
+    const intendedBytes = Buffer.from('[mcp_servers.aun]\nenabled = true\ncommand = "current"\n')
+    writeFileSync(configPath, original, { mode: 0o600 })
+    const currentNativeLegacy = {
+      name: 'aun',
+      enabled: false,
+      disabled_reason: null,
+      transport: {
+        type: 'stdio',
+        command: '/Users/yuji/.bun/bin/bun',
+        args: ['run', '/Users/yuji/.agent-comms/state-daemon/current/server.ts'],
+        env: null,
+        env_vars: [],
+        cwd: null,
+      },
+      enabled_tools: null,
+      disabled_tools: null,
+      startup_timeout_sec: null,
+      tool_timeout_sec: null,
+    }
+    const candidateContext: BootstrapStageContext = {
+      ...context,
+      providerRootAuthority: {
+        existingTarget: true, canonicalSourceField: 'metadata.codex_home', canonicalRoot: root,
+        canonicalRootDigest: 'root', canonicalRealpathDigest: 'real-root',
+        projectionMatches: true, callerMismatch: false,
+      },
+    }
+    const nativeState = () => readFileSync(configPath).equals(original)
+      ? 'legacy'
+      : readFileSync(configPath).equals(intendedBytes) ? 'intended' : 'absent'
+    const adapter = createCodexBootstrapAdapter({
+      bunPath: '/bin/bun', serverEntry: 'server.ts',
+      run: async (_command, args) => {
+        const joined = args.join(' ')
+        const state = nativeState()
+        if (joined === 'mcp get aun --json') {
+          if (state === 'legacy') return { exitCode: 0, stdout: JSON.stringify(currentNativeLegacy), stderr: '' }
+          if (state === 'intended') return { exitCode: 0, stdout: exactGet(), stderr: '' }
+          return { exitCode: 1, stdout: '', stderr: 'MCP server aun not found' }
+        }
+        if (joined === 'mcp list --json') return {
+          exitCode: 0,
+          stdout: JSON.stringify(state === 'legacy'
+            ? [{ name: 'aun', enabled: false, auth_status: 'unsupported' }]
+            : state === 'intended' ? [{ name: 'aun', enabled: true }] : []),
+          stderr: '',
+        }
+        if (joined === 'mcp remove aun') {
+          writeFileSync(configPath, absentBytes, { mode: 0o600 })
+          return { exitCode: 0, stdout: 'removed', stderr: '' }
+        }
+        if (args.slice(0, 3).join(' ') === 'mcp add aun') {
+          writeFileSync(configPath, intendedBytes, { mode: 0o600 })
+          return { exitCode: 0, stdout: 'added', stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected' }
+      },
+    })
+    try {
+      const upgraded = await adapter.applyMcpRegistration(candidateContext)
+      expect(upgraded.ok).toBe(true)
+      expect(upgraded.mutation?.rollback_payload).toMatchObject({
+        replaced_recognized_disabled_legacy: true,
+        backup_fsync_verified: true,
+      })
+      const rolledBack = await adapter.rollbackRuntimeRegistration(candidateContext, {
+        mutation_id: 'current-native-shape', stage: 'B4_MCP_REGISTRATION', rollback_status: 'not_run',
+        ...upgraded.mutation!,
+      })
+      expect(rolledBack.ok).toBe(true)
       expect(readFileSync(configPath).equals(original)).toBe(true)
       expect(existsSync(join(root, `.aun-bootstrap-rollback-${context.runId}`))).toBe(false)
     } finally {

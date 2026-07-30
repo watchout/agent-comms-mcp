@@ -1038,18 +1038,42 @@ function codexListState(value: any): { count: number; enabled: boolean; entries:
   return { count: entries.length, enabled: entries.length === 1 && entries[0]?.enabled === true, entries }
 }
 
-function hasExactObjectKeys(value: unknown, keys: string[]): boolean {
+const LEGACY_CODEX_TOP_LEVEL_KEYS = [
+  'name', 'enabled', 'scope', 'transport',
+  'disabled_reason', 'enabled_tools', 'disabled_tools',
+  'startup_timeout_sec', 'tool_timeout_sec',
+] as const
+
+const LEGACY_CODEX_TRANSPORT_KEYS = [
+  'type', 'command', 'args', 'env', 'env_vars', 'cwd',
+] as const
+
+function hasOnlyKnownObjectKeys(value: unknown, keys: readonly string[]): boolean {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-    && bootstrapDigest(Object.keys(value as Record<string, unknown>).sort()) === bootstrapDigest([...keys].sort())
+    && Object.keys(value as Record<string, unknown>).every((key) => keys.includes(key))
+}
+
+function absentOrNull(value: Record<string, unknown>, key: string): boolean {
+  return !(key in value) || value[key] === null
 }
 
 function recognizedDisabledLegacyTuple(value: any): boolean {
   const transport = value?.transport
-  return hasExactObjectKeys(value, ['name', 'enabled', 'scope', 'transport'])
-    && hasExactObjectKeys(transport, ['type', 'command', 'args', 'env'])
+  if (!hasOnlyKnownObjectKeys(value, LEGACY_CODEX_TOP_LEVEL_KEYS)
+    || !hasOnlyKnownObjectKeys(transport, LEGACY_CODEX_TRANSPORT_KEYS)) return false
+  const top = value as Record<string, unknown>
+  const nativeTransport = transport as Record<string, unknown>
+  return (top.scope === undefined || top.scope === 'user')
+    && absentOrNull(top, 'disabled_reason')
+    && absentOrNull(top, 'enabled_tools')
+    && absentOrNull(top, 'disabled_tools')
+    && absentOrNull(top, 'startup_timeout_sec')
+    && absentOrNull(top, 'tool_timeout_sec')
+    && absentOrNull(nativeTransport, 'cwd')
+    && (nativeTransport.env_vars === undefined
+      || (Array.isArray(nativeTransport.env_vars) && nativeTransport.env_vars.length === 0))
     && value?.name === 'aun'
     && value?.enabled === false
-    && value?.scope === 'user'
     && transport?.type === 'stdio'
     && String(transport?.command ?? '') === LEGACY_BUN
     && Array.isArray(transport?.args)

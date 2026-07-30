@@ -408,6 +408,8 @@ describe('aun bootstrap clean-host journal', () => {
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
     let activeOwnedQueueId: string | null = null
+    let invalidPayloadQueueId: string | null = null
+    const invalidPayload = 'step one legacy queue payload'
     if (databaseUrl) {
       const ownedDb = new PgAdapter(databaseUrl)
       const activeOwned = await ownedDb.query<{ id: string | number }>(
@@ -419,6 +421,12 @@ describe('aun bootstrap clean-host journal', () => {
         })],
       )
       activeOwnedQueueId = String(activeOwned[0]!.id)
+      const invalidShared = await ownedDb.query<{ id: string | number }>(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at, done_at)
+         VALUES ($1, $2, $3, 'done', 0, now(), now()) RETURNING id`,
+        ['clean-default', randomUUID(), invalidPayload],
+      )
+      invalidPayloadQueueId = String(invalidShared[0]!.id)
       await ownedDb.close()
     }
     const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run })
@@ -431,14 +439,21 @@ describe('aun bootstrap clean-host journal', () => {
       expect([`${dbPath}-wal`, `${dbPath}-shm`].every((path) => !existsSync(path))).toBe(true)
     } else if (databaseUrl) {
       const rollbackReadback = new PgAdapter(databaseUrl)
+      const queueRows = await rollbackReadback.query<any>(
+        'SELECT id, status, payload FROM message_queue ORDER BY id',
+      )
+      const activeOwnedQueueRows = queueRows.filter((row) => {
+        let payload: any = null
+        try { payload = JSON.parse(String(row.payload)) } catch { return false }
+        return payload?.bootstrap_run_id === first.run_id
+          && ['pending', 'read', 'received', 'in_progress'].includes(String(row.status))
+      })
       const activeOwned = [
         await rollbackReadback.query<any>(`SELECT runtime_instance_id FROM agent_runtime_instances
           WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [first.run_id]),
         await rollbackReadback.query<any>(`SELECT id FROM runtime_memory_ready_evidence
           WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [first.run_id]),
-        await rollbackReadback.query<any>(`SELECT id FROM message_queue
-          WHERE (payload::jsonb)->>'bootstrap_run_id' = $1
-            AND status IN ('pending', 'read', 'received', 'in_progress')`, [first.run_id]),
+        activeOwnedQueueRows,
       ]
       expect(activeOwned.map((rows) => rows.length)).toEqual([0, 0, 0])
       const expiredOwned = await rollbackReadback.queryOne<any>(
@@ -452,6 +467,10 @@ describe('aun bootstrap clean-host journal', () => {
       const sharedContention = await rollbackReadback.queryOne<any>('SELECT status, payload FROM message_queue WHERE id = $1', [contentionQueueId])
       expect(sharedContention?.status).toBe('done')
       expect(JSON.parse(String(sharedContention?.payload)).bootstrap_run_id).toBeUndefined()
+      const invalidShared = await rollbackReadback.queryOne<any>(
+        'SELECT status, payload FROM message_queue WHERE id = $1', [invalidPayloadQueueId],
+      )
+      expect(invalidShared).toEqual({ status: 'done', payload: invalidPayload })
       await rollbackReadback.close()
     }
   }, 60_000)
