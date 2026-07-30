@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import type { DbAdapter } from '../core/db/adapter'
+import { PgAdapter } from '../core/db/pg-adapter'
 import {
   admitAunReceipt,
   canonicalJson,
@@ -21,6 +24,10 @@ import {
   type TransitionBinding,
   type TransitionReceiptWire,
 } from '../core/shirube-v41-transition-controller'
+import {
+  createShirubeV41AunAdmissionStore,
+  createShirubeV41ControllerStore,
+} from '../core/shirube-v41-transition-persistence'
 
 const d = (value: string) => digestObject({ value })
 const now = '2026-07-30T01:00:00Z'
@@ -273,6 +280,68 @@ class MemoryAun implements AunAdmissionStore {
   }
 }
 
+class FailOnceOnConsumptionAdapter implements DbAdapter {
+  readonly dialect = 'postgres' as const
+  private armed = true
+
+  constructor(private readonly base: DbAdapter) {}
+
+  query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+    return this.base.query<T>(sql, params)
+  }
+
+  queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
+    return this.base.queryOne<T>(sql, params)
+  }
+
+  execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+    return this.base.execute(sql, params)
+  }
+
+  transaction<T>(fn: (tx: DbAdapter) => Promise<T>): Promise<T> {
+    return this.base.transaction((tx) => fn({
+      dialect: 'postgres',
+      query: <R = any>(sql: string, params?: any[]) => tx.query<R>(sql, params),
+      queryOne: <R = any>(sql: string, params?: any[]) => tx.queryOne<R>(sql, params),
+      execute: async (sql: string, params?: any[]) => {
+        if (this.armed && sql.includes('INSERT INTO shirube_v41_receipt_consumptions')) {
+          this.armed = false
+          throw new Error('injected post-queue precommit crash')
+        }
+        return tx.execute(sql, params)
+      },
+      transaction: <R>(nested: (nestedTx: DbAdapter) => Promise<R>) => tx.transaction(nested),
+      close: () => Promise.resolve(),
+    }))
+  }
+
+  close(): Promise<void> {
+    return Promise.resolve()
+  }
+}
+
+function postgresAdminUrl(): string {
+  return process.env.AGENT_COM_TEST_DATABASE_URL
+    ?? process.env.DATABASE_URL
+    ?? 'postgresql:///postgres?host=/tmp'
+}
+
+function isolatedDatabaseUrl(adminUrl: string, databaseName: string): string {
+  const target = new URL(adminUrl)
+  target.pathname = `/${databaseName}`
+  return target.toString()
+}
+
+function runDatabaseCommand(command: 'createdb' | 'dropdb', adminUrl: string, databaseName: string): void {
+  const args = [command, `--maintenance-db=${adminUrl}`]
+  if (command === 'dropdb') args.push('--if-exists', '--force')
+  args.push(databaseName)
+  const result = Bun.spawnSync(args, { stdout: 'pipe', stderr: 'pipe' })
+  if (result.exitCode !== 0) {
+    throw new Error(`${command} failed (${result.exitCode}): ${result.stderr.toString().trim()}`)
+  }
+}
+
 async function issued(): Promise<{ wire: TransitionReceiptWire; controller: MemoryController }> {
   const controller = new MemoryController()
   const result = await commitControllerTransition(controller, request())
@@ -380,6 +449,92 @@ describe('Shirube V4.1 transition controller', () => {
     const replay = await admitAunReceipt(store, admissionRequest(wire))
     expect(replay).toMatchObject({ verdict: 'PASS', reason_code: 'OUTBOX_DUPLICATE_SUPPRESSED', queue_rows: 0, authoritative_lookup_performed: false })
     expect([store.queues.length, store.projections.length]).toEqual([1, 1])
+  })
+
+  test('PostgreSQL admission matches the real partial unique index and survives crash plus replay', async () => {
+    const adminUrl = postgresAdminUrl()
+    const databaseName = `acm_n6_${process.pid}_${randomUUID().replaceAll('-', '')}`
+    const databaseUrl = isolatedDatabaseUrl(adminUrl, databaseName)
+    runDatabaseCommand('createdb', adminUrl, databaseName)
+    const db = new PgAdapter(databaseUrl)
+    try {
+      await db.execute(`
+        CREATE TABLE message_queue (
+          id BIGSERIAL PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          message_id TEXT,
+          payload TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE UNIQUE INDEX uq_mq_agent_message
+          ON message_queue(agent_id, message_id)
+          WHERE message_id IS NOT NULL;
+      `)
+      await db.execute(readFileSync(resolve(import.meta.dir, '../db/migrations/2026-07-30-shirube-v41-transition-admission.up.sql'), 'utf8'))
+
+      const initial = state()
+      await db.execute(
+        `INSERT INTO shirube_v41_controller_adapters
+           (controller_adapter_id, authenticated_caller, next_receipt_revision, lifecycle_state)
+         VALUES ($1,$2,1,'active')`,
+        [initial.controller_adapter_id, 'controller-service'],
+      )
+      await db.execute(
+        `INSERT INTO shirube_v41_plan_states
+           (root_goal_run_id, plan_id, plan_digest, generation, graph_id, node_id,
+            parent_graph_id, parent_node_id, state_digest, subject_tuple, graph_state,
+            actor_agent_id, active_function, controller_adapter_id,
+            controller_instance_id, controller_version, dispatch_state)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,$15,$16,$17)`,
+        [initial.root_goal_run_id, initial.plan_id, initial.plan_digest, initial.generation,
+          initial.graph_id, initial.node_id, initial.parent_graph_id, initial.parent_node_id,
+          initial.state_digest, canonicalJson(initial.subject_tuple), canonicalJson(initial.graph_state),
+          initial.actor_agent_id, initial.active_function, initial.controller_adapter_id,
+          initial.controller_instance_id, initial.controller_version, initial.dispatch_state],
+      )
+      await db.execute(
+        `INSERT INTO shirube_v41_destination_registry
+           (destination_kind, destination_actor_agent_id, destination_active_function, lifecycle_state)
+         VALUES ('AGENT_FUNCTION',$1,$2,'active')`,
+        ['codex-audit', 'evidence_audit_gate'],
+      )
+
+      const committed = await commitControllerTransition(createShirubeV41ControllerStore(db), request(initial))
+      expect(committed).toMatchObject({ verdict: 'PASS', reason_code: 'TRANSITION_COMMITTED', queue_rows: 0 })
+      const wire = committed.receipt_wire!
+      const admission = admissionRequest(wire)
+
+      const crashed = await admitAunReceipt(
+        createShirubeV41AunAdmissionStore(new FailOnceOnConsumptionAdapter(db)),
+        admission,
+      )
+      expect(crashed).toMatchObject({ verdict: 'BLOCK', reason_code: 'TRANSACTION_ABORTED', queue_rows: 0 })
+      expect(await db.queryOne<{ queues: number; projections: number; consumptions: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM message_queue) AS queues,
+           (SELECT count(*)::int FROM shirube_v41_queue_projections) AS projections,
+           (SELECT count(*)::int FROM shirube_v41_receipt_consumptions) AS consumptions`,
+      )).toEqual({ queues: 0, projections: 0, consumptions: 0 })
+
+      const admitted = await admitAunReceipt(createShirubeV41AunAdmissionStore(db), admission)
+      expect(admitted).toMatchObject({
+        verdict: 'PASS', reason_code: 'RECEIPT_ADMITTED', queue_rows: 1, projections: 1, effects: 0,
+      })
+      const replay = await admitAunReceipt(createShirubeV41AunAdmissionStore(db), admission)
+      expect(replay).toMatchObject({
+        verdict: 'PASS', reason_code: 'OUTBOX_DUPLICATE_SUPPRESSED', queue_rows: 0,
+        authoritative_lookup_performed: false,
+      })
+      expect(await db.queryOne<{ queues: number; projections: number; consumptions: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM message_queue) AS queues,
+           (SELECT count(*)::int FROM shirube_v41_queue_projections) AS projections,
+           (SELECT count(*)::int FROM shirube_v41_receipt_consumptions) AS consumptions`,
+      )).toEqual({ queues: 1, projections: 1, consumptions: 1 })
+    } finally {
+      await db.close()
+      runDatabaseCommand('dropdb', adminUrl, databaseName)
+    }
   })
 
   test('wire rejects non-NFC and lone-surrogate payloads before admission', async () => {

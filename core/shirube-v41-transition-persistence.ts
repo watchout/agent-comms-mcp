@@ -274,7 +274,8 @@ export function createShirubeV41AunAdmissionStore(db: DbAdapter): AunAdmissionSt
           const row = await tx.queryOne<{ id: string | number }>(
             `INSERT INTO message_queue (agent_id, message_id, payload, status)
              VALUES ($1,$2,$3,'pending')
-             ON CONFLICT (message_id) DO NOTHING RETURNING id`,
+             ON CONFLICT (agent_id, message_id) WHERE message_id IS NOT NULL
+             DO NOTHING RETURNING id`,
             [agentId, messageId, payload],
           )
           if (!row) throw new Error('V41_QUEUE_INSERT_CONFLICT')
