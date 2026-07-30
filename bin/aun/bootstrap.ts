@@ -838,6 +838,11 @@ function parseJsonRecord(value: unknown): Record<string, any> {
   }
 }
 
+function bootstrapRunIdFromQueuePayload(value: unknown): string | null {
+  const parsed = parseJsonRecord(value)
+  return typeof parsed.bootstrap_run_id === 'string' ? parsed.bootstrap_run_id : null
+}
+
 function executableVersionOk(output: string, minimumMajor: number): boolean {
   const match = output.match(/(\d+)\.(\d+)\.(\d+)/)
   return Boolean(match && Number(match[1]) >= minimumMajor)
@@ -3070,21 +3075,24 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             }
           }
           const ledger = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+            const queueBefore = await tx.query<any>(
+              `SELECT id, status, payload FROM message_queue ORDER BY id`,
+            )
+            const ownedQueueBefore = queueBefore.filter((row) => bootstrapRunIdFromQueuePayload(row.payload) === context.runId)
+            const sharedQueueBefore = queueBefore.filter((row) => bootstrapRunIdFromQueuePayload(row.payload) !== context.runId)
             const sharedBefore = [
               await tx.query<any>(`SELECT runtime_instance_id, status, metadata FROM agent_runtime_instances
                 WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY runtime_instance_id`, [context.runId]),
               await tx.query<any>(`SELECT id, result_status, metadata FROM runtime_memory_ready_evidence
                 WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
-              await tx.query<any>(`SELECT id, status, payload FROM message_queue
-                WHERE COALESCE((payload::jsonb)->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+              sharedQueueBefore,
             ]
             const ownedBefore = [
               await tx.query<any>(`SELECT runtime_instance_id, status FROM agent_runtime_instances
                 WHERE metadata->>'bootstrap_run_id' = $1 ORDER BY runtime_instance_id`, [context.runId]),
               await tx.query<any>(`SELECT id, result_status FROM runtime_memory_ready_evidence
                 WHERE metadata->>'bootstrap_run_id' = $1 ORDER BY id`, [context.runId]),
-              await tx.query<any>(`SELECT id, status FROM message_queue
-                WHERE (payload::jsonb)->>'bootstrap_run_id' = $1 ORDER BY id`, [context.runId]),
+              ownedQueueBefore.map((row) => ({ id: row.id, status: row.status })),
             ]
             await tx.execute(`UPDATE runtime_memory_ready_evidence
               SET result_status = 'failed', failure_reason = 'BOOTSTRAP_ROLLBACK', valid_until = now()
@@ -3092,43 +3100,54 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             await tx.execute(`UPDATE agent_runtime_instances
               SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), last_seen_at = now()
               WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId])
-            await tx.execute(`UPDATE message_queue
-              SET status = CASE
-                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'skipped'
-                    ELSE status
-                  END,
-                  failed_reason = CASE
-                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'BOOTSTRAP_ROLLBACK'
-                    ELSE failed_reason
-                  END,
-                  done_at = CASE
-                    WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN COALESCE(done_at, now())
-                    ELSE done_at
-                  END,
-                  claim_expires_at = now(),
-                  payload = jsonb_set(payload::jsonb, '{bootstrap_rollback_expired}', 'true'::jsonb, true)::text
-              WHERE (payload::jsonb)->>'bootstrap_run_id' = $1`, [context.runId])
+            let exactQueueUpdateCount = 0
+            for (const row of ownedQueueBefore) {
+              const updated = await tx.execute(`UPDATE message_queue
+                SET status = CASE
+                      WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'skipped'
+                      ELSE status
+                    END,
+                    failed_reason = CASE
+                      WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN 'BOOTSTRAP_ROLLBACK'
+                      ELSE failed_reason
+                    END,
+                    done_at = CASE
+                      WHEN status IN ('pending', 'read', 'received', 'in_progress') THEN COALESCE(done_at, now())
+                      ELSE done_at
+                    END,
+                    claim_expires_at = now(),
+                    payload = jsonb_set(payload::jsonb, '{bootstrap_rollback_expired}', 'true'::jsonb, true)::text
+                WHERE id = $1 AND payload = $2`, [row.id, row.payload])
+              if (updated.rowCount !== 1) throw new Error('bootstrap queue rollback exact row fence rejected')
+              exactQueueUpdateCount += updated.rowCount
+            }
+            const queueAfter = await tx.query<any>(
+              `SELECT id, status, payload FROM message_queue ORDER BY id`,
+            )
+            const ownedQueueAfter = queueAfter.filter((row) => bootstrapRunIdFromQueuePayload(row.payload) === context.runId)
+            const sharedQueueAfter = queueAfter.filter((row) => bootstrapRunIdFromQueuePayload(row.payload) !== context.runId)
             const activeAfter = [
               await tx.query<any>(`SELECT runtime_instance_id FROM agent_runtime_instances
                 WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId]),
               await tx.query<any>(`SELECT id FROM runtime_memory_ready_evidence
                 WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [context.runId]),
-              await tx.query<any>(`SELECT id FROM message_queue
-                WHERE (payload::jsonb)->>'bootstrap_run_id' = $1
-                  AND status IN ('pending', 'read', 'received', 'in_progress')`, [context.runId]),
+              ownedQueueAfter
+                .filter((row) => ['pending', 'read', 'received', 'in_progress'].includes(String(row.status)))
+                .map((row) => ({ id: row.id })),
             ]
             const sharedAfter = [
               await tx.query<any>(`SELECT runtime_instance_id, status, metadata FROM agent_runtime_instances
                 WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY runtime_instance_id`, [context.runId]),
               await tx.query<any>(`SELECT id, result_status, metadata FROM runtime_memory_ready_evidence
                 WHERE COALESCE(metadata->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
-              await tx.query<any>(`SELECT id, status, payload FROM message_queue
-                WHERE COALESCE((payload::jsonb)->>'bootstrap_run_id', '') <> $1 ORDER BY id`, [context.runId]),
+              sharedQueueAfter,
             ]
             return {
               owned_before_digest: bootstrapDigest(ownedBefore),
               owned_before_counts: ownedBefore.map((rows) => rows.length),
               active_after_counts: activeAfter.map((rows) => rows.length),
+              exact_queue_update_count: exactQueueUpdateCount,
+              exact_queue_update_expected: ownedQueueBefore.length,
               shared_before_digest: bootstrapDigest(sharedBefore),
               shared_after_digest: bootstrapDigest(sharedAfter),
               shared_unchanged: bootstrapDigest(sharedBefore) === bootstrapDigest(sharedAfter),
@@ -3137,6 +3156,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           const schemaAfterCleanup = await postgresSchemaDigest().catch(() => null)
           const ownedAbsent = Boolean(ledger)
             && ledger!.active_after_counts.every((count) => count === 0)
+            && ledger!.exact_queue_update_count === ledger!.exact_queue_update_expected
             && ledger!.shared_unchanged
             && schemaAfterCleanup === schemaBeforeCleanup
           const approvedConfigurationMigration = payload.configuration_migration_digest === bootstrapDigest(readFileSync(join(
