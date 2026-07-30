@@ -572,7 +572,18 @@ function bootstrapInputDigest(input: {
     database_backend: databaseBackend,
     database_endpoint_digest: bootstrapDigest(input.env.DATABASE_URL || input.env.AGENT_COM_SQLITE_PATH || join(input.repoRoot, 'agent-com.db')),
     requested_port: input.env.AUN_WEBHOOK_PORT || input.env.AUN_BOOTSTRAP_CHANNEL_PORT || null,
-    tmux_session: input.env.TMUX || input.env.TMUX_PANE || null,
+    tmux_authority: Object.prototype.hasOwnProperty.call(input.env, 'AUN_BOOTSTRAP_TMUX_SESSION')
+      || Object.prototype.hasOwnProperty.call(input.env, 'AUN_BOOTSTRAP_TMUX_PANE')
+      ? {
+          source: 'explicit-target',
+          session: input.env.AUN_BOOTSTRAP_TMUX_SESSION || null,
+          pane: input.env.AUN_BOOTSTRAP_TMUX_PANE || null,
+        }
+      : {
+          source: 'caller-context',
+          tmux: input.env.TMUX || null,
+          pane: input.env.TMUX_PANE || null,
+        },
     memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(input.workspaceRoot),
     provider_snapshot: input.providerSnapshot,
     intended_aun_tuple_template_digest: bootstrapDigest({
@@ -1062,6 +1073,10 @@ type DefaultPortsOptions = {
 
 function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts {
   const { run, env, home, repoRoot } = options
+  const explicitTmuxSessionProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_SESSION')
+  const explicitTmuxPaneProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_PANE')
+  const explicitTmuxSession = env.AUN_BOOTSTRAP_TMUX_SESSION?.trim() ?? ''
+  const explicitTmuxPane = env.AUN_BOOTSTRAP_TMUX_PANE?.trim() ?? ''
   const bunPath = process.execPath
   const adapterDeps = { run, bunPath, serverEntry: 'server.ts' }
   const adapters: Record<BootstrapResolvedRuntime, BootstrapRuntimeAdapter> = {
@@ -1145,6 +1160,77 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         profile_revision: Number(row.profile_revision ?? 1),
       }
     }, { readonly: true }).catch(() => null)
+  }
+
+  const resolveTmuxAuthority = async (
+    context: BootstrapStageContext,
+    existingSession: unknown,
+  ): Promise<{ ok: true; session: string; evidenceRef: string } | { ok: false; evidenceRef: string }> => {
+    const validSession = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)
+    const validPane = (value: string): boolean => /^%[0-9]+$/.test(value)
+
+    if (explicitTmuxSessionProvided || explicitTmuxPaneProvided) {
+      if (!explicitTmuxSessionProvided || !explicitTmuxPaneProvided
+        || !validSession(explicitTmuxSession) || !validPane(explicitTmuxPane)) {
+        return {
+          ok: false,
+          evidenceRef: `tmux-explicit-target-invalid:${bootstrapDigest({
+            has_session: explicitTmuxSessionProvided,
+            has_pane: explicitTmuxPaneProvided,
+            session_valid: validSession(explicitTmuxSession),
+            pane_valid: validPane(explicitTmuxPane),
+          })}`,
+        }
+      }
+      const sessionExists = await run(
+        'tmux', ['has-session', '-t', `=${explicitTmuxSession}`], commandOptions(context, 10_000),
+      )
+      const paneSession = await run(
+        'tmux', ['display-message', '-p', '-t', explicitTmuxPane, '#S'], commandOptions(context, 10_000),
+      )
+      const paneIdentity = await run(
+        'tmux', ['display-message', '-p', '-t', explicitTmuxPane, '#{pane_id}'], commandOptions(context, 10_000),
+      )
+      const valid = sessionExists.exitCode === 0
+        && paneSession.exitCode === 0 && paneSession.stdout.trim() === explicitTmuxSession
+        && paneIdentity.exitCode === 0 && paneIdentity.stdout.trim() === explicitTmuxPane
+      const evidenceRef = `tmux-explicit-target:${bootstrapDigest({
+        session: explicitTmuxSession,
+        pane: explicitTmuxPane,
+        session_exists_exit: sessionExists.exitCode,
+        pane_session_exit: paneSession.exitCode,
+        pane_session: paneSession.stdout.trim(),
+        pane_identity_exit: paneIdentity.exitCode,
+        pane_identity: paneIdentity.stdout.trim(),
+      })}`
+      return valid ? { ok: true, session: explicitTmuxSession, evidenceRef } : { ok: false, evidenceRef }
+    }
+
+    const callerSession = await run(
+      'tmux', ['display-message', '-p', '#S'], commandOptions(context, 10_000),
+    )
+    const callerSessionName = callerSession.stdout.trim()
+    if (callerSession.exitCode === 0 && validSession(callerSessionName)) {
+      return {
+        ok: true,
+        session: callerSessionName,
+        evidenceRef: `tmux-caller-session:${bootstrapDigest({ session: callerSessionName })}`,
+      }
+    }
+    const fallbackSession = typeof existingSession === 'string' ? existingSession.trim() : ''
+    if (!validSession(fallbackSession)) {
+      return { ok: false, evidenceRef: `tmux-authority-unresolved:${bootstrapDigest({ caller_exit: callerSession.exitCode })}` }
+    }
+    const existingSessionReadback = await run(
+      'tmux', ['has-session', '-t', `=${fallbackSession}`], commandOptions(context, 10_000),
+    )
+    const evidenceRef = `tmux-existing-session:${bootstrapDigest({
+      session: fallbackSession,
+      session_exists_exit: existingSessionReadback.exitCode,
+    })}`
+    return existingSessionReadback.exitCode === 0
+      ? { ok: true, session: fallbackSession, evidenceRef }
+      : { ok: false, evidenceRef }
   }
 
   const ensureConfigurationDesiredState = async (
@@ -1880,7 +1966,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         run(bunPath, ['--version'], commandOptions(context, 10_000)),
         run('node', ['--version'], commandOptions(context, 10_000)),
         run('git', ['--version'], commandOptions(context, 10_000)),
-        run('tmux', ['display-message', '-p', '#S:#I.#P'], commandOptions(context, 10_000)),
+        run('tmux', ['-V'], commandOptions(context, 10_000)),
         run('launchctl', ['help'], commandOptions(context, 10_000)),
       ])
       if (common.slice(0, 3).some((result) => result.exitCode !== 0)) return { ok: false, reasonCodes: ['NO_GO_DEPENDENCY_MISSING'] }
@@ -1888,11 +1974,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return { ok: false, reasonCodes: ['NO_GO_VERSION_UNSUPPORTED'] }
       }
       if (common[3].exitCode !== 0 || common[4].exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_DEPENDENCY_MISSING'] }
-      const tmuxIdentity = common[3].stdout.trim()
-      if (!tmuxIdentity) return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'] }
-      const [tmuxSession, tmuxPane] = tmuxIdentity.split(':', 2)
-      env.AUN_BOOTSTRAP_TMUX_SESSION = tmuxSession
-      env.AUN_BOOTSTRAP_TMUX_PANE = tmuxPane ?? env.TMUX_PANE ?? ''
+      let tmuxIdentity = `${explicitTmuxSession}:${explicitTmuxPane}`
+      if (!explicitTmuxSessionProvided && !explicitTmuxPaneProvided) {
+        const callerTmux = await run(
+          'tmux', ['display-message', '-p', '#S:#I.#P'], commandOptions(context, 10_000),
+        )
+        if (callerTmux.exitCode !== 0 || !callerTmux.stdout.trim()) {
+          return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'] }
+        }
+        tmuxIdentity = callerTmux.stdout.trim()
+        const [tmuxSession, tmuxPane] = tmuxIdentity.split(':', 2)
+        env.AUN_BOOTSTRAP_TMUX_SESSION = tmuxSession
+        env.AUN_BOOTSTRAP_TMUX_PANE = tmuxPane ?? env.TMUX_PANE ?? ''
+      }
 
       profileBefore = await profileGetReadOnly(context.agentId)
       const signals = await processRuntimeSignals(run, repoRoot, env)
@@ -2042,9 +2136,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const adapter = adapterFor(context)
       if (!adapter) return { ok: false, reasonCodes: ['NO_GO_RUNTIME_UNDETECTED'] }
       const existing = context.dryRun && !databaseAlreadyExists() ? profileBefore : await profileGet(context.agentId)
-      const tmux = await run('tmux', ['display-message', '-p', '#S'], commandOptions(context, 10_000))
-      const session = tmux.exitCode === 0 ? tmux.stdout.trim() : existing?.tmux_session
-      if (!session) return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'] }
+      const tmuxAuthority = await resolveTmuxAuthority(context, existing?.tmux_session)
+      if (!tmuxAuthority.ok) {
+        return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'], evidenceRefs: [tmuxAuthority.evidenceRef] }
+      }
+      const session = tmuxAuthority.session
       const port = await choosePort(run, context, existing)
       if (!port) return { ok: false, reasonCodes: ['NO_GO_PORT_CONFLICT'] }
       env.AUN_BOOTSTRAP_CHANNEL_PORT = String(port)
@@ -2059,7 +2155,20 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         && Number(existing.channel_port) === port
         && existing.tmux_session === session
         && existing.profile_enabled === true
-      if (context.dryRun) return { ok: true, evidenceRefs: [`profile-plan:${bootstrapDigest(desired)}`], readinessPredicates: { profile_plan_unambiguous: true } }
+      if (context.dryRun) {
+        if (existing && !matches) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_PROFILE_CONFLICT'],
+            evidenceRefs: [tmuxAuthority.evidenceRef, `profile-mismatch:${bootstrapDigest({ existing: managedProfile(existing), desired })}`],
+          }
+        }
+        return {
+          ok: true,
+          evidenceRefs: [tmuxAuthority.evidenceRef, `profile-plan:${bootstrapDigest(desired)}`],
+          readinessPredicates: { profile_plan_unambiguous: true },
+        }
+      }
       if (matches) {
         let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
         try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
@@ -2078,6 +2187,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return {
           ok: true,
           evidenceRefs: [
+            tmuxAuthority.evidenceRef,
             `profile-existing:${bootstrapDigest(existing)}`,
             ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
           ],
@@ -2090,7 +2200,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       if (existing) {
-        return { ok: false, reasonCodes: ['NO_GO_PROFILE_CONFLICT'], evidenceRefs: [`profile-mismatch:${bootstrapDigest(existing)}`] }
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_PROFILE_CONFLICT'],
+          evidenceRefs: [tmuxAuthority.evidenceRef, `profile-mismatch:${bootstrapDigest({ existing: managedProfile(existing), desired })}`],
+        }
       }
       const applied = await run(bunPath, [
         'cli/index.ts', 'agent', 'profile', 'set', context.agentId,
@@ -2142,6 +2256,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       return {
         ok: true,
         evidenceRefs: [
+          tmuxAuthority.evidenceRef,
           `profile-readback:${bootstrapDigest(readback)}`,
           ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
         ],
