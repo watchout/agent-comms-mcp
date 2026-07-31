@@ -28,13 +28,13 @@ afterEach(() => {
 })
 
 describe('aun bootstrap clean-host journal', () => {
-  test('B3 uses the validated explicit target tmux when the controller session differs in dry-run and live', async () => {
+  test('B5-TARGET-AUTHORITY-001 uses only the validated target pane process tree when the controller differs', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const dbPath = join(home, 'target.db')
     writeFileSync(dbPath, 'profile-readback-fixture')
-    const env = {
+    const env: Record<string, string> = {
       HOME: home,
       AGENT_COM_DB: 'sqlite',
       AGENT_COM_SQLITE_PATH: dbPath,
@@ -59,6 +59,7 @@ describe('aun bootstrap clean-host journal', () => {
         if (joined === 'has-session -t =misell') return { exitCode: 0, stdout: '', stderr: '' }
         if (joined === 'display-message -p -t %52 #S') return { exitCode: 0, stdout: 'misell\n', stderr: '' }
         if (joined === 'display-message -p -t %52 #{pane_id}') return { exitCode: 0, stdout: '%52\n', stderr: '' }
+        if (joined === 'display-message -p -t %52 #{pane_pid}') return { exitCode: 0, stdout: '7311\n', stderr: '' }
         if (joined === 'display-message -p #S') return { exitCode: 0, stdout: 'discord-aun\n', stderr: '' }
       }
       if (command === process.execPath && joined.includes('agent profile get')) {
@@ -69,7 +70,14 @@ describe('aun bootstrap clean-host journal', () => {
       if (command === 'git' && joined === '--version') return { exitCode: 0, stdout: 'git version 2.50.0\n', stderr: '' }
       if (command === 'launchctl' && joined === 'help') return { exitCode: 0, stdout: 'launchctl help\n', stderr: '' }
       if (command === 'codex' && joined === '--version') return { exitCode: 0, stdout: 'codex-cli 1.0.0\n', stderr: '' }
-      if (command === 'ps') return { exitCode: 1, stdout: '', stderr: '' }
+      if (command === 'ps' && joined === '-axo pid=,ppid=,command=') {
+        return {
+          exitCode: 0,
+          stdout: '62097 1 /Applications/Codex.app/controller/codex\n7311 1 /bin/zsh\n7312 7311 /usr/local/bin/codex\n',
+          stderr: '',
+        }
+      }
+      if (command === 'ps') return { exitCode: 0, stdout: '1 /Applications/Codex.app/controller/codex\n', stderr: '' }
       if (command === process.execPath && joined.includes('agent profile set')) profileSetCalls++
       return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
     }
@@ -84,6 +92,7 @@ describe('aun bootstrap clean-host journal', () => {
     expect(preflight.ok).toBe(true)
     expect(env.AUN_BOOTSTRAP_TMUX_SESSION).toBe('misell')
     expect(env.AUN_BOOTSTRAP_TMUX_PANE).toBe('%52')
+    expect(env.AUN_BOOTSTRAP_PROVIDER_PID).toBe('7312')
     expect(tmuxCalls).not.toContain('display-message -p #S:#I.#P')
 
     for (const dryRun of [true, false]) {
@@ -91,9 +100,10 @@ describe('aun bootstrap clean-host journal', () => {
       expect(outcome.ok).toBe(true)
       expect(outcome.evidenceRefs?.some((ref) => ref.startsWith('tmux-explicit-target:'))).toBe(true)
     }
-    expect(tmuxCalls.filter((call) => call === 'has-session -t =misell')).toHaveLength(2)
-    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #S')).toHaveLength(2)
-    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #{pane_id}')).toHaveLength(2)
+    expect(tmuxCalls.filter((call) => call === 'has-session -t =misell')).toHaveLength(3)
+    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #S')).toHaveLength(3)
+    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #{pane_id}')).toHaveLength(3)
+    expect(tmuxCalls.filter((call) => call === 'display-message -p -t %52 #{pane_pid}')).toHaveLength(1)
     expect(tmuxCalls).not.toContain('display-message -p #S')
     expect(profileSetCalls).toBe(0)
   })
@@ -150,6 +160,170 @@ describe('aun bootstrap clean-host journal', () => {
     expect(tmuxCalls.filter((call) => call === 'has-session -t =misell')).toHaveLength(2)
     expect(tmuxCalls).not.toContain('display-message -p #S')
     expect(profileSetCalls).toBe(0)
+  })
+
+  test('B5-ROLLBACK-001 stops only the current-run receipt and preserves ordinary runtime identity and status', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-rollback-'))
+    roots.push(home)
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const dbPath = join(home, 'b5-rollback.db')
+    const env = {
+      ...process.env,
+      HOME: home,
+      AUN_HOME: join(home, '.aun'),
+      AGENT_COM_DB: 'sqlite',
+      AGENT_COM_SQLITE_PATH: dbPath,
+    } as Record<string, string>
+    expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
+    const profile = Bun.spawnSync([
+      process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b5-rollback',
+      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
+      '--channel-port', '8812', '--tmux-session', 'b5-session', '--enabled', 'true', '--execute',
+    ], { cwd: repoRoot, env })
+    expect(profile.exitCode).toBe(0)
+    const db = new SqliteAdapter(dbPath)
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
+          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5)`,
+      ['ordinary-b5', 'b5-rollback', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
+    )
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
+          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+       VALUES ($1, $2, 'codex', 'bootstrap_bound_provider', 'b5-session', 7312, 8812, $3, $4, 'running', now(), now(), $5)`,
+      ['bootstrap-b5', 'b5-rollback', repoRoot, 'a'.repeat(40), JSON.stringify({ bootstrap_run_id: 'b5-rollback-run' })],
+    )
+    const runtimeProjection = `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+                                      port, checkout_path, commit_sha, status, metadata
+                                 FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2`
+    const ordinaryBefore = await db.queryOne<any>(runtimeProjection, ['ordinary-b5', 'b5-rollback'])
+    const ports = bootstrapInternal.createDefaultPorts({
+      run: async () => ({ exitCode: 1, stdout: '', stderr: 'not used' }),
+      env,
+      home,
+      repoRoot,
+    })
+    const context = {
+      runId: 'b5-rollback-run', agentId: 'b5-rollback', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
+      priorState: { mutations: [] } as any,
+    } satisfies BootstrapStageContext
+    const outcome = await ports.rollbackMutation(context, {
+      mutation_id: 'b5-rollback-mutation', stage: 'B5_MEMORY_READINESS', kind: 'memory_readiness',
+      owner_key: 'memory:b5-rollback-run:bootstrap-b5:none', before_digest: bootstrapDigest(ordinaryBefore),
+      intended_after_digest: 'receipt', actual_after_digest: 'receipt',
+      rollback_action: 'expire run-owned memory evidence and stop only a run-owned runtime receipt',
+      rollback_status: 'not_run',
+      rollback_payload: {
+        runtime_instance_id: 'bootstrap-b5', runtime_created: true, evidence_id: null,
+        bootstrap_run_id: 'b5-rollback-run',
+        runtime_before_identities: [{ runtime_instance_id: 'ordinary-b5', row_digest: bootstrapDigest(ordinaryBefore) }],
+      },
+    })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.readinessPredicates).toMatchObject({
+      rollback_verified: true,
+      preexisting_runtime_unchanged: true,
+    })
+    const ordinaryAfter = await db.queryOne<any>(runtimeProjection, ['ordinary-b5', 'b5-rollback'])
+    const bootstrapAfter = await db.queryOne<any>('SELECT status FROM agent_runtime_instances WHERE runtime_instance_id = $1', ['bootstrap-b5'])
+    expect(bootstrapDigest(ordinaryAfter)).toBe(bootstrapDigest(ordinaryBefore))
+    expect(bootstrapAfter?.status).toBe('stopped')
+    await db.close()
+  })
+
+  test('B5-CONCURRENCY-001 serializes concurrent receipt selection and retains one bootstrap row beside ordinary runtime', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
+    roots.push(home)
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const databaseName = `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`
+    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
+    postgresDatabases.push(databaseName)
+    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const baseEnv = {
+      ...process.env,
+      HOME: home,
+      AUN_HOME: join(home, '.aun'),
+      AGENT_COM_DB: 'postgres',
+      DATABASE_URL: databaseUrl,
+      AGENT_MEMORY_PROJECT: 'b5-concurrency-project',
+      AUN_BOOTSTRAP_CHANNEL_PORT: '8812',
+      AUN_BOOTSTRAP_PROVIDER_PID: '7312',
+    } as Record<string, string>
+    expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env: baseEnv }).exitCode).toBe(0)
+    const profileSet = Bun.spawnSync([
+      process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b5-concurrency',
+      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
+      '--channel-port', '8812', '--tmux-session', 'b5-session', '--enabled', 'true', '--execute',
+    ], { cwd: repoRoot, env: baseEnv })
+    expect(profileSet.exitCode).toBe(0)
+    const db = new PgAdapter(databaseUrl)
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
+          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5::jsonb)`,
+      ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
+    )
+    await db.close()
+    const profile = {
+      runtime: 'TUI', runtime_engine_preference: 'codex', home_directory: repoRoot,
+      channel_port: 8812, tmux_session: 'b5-session', profile_enabled: true,
+      profile_revision: 1, profile_source: 'fixture',
+    }
+    const recoveryFixture = `
+      const readline = require('node:readline');
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on('line', (line) => {
+        const m = JSON.parse(line);
+        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}));
+        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
+        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project b5-concurrency-project recovered'}],isError:false}}));
+      });
+    `
+    const run = async (command: string, args: string[]) => {
+      const joined = args.join(' ')
+      if (command === process.execPath && joined.includes('agent profile get')) {
+        return { exitCode: 0, stdout: JSON.stringify({ profile }), stderr: '' }
+      }
+      if (command === 'codex' && joined === 'mcp get wasurezu --json') {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            enabled: true,
+            transport: { type: 'stdio', command: process.execPath, args: ['-e', recoveryFixture], env: {} },
+          }),
+          stderr: '',
+        }
+      }
+      return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+    }
+    const runGate = (runId: string) => {
+      const env = { ...baseEnv }
+      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+      return ports.ensureMemoryReadiness({
+        runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+        repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
+        priorState: { mutations: [] } as any,
+      })
+    }
+    const outcomes = await Promise.all([runGate('b5-concurrent-a'), runGate('b5-concurrent-b')])
+    expect(outcomes.every((outcome) => outcome.ok || outcome.reasonCodes?.[0] === 'NO_GO_MEMORY_RECOVERY')).toBe(true)
+    expect(outcomes.every((outcome) => outcome.reasonCodes?.[0] !== 'NO_GO_RUNTIME_RECEIPT')).toBe(true)
+    const readback = new PgAdapter(databaseUrl)
+    const active = await readback.query<any>(
+      `SELECT runtime_instance_id, runtime_kind, status FROM agent_runtime_instances
+        WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
+      ['b5-concurrency'],
+    )
+    expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toHaveLength(1)
+    expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
+      { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
+    ])
+    await readback.close()
   })
 
   test('existing Codex target root authority comes only from metadata.codex_home and projection equality', async () => {

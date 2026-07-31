@@ -801,7 +801,12 @@ function profileRuntimeSignal(profile: any): BootstrapRuntimeSignal | null {
   return runtime ? { source: 'agent_profile', runtime, verified: true, evidence: `profile_revision:${profile.profile_revision ?? 'unknown'}` } : null
 }
 
-async function processRuntimeSignals(run: BootstrapAdapterCommandRunner, repoRoot: string, env: Record<string, string>): Promise<BootstrapRuntimeSignal[]> {
+async function processRuntimeSignals(
+  run: BootstrapAdapterCommandRunner,
+  repoRoot: string,
+  env: Record<string, string>,
+  assignProviderPid = true,
+): Promise<BootstrapRuntimeSignal[]> {
   const signals: BootstrapRuntimeSignal[] = []
   let pid = process.ppid
   const seen = new Set<number>()
@@ -815,23 +820,256 @@ async function processRuntimeSignals(run: BootstrapAdapterCommandRunner, repoRoo
     const command = match[2].toLowerCase()
     if (/(^|[/\s])codex(?:\s|$)/.test(command)) {
       signals.push({ source: 'process_identity', runtime: 'codex', verified: true, evidence: `ancestor_pid:${pid}` })
-      env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
+      if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
     }
     if (/(^|[/\s])claude(?:\s|$)/.test(command)) {
       signals.push({ source: 'process_identity', runtime: 'claude', verified: true, evidence: `ancestor_pid:${pid}` })
-      env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
+      if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
     }
     pid = Number(match[1])
   }
   if (env.CODEX_THREAD_ID || env.CODEX_SANDBOX) {
     signals.push({ source: 'process_identity', runtime: 'codex', verified: true, evidence: 'codex_runtime_env' })
-    env.AUN_BOOTSTRAP_PROVIDER_PID ||= String(process.ppid)
+    if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID ||= String(process.ppid)
   }
   if (env.CLAUDECODE === '1') {
     signals.push({ source: 'process_identity', runtime: 'claude', verified: true, evidence: 'claude_runtime_env' })
-    env.AUN_BOOTSTRAP_PROVIDER_PID ||= String(process.ppid)
+    if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID ||= String(process.ppid)
   }
   return signals.filter((signal, index, all) => all.findIndex((candidate) => candidate.source === signal.source && candidate.runtime === signal.runtime) === index)
+}
+
+type TargetRuntimeAuthority = {
+  ok: true
+  signals: BootstrapRuntimeSignal[]
+  providerPids: Partial<Record<BootstrapResolvedRuntime, number>>
+  evidenceRef: string
+} | {
+  ok: false
+  discriminator: 'target_identity_mismatch' | 'target_process_read_failure' | 'target_process_unresolved' | 'target_process_ambiguous'
+  evidenceRef: string
+}
+
+function commandRuntime(command: string): BootstrapResolvedRuntime | null {
+  const normalized = command.toLowerCase()
+  if (/(^|[/\s])codex(?:[./\s]|$)/.test(normalized)) return 'codex'
+  if (/(^|[/\s])claude(?:[./\s]|$)/.test(normalized)) return 'claude'
+  return null
+}
+
+async function resolveExplicitTargetRuntimeAuthority(input: {
+  run: BootstrapAdapterCommandRunner
+  context: BootstrapStageContext
+  repoRoot: string
+  env: Record<string, string>
+  session: string
+  pane: string
+}): Promise<TargetRuntimeAuthority> {
+  const validSession = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(input.session)
+  const validPane = /^%[0-9]+$/.test(input.pane)
+  if (!validSession || !validPane) {
+    return {
+      ok: false,
+      discriminator: 'target_identity_mismatch',
+      evidenceRef: `runtime-authority:target_identity_mismatch:${bootstrapDigest({ valid_session: validSession, valid_pane: validPane })}`,
+    }
+  }
+  const options = { cwd: input.repoRoot, env: input.env, timeoutMs: 10_000, signal: input.context.abortSignal }
+  const sessionExists = await input.run('tmux', ['has-session', '-t', `=${input.session}`], options)
+  const paneSession = await input.run('tmux', ['display-message', '-p', '-t', input.pane, '#S'], options)
+  const paneIdentity = await input.run('tmux', ['display-message', '-p', '-t', input.pane, '#{pane_id}'], options)
+  const panePidResult = await input.run('tmux', ['display-message', '-p', '-t', input.pane, '#{pane_pid}'], options)
+  const panePid = Number(panePidResult.stdout.trim())
+  const identityEvidence = {
+    session_digest: bootstrapDigest(input.session),
+    pane_digest: bootstrapDigest(input.pane),
+    session_exists_exit: sessionExists.exitCode,
+    pane_session_exit: paneSession.exitCode,
+    pane_session_match: paneSession.stdout.trim() === input.session,
+    pane_identity_exit: paneIdentity.exitCode,
+    pane_identity_match: paneIdentity.stdout.trim() === input.pane,
+    pane_pid_exit: panePidResult.exitCode,
+    pane_pid_valid: Number.isInteger(panePid) && panePid > 1,
+  }
+  if (sessionExists.exitCode !== 0 || paneSession.exitCode !== 0 || !identityEvidence.pane_session_match
+    || paneIdentity.exitCode !== 0 || !identityEvidence.pane_identity_match
+    || panePidResult.exitCode !== 0 || !identityEvidence.pane_pid_valid) {
+    return {
+      ok: false,
+      discriminator: 'target_identity_mismatch',
+      evidenceRef: `runtime-authority:target_identity_mismatch:${bootstrapDigest(identityEvidence)}`,
+    }
+  }
+
+  const processTable = await input.run('ps', ['-axo', 'pid=,ppid=,command='], options)
+  if (processTable.exitCode !== 0) {
+    return {
+      ok: false,
+      discriminator: 'target_process_read_failure',
+      evidenceRef: `runtime-authority:target_process_read_failure:${bootstrapDigest({ ...identityEvidence, process_exit: processTable.exitCode })}`,
+    }
+  }
+  const rows = processTable.stdout.split('\n').flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+([\s\S]+?)\s*$/)
+    return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : []
+  })
+  const depths = new Map<number, number>([[panePid, 0]])
+  for (let depth = 1; depth < 32; depth++) {
+    let added = false
+    for (const row of rows) {
+      if (depths.has(row.pid)) continue
+      const parentDepth = depths.get(row.ppid)
+      if (parentDepth === undefined) continue
+      depths.set(row.pid, parentDepth + 1)
+      added = true
+    }
+    if (!added) break
+  }
+  if (!depths.has(panePid) || !rows.some((row) => row.pid === panePid)) {
+    return {
+      ok: false,
+      discriminator: 'target_process_unresolved',
+      evidenceRef: `runtime-authority:target_process_unresolved:${bootstrapDigest({ ...identityEvidence, process_table_digest: bootstrapDigest(processTable.stdout) })}`,
+    }
+  }
+  const candidates = rows.flatMap((row) => {
+    const depth = depths.get(row.pid)
+    const runtime = depth === undefined ? null : commandRuntime(row.command)
+    return runtime ? [{ pid: row.pid, depth, runtime }] : []
+  })
+  const providerPids: Partial<Record<BootstrapResolvedRuntime, number>> = {}
+  const signals: BootstrapRuntimeSignal[] = []
+  for (const runtime of ['codex', 'claude'] as const) {
+    const runtimeCandidates = candidates.filter((candidate) => candidate.runtime === runtime)
+    if (runtimeCandidates.length === 0) continue
+    const minimumDepth = Math.min(...runtimeCandidates.map((candidate) => candidate.depth))
+    const nearest = runtimeCandidates.filter((candidate) => candidate.depth === minimumDepth)
+    if (nearest.length !== 1) {
+      return {
+        ok: false,
+        discriminator: 'target_process_ambiguous',
+        evidenceRef: `runtime-authority:target_process_ambiguous:${bootstrapDigest({
+          ...identityEvidence,
+          runtime,
+          candidate_count: runtimeCandidates.length,
+          nearest_count: nearest.length,
+          process_table_digest: bootstrapDigest(processTable.stdout),
+        })}`,
+      }
+    }
+    providerPids[runtime] = nearest[0].pid
+    signals.push({
+      source: 'process_identity',
+      runtime,
+      verified: true,
+      evidence: `target_process_tree:${bootstrapDigest({ pane_pid: panePid, provider_pid: nearest[0].pid, depth: minimumDepth })}`,
+    })
+  }
+  if (signals.length === 0) {
+    return {
+      ok: false,
+      discriminator: 'target_process_unresolved',
+      evidenceRef: `runtime-authority:target_process_unresolved:${bootstrapDigest({
+        ...identityEvidence,
+        descendant_count: depths.size,
+        process_table_digest: bootstrapDigest(processTable.stdout),
+      })}`,
+    }
+  }
+  return {
+    ok: true,
+    signals,
+    providerPids,
+    evidenceRef: `runtime-authority:target_process_verified:${bootstrapDigest({
+      ...identityEvidence,
+      runtime_count: signals.length,
+      authority_digest: bootstrapDigest(providerPids),
+      process_table_digest: bootstrapDigest(processTable.stdout),
+    })}`,
+  }
+}
+
+type RuntimeReceiptTuple = {
+  agent_id: string
+  runtime_engine: BootstrapResolvedRuntime
+  session_name: string
+  process_id: number
+  port: number
+  checkout_path: string
+  commit_sha: string
+}
+
+type RuntimeReceiptDecision = {
+  ok: true
+  action: 'create' | 'reuse'
+  runtimeInstanceId: string | null
+  ordinaryActiveCount: number
+  bootstrapActiveCount: number
+  evidenceDigest: string
+} | {
+  ok: false
+  discriminator: 'runtime_receipt_incompatible' | 'runtime_receipt_ambiguous'
+  ordinaryActiveCount: number
+  bootstrapActiveCount: number
+  evidenceDigest: string
+}
+
+function classifyRuntimeReceiptRows(active: any[], tuple: RuntimeReceiptTuple): RuntimeReceiptDecision {
+  const bootstrapRows = active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')
+  const ordinaryActiveCount = active.length - bootstrapRows.length
+  const matches = bootstrapRows.filter((row) => row.agent_id === tuple.agent_id
+    && row.runtime_engine === tuple.runtime_engine
+    && row.session_name === tuple.session_name
+    && Number(row.process_id) === tuple.process_id
+    && Number(row.port) === tuple.port
+    && realpathOrResolve(String(row.checkout_path ?? '')) === tuple.checkout_path
+    && row.commit_sha === tuple.commit_sha)
+  const evidenceDigest = bootstrapDigest({
+    tuple_digest: bootstrapDigest(tuple),
+    ordinary_active_count: ordinaryActiveCount,
+    bootstrap_active_count: bootstrapRows.length,
+    compatible_bootstrap_count: matches.length,
+    active_rows_digest: bootstrapDigest(active),
+  })
+  if (bootstrapRows.length === 0) {
+    return { ok: true, action: 'create', runtimeInstanceId: null, ordinaryActiveCount, bootstrapActiveCount: 0, evidenceDigest }
+  }
+  if (bootstrapRows.length > 1) {
+    return {
+      ok: false,
+      discriminator: 'runtime_receipt_ambiguous',
+      ordinaryActiveCount,
+      bootstrapActiveCount: bootstrapRows.length,
+      evidenceDigest,
+    }
+  }
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      discriminator: 'runtime_receipt_incompatible',
+      ordinaryActiveCount,
+      bootstrapActiveCount: bootstrapRows.length,
+      evidenceDigest,
+    }
+  }
+  return {
+    ok: true,
+    action: 'reuse',
+    runtimeInstanceId: String(matches[0].runtime_instance_id),
+    ordinaryActiveCount,
+    bootstrapActiveCount: 1,
+    evidenceDigest,
+  }
+}
+
+class RuntimeReceiptSelectionError extends Error {
+  constructor(
+    readonly discriminator: 'runtime_receipt_incompatible' | 'runtime_receipt_ambiguous' | 'runtime_receipt_post_insert_readback',
+    readonly evidenceDigest: string,
+  ) {
+    super(discriminator)
+    this.name = 'RuntimeReceiptSelectionError'
+  }
 }
 
 function parseJsonOutput(result: BootstrapCommandResult): any | null {
@@ -1726,8 +1964,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     let runtimeInstanceId: string | null = null
     let runtimeCreated = false
     let runtimeBeforeDigest: string | null = null
+    let runtimeBeforeIdentities: Array<{ runtime_instance_id: string; row_digest: string }> = []
     let evidenceId: string | number | null = null
     let runtimeTupleDigest: string | null = null
+    let failureDiscriminator = 'runtime_receipt_input_invalid'
     try {
       const profile = await profileGet(context.agentId)
       const sessionName = env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session
@@ -1735,7 +1975,45 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
       if (!profile || !sessionName || !Number.isInteger(port) || port <= 0
         || !Number.isInteger(providerPid) || providerPid <= 1 || !context.resolvedRuntime || !context.repoHead) {
-        return { ok: false, reasonCodes: ['NO_GO_RUNTIME_RECEIPT'] }
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_RUNTIME_RECEIPT'],
+          evidenceRefs: [`memory-error:runtime_receipt_input_invalid:${bootstrapDigest({
+            profile_present: Boolean(profile),
+            session_present: Boolean(sessionName),
+            port_valid: Number.isInteger(port) && port > 0,
+            provider_pid_valid: Number.isInteger(providerPid) && providerPid > 1,
+            runtime_present: Boolean(context.resolvedRuntime),
+            commit_present: Boolean(context.repoHead),
+          })}`],
+        }
+      }
+      if (explicitTmuxSessionProvided && explicitTmuxPaneProvided) {
+        failureDiscriminator = 'target_authority_readback'
+        const authority = await resolveExplicitTargetRuntimeAuthority({
+          run,
+          context,
+          repoRoot,
+          env,
+          session: explicitTmuxSession,
+          pane: explicitTmuxPane,
+        })
+        if (!authority.ok || authority.providerPids[context.resolvedRuntime] !== providerPid) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_RUNTIME_RECEIPT'],
+            evidenceRefs: [
+              authority.evidenceRef,
+              `memory-error:target_authority_mismatch:${bootstrapDigest({
+                authority_ok: authority.ok,
+                runtime: context.resolvedRuntime,
+                provider_pid_matches: authority.ok
+                  ? authority.providerPids[context.resolvedRuntime] === providerPid
+                  : false,
+              })}`,
+            ],
+          }
+        }
       }
       const runtimeTuple = {
         agent_id: context.agentId,
@@ -1747,29 +2025,34 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         commit_sha: context.repoHead,
       }
       runtimeTupleDigest = bootstrapDigest(runtimeTuple)
-      const runtime = await withBootstrapDb(env, async (db) => {
-        const active = await db.query<any>(
-          `SELECT runtime_instance_id, agent_id, runtime_engine, session_name, process_id,
+      failureDiscriminator = 'runtime_receipt_db_read'
+      const runtime = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+        const agent = await tx.queryOne<{ agent_id: string }>(
+          'SELECT agent_id FROM agents WHERE agent_id = $1 FOR UPDATE',
+          [context.agentId],
+        )
+        if (!agent) throw new Error('runtime receipt agent unavailable')
+        const readActive = () => tx.query<any>(
+          `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
                   port, checkout_path, commit_sha, status, metadata
              FROM agent_runtime_instances
             WHERE agent_id = $1 AND status IN ('running', 'active')
-            ORDER BY COALESCE(last_seen_at, started_at) DESC`,
+            ORDER BY runtime_instance_id`,
           [context.agentId],
         )
+        const active = await readActive()
         runtimeBeforeDigest = bootstrapDigest(active)
-        const matches = active.filter((row) => row.agent_id === runtimeTuple.agent_id
-          && row.runtime_engine === runtimeTuple.runtime_engine
-          && row.session_name === runtimeTuple.session_name
-          && Number(row.process_id) === runtimeTuple.process_id
-          && Number(row.port) === runtimeTuple.port
-          && realpathOrResolve(String(row.checkout_path ?? '')) === runtimeTuple.checkout_path
-          && row.commit_sha === runtimeTuple.commit_sha)
-        if (matches.length === 1 && active.length === 1) {
-          return { id: String(matches[0].runtime_instance_id), created: false }
+        runtimeBeforeIdentities = active.map((row) => ({
+          runtime_instance_id: String(row.runtime_instance_id),
+          row_digest: bootstrapDigest(row),
+        }))
+        const decision = classifyRuntimeReceiptRows(active, runtimeTuple)
+        if (!decision.ok) throw new RuntimeReceiptSelectionError(decision.discriminator, decision.evidenceDigest)
+        if (decision.action === 'reuse' && decision.runtimeInstanceId) {
+          return { id: decision.runtimeInstanceId, created: false, decisionDigest: decision.evidenceDigest }
         }
-        if (active.length > 0) throw new Error('active runtime tuple mismatch')
         const id = randomUUID()
-        const inserted = await db.query<{ runtime_instance_id: string }>(
+        const inserted = await tx.query<{ runtime_instance_id: string }>(
           `INSERT INTO agent_runtime_instances
              (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
               process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
@@ -1780,15 +2063,22 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           [id, context.agentId, context.resolvedRuntime, sessionName, providerPid, port,
             runtimeTuple.checkout_path, context.repoHead, JSON.stringify({ bootstrap_run_id: context.runId, tuple_digest: runtimeTupleDigest })],
         )
-        return { id: String(inserted[0]?.runtime_instance_id ?? id), created: true }
-      })
+        const insertedId = String(inserted[0]?.runtime_instance_id ?? id)
+        const postInsert = classifyRuntimeReceiptRows(await readActive(), runtimeTuple)
+        if (!postInsert.ok || postInsert.action !== 'reuse' || postInsert.runtimeInstanceId !== insertedId) {
+          throw new RuntimeReceiptSelectionError('runtime_receipt_post_insert_readback', postInsert.evidenceDigest)
+        }
+        return { id: insertedId, created: true, decisionDigest: postInsert.evidenceDigest }
+      }))
       runtimeInstanceId = runtime.id
       runtimeCreated = runtime.created
       env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = runtime.id
 
+      failureDiscriminator = 'memory_recovery'
       const transport = await readConfiguredWasurezuTransport(context, run)
       if (!transport) throw new Error('provider-native Wasurezu stdio tuple missing')
       const recovery = await runStdioMcpRecovery(transport, project, context)
+      failureDiscriminator = 'memory_post_mutation_readback'
       const result = await withBootstrapDb(env, async (db) => {
         const evidence = buildWasurezuBootstrapEvidence({
           agent_id: context.agentId,
@@ -1847,6 +2137,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           bootstrap_run_id: context.runId, project, recovery_response_digest: recovery.responseDigest, runtime_tuple_digest: runtimeTupleDigest,
           provider_tuple_digest: transport.tupleDigest,
           valid_until: result.validUntil,
+          runtime_before_identities: runtimeBeforeIdentities,
         },
       }
       return result.gate.ok
@@ -1882,14 +2173,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         rollback_payload: {
           runtime_instance_id: runtimeInstanceId, runtime_created: runtimeCreated, evidence_id: evidenceId,
           bootstrap_run_id: context.runId, post_error_readback_digest: observed ? bootstrapDigest(observed) : null,
+          runtime_before_identities: runtimeBeforeIdentities,
         },
       } : undefined
+      const discriminator = err instanceof RuntimeReceiptSelectionError ? err.discriminator : failureDiscriminator
+      const errorDigest = err instanceof RuntimeReceiptSelectionError
+        ? err.evidenceDigest
+        : bootstrapDigest({ discriminator, error_type: err instanceof Error ? err.name : typeof err })
       return {
         ok: false,
         reasonCodes: [mutation
           ? 'NO_GO_POST_MUTATION_READBACK'
           : runtimeInstanceId ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'],
-        evidenceRefs: [`memory-error:${bootstrapDigest(String(err))}`],
+        evidenceRefs: [`memory-error:${discriminator}:${errorDigest}`],
         mutation,
       }
     }
@@ -1989,11 +2285,57 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
 
       profileBefore = await profileGetReadOnly(context.agentId)
-      const signals = await processRuntimeSignals(run, repoRoot, env)
+      const controllerSignals = await processRuntimeSignals(
+        run,
+        repoRoot,
+        env,
+        !(explicitTmuxSessionProvided && explicitTmuxPaneProvided),
+      )
+      let signals = controllerSignals
+      const authorityEvidenceRefs: string[] = []
+      let targetAuthority: TargetRuntimeAuthority | null = null
+      if (explicitTmuxSessionProvided && explicitTmuxPaneProvided) {
+        delete env.AUN_BOOTSTRAP_PROVIDER_PID
+        targetAuthority = await resolveExplicitTargetRuntimeAuthority({
+          run,
+          context,
+          repoRoot,
+          env,
+          session: explicitTmuxSession,
+          pane: explicitTmuxPane,
+        })
+        authorityEvidenceRefs.push(targetAuthority.evidenceRef)
+        authorityEvidenceRefs.push(`runtime-authority:controller-evidence-only:${bootstrapDigest(controllerSignals)}`)
+        if (!targetAuthority.ok) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_IDENTITY_MISMATCH'],
+            evidenceRefs: authorityEvidenceRefs,
+          }
+        }
+        signals = targetAuthority.signals
+      }
       const profileSignal = profileRuntimeSignal(profileBefore)
       if (profileSignal) signals.push(profileSignal)
       const selection = selectBootstrapRuntime(context.requestedRuntime, signals)
       if (!selection.ok || !selection.runtime) return { ok: false, reasonCodes: [selection.reason] }
+      if (targetAuthority?.ok) {
+        const providerPid = targetAuthority.providerPids[selection.runtime]
+        if (!providerPid) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_IDENTITY_MISMATCH'],
+            evidenceRefs: [
+              ...authorityEvidenceRefs,
+              `runtime-authority:target_runtime_mismatch:${bootstrapDigest({
+                selected_runtime: selection.runtime,
+                available_runtime_digests: Object.keys(targetAuthority.providerPids).map(bootstrapDigest),
+              })}`,
+            ],
+          }
+        }
+        env.AUN_BOOTSTRAP_PROVIDER_PID = String(providerPid)
+      }
       const liveRuntimes = [...new Set(signals.filter((signal) => signal.source === 'process_identity' && signal.verified).map((signal) => signal.runtime))]
       if (liveRuntimes.length === 1) env.AUN_BOOTSTRAP_PROCESS_RUNTIME = liveRuntimes[0]
       else delete env.AUN_BOOTSTRAP_PROCESS_RUNTIME
@@ -2002,7 +2344,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       return {
         ok: true,
         resolvedRuntime: selection.runtime,
-        evidenceRefs: [`runtime-selection:${bootstrapDigest(selection)}`, ...(provider.evidenceRefs ?? [])],
+        evidenceRefs: [
+          `runtime-selection:${bootstrapDigest(selection)}`,
+          ...authorityEvidenceRefs,
+          ...(provider.evidenceRefs ?? []),
+        ],
         readinessPredicates: { dependencies_present: true, supervisor_capable: true, runtime_unambiguous: true },
         readbackDigest: bootstrapDigest({
           runtime: selection.runtime,
@@ -3115,7 +3461,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const payload = mutation.rollback_payload ?? {}
         const runtimeId = String(payload.runtime_instance_id ?? '')
         const evidenceId = payload.evidence_id
-        const ok = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+        const rollback = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
           if (evidenceId !== null && evidenceId !== undefined) {
             const evidence = await tx.queryOne<any>(
               'SELECT result_status, failure_reason, metadata FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
@@ -3156,10 +3502,39 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           const active = payload.runtime_created === true
             ? await tx.queryOne('SELECT runtime_instance_id FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND status IN (\'running\', \'active\')', [runtimeId])
             : null
-          return (!evidence || (evidence.result_status === 'failed' && evidence.failure_reason === 'BOOTSTRAP_ROLLBACK')) && !active
+          const beforeIdentities = Array.isArray(payload.runtime_before_identities)
+            ? payload.runtime_before_identities as Array<{ runtime_instance_id?: unknown; row_digest?: unknown }>
+            : []
+          const preexistingRuntimeUnchanged = (await Promise.all(beforeIdentities.map(async (identity) => {
+            const id = String(identity.runtime_instance_id ?? '')
+            const expectedDigest = String(identity.row_digest ?? '')
+            if (!id || !expectedDigest) return false
+            const row = await tx.queryOne<any>(
+              `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+                      port, checkout_path, commit_sha, status, metadata
+                 FROM agent_runtime_instances
+                WHERE runtime_instance_id = $1 AND agent_id = $2`,
+              [id, context.agentId],
+            )
+            return Boolean(row) && bootstrapDigest(row) === expectedDigest
+          }))).every(Boolean)
+          return {
+            ok: (!evidence || (evidence.result_status === 'failed' && evidence.failure_reason === 'BOOTSTRAP_ROLLBACK'))
+              && !active && preexistingRuntimeUnchanged,
+            preexistingRuntimeUnchanged,
+          }
         })).catch(() => false)
-        return ok
-          ? { ok: true, readinessPredicates: { rollback_verified: true }, readbackDigest: bootstrapDigest({ runtime_id: runtimeId, evidence_id: evidenceId, active: false }) }
+        return rollback && rollback.ok
+          ? {
+              ok: true,
+              readinessPredicates: { rollback_verified: true, preexisting_runtime_unchanged: rollback.preexistingRuntimeUnchanged },
+              readbackDigest: bootstrapDigest({
+                runtime_id: runtimeId,
+                evidence_id: evidenceId,
+                active: false,
+                preexisting_runtime_unchanged: rollback.preexistingRuntimeUnchanged,
+              }),
+            }
           : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
       }
       if (mutation.kind === 'profile') {
@@ -3809,4 +4184,5 @@ export const bootstrapInternal = {
   createDefaultPorts,
   providerInputSnapshot,
   resolveProviderRootAuthority,
+  classifyRuntimeReceiptRows,
 }
