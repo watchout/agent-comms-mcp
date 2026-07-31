@@ -817,13 +817,9 @@ async function processRuntimeSignals(
     const line = result.stdout.trim()
     const match = line.match(/^(\d+)\s+([\s\S]+)$/)
     if (!match) break
-    const command = match[2].toLowerCase()
-    if (/(^|[/\s])codex(?:\s|$)/.test(command)) {
-      signals.push({ source: 'process_identity', runtime: 'codex', verified: true, evidence: `ancestor_pid:${pid}` })
-      if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
-    }
-    if (/(^|[/\s])claude(?:\s|$)/.test(command)) {
-      signals.push({ source: 'process_identity', runtime: 'claude', verified: true, evidence: `ancestor_pid:${pid}` })
+    const runtime = commandRuntime(match[2])
+    if (runtime) {
+      signals.push({ source: 'process_identity', runtime, verified: true, evidence: `ancestor_pid:${pid}` })
       if (assignProviderPid) env.AUN_BOOTSTRAP_PROVIDER_PID = String(pid)
     }
     pid = Number(match[1])
@@ -851,9 +847,11 @@ type TargetRuntimeAuthority = {
 }
 
 function commandRuntime(command: string): BootstrapResolvedRuntime | null {
-  const normalized = command.toLowerCase()
-  if (/(^|[/\s])codex(?:[./\s]|$)/.test(normalized)) return 'codex'
-  if (/(^|[/\s])claude(?:[./\s]|$)/.test(normalized)) return 'claude'
+  const executableMatch = command.trim().match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/)
+  const executable = executableMatch?.[1] ?? executableMatch?.[2] ?? executableMatch?.[3]
+  const basename = executable?.replaceAll('\\', '/').split('/').pop()?.toLowerCase()
+  if (basename === 'codex' || basename === 'codex.exe') return 'codex'
+  if (basename === 'claude' || basename === 'claude.exe') return 'claude'
   return null
 }
 
