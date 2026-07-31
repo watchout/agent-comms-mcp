@@ -138,6 +138,77 @@ describe('aun bootstrap B0-B8 state machine', () => {
     }
   })
 
+  test('B5-COEXIST-001 preserves ordinary active rows and creates a bootstrap receipt', () => {
+    const tuple = {
+      agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
+      process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
+    }
+    const decision = bootstrapInternal.classifyRuntimeReceiptRows([{
+      runtime_instance_id: 'ordinary-1', agent_id: 'misell', runtime_engine: 'codex',
+      runtime_kind: 'local_process', session_name: 'misell', process_id: 7000,
+      port: 8812, checkout_path: tuple.checkout_path, commit_sha: HEAD, status: 'running',
+      metadata: { secret: 'must-not-escape' },
+    }], tuple)
+    expect(decision).toMatchObject({
+      ok: true, action: 'create', runtimeInstanceId: null, ordinaryActiveCount: 1, bootstrapActiveCount: 0,
+    })
+    expect(JSON.stringify(decision)).not.toContain('must-not-escape')
+  })
+
+  test('B5-COEXIST-002 reuses exactly one compatible bootstrap receipt beside ordinary rows', () => {
+    const tuple = {
+      agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
+      process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
+    }
+    const rows = [
+      {
+        runtime_instance_id: 'ordinary-1', agent_id: 'misell', runtime_engine: 'codex',
+        runtime_kind: 'state_daemon', session_name: null, process_id: 5000,
+        port: null, checkout_path: tuple.checkout_path, commit_sha: HEAD, status: 'active', metadata: {},
+      },
+      {
+        runtime_instance_id: 'bootstrap-1', ...tuple,
+        runtime_kind: 'bootstrap_bound_provider', status: 'running', metadata: { bootstrap_run_id: 'prior-run' },
+      },
+    ]
+    expect(bootstrapInternal.classifyRuntimeReceiptRows(rows, tuple)).toMatchObject({
+      ok: true, action: 'reuse', runtimeInstanceId: 'bootstrap-1', ordinaryActiveCount: 1, bootstrapActiveCount: 1,
+    })
+  })
+
+  test('B5-FAIL-CLOSED-001 rejects one incompatible bootstrap receipt before mutation', () => {
+    const tuple = {
+      agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
+      process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
+    }
+    const decision = bootstrapInternal.classifyRuntimeReceiptRows([{
+      runtime_instance_id: 'bootstrap-wrong', ...tuple, process_id: 9999,
+      runtime_kind: 'bootstrap_bound_provider', status: 'running', metadata: {},
+    }], tuple)
+    expect(decision).toMatchObject({
+      ok: false, discriminator: 'runtime_receipt_incompatible', ordinaryActiveCount: 0, bootstrapActiveCount: 1,
+    })
+  })
+
+  test('B5-FAIL-CLOSED-002 rejects multiple bootstrap receipts even when both match', () => {
+    const tuple = {
+      agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
+      process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
+    }
+    const row = {
+      agent_id: 'misell', runtime_engine: 'codex', runtime_kind: 'bootstrap_bound_provider',
+      session_name: 'misell', process_id: 7312, port: 8812, checkout_path: tuple.checkout_path,
+      commit_sha: HEAD, status: 'running', metadata: {},
+    }
+    const decision = bootstrapInternal.classifyRuntimeReceiptRows([
+      { runtime_instance_id: 'bootstrap-1', ...row },
+      { runtime_instance_id: 'bootstrap-2', ...row },
+    ], tuple)
+    expect(decision).toMatchObject({
+      ok: false, discriminator: 'runtime_receipt_ambiguous', ordinaryActiveCount: 0, bootstrapActiveCount: 2,
+    })
+  })
+
   test('genuine Wasurezu MCP protocol rejects missing/error/wrong-project/fabricated/timeout receipts', async () => {
     const fixture = (mode: string) => `
       const readline = require('node:readline');
