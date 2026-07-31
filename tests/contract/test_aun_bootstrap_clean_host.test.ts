@@ -108,6 +108,74 @@ describe('aun bootstrap clean-host journal', () => {
     expect(profileSetCalls).toBe(0)
   })
 
+  test('B5-TARGET-AUTHORITY-EXECUTABLE-001 rejects non-provider executables whose arguments or paths mention a provider', async () => {
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const fixtures = [
+      { name: 'argument', command: '/usr/local/bin/node /work/codex/helper.js' },
+      { name: 'directory', command: '/work/claude/node --mode helper' },
+    ]
+
+    for (const fixture of fixtures) {
+      const home = mkdtempSync(join(tmpdir(), `aun-bootstrap-target-executable-${fixture.name}-`))
+      roots.push(home)
+      const dbPath = join(home, 'target.db')
+      writeFileSync(dbPath, 'profile-readback-fixture')
+      const env: Record<string, string> = {
+        HOME: home,
+        AGENT_COM_DB: 'sqlite',
+        AGENT_COM_SQLITE_PATH: dbPath,
+        AUN_BOOTSTRAP_CHANNEL_PORT: '8801',
+        AUN_BOOTSTRAP_TMUX_SESSION: 'misell',
+        AUN_BOOTSTRAP_TMUX_PANE: '%52',
+        TMUX: '/private/tmp/tmux-controller/default,62097,4',
+        TMUX_PANE: '%9',
+        CODEX_SANDBOX: 'workspace-write',
+      }
+      const profile = {
+        runtime: 'TUI', runtime_engine_preference: 'codex', home_directory: repoRoot,
+        channel_port: 8801, tmux_session: 'misell', profile_enabled: true, profile_revision: 2,
+      }
+      const run = async (command: string, args: string[]) => {
+        const joined = args.join(' ')
+        if (command === 'tmux') {
+          if (joined === '-V') return { exitCode: 0, stdout: 'tmux 3.6a\n', stderr: '' }
+          if (joined === 'has-session -t =misell') return { exitCode: 0, stdout: '', stderr: '' }
+          if (joined === 'display-message -p -t %52 #S') return { exitCode: 0, stdout: 'misell\n', stderr: '' }
+          if (joined === 'display-message -p -t %52 #{pane_id}') return { exitCode: 0, stdout: '%52\n', stderr: '' }
+          if (joined === 'display-message -p -t %52 #{pane_pid}') return { exitCode: 0, stdout: '7311\n', stderr: '' }
+        }
+        if (command === process.execPath && joined.includes('agent profile get')) {
+          return { exitCode: 0, stdout: JSON.stringify({ profile }), stderr: '' }
+        }
+        if (command === process.execPath && joined === '--version') return { exitCode: 0, stdout: '1.3.11\n', stderr: '' }
+        if (command === 'node' && joined === '--version') return { exitCode: 0, stdout: 'v20.20.0\n', stderr: '' }
+        if (command === 'git' && joined === '--version') return { exitCode: 0, stdout: 'git version 2.50.0\n', stderr: '' }
+        if (command === 'launchctl' && joined === 'help') return { exitCode: 0, stdout: 'launchctl help\n', stderr: '' }
+        if (command === 'ps' && joined === '-axo pid=,ppid=,command=') {
+          return {
+            exitCode: 0,
+            stdout: `62097 1 /Applications/Codex.app/controller/codex\n7311 1 /bin/zsh\n7312 7311 ${fixture.command}\n`,
+            stderr: '',
+          }
+        }
+        if (command === 'ps') return { exitCode: 0, stdout: '1 /Applications/Codex.app/controller/codex\n', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+      }
+      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+      const context = {
+        runId: `target-executable-${fixture.name}`, agentId: 'misell', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+        repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), env, dryRun: true,
+        priorState: { mutations: [] } as any,
+      } satisfies BootstrapStageContext
+
+      const preflight = await ports.dependencyPreflight(context)
+      expect(preflight.ok).toBe(false)
+      expect(preflight.reasonCodes).toEqual(['NO_GO_IDENTITY_MISMATCH'])
+      expect(preflight.evidenceRefs?.some((ref) => ref.startsWith('runtime-authority:target_process_unresolved:'))).toBe(true)
+      expect(env.AUN_BOOTSTRAP_PROVIDER_PID).toBeUndefined()
+    }
+  })
+
   test('B3 fails closed before profile mutation when the explicit pane is outside the target session', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-mismatch-'))
     roots.push(home)
