@@ -1698,6 +1698,15 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     }
   }
 
+  const configurationDesiredReadback = (
+    configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>,
+  ) => configuration ? {
+    desired_revision: configuration.desired_revision,
+    desired_digest: configuration.desired_digest,
+    release_tree: configuration.release_tree,
+    held_event_ids: configuration.held_event_ids,
+  } : null
+
   const configurationDesiredReadOnly = async (
     agentId: string,
   ): Promise<{ desired_revision: number; desired_digest: string; release_tree: string } | null> => {
@@ -2522,12 +2531,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             evidenceRefs: [`configuration-desired-error:${bootstrapDigest(String(error))}`],
           }
         }
-        const configurationReadback = configuration ? {
-          desired_revision: configuration.desired_revision,
-          desired_digest: configuration.desired_digest,
-          release_tree: configuration.release_tree,
-          held_event_ids: configuration.held_event_ids,
-        } : null
+        const configurationReadback = configurationDesiredReadback(configuration)
         return {
           ok: true,
           evidenceRefs: [
@@ -2591,12 +2595,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           mutation: observedMutation,
         }
       }
-      const configurationReadback = configuration ? {
-        desired_revision: configuration.desired_revision,
-        desired_digest: configuration.desired_digest,
-        release_tree: configuration.release_tree,
-        held_event_ids: configuration.held_event_ids,
-      } : null
+      const configurationReadback = configurationDesiredReadback(configuration)
       return {
         ok: true,
         evidenceRefs: [
