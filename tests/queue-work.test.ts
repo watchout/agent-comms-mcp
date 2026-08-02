@@ -616,6 +616,64 @@ describe('finalizeDoneQueueWork', () => {
     expect(events).not.toContain('ROLLBACK')
   })
 
+  test('releases the row lock for a sender-owned close and verifies exact reply readback', async () => {
+    const row = receivedRow({
+      status: 'done',
+      payload: JSON.stringify({
+        channel_id: 'audit',
+        author_id: 'codex-cto',
+        content: 'Audit PR #489',
+        runner_result: okResult({ reply: 'L3 LGTM', next_action: 'reply' }),
+      }),
+    })
+    const events: string[] = []
+    const db = new FakeQueueDb(row)
+    const query = db.query.bind(db)
+    db.query = async (sql, params) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        events.push(sql)
+      } else if (sql.includes('FOR UPDATE')) {
+        events.push('SELECT_FOR_UPDATE')
+      }
+      return query(sql, params)
+    }
+    const replySender: QueueReplySender = {
+      queue_close_mode: 'sender',
+      async sendReply() {
+        events.push('SEND_REPLY')
+        expect(events.at(-2)).toBe('COMMIT')
+        db.row.status = 'replied'
+        db.row.replied_with = 'reply-1'
+        db.row.claimed_by = null
+        db.row.claimed_at = null
+        db.row.claim_expires_at = null
+        return { message_id: 'reply-1', queue_closed: true }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      replySender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      code: 'REPLIED',
+      queue_id: '42',
+      replied_with: 'reply-1',
+    })
+    expect(events).toEqual([
+      'BEGIN',
+      'SELECT_FOR_UPDATE',
+      'COMMIT',
+      'SEND_REPLY',
+      'BEGIN',
+      'SELECT_FOR_UPDATE',
+      'COMMIT',
+    ])
+  })
+
   test('sends the stored reply and closes done rows as replied', async () => {
     const row = receivedRow({
       status: 'done',

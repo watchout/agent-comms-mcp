@@ -2814,6 +2814,7 @@ async function sendMessage(args: string[]) {
   const noClose = flagEnabled(flags['no-close'])
   const closeRequested = flagEnabled(flags.close)
   const d1InvocationKey = flags['d1-invocation-key']
+  const queueWorkFinalizer = flagEnabled(flags['queue-work-finalizer'])
 
   if (!content) {
     console.error('Error: --content is required')
@@ -2821,6 +2822,13 @@ async function sendMessage(args: string[]) {
   }
   if (noClose && closeRequested) {
     console.error('Error: --no-close and --close are mutually exclusive')
+    process.exit(2)
+  }
+  if (
+    queueWorkFinalizer
+    && (!queueIdRaw || !messageIdRaw || !closeRequested || noClose || d1InvocationKey !== undefined)
+  ) {
+    console.error('Error: --queue-work-finalizer requires --queue-id, --message-id, and --close; it cannot be combined with --no-close or --d1-invocation-key')
     process.exit(2)
   }
   if (
@@ -2971,8 +2979,60 @@ async function sendMessage(args: string[]) {
             message_id: qrow.message_id,
           })
         }
+        let queueWorkFinalizerDoneReply = false
+        if (queueWorkFinalizer && qrow.status === 'done' && !qrow.replied_with) {
+          const queuePayload = parseQueuePayloadLoose(qrow.payload)
+          const receiveClaim = queuePayload.receive_claim && typeof queuePayload.receive_claim === 'object'
+            ? queuePayload.receive_claim as Record<string, unknown>
+            : {}
+          const runnerResult = queuePayload.runner_result && typeof queuePayload.runner_result === 'object'
+            ? queuePayload.runner_result as Record<string, unknown>
+            : {}
+          const expectedSource = 'state-daemon-queue-work-scheduler'
+          const mismatches: string[] = []
+          if (qrow.claimed_by !== agentId) mismatches.push('claimed_by')
+          if (receiveClaim.source !== expectedSource) mismatches.push('receive_claim.source')
+          if (runnerResult.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
+          if (runnerResult.ok !== true) mismatches.push('runner_result.ok')
+          if (runnerResult.next_action !== 'reply') mismatches.push('runner_result.next_action')
+          if (runnerResult.reply !== content) mismatches.push('runner_result.reply')
+          if (runnerResult.invocation_source !== expectedSource) mismatches.push('runner_result.invocation_source')
+          if (typeof runnerResult.runtime_id !== 'string' || runnerResult.runtime_id.trim().length === 0) {
+            mismatches.push('runner_result.runtime_id')
+          }
+          if (
+            typeof runnerResult.completed_at !== 'string'
+            || !Number.isFinite(Date.parse(runnerResult.completed_at))
+          ) {
+            mismatches.push('runner_result.completed_at')
+          }
+          if (mismatches.length > 0) {
+            writeFailureJson(
+              'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+              `done-row queue-work reply authority mismatch: ${mismatches.join(', ')}`,
+              {
+                queue_id: qrow.id,
+                message_id: qrow.message_id,
+                status: qrow.status,
+                mismatches,
+              },
+            )
+          }
+          queueWorkFinalizerDoneReply = true
+        }
+        if (queueWorkFinalizer && qrow.status !== 'done' && qrow.status !== 'replied') {
+          writeFailureJson(
+            'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+            `queue-work finalizer requires a done row or an idempotent replied replay; got ${qrow.status}`,
+            {
+              queue_id: qrow.id,
+              message_id: qrow.message_id,
+              status: qrow.status,
+            },
+          )
+        }
         const d1DoneReply = d1InvocationKey !== undefined && qrow.status === 'done' && !qrow.replied_with
-        if ((qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) && !d1DoneReply) {
+        if ((qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) && !d1DoneReply && !queueWorkFinalizerDoneReply) {
           const replay = await loadReplyCloseReplay(db, qrow, agentId)
           if (replay.kind === 'idempotent') {
             await db.query('COMMIT')
@@ -3024,14 +3084,14 @@ async function sendMessage(args: string[]) {
             })
           }
         }
-        if (!d1DoneReply && ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is actively claimed by ${qrow.claimed_by}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
             claimed_by: qrow.claimed_by,
           })
         }
-        if (!d1DoneReply &&
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply &&
           ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
           qrow.claimed_by === agentId &&
           (dateMs(qrow.claim_expires_at) === null || dateMs(qrow.claim_expires_at)! <= Date.now())
@@ -3048,7 +3108,7 @@ async function sendMessage(args: string[]) {
           claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
           qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
         }
-        if (!d1DoneReply && !ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && !ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
           writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
@@ -3056,7 +3116,7 @@ async function sendMessage(args: string[]) {
             claimed_by: qrow.claimed_by,
           })
         }
-        if (!d1DoneReply && qrow.claimed_by !== agentId) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is not actively claimed by ${agentId}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,

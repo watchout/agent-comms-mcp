@@ -409,6 +409,8 @@ function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): L
 }
 
 class AgentComCliReplySender implements QueueReplySender {
+  readonly queue_close_mode = 'sender' as const
+
   constructor(private readonly repoRoot: string, private readonly env: NodeJS.ProcessEnv) {}
 
   async sendReply(input: {
@@ -432,7 +434,9 @@ class AgentComCliReplySender implements QueueReplySender {
       '--queue-id',
       input.queue_id,
       ...(input.message_id ? ['--message-id', input.message_id] : []),
-      ...(input.idempotency_key ? ['--d1-invocation-key', input.idempotency_key, '--no-close'] : []),
+      ...(input.idempotency_key
+        ? ['--d1-invocation-key', input.idempotency_key, '--no-close']
+        : ['--queue-work-finalizer', '--close']),
     ], {
       cwd: this.repoRoot,
       env: {
@@ -444,10 +448,13 @@ class AgentComCliReplySender implements QueueReplySender {
       maxBuffer: 1024 * 1024 * 5,
     })
     if (child.status !== 0) {
-      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr}`)
+      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr} stdout=${child.stdout}`)
     }
     const parsed = JSON.parse(child.stdout || '{}')
-    return { message_id: parsed.message_id ?? null }
+    return {
+      message_id: parsed.message_id ?? null,
+      queue_closed: parsed.work_closed === true,
+    }
   }
 }
 

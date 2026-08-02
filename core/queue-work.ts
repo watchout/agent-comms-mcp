@@ -91,6 +91,12 @@ export interface LlmRuntimeAdapter {
 }
 
 export interface QueueReplySender {
+  /**
+   * Some production senders own both the outbound reply and the queue close
+   * in one durable transaction. The finalizer releases its row lock before
+   * invoking these senders and verifies their exact close by readback.
+   */
+  queue_close_mode?: 'finalizer' | 'sender'
   sendReply(input: {
     queue_id: string
     agent_id: string
@@ -98,7 +104,7 @@ export interface QueueReplySender {
     content: string
     mention: string | null
     idempotency_key?: string | null
-  }): Promise<{ message_id?: string | null }>
+  }): Promise<{ message_id?: string | null; queue_closed?: boolean }>
 }
 
 export interface QueueWorkWritebackSender {
@@ -221,6 +227,8 @@ export type QueueWorkFinalizeOutcome =
         | 'TERMINAL_EVIDENCE_INVALID'
         | 'MISSING_REPLY'
         | 'MISSING_REPLY_SENDER'
+        | 'REPLY_SEND_FAILED'
+        | 'REPLY_CLOSE_READBACK_FAILED'
         | 'MISSING_WRITEBACK'
         | 'MISSING_WRITEBACK_SENDER'
         | 'WRITEBACK_FAILED'
@@ -1141,6 +1149,71 @@ export async function finalizeDoneQueueWork(
       }
       if (d1CompletedReceipt) {
         return closeDirectly(d1CompletedReceipt, 'REPLIED', writebackPostedWith, writebackBodySha256)
+      }
+      if (opts.replySender!.queue_close_mode === 'sender') {
+        // The production CLI sender closes the exact queue row atomically with
+        // its reply. Release this transaction's FOR UPDATE lock first; keeping
+        // it while spawning the CLI would deadlock the second connection.
+        await db.query('COMMIT')
+        committed = true
+        let sent: { message_id?: string | null; queue_closed?: boolean }
+        try {
+          sent = await opts.replySender!.sendReply({
+            queue_id: queueIdOf(row),
+            agent_id: row.agent_id,
+            message_id: row.message_id,
+            content: result.reply,
+            mention: buildQueueWorkEnvelope(row).reply_contract.mention,
+          })
+        } catch (err) {
+          await db.query('BEGIN')
+          committed = false
+          return failClosed('REPLY_SEND_FAILED', (err as Error).message ?? String(err))
+        }
+
+        await db.query('BEGIN')
+        committed = false
+        const readback = await db.query<Pick<QueueWorkRow, 'id' | 'status'> & { replied_with?: string | null }>(
+          `SELECT id, agent_id, message_id, payload, status, priority, created_at,
+                  claimed_by, claimed_at, claim_expires_at, replied_with
+             FROM message_queue
+            WHERE id = $1
+            FOR UPDATE`,
+          [row.id],
+        )
+        const closed = readback.rows[0]
+        const sentMessageId = sent.message_id ?? null
+        if (
+          sent.queue_closed !== true
+          || !closed
+          || closed.status !== 'replied'
+          || !sentMessageId
+          || closed.replied_with !== sentMessageId
+        ) {
+          if (closed?.status === 'done') {
+            return failClosed(
+              'REPLY_CLOSE_READBACK_FAILED',
+              `sender close readback mismatch: status=${closed.status} replied_with=${closed.replied_with ?? 'null'} sent=${sentMessageId ?? 'null'}`,
+            )
+          }
+          await db.query('ROLLBACK')
+          committed = true
+          return {
+            ok: false,
+            code: 'REPLY_CLOSE_READBACK_FAILED',
+            queue_id: queueIdOf(row),
+            detail: `sender close readback mismatch: status=${closed?.status ?? 'missing'} replied_with=${closed?.replied_with ?? 'null'} sent=${sentMessageId ?? 'null'}`,
+          }
+        }
+        await db.query('COMMIT')
+        committed = true
+        return {
+          ok: true,
+          code: 'REPLIED',
+          queue_id: queueIdOf(row),
+          replied_with: sentMessageId,
+          writeback_posted_with: writebackPostedWith,
+        }
       }
       const envelope = buildQueueWorkEnvelope(row)
       const sent = await opts.replySender!.sendReply({

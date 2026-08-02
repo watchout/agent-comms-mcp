@@ -1096,6 +1096,114 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
 })
 
 describe('F3 — agent-com send (SQLite)', () => {
+  test('queue-work finalizer replies once from an exact authorized done row', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const { messageId, queueId } = seedPendingMessage('queue-work finalizer input')
+    runCli(['next'])
+    const reply = 'queue-work exact reply'
+    const db = new Database(dbPath)
+    try {
+      const row = db.prepare('SELECT payload FROM message_queue WHERE id = ?').get(queueId) as { payload: string }
+      const payload = JSON.parse(row.payload)
+      payload.receive_claim = {
+        mode: 'targeted-receive',
+        source: 'state-daemon-queue-work-scheduler',
+        agent_id: 'probe-f',
+        queue_id: String(queueId),
+      }
+      payload.runner_result = {
+        schema_version: 'queue_work_result_v1',
+        ok: true,
+        summary: 'completed',
+        reply,
+        evidence: ['semantic_outcome=reply', 'outcome_reason=test'],
+        writeback: null,
+        next_action: 'reply',
+        runtime_id: 'codex-exec',
+        invocation_source: 'state-daemon-queue-work-scheduler',
+        completed_at: '2026-08-02T01:00:00.000Z',
+      }
+      db.prepare(`UPDATE message_queue SET status = 'done', done_at = ?, payload = ? WHERE id = ?`)
+        .run('2026-08-02T01:00:00.000Z', JSON.stringify(payload), queueId)
+    } finally {
+      db.close()
+    }
+
+    const args = [
+      'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
+      '--message-id', messageId, '--queue-work-finalizer', '--close',
+    ]
+    const first = runCli(args)
+    expect(first.status).toBe(0)
+    const firstPayload = JSON.parse(first.stdout.trim()) as any
+    expect(firstPayload).toMatchObject({
+      ok: true,
+      queue_id: queueId,
+      work_closed: true,
+      close_mode: 'explicit',
+    })
+    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
+      .toEqual([{ status: 'replied', replied_with: firstPayload.message_id }])
+
+    const replay = runCli(args)
+    expect(replay.status).toBe(0)
+    expect(JSON.parse(replay.stdout.trim())).toMatchObject({
+      ok: true,
+      queue_id: queueId,
+      idempotent: true,
+      code: 'IDEMPOTENT_REPLY_CLOSE',
+      outbound_message_id: firstPayload.message_id,
+      replied_with: firstPayload.message_id,
+      work_closed: true,
+    })
+    expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
+      .toHaveLength(1)
+  })
+
+  test('queue-work finalizer rejects a done row when the stored reply differs', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const { messageId, queueId } = seedPendingMessage('queue-work mismatched input')
+    runCli(['next'])
+    const db = new Database(dbPath)
+    try {
+      const row = db.prepare('SELECT payload FROM message_queue WHERE id = ?').get(queueId) as { payload: string }
+      const payload = JSON.parse(row.payload)
+      payload.receive_claim = { source: 'state-daemon-queue-work-scheduler' }
+      payload.runner_result = {
+        schema_version: 'queue_work_result_v1',
+        ok: true,
+        summary: 'completed',
+        reply: 'authorized reply',
+        evidence: [],
+        writeback: null,
+        next_action: 'reply',
+        runtime_id: 'codex-exec',
+        invocation_source: 'state-daemon-queue-work-scheduler',
+        completed_at: '2026-08-02T01:00:00.000Z',
+      }
+      db.prepare(`UPDATE message_queue SET status = 'done', done_at = ?, payload = ? WHERE id = ?`)
+        .run('2026-08-02T01:00:00.000Z', JSON.stringify(payload), queueId)
+    } finally {
+      db.close()
+    }
+
+    const rejected = runCli([
+      'send', '--content', 'different reply', '--mentions', 'cto', '--queue-id', String(queueId),
+      '--message-id', messageId, '--queue-work-finalizer', '--close',
+    ])
+    expect(rejected.status).toBe(1)
+    expect(JSON.parse(rejected.stdout.trim())).toMatchObject({
+      ok: false,
+      code: 'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+      queue_id: queueId,
+      mismatches: ['runner_result.reply'],
+    })
+    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
+      .toEqual([{ status: 'done', replied_with: null }])
+    expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
+      .toHaveLength(0)
+  })
+
   test('D1 reserved internal reply writes once from done and replays the same durable message id', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('D1 internal reply')
