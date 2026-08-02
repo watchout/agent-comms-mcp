@@ -11,6 +11,7 @@ import type {
 } from '../../bin/aun/bootstrap-types'
 import { MemoryBootstrapStateStore, bootstrapDigest } from '../../core/aun-bootstrap-state'
 import { PgAdapter } from '../../core/db/pg-adapter'
+import { createPostgresTestDatabase } from '../helpers/postgres-test-database'
 
 const HEAD = 'c8eb30805a587a65a794499fa597935f2460c703'
 const fakeRun = async (command: string, args: string[]) => command === 'codex' && args.join(' ') === 'mcp get wasurezu --json'
@@ -193,9 +194,11 @@ if (crashFixtureStage) {
   test('B3 locked authority and exact outbox revision/digest fences reject drift with zero protected deletion', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-b3-fences-')))
     const databaseName = `aun_bootstrap_fences_${process.pid}_${Date.now()}`
-    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const codexRoot = join(home, '.codex')
+    mkdirSync(codexRoot, { mode: 0o700 })
+    const postgresDatabase = createPostgresTestDatabase(databaseName)
+    const databaseUrl = postgresDatabase.databaseUrl
     const env = {
       ...process.env,
       HOME: home,
@@ -205,8 +208,6 @@ if (crashFixtureStage) {
       AUN_BOOTSTRAP_CHANNEL_PORT: '8801',
       AUN_BOOTSTRAP_PROCESS_RUNTIME: 'codex',
     } as Record<string, string>
-    mkdirSync(codexRoot, { mode: 0o700 })
-    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
     let db: PgAdapter | null = null
     try {
       expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
@@ -351,7 +352,7 @@ if (crashFixtureStage) {
       }))
     } finally {
       await db?.close().catch(() => {})
-      Bun.spawnSync(['dropdb', '-h', '/tmp', '--if-exists', databaseName])
+      postgresDatabase.drop()
       rmSync(home, { recursive: true, force: true })
     }
   }, 30_000)

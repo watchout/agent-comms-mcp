@@ -14,6 +14,7 @@ import {
 } from '../../core/aun-configuration-desired-state'
 import { acquireControlPlaneLease, releaseControlPlaneLease } from '../../core/control-plane-leases'
 import { PgAdapter } from '../../core/db/pg-adapter'
+import { createPostgresTestDatabase } from '../helpers/postgres-test-database'
 
 const upPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-configuration-reconciliation.up.sql')
 const downPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-configuration-reconciliation.down.sql')
@@ -105,10 +106,9 @@ describe('AUN configuration reconciliation migration', () => {
 
   test('executes isolated PostgreSQL up/down/up with one revision and one outbox event per governed update', async () => {
     const databaseName = `acm887_${process.pid}_${randomUUID().replaceAll('-', '')}`
-    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
     const repoRoot = join(import.meta.dir, '../..')
-    const created = Bun.spawnSync(['createdb', '-h', '/tmp', databaseName], { stdout: 'pipe', stderr: 'pipe' })
-    expect(created.exitCode).toBe(0)
+    const postgresDatabase = createPostgresTestDatabase(databaseName)
+    const databaseUrl = postgresDatabase.databaseUrl
     const priorAuthSecret = process.env.AGENT_COMMS_SECRET
     process.env.AGENT_COMMS_SECRET = receiptSecret
     let db: PgAdapter | null = null
@@ -485,8 +485,7 @@ describe('AUN configuration reconciliation migration', () => {
       if (priorAuthSecret === undefined) delete process.env.AGENT_COMMS_SECRET
       else process.env.AGENT_COMMS_SECRET = priorAuthSecret
       await db?.close().catch(() => {})
-      const dropped = Bun.spawnSync(['dropdb', '-h', '/tmp', '--if-exists', databaseName], { stdout: 'pipe', stderr: 'pipe' })
-      expect(dropped.exitCode).toBe(0)
+      postgresDatabase.drop()
     }
   }, 30_000)
 })
