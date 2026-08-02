@@ -125,6 +125,13 @@ export interface ExecResult {
   killed?: boolean
 }
 
+/** Resolve the current Bun runtime without relying on a launchd PATH. */
+export function resolveQueueWorkBunExecutable(env: NodeJS.ProcessEnv = process.env): string {
+  return env.AUN_BUN_EXECUTABLE?.trim()
+    || env.STATE_DAEMON_BUN_EXECUTABLE?.trim()
+    || process.execPath
+}
+
 /**
  * Async execFile so adapter runs never block the caller's event loop — the
  * state-daemon invokes this in-process and must keep heartbeat/sweep/notify
@@ -431,7 +438,7 @@ class AgentComCliReplySender implements QueueReplySender {
     if (!input.mention) {
       throw new Error('reply mention is required for agent-com send')
     }
-    const child = await execFileAsync('bun', [
+    const child = await execFileAsync(resolveQueueWorkBunExecutable(this.env), [
       'cli/index.ts',
       'send',
       '--content',
@@ -456,7 +463,12 @@ class AgentComCliReplySender implements QueueReplySender {
       maxBuffer: 1024 * 1024 * 5,
     })
     if (child.status !== 0) {
-      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr} stdout=${child.stdout}`)
+      throw new Error([
+        `agent-com send failed status=${child.status}`,
+        child.errorMessage ? `error=${child.errorMessage}` : null,
+        `stderr=${child.stderr}`,
+        `stdout=${child.stdout}`,
+      ].filter(Boolean).join(' '))
     }
     const parsed = JSON.parse(child.stdout || '{}')
     return {

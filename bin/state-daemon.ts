@@ -239,6 +239,17 @@ export function exactClaimFenceFromTargetedReceive(
   }
 }
 
+export function describeQueueWorkFailure(result: RunQueueWorkCliResult): string {
+  if (result.error) return result.error
+  if (result.finalizer && typeof result.finalizer === 'object') {
+    return JSON.stringify(result.finalizer)
+  }
+  if (result.runner && typeof result.runner === 'object') {
+    return JSON.stringify(result.runner)
+  }
+  return 'queue work runner returned ok=false'
+}
+
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
@@ -282,7 +293,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       // Rows claimed by another path (e.g. a live TUI session that called
       // `next`) are not scheduler work — leave them untouched, no alert.
       if ((result.runner as { code?: string } | undefined)?.code === 'CLAIM_NOT_OWNED') return
-      throw new Error(this.describeFailure(result))
+      throw new Error(describeQueueWorkFailure(result))
     }
   }
 
@@ -335,12 +346,6 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     return this.env.STATE_DAEMON_QUEUE_WORK_RUNTIME ?? this.env.AUN_QUEUE_WORK_RUNTIME
   }
 
-  private describeFailure(result: RunQueueWorkCliResult): string {
-    return result.error
-      ?? (result.runner && typeof result.runner === 'object'
-        ? JSON.stringify(result.runner)
-        : 'queue work runner returned ok=false')
-  }
 }
 
 function queueWorkSchedulerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

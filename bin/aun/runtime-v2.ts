@@ -37,6 +37,7 @@ import {
   createWritebackSender,
   describeCodexExecFailure,
   repoRoot,
+  resolveQueueWorkBunExecutable,
   type RunQueueWorkPlan,
 } from './run-queue-work'
 import { ShirubeD1RuntimeController } from '../../core/shirube-d1-runtime'
@@ -349,7 +350,7 @@ class AgentComCliReplySender implements QueueReplySender {
     idempotency_key?: string | null
   }): Promise<{ message_id?: string | null }> {
     if (!input.mention) throw new Error('reply mention is required for agent-com send')
-    const child = await execFileAsync('bun', [
+    const child = await execFileAsync(resolveQueueWorkBunExecutable(this.env), [
       'cli/index.ts',
       'send',
       '--content',
@@ -371,7 +372,12 @@ class AgentComCliReplySender implements QueueReplySender {
       maxBuffer: 1024 * 1024 * 5,
     })
     if (child.status !== 0) {
-      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr}`)
+      throw new Error([
+        `agent-com send failed status=${child.status}`,
+        child.errorMessage ? `error=${child.errorMessage}` : null,
+        `stderr=${child.stderr}`,
+        `stdout=${child.stdout}`,
+      ].filter(Boolean).join(' '))
     }
     const parsed = JSON.parse(child.stdout || '{}')
     return { message_id: parsed.message_id ?? null }

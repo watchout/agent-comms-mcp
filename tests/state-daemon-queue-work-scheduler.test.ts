@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
 } from '../bin/state-daemon'
@@ -21,6 +22,24 @@ import {
 } from './contract/state-daemon/fakes'
 
 const REPO = join(import.meta.dir, '..')
+
+test('queue-work failure reporting surfaces the failed finalizer instead of the successful runner', () => {
+  const detail = describeQueueWorkFailure({
+    ok: false,
+    dry_run: false,
+    plan: {} as any,
+    runner: { ok: true, code: 'DONE' },
+    finalizer: {
+      ok: false,
+      code: 'REPLY_SEND_FAILED',
+      detail: 'spawn bun ENOENT',
+    },
+  })
+
+  expect(detail).toContain('REPLY_SEND_FAILED')
+  expect(detail).toContain('spawn bun ENOENT')
+  expect(detail).not.toContain('"code":"DONE"')
+})
 
 class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
