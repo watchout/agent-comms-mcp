@@ -2,101 +2,130 @@ schema_version: shirube-audit-checklist/v1
 checklist_id: AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001
 cell_id: CELL-AUN-RECOVERY-CONTRACT-001
 graph_id: GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001
+graph_version: 2.0-final-pre-freeze
 control_source: https://github.com/watchout/agent-comms-mcp/issues/602
-allowed_auditors:
-  - codex-audit
-  - devauditor
-forbidden_auditors:
-  - arc
-  - aun
-  - implementation_author
+authority_ref: aun-message:45268548-a9fc-4735-be12-e35ec15d784a
+allowed_auditors: [codex-audit, devauditor]
+forbidden_auditors: [arc, aun, implementation_author]
 exact_head_required: true
 machine_validation_required: true
 items:
   - audit_item_id: REC-CONTROL-AUDIT-001
     gate: G1
-    requirement_ids: [REQ-REC-001, REQ-REC-002, REQ-REC-003, REQ-REC-014]
-    test_ids: [TEST-001, TEST-005, TEST-006, TEST-018]
-    pass_predicate: Every domain rule traces to the owner directive, Issue 602 evidence, an accepted repository contract, or an explicit future owner decision; unsourced invention count is zero.
+    requirement_ids: [REQ-REC-001, REQ-REC-003, REQ-REC-007, REQ-REC-014, REQ-REC-017, REQ-REC-018, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-001, TEST-006, TEST-008, TEST-018, TEST-021, TEST-022, TEST-023, TEST-024]
+    pass_predicate: Every domain rule traces to the owner directive, authoritative AUN amendment, Issue 602, related issues, accepted repository contract, or explicit future owner decision with unsourced invention count zero.
   - audit_item_id: REC-CONTROL-AUDIT-002
     gate: G2
-    requirement_ids: [REQ-REC-003, REQ-REC-004, REQ-REC-005, REQ-REC-006]
-    test_ids: [TEST-002, TEST-003, TEST-004, TEST-007]
-    pass_predicate: Agent-first automatic receive retains deterministic eligibility, identity, lease, fence, finalization, and no-bypass authority; LLM final authority count is zero.
+    requirement_ids: [REQ-REC-003, REQ-REC-004, REQ-REC-005, REQ-REC-006, REQ-REC-019]
+    test_ids: [TEST-002, TEST-003, TEST-004, TEST-007, TEST-023]
+    pass_predicate: Agent-first automatic receive and reconciliation retain deterministic identity eligibility lease fence finalization plan-hash and no-bypass authority with LLM final authority count zero.
   - audit_item_id: REC-CONTROL-AUDIT-003
     gate: G3
-    requirement_ids: [REQ-REC-002, REQ-REC-008, REQ-REC-009]
-    test_ids: [TEST-005, TEST-011, TEST-014]
-    pass_predicate: AUN core, runtime supervisor, runtime invocation, connector projection, manifest, persistence, identity, and MCP boundaries are separated and provenance is explicit.
+    requirement_ids: [REQ-REC-002, REQ-REC-008, REQ-REC-009, REQ-REC-015, REQ-REC-016, REQ-REC-018, REQ-REC-020]
+    test_ids: [TEST-005, TEST-011, TEST-014, TEST-019, TEST-020, TEST-022, TEST-024]
+    pass_predicate: AUN core supervisor runtime invocation connector projection persistence manifest identity MCP and queue-reconciliation boundaries are separated with explicit provenance.
   - audit_item_id: REC-CONTROL-AUDIT-004
     gate: G4
-    requirement_ids: [REQ-REC-001, REQ-REC-004, REQ-REC-005, REQ-REC-007, REQ-REC-010]
-    test_ids: [TEST-001, TEST-004, TEST-008, TEST-009, TEST-013]
-    pass_predicate: Exactly 14 requirements map to 14 measurable acceptance predicates and at least one of exactly 18 tests; missing and unknown reference counts are zero.
+    requirement_ids: [REQ-REC-001, REQ-REC-004, REQ-REC-007, REQ-REC-010, REQ-REC-016, REQ-REC-018, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-001, TEST-004, TEST-008, TEST-013, TEST-020, TEST-022, TEST-023, TEST-024]
+    pass_predicate: Exactly 20 requirements map to 20 measurable acceptance predicates and at least one of exactly 24 tests with missing and unknown reference counts zero.
   - audit_item_id: REC-CONTROL-AUDIT-005
     gate: G5
-    requirement_ids: [REQ-REC-006, REQ-REC-007, REQ-REC-011]
-    test_ids: [TEST-007, TEST-008, TEST-009, TEST-010, TEST-017]
-    pass_predicate: Every listed failure mode has deterministic detection and recovery; placed-not-delivered and declared-not-verified are explicitly closed.
+    requirement_ids: [REQ-REC-006, REQ-REC-007, REQ-REC-011, REQ-REC-015, REQ-REC-016, REQ-REC-018, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-007, TEST-008, TEST-009, TEST-010, TEST-017, TEST-019, TEST-020, TEST-022, TEST-023, TEST-024]
+    pass_predicate: All 20 failure modes have deterministic detection and recovery including placed-not-delivered declared-not-verified stale MCP unsafe reconciliation missing schema and silent fallback.
   - audit_item_id: REC-CONTROL-AUDIT-006
     gate: G6
-    requirement_ids: [REQ-REC-010, REQ-REC-011, REQ-REC-012, REQ-REC-013]
-    test_ids: [TEST-013, TEST-016, TEST-017, TEST-018]
-    pass_predicate: Runtime, manifest, profile reconciliation, fleet wave, reboot, rollback, Ready, approval, and merge remain protected; OD-AUN-001 and OD-AUN-002 are not bypassed; author is not auditor.
+    requirement_ids: [REQ-REC-010, REQ-REC-011, REQ-REC-012, REQ-REC-013, REQ-REC-016, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-013, TEST-016, TEST-017, TEST-018, TEST-020, TEST-023, TEST-024]
+    pass_predicate: DB queue schema manifest runtime endpoint fleet reboot rollback Ready approval and merge remain protected under OD-AUN-001 or OD-AUN-002 and author is not auditor.
   - audit_item_id: REC-CONTROL-AUDIT-007
     gate: G7
-    requirement_ids: [REQ-REC-012]
-    test_ids: [TEST-001, TEST-012, TEST-013, TEST-018]
-    pass_predicate: Every gate, block, Cell transition, owner decision, and delivery has a complete next_action and durable reach-check requirement.
+    requirement_ids: [REQ-REC-012, REQ-REC-017]
+    test_ids: [TEST-001, TEST-012, TEST-018, TEST-021]
+    pass_predicate: Every gate block Cell transition owner decision related-control disposition and delivery has complete next_action and durable reach check.
   - audit_item_id: REC-CONTROL-AUDIT-008
     gate: DENOMINATOR
     requirement_ids: [REQ-REC-008, REQ-REC-009]
     test_ids: [TEST-011, TEST-012, TEST-014, TEST-015]
-    pass_predicate: Raw observed 39 and legacy activation candidate 38 remain evidence only; production N is unresolved until canonical profile reconciliation reaches expected equals resolved and blockers zero without name inference.
+    pass_predicate: Raw counts and test fixtures remain evidence only; production N is unresolved until canonical classification reaches expected equals resolved and blockers zero without name inference.
   - audit_item_id: REC-CONTROL-AUDIT-009
     gate: CELL_GRAPH
-    requirement_ids: [REQ-REC-001, REQ-REC-010, REQ-REC-014]
-    test_ids: [TEST-001, TEST-013, TEST-018]
-    pass_predicate: Exactly six Cells are ordered 10 through 60 with explicit dependencies, one responsibility and boundary each, and no later Cell is admitted before its predecessor and owner gate.
+    requirement_ids: [REQ-REC-001, REQ-REC-010, REQ-REC-014, REQ-REC-018, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-001, TEST-013, TEST-018, TEST-022, TEST-023, TEST-024]
+    pass_predicate: Exactly ten Cells are ordered 10 through 100 with declared dependencies one goal one primary responsibility one implementation boundary and one verification boundary each.
   - audit_item_id: REC-CONTROL-AUDIT-010
     gate: PATH_AND_IDENTITY
     requirement_ids: [REQ-REC-001, REQ-REC-012]
     test_ids: [TEST-001]
-    pass_predicate: PR parent equals pinned base commit, base tree is exact, changed path set equals five, artifact hashes are exact, PR remains Draft, and protected effect count is zero.
+    pass_predicate: PR base equals pinned commit and tree changed path set equals five artifact hashes are exact PR remains Draft and protected effect count is zero.
   - audit_item_id: REC-CONTROL-AUDIT-011
     gate: COMPLETION
-    requirement_ids: [REQ-REC-003, REQ-REC-005, REQ-REC-006, REQ-REC-007, REQ-REC-008, REQ-REC-009, REQ-REC-010, REQ-REC-011, REQ-REC-012, REQ-REC-013, REQ-REC-014]
-    test_ids: [TEST-006, TEST-007, TEST-008, TEST-009, TEST-010, TEST-011, TEST-012, TEST-013, TEST-014, TEST-015, TEST-016, TEST-017, TEST-018]
-    pass_predicate: The candidate never calls Cell 10, the graph, the manifest, the fleet, or Issue 602 complete based on docs, merge, daemon health, or one canary alone.
+    requirement_ids: [REQ-REC-003, REQ-REC-005, REQ-REC-006, REQ-REC-007, REQ-REC-008, REQ-REC-009, REQ-REC-010, REQ-REC-011, REQ-REC-012, REQ-REC-013, REQ-REC-014, REQ-REC-017, REQ-REC-018, REQ-REC-019, REQ-REC-020]
+    test_ids: [TEST-006, TEST-007, TEST-008, TEST-009, TEST-010, TEST-011, TEST-012, TEST-013, TEST-014, TEST-015, TEST-016, TEST-017, TEST-018, TEST-021, TEST-022, TEST-023, TEST-024]
+    pass_predicate: Candidate never calls Cell 10 graph manifest fleet Issue 602 or related controls complete based on docs merge green tests daemon health one canary or canonical aun projection alone.
   - audit_item_id: REC-CONTROL-AUDIT-012
     gate: D1_ISOLATION
-    requirement_ids: [REQ-REC-013]
-    test_ids: [TEST-016]
-    pass_predicate: Ordinary communication desired state and manifest admission cannot change protected D1 admission, exact allowlist, receipts, or effects.
+    requirement_ids: [REQ-REC-013, REQ-REC-016]
+    test_ids: [TEST-016, TEST-020]
+    pass_predicate: Ordinary communication and manifest schema activation cannot change protected D1 admission exact allowlist receipts history or effects.
+  - audit_item_id: REC-CONTROL-AUDIT-013
+    gate: SUPERVISOR_NEUTRALITY
+    requirement_ids: [REQ-REC-002, REQ-REC-015]
+    test_ids: [TEST-005, TEST-019]
+    pass_predicate: Core owns no tmux launchd or host command authority and all supported host supervisor adapters pass one conformance contract.
+  - audit_item_id: REC-CONTROL-AUDIT-014
+    gate: MANIFEST_SCHEMA
+    requirement_ids: [REQ-REC-016]
+    test_ids: [TEST-020]
+    pass_predicate: Live manifest tables cannot be assumed from merged code; exact migration requires disposable preflight owner decision backup live readback repeated-up and protected negative proof.
+  - audit_item_id: REC-CONTROL-AUDIT-015
+    gate: RELATED_CONTROL_DISPOSITION
+    requirement_ids: [REQ-REC-017]
+    test_ids: [TEST-021]
+    pass_predicate: Issues 691 603 604 449 and 435 remain blocking until each requirement has immutable closure evidence or explicit successor mapping with zero unmet requirement.
+  - audit_item_id: REC-CONTROL-AUDIT-016
+    gate: MCP_BOOTSTRAP
+    requirement_ids: [REQ-REC-018]
+    test_ids: [TEST-022]
+    pass_predicate: Exact approved clean-checkout MCP registration works for fresh Codex and Claude SQLite-new SQLite-existing and PostgreSQL sessions survives restart rolls back and has zero ACL violation.
+  - audit_item_id: REC-CONTROL-AUDIT-017
+    gate: QUEUE_RECONCILIATION
+    requirement_ids: [REQ-REC-004, REQ-REC-006, REQ-REC-019]
+    test_ids: [TEST-003, TEST-007, TEST-023]
+    pass_predicate: Every active inbound and outbound row is inventoried and deterministically classified before bounded plan-hash idempotent apply with no LLM drain or silent discard.
+  - audit_item_id: REC-CONTROL-AUDIT-018
+    gate: ENDPOINT_DIRECT_DELIVERY
+    requirement_ids: [REQ-REC-009, REQ-REC-020]
+    test_ids: [TEST-013, TEST-014, TEST-024]
+    pass_predicate: Each target has fresh runtime endpoint lease intended delivery owner and direct-consumer evidence while every NORM-060 failure class and unintended AUN fallback is zero.
 verdict_contract:
   PASS: Every audit item passes on the same exact head with reproducible evidence and zero unauthorized effect.
-  REQUEST_CHANGES: One or more bounded correctable artifact findings exist; each finding names the gate, file, predicate, and exact required replacement.
-  ESCALATE: Source intent conflicts, a protected decision is being inferred, or correction would require widening the frozen graph or authority boundary.
+  REQUEST_CHANGES: One or more bounded correctable artifact findings exist and each names gate file predicate and exact replacement.
+  ESCALATE: Source intent conflicts protected decision is inferred or correction requires widening frozen authority.
 stop_conditions:
-  - The auditor is ARC, AUN, or another author of the candidate.
+  - Auditor is ARC AUN or another author of candidate.
   - Evidence is not bound to one exact head and tree.
-  - Validation requires runtime, DB, queue, LaunchAgent, manifest, credential, or provider mutation.
-  - The PR is Ready, approved, merged, or no longer based on the pinned parent.
-  - A protected owner decision is missing or treated as implied.
+  - Validation requires runtime DB queue LaunchAgent MCP manifest credential provider or production mutation.
+  - PR is Ready approved merged or no longer based on pinned baseline.
+  - Protected owner decision is missing or treated as implied.
 next_action:
   blocking: true
   actor: codex-audit
   active_function: evidence_audit_gate
-  action: Run this checklist on the exact Draft Control PR head and publish one immutable verdict without editing candidate files.
+  action: Run all 18 items on the exact Draft PR 908 successor head and publish one immutable verdict without editing candidate files.
   delivery: GitHub PR verdict comment plus AUN return to ARC and AUN.
   input_refs:
+    - aun-message:45268548-a9fc-4735-be12-e35ec15d784a
     - https://github.com/watchout/agent-comms-mcp/issues/602
+    - https://github.com/watchout/agent-comms-mcp/pull/908
     - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
     - .shirube/cells/CELL-AUN-RECOVERY-CONTRACT-001.yaml
     - .shirube/specs/SPEC-AUN-AUTORECEIVE-FLEET-RECOVERY-001.md
     - .shirube/control-handoffs/CH-AUN-RECOVERY-CONTRACT-001.yaml
   scope:
-    allowed: Read-only exact-head artifact and trace validation.
-    forbidden: Edits, self-fix, approval, merge, Ready, runtime, DB, queue, LaunchAgent, manifest, provider, credential, or production effects.
-  deliverable: Exact-head PASS, REQUEST_CHANGES, or ESCALATE with complete evidence and next_action.
-  completion_evidence: Immutable GitHub URL, exact head and tree, per-item verdicts, validation commands and outputs, artifact hashes, and AUN delivery receipt.
+    allowed: Read-only exact-head artifact trace and source validation.
+    forbidden: Edits self-fix approval merge Ready runtime DB queue LaunchAgent MCP manifest provider credential or production effects.
+  deliverable: Exact-head PASS REQUEST_CHANGES or ESCALATE with complete evidence and next_action.
+  completion_evidence: Immutable GitHub URL exact head tree per-item verdicts commands outputs hashes API readback and AUN receipt.

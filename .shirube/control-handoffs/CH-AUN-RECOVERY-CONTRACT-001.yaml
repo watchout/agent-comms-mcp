@@ -2,8 +2,11 @@ schema_version: shirube-v3/control_handoff/v1
 artifact_id: CH-AUN-RECOVERY-CONTRACT-001
 cell_id: CELL-AUN-RECOVERY-CONTRACT-001
 graph_id: GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001
+graph_version: 2.0-final-pre-freeze
 control_source: https://github.com/watchout/agent-comms-mcp/issues/602
-authority_ref: aun-message:f9279e96-a6c6-4805-944d-f540b163f847
+authority_refs:
+  - aun-message:45268548-a9fc-4735-be12-e35ec15d784a
+  - aun-message:4776a58d-f2bf-487b-ba6d-bd9d2642bea8
 execution_context:
   agent_id: arc
   active_function: control_artifact_author
@@ -11,8 +14,9 @@ execution_context:
   base_commit: 9054c38d769cc1d50238fb327f60567c8d2fbe2c
   base_tree: 61494635f156bac8f950b54e8446a6f22d5f1b85
   branch_name: agent/arc-issue602-v3-control-freeze-20260803
+  draft_pr: https://github.com/watchout/agent-comms-mcp/pull/908
   runtime_activation: false
-lifecycle_state: MATERIALIZE_CONTROL_CANDIDATE_THEN_ROUTE_INDEPENDENT_AUDIT
+lifecycle_state: MATERIALIZE_GRAPH_2_CONTROL_CANDIDATE_THEN_ROUTE_FRESH_INDEPENDENT_AUDIT
 exact_allowed_paths_in_order:
   - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
   - .shirube/cells/CELL-AUN-RECOVERY-CONTRACT-001.yaml
@@ -20,48 +24,51 @@ exact_allowed_paths_in_order:
   - .shirube/control-handoffs/CH-AUN-RECOVERY-CONTRACT-001.yaml
   - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001.yaml
 allowed_operations:
-  - Materialize the exact five Control artifact paths from the pinned base.
+  - Replace the obsolete PR 908 candidate in the exact five Control artifact paths.
   - Parse every YAML file with aliases disabled.
-  - Run read-only cross-reference and trace-count validation.
-  - Run git diff --check and verify the exact changed-path set.
-  - Commit and push one Control-only successor branch.
-  - Open one Draft PR without changing Ready state or merging.
-  - Publish one immutable Issue 602 V3 amendment and read it back through the GitHub API.
-  - Deliver the exact PR head and evidence to an independent evidence_audit_gate.
+  - Run read-only cross-reference trace count and Design Flow validation.
+  - Run non-live baseline or conformance tests without live mutation.
+  - Verify git diff check and exact changed-path equality.
+  - Commit and push one Control-only successor to the existing Draft PR branch.
+  - Update the Draft PR body and verify API byte equality.
+  - Publish one immutable superseding Issue 602 V3 amendment and verify API byte equality.
+  - Deliver the new exact PR head to an independent evidence_audit_gate.
 forbidden_operations:
   - Any sixth repository path.
-  - Product, queue, state-daemon, finalizer, scheduler, runtime, provider, connector, or supervisor implementation.
-  - Database DDL or DML, queue traversal, next, inbox, FIFO drain, manual terminalization, or raw SQL repair.
-  - LaunchAgent, launchctl, tmux, process, listener, runtime, profile, credential, manifest, or production mutation.
-  - Discord live write, live queue canary, fleet activation, controlled reboot, or rollback execution.
+  - Product queue state-daemon finalizer scheduler runtime provider connector supervisor or MCP implementation.
+  - Production DB DDL or DML queue drain raw SQL reconciliation or manual terminalization.
+  - LaunchAgent launchctl tmux process listener runtime profile credential endpoint or manifest mutation.
+  - Discord live write live canary fleet activation controlled reboot or rollback execution.
   - Agent-name inference as production classification authority.
-  - Owner GO, OD-AUN-001, OD-AUN-002, Ready, approval, merge, deploy, rollout, release, or VERIFIED_DONE mutation.
+  - Owner GO OD-AUN-001 OD-AUN-002 Ready approval merge deploy rollout release or VERIFIED_DONE mutation.
+  - Independent audit dispatch for obsolete head fa27c3151eb57caada824207c1916729d6e15437.
   - ARC self-audit or AUN requester self-audit as independent evidence.
 required_evidence:
-  - Exact base commit and tree readback.
+  - Exact base commit 9054c38d769cc1d50238fb327f60567c8d2fbe2c and tree 61494635f156bac8f950b54e8446a6f22d5f1b85.
   - Exact changed-file list of five paths and no other paths.
   - SHA-256 for every changed artifact and aggregate canonical path-hash list.
   - Aliases-disabled YAML safe parse for every YAML artifact.
-  - Six ordered Cells, 14 requirements, 14 acceptance criteria, 18 tests, and 15 completion predicates.
-  - Requirement to acceptance and test trace has zero missing or unknown refs.
+  - Ten ordered Cells, 20 requirements, 20 acceptance criteria, 24 tests, 24 completion predicates, and 20 failure modes.
+  - Requirement acceptance and test trace has zero missing or unknown refs.
   - Design Flow G1 through G7 candidate result PASS with protected effects zero.
-  - Draft PR URL, exact head, exact tree, and parent equals pinned base commit.
-  - Issue 602 amendment URL, API byte equality, body SHA-256, and parse/readback result.
-  - AUN delivery receipt to the requestor and independent auditor route receipt.
+  - Source baseline 304 pass 0 fail and live Phase-0 NO_GO are both stated without conflation.
+  - Draft PR URL exact successor head tree and parent chain to pinned base.
+  - Issue 602 superseding amendment URL API byte equality body SHA-256 and safe parse result.
+  - AUN source-return receipt and fresh independent-auditor route receipt.
 exact_stop_conditions:
-  - Current main differs from the pinned base before branch creation or parent verification.
-  - Any artifact requires runtime facts not present in the source evidence to claim PASS.
-  - The raw observed count 39 is promoted to production denominator N.
+  - Current main or PR base differs from the pinned baseline without an explicit amendment.
+  - Any runtime fact absent from sources would be claimed PASS.
+  - Any raw observed count is promoted to production denominator N.
   - Any path outside the exact five changes.
   - Any protected effect or host mutation is attempted.
-  - The requirement, acceptance, test, checklist, or Cell cross-reference validation fails.
-  - GitHub API readback differs from the saved amendment body.
-  - The Draft PR cannot remain non-Ready and unmerged.
+  - Any Cell requirement acceptance test checklist failure or audit cross-reference fails.
+  - GitHub API readback differs from saved body bytes.
+  - Draft PR cannot remain non-Ready and unmerged.
   - No independent auditor is available.
 failure_handling:
-  artifact_validation_failure: Keep the branch local or Draft, publish no PASS claim, and return exact validation errors to ARC.
+  artifact_validation_failure: Keep PR Draft and Cell 10 nonterminal; publish no PASS claim and return exact validation errors.
   external_readback_failure: Keep Cell 10 nonterminal and retry only the bounded GitHub readback or AUN delivery operation.
-  protected_boundary_pressure: Stop with a blocking next_action to protected_surface_gate; do not widen this handoff.
+  protected_boundary_pressure: Stop with a blocking next_action to protected_surface_gate and do not widen this handoff.
 gate_result:
   handoff_validity: PASS
   authoring_authorized: true
@@ -72,16 +79,18 @@ next_action:
   blocking: true
   actor: codex-audit
   active_function: evidence_audit_gate
-  action: Audit the exact Draft Control PR head against the graph, Cell, spec, this handoff, and the audit checklist without editing or repairing the artifacts.
+  action: Audit the new exact Draft PR 908 head against graph 2.0 all five artifacts and the checklist without editing or repairing them.
   delivery: GitHub exact-head verdict plus AUN delivery to ARC and AUN.
   input_refs:
+    - aun-message:45268548-a9fc-4735-be12-e35ec15d784a
     - https://github.com/watchout/agent-comms-mcp/issues/602
+    - https://github.com/watchout/agent-comms-mcp/pull/908
     - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
     - .shirube/cells/CELL-AUN-RECOVERY-CONTRACT-001.yaml
     - .shirube/specs/SPEC-AUN-AUTORECEIVE-FLEET-RECOVERY-001.md
     - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001.yaml
   scope:
     allowed: Read-only exact-head evidence audit and reproducible validation.
-    forbidden: File edits, self-fix, runtime or protected effects, Ready, approval, merge, activation, or owner-decision substitution.
-  deliverable: PASS, REQUEST_CHANGES, or ESCALATE with each finding bound to a Design Flow gate and exact artifact location.
-  completion_evidence: Immutable verdict URL, exact head and tree, artifact hashes, validation output, and AUN route receipt.
+    forbidden: File edits self-fix runtime protected effects Ready approval merge activation or owner-decision substitution.
+  deliverable: PASS REQUEST_CHANGES or ESCALATE with each finding bound to a gate and exact artifact location.
+  completion_evidence: Immutable verdict URL exact head tree hashes validation output API readback and AUN receipt.
