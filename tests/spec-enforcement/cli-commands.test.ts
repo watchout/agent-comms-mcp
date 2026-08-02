@@ -22,6 +22,10 @@
  *   - cli/index.ts                                            (handlers + dispatch)
  *   - github.com/watchout/agent-comms-mcp/issues/132
  *   - docs/agent-com-message-queue-spec.md §4-6              (canonical spec)
+ *
+ * Data-safety note: this source-enforcement file only reads command text.
+ * Any DELETE-like strings are assertions, not executable data operations;
+ * soft-delete policy is therefore not applicable to this test fixture.
  */
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
