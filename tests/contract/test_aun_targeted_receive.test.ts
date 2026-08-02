@@ -145,7 +145,11 @@ describe('test_aun_targeted_receive - exact queue_id receive runner', () => {
       message_id: requested.messageId,
       content: 'old chat still exact target',
       message_type: 'chat',
+      claimed_by: TEST_AGENT,
     })
+    expect(Number.isFinite(Date.parse(body.claimed_at))).toBe(true)
+    expect(Number.isFinite(Date.parse(body.claim_expires_at))).toBe(true)
+    expect(Date.parse(body.claim_expires_at)).toBeGreaterThan(Date.parse(body.claimed_at))
     expect(row(requested.queueId)).toEqual({ status: 'received', claimed_by: TEST_AGENT, claim_ttl: 1 })
     expect(row(newer.queueId)).toEqual({ status: 'pending', claimed_by: null, claim_ttl: 0 })
   })

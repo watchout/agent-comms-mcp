@@ -129,6 +129,73 @@ function allowOutboundAgents(...agentIds: string[]): void {
   }
 }
 
+function authorizeQueueWorkDone(
+  queueId: number,
+  reply: string,
+  mutate?: (payload: Record<string, any>) => void,
+): { claimedAt: string; completedAt: string } {
+  const db = new Database(dbPath)
+  try {
+    const row = db.prepare(
+      `SELECT payload, claimed_at FROM message_queue WHERE id = ?`,
+    ).get(queueId) as { payload: string; claimed_at: string | null }
+    const claimedAt = row.claimed_at
+      ? new Date(row.claimed_at).toISOString()
+      : new Date(Date.now() - 1_000).toISOString()
+    const completedAt = new Date(Math.max(Date.parse(claimedAt), Date.now())).toISOString()
+    const payload = JSON.parse(row.payload)
+    payload.receive_claim = {
+      mode: 'targeted-receive',
+      source: 'state-daemon-queue-work-scheduler',
+      agent_id: 'probe-f',
+      queue_id: String(queueId),
+    }
+    payload.queue_work_execution = {
+      source: 'state-daemon-queue-work-scheduler',
+      agent_id: 'probe-f',
+      queue_id: String(queueId),
+      runtime_id: 'codex-exec',
+      claimed_by: 'probe-f',
+      claimed_at: claimedAt,
+      started_at: claimedAt,
+    }
+    payload.runner_result = {
+      schema_version: 'queue_work_result_v1',
+      ok: true,
+      summary: 'completed',
+      reply,
+      evidence: ['semantic_outcome=reply', 'outcome_reason=test'],
+      writeback: null,
+      next_action: 'reply',
+      runtime_id: 'codex-exec',
+      invocation_source: 'state-daemon-queue-work-scheduler',
+      completed_at: completedAt,
+      claim_fence: {
+        claimed_by: 'probe-f',
+        claimed_at: claimedAt,
+      },
+    }
+    mutate?.(payload)
+    db.prepare(`UPDATE message_queue
+      SET status = 'done',
+          claimed_by = 'probe-f',
+          claimed_at = ?,
+          claim_expires_at = ?,
+          done_at = ?,
+          payload = ?
+      WHERE id = ?`).run(
+      claimedAt,
+      new Date(Date.now() + 300_000).toISOString(),
+      completedAt,
+      JSON.stringify(payload),
+      queueId,
+    )
+    return { claimedAt, completedAt }
+  } finally {
+    db.close()
+  }
+}
+
 describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
   test('message_queue has failed_reason/done_at + v0.9-compatible CHECK', () => {
     const rows = dbRead(`PRAGMA table_info(message_queue)`)
@@ -1101,33 +1168,7 @@ describe('F3 — agent-com send (SQLite)', () => {
     const { messageId, queueId } = seedPendingMessage('queue-work finalizer input')
     runCli(['next'])
     const reply = 'queue-work exact reply'
-    const db = new Database(dbPath)
-    try {
-      const row = db.prepare('SELECT payload FROM message_queue WHERE id = ?').get(queueId) as { payload: string }
-      const payload = JSON.parse(row.payload)
-      payload.receive_claim = {
-        mode: 'targeted-receive',
-        source: 'state-daemon-queue-work-scheduler',
-        agent_id: 'probe-f',
-        queue_id: String(queueId),
-      }
-      payload.runner_result = {
-        schema_version: 'queue_work_result_v1',
-        ok: true,
-        summary: 'completed',
-        reply,
-        evidence: ['semantic_outcome=reply', 'outcome_reason=test'],
-        writeback: null,
-        next_action: 'reply',
-        runtime_id: 'codex-exec',
-        invocation_source: 'state-daemon-queue-work-scheduler',
-        completed_at: '2026-08-02T01:00:00.000Z',
-      }
-      db.prepare(`UPDATE message_queue SET status = 'done', done_at = ?, payload = ? WHERE id = ?`)
-        .run('2026-08-02T01:00:00.000Z', JSON.stringify(payload), queueId)
-    } finally {
-      db.close()
-    }
+    authorizeQueueWorkDone(queueId, reply)
 
     const args = [
       'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
@@ -1164,28 +1205,7 @@ describe('F3 — agent-com send (SQLite)', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('queue-work mismatched input')
     runCli(['next'])
-    const db = new Database(dbPath)
-    try {
-      const row = db.prepare('SELECT payload FROM message_queue WHERE id = ?').get(queueId) as { payload: string }
-      const payload = JSON.parse(row.payload)
-      payload.receive_claim = { source: 'state-daemon-queue-work-scheduler' }
-      payload.runner_result = {
-        schema_version: 'queue_work_result_v1',
-        ok: true,
-        summary: 'completed',
-        reply: 'authorized reply',
-        evidence: [],
-        writeback: null,
-        next_action: 'reply',
-        runtime_id: 'codex-exec',
-        invocation_source: 'state-daemon-queue-work-scheduler',
-        completed_at: '2026-08-02T01:00:00.000Z',
-      }
-      db.prepare(`UPDATE message_queue SET status = 'done', done_at = ?, payload = ? WHERE id = ?`)
-        .run('2026-08-02T01:00:00.000Z', JSON.stringify(payload), queueId)
-    } finally {
-      db.close()
-    }
+    authorizeQueueWorkDone(queueId, 'authorized reply')
 
     const rejected = runCli([
       'send', '--content', 'different reply', '--mentions', 'cto', '--queue-id', String(queueId),
@@ -1198,6 +1218,124 @@ describe('F3 — agent-com send (SQLite)', () => {
       queue_id: queueId,
       mismatches: ['runner_result.reply'],
     })
+    expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
+      .toEqual([{ status: 'done', replied_with: null }])
+    expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
+      .toHaveLength(0)
+  })
+
+  test('queue-work finalizer rejects every claim/result identity mismatch with zero outbound and zero close', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const cases: Array<{
+      expected: string
+      mutate: (payload: Record<string, any>) => void
+    }> = [
+      {
+        expected: 'receive_claim.source',
+        mutate: (payload) => { payload.receive_claim.source = 'other-source' },
+      },
+      {
+        expected: 'receive_claim.agent_id',
+        mutate: (payload) => { payload.receive_claim.agent_id = 'other-agent' },
+      },
+      {
+        expected: 'receive_claim.queue_id',
+        mutate: (payload) => { payload.receive_claim.queue_id = '999999' },
+      },
+      {
+        expected: 'queue_work_execution.source',
+        mutate: (payload) => { payload.queue_work_execution.source = 'other-source' },
+      },
+      {
+        expected: 'queue_work_execution.agent_id',
+        mutate: (payload) => { payload.queue_work_execution.agent_id = 'other-agent' },
+      },
+      {
+        expected: 'queue_work_execution.queue_id',
+        mutate: (payload) => { payload.queue_work_execution.queue_id = '999999' },
+      },
+      {
+        expected: 'queue_work_execution.runtime_id',
+        mutate: (payload) => { payload.queue_work_execution.runtime_id = 'other-runtime' },
+      },
+      {
+        expected: 'runner_result.runtime_id',
+        mutate: (payload) => { payload.runner_result.runtime_id = 'other-runtime' },
+      },
+      {
+        expected: 'queue_work_execution.claimed_by',
+        mutate: (payload) => { payload.queue_work_execution.claimed_by = 'other-agent' },
+      },
+      {
+        expected: 'queue_work_execution.claimed_at',
+        mutate: (payload) => { payload.queue_work_execution.claimed_at = '2026-08-02T00:00:00.000Z' },
+      },
+      {
+        expected: 'queue_work_execution.started_at',
+        mutate: (payload) => { payload.queue_work_execution.started_at = '2020-01-01T00:00:00.000Z' },
+      },
+      {
+        expected: 'runner_result.invocation_source',
+        mutate: (payload) => { payload.runner_result.invocation_source = 'other-source' },
+      },
+      {
+        expected: 'runner_result.claim_fence.claimed_by',
+        mutate: (payload) => { payload.runner_result.claim_fence.claimed_by = 'other-agent' },
+      },
+      {
+        expected: 'runner_result.claim_fence.claimed_at',
+        mutate: (payload) => { payload.runner_result.claim_fence.claimed_at = '2026-08-02T00:00:00.000Z' },
+      },
+      {
+        expected: 'runner_result.completed_at',
+        mutate: (payload) => { payload.runner_result.completed_at = '2026-08-02T00:00:00.000Z' },
+      },
+    ]
+
+    for (const [index, testCase] of cases.entries()) {
+      const { messageId, queueId } = seedPendingMessage(`claim/result mismatch ${index}`)
+      const reply = `must not escape ${index}`
+      authorizeQueueWorkDone(queueId, reply, testCase.mutate)
+
+      const rejected = runCli([
+        'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
+        '--message-id', messageId, '--queue-work-finalizer', '--close',
+      ], { AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: 'codex-exec' })
+
+      expect(rejected.status).toBe(1)
+      const response = JSON.parse(rejected.stdout.trim())
+      expect(response).toMatchObject({
+        ok: false,
+        code: 'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+        queue_id: queueId,
+      })
+      expect(response.mismatches).toContain(testCase.expected)
+      expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
+        .toEqual([{ status: 'done', replied_with: null }])
+      expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
+        .toHaveLength(0)
+    }
+  })
+
+  test('queue-work finalizer rejects an expired exact lease with zero outbound and zero close', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const { messageId, queueId } = seedPendingMessage('expired claim/result fence')
+    const reply = 'expired result must not escape'
+    authorizeQueueWorkDone(queueId, reply)
+    const db = new Database(dbPath)
+    try {
+      db.prepare(`UPDATE message_queue SET claim_expires_at = ? WHERE id = ?`)
+        .run('2000-01-01T00:00:00.000Z', queueId)
+    } finally {
+      db.close()
+    }
+
+    const rejected = runCli([
+      'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
+      '--message-id', messageId, '--queue-work-finalizer', '--close',
+    ])
+    expect(rejected.status).toBe(1)
+    expect(JSON.parse(rejected.stdout.trim()).mismatches).toContain('claim_expires_at')
     expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
       .toEqual([{ status: 'done', replied_with: null }])
     expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))

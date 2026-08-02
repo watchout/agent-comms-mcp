@@ -27,6 +27,7 @@ import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { computeShirubeD1InternalReplyMessageId } from '../core/shirube-d1-runtime'
+import { queueWorkClaimResultFenceMismatches } from '../core/queue-work'
 import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
@@ -474,7 +475,10 @@ type ExplicitReplyQueueRow = {
   payload: string | null
   status: string
   claimed_by: string | null
+  claimed_at: string | Date | null
   claim_expires_at: string | Date | null
+  done_at: string | Date | null
+  database_now: string | Date | null
   replied_with: string | null
 }
 
@@ -3110,7 +3114,9 @@ async function sendMessage(args: string[]) {
             writeFailureJson('QUEUE_NOT_FOUND', `invalid queue_id: ${queueIdRaw}`, { queue_id: queueIdRaw })
           }
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by,
+                    claimed_at::text AS claimed_at,
+                    claim_expires_at, done_at, CURRENT_TIMESTAMP AS database_now, replied_with
                FROM message_queue
               WHERE id = $1
               FOR UPDATE`,
@@ -3118,7 +3124,9 @@ async function sendMessage(args: string[]) {
           )
         } else {
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by,
+                    claimed_at::text AS claimed_at,
+                    claim_expires_at, done_at, CURRENT_TIMESTAMP AS database_now, replied_with
                FROM message_queue
               WHERE agent_id = $1 AND message_id = $2
               ORDER BY created_at DESC
@@ -3152,30 +3160,20 @@ async function sendMessage(args: string[]) {
         let queueWorkFinalizerDoneReply = false
         if (queueWorkFinalizer && qrow.status === 'done' && !qrow.replied_with) {
           const queuePayload = parseQueuePayloadLoose(qrow.payload)
-          const receiveClaim = queuePayload.receive_claim && typeof queuePayload.receive_claim === 'object'
-            ? queuePayload.receive_claim as Record<string, unknown>
-            : {}
           const runnerResult = queuePayload.runner_result && typeof queuePayload.runner_result === 'object'
             ? queuePayload.runner_result as Record<string, unknown>
             : {}
           const expectedSource = 'state-daemon-queue-work-scheduler'
-          const mismatches: string[] = []
-          if (qrow.claimed_by !== agentId) mismatches.push('claimed_by')
-          if (receiveClaim.source !== expectedSource) mismatches.push('receive_claim.source')
+          const mismatches = queueWorkClaimResultFenceMismatches({
+            row: qrow,
+            payload: queuePayload,
+            expectedClaimSource: expectedSource,
+            expectedRuntimeId: process.env.AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID?.trim() || undefined,
+          })
           if (runnerResult.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
           if (runnerResult.ok !== true) mismatches.push('runner_result.ok')
           if (runnerResult.next_action !== 'reply') mismatches.push('runner_result.next_action')
           if (runnerResult.reply !== content) mismatches.push('runner_result.reply')
-          if (runnerResult.invocation_source !== expectedSource) mismatches.push('runner_result.invocation_source')
-          if (typeof runnerResult.runtime_id !== 'string' || runnerResult.runtime_id.trim().length === 0) {
-            mismatches.push('runner_result.runtime_id')
-          }
-          if (
-            typeof runnerResult.completed_at !== 'string'
-            || !Number.isFinite(Date.parse(runnerResult.completed_at))
-          ) {
-            mismatches.push('runner_result.completed_at')
-          }
           if (mismatches.length > 0) {
             writeFailureJson(
               'QUEUE_WORK_FINALIZER_UNAUTHORIZED',

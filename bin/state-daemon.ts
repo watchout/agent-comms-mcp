@@ -59,8 +59,9 @@ import {
   loadQueueWorkResiduePolicyFile,
   queueWorkResidueExcludedQueueIds,
 } from '../core/state-daemon/queue-work-residue-policy'
-import { receiveTargeted } from './aun/receive'
+import { receiveTargeted, type TargetedReceiveResult } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
+import type { QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import type {
@@ -213,7 +214,32 @@ class CompositeAlertSink implements AlertSink {
 }
 
 // ── QueueWorkScheduler (opt-in script-controlled queue runner) ──────────────
-class QueueWorkRunnerScheduler implements QueueWorkScheduler {
+export function exactClaimFenceFromTargetedReceive(
+  received: TargetedReceiveResult,
+  input: { queueId: number; agentId: string },
+): QueueWorkClaimFence {
+  const claimed = received.summary?.claimed
+  const claimedAtMs = claimed?.claimed_at ? Date.parse(claimed.claimed_at) : Number.NaN
+  const claimExpiresAtMs = claimed?.claim_expires_at ? Date.parse(claimed.claim_expires_at) : Number.NaN
+  if (
+    !claimed
+    || String(claimed.queue_id ?? '') !== String(input.queueId)
+    || claimed.claimed_by !== input.agentId
+    || !Number.isFinite(claimedAtMs)
+    || !Number.isFinite(claimExpiresAtMs)
+    || claimExpiresAtMs <= claimedAtMs
+  ) {
+    throw new Error(`targeted receive returned no exact claim fence for ${input.agentId} queue_id=${input.queueId}`)
+  }
+  return {
+    claimedBy: input.agentId,
+    // Preserve the database timestamp text verbatim. PostgreSQL `now()` can
+    // contain microseconds that a JavaScript Date would silently truncate.
+    claimedAt: claimed.claimed_at!.trim(),
+  }
+}
+
+export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
@@ -230,15 +256,24 @@ class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     if (!received.ok) {
       throw new Error(`targeted receive failed code=${received.code} stderr=${received.stderr.trim()}`)
     }
-    await this.runReceived(input)
+    await this.runReceivedWithFence(input, exactClaimFenceFromTargetedReceive(received, input))
   }
 
   async runReceived(input: { queueId: number; agentId: string }): Promise<void> {
+    await this.runReceivedWithFence(input)
+  }
+
+  private async runReceivedWithFence(
+    input: { queueId: number; agentId: string },
+    claimFence?: QueueWorkClaimFence,
+  ): Promise<void> {
     const env = this.envFor(input.agentId)
     const result = await runQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
       runtime: this.runtime(),
+      claimFence,
+      requireClaimFence: true,
       finalize: env.STATE_DAEMON_QUEUE_WORK_FINALIZE === '1',
       env,
       cwd: this.cwd,

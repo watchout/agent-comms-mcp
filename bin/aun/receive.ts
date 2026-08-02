@@ -67,6 +67,9 @@ export interface ClaimedMessage {
   message_type?: string
   source?: string | null
   created_at?: string
+  claimed_by?: string
+  claimed_at?: string
+  claim_expires_at?: string
   reply_chain?: unknown[]
   presentation?: PresentationEvidence
   routing?: QueueRoutingDecisionEvidence
@@ -511,6 +514,11 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           ? 'target_queue_not_found'
           : selected.status !== 'pending' ? 'target_queue_not_pending' : presentation?.blocked_reason ?? null
         let claimed: ClaimedMessage | null = null
+        let claimIdentity: {
+          claimed_by: string
+          claimed_at: string
+          claim_expires_at: string
+        } | null = null
 
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
@@ -535,6 +543,27 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           if (update.rowCount !== 1) {
             throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
           }
+          const claimedRow = await tx.queryOne<Record<string, unknown>>(
+            `SELECT claimed_by, claimed_at::text AS claimed_at,
+                    claim_expires_at::text AS claim_expires_at
+               FROM message_queue
+              WHERE id = $1 AND agent_id = $2 AND status = 'received'`,
+            [selected.queue_id, plan.env.AGENT_ID],
+          )
+          const claimedAt = normalizeDate(claimedRow?.claimed_at)
+          const persistedClaimExpiresAt = normalizeDate(claimedRow?.claim_expires_at)
+          if (
+            claimedRow?.claimed_by !== plan.env.AGENT_ID
+            || !claimedAt
+            || !persistedClaimExpiresAt
+          ) {
+            throw new Error(`target queue claim identity readback failed: queue_id=${selected.queue_id}`)
+          }
+          claimIdentity = {
+            claimed_by: plan.env.AGENT_ID,
+            claimed_at: claimedAt,
+            claim_expires_at: persistedClaimExpiresAt,
+          }
           await tx.execute(
             `UPDATE agents SET
                status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
@@ -551,7 +580,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
         )
         const waiting = Number(waitingRow?.n ?? 0)
         if (selected && !blockedReason) {
-          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, payload, waiting)
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, payload, waiting, claimIdentity)
         }
 
         return {
@@ -1008,7 +1037,16 @@ function selectActionableRow(rows: DiagnosedQueueRow[]): { row: DiagnosedQueueRo
   }
 }
 
-function claimedMessageFromRow(row: DiagnosedQueueRow, payload: Record<string, unknown>, waiting: number): ClaimedMessage {
+function claimedMessageFromRow(
+  row: DiagnosedQueueRow,
+  payload: Record<string, unknown>,
+  waiting: number,
+  claimIdentity?: {
+    claimed_by: string
+    claimed_at: string
+    claim_expires_at: string
+  } | null,
+): ClaimedMessage {
   return {
     waiting,
     mode: 'queue',
@@ -1021,6 +1059,7 @@ function claimedMessageFromRow(row: DiagnosedQueueRow, payload: Record<string, u
     message_type: row.message_type,
     source: typeof payload.source === 'string' ? payload.source : null,
     created_at: row.created_at ?? undefined,
+    ...(claimIdentity ?? {}),
     ...(row.presentation ? { presentation: row.presentation } : {}),
     routing: row.routing,
   }
