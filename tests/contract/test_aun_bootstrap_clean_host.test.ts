@@ -13,9 +13,10 @@ import {
   STATE_DAEMON_PLIST_NAME,
   type StateDaemonRestorePlan,
 } from '../../core/state-daemon/launchagent'
+import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
 
 const roots: string[] = []
-const postgresDatabases: string[] = []
+const postgresDatabases: PostgresTestDatabase[] = []
 const launchctlSafePrint = (pid: number) => `pid = ${pid}
 SHIRUBE_D1_ENABLED => 0
 SHIRUBE_D1_KILL_SWITCH => 1
@@ -23,8 +24,8 @@ SHIRUBE_D1_TARGET_ALLOWLIST => []
 STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED => 0
 `
 afterEach(() => {
+  while (postgresDatabases.length) postgresDatabases.pop()!.drop()
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
-  while (postgresDatabases.length) Bun.spawnSync(['dropdb', '-h', '/tmp', '--if-exists', postgresDatabases.pop()!])
 })
 
 describe('aun bootstrap clean-host journal', () => {
@@ -163,9 +164,9 @@ describe('aun bootstrap clean-host journal', () => {
     writeFileSync(wrongConfig, 'wrong-profile-must-remain-byte-identical\n', { mode: 0o640 })
     const wrongBefore = { bytes: readFileSync(wrongConfig), stat: statSync(wrongConfig) }
     const databaseName = `aun_bootstrap_root_${process.pid}_${Date.now()}`
-    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
-    postgresDatabases.push(databaseName)
-    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const postgresDatabase = createPostgresTestDatabase(databaseName)
+    postgresDatabases.push(postgresDatabase)
+    const databaseUrl = postgresDatabase.databaseUrl
     const repoRoot = join(import.meta.dir, '..', '..')
     const env = { ...process.env, HOME: home, DATABASE_URL: databaseUrl, AGENT_COM_DB: 'postgres' } as Record<string, string>
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
@@ -229,9 +230,9 @@ describe('aun bootstrap clean-host journal', () => {
     const codexRoot = join(home, '.codex')
     mkdirSync(codexRoot, { mode: 0o700 })
     const databaseName = `aun_bootstrap_b3_${process.pid}_${Date.now()}`
-    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
-    postgresDatabases.push(databaseName)
-    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const postgresDatabase = createPostgresTestDatabase(databaseName)
+    postgresDatabases.push(postgresDatabase)
+    const databaseUrl = postgresDatabase.databaseUrl
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const env = {
       ...process.env,
@@ -356,12 +357,9 @@ describe('aun bootstrap clean-host journal', () => {
       sqlitePrestate = readFileSync(dbPath)
     }
     const databaseName = backend === 'postgres' ? `aun_bootstrap_${process.pid}_${Date.now()}` : null
-    if (databaseName) {
-      const created = Bun.spawnSync(['createdb', '-h', '/tmp', databaseName])
-      expect(created.exitCode).toBe(0)
-      postgresDatabases.push(databaseName)
-    }
-    const databaseUrl = databaseName ? `postgresql:///${databaseName}?host=/tmp` : undefined
+    const postgresDatabase = databaseName ? createPostgresTestDatabase(databaseName) : null
+    if (postgresDatabase) postgresDatabases.push(postgresDatabase)
+    const databaseUrl = postgresDatabase?.databaseUrl
     const env = {
       ...process.env,
       HOME: home,
