@@ -38,11 +38,14 @@ describe('projection text decorator', () => {
     })).toBe('[codex-aun -> codex-cto]\nhello')
   })
 
-  test('server and CLI outbound enqueue paths both apply the decorator', async () => {
+  test('server and shared CLI outbound enqueue paths both apply the decorator', async () => {
     const repoRoot = resolve(import.meta.dir, '..', '..')
     const server = await Bun.file(resolve(repoRoot, 'server.ts')).text()
     const cli = await Bun.file(resolve(repoRoot, 'cli/index.ts')).text()
     expect((server.match(/decorateProjectedContent\(/g) ?? []).length).toBeGreaterThanOrEqual(2)
-    expect((cli.match(/decorateProjectedContent\(/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect(cli).toContain('async function enqueueOutboundProjection')
+    expect((cli.match(/decorateProjectedContent\(/g) ?? []).length).toBeGreaterThanOrEqual(1)
+    // One definition plus the send and notify call sites.
+    expect((cli.match(/enqueueOutboundProjection\(/g) ?? []).length).toBeGreaterThanOrEqual(3)
   })
 })
