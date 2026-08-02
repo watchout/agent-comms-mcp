@@ -498,6 +498,12 @@ type ClaimRenewalEvidence = {
   free_form_text_authorizes_renewal: false
 }
 
+type QueueWorkFinalizerCloseFence = {
+  agent_id: string
+  claimed_by: string
+  claimed_at: string
+}
+
 const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
 const TERMINAL_REPLY_CLOSE_STATUSES = new Set(['replied', 'done', 'skipped', 'failed'])
 const MAX_CLAIM_RENEWAL_TTL_SEC = 15 * 60
@@ -3105,6 +3111,7 @@ async function sendMessage(args: string[]) {
       let target: Target | null = null
       const explicitClose = !!queueIdRaw || !!messageIdRaw
       let claimRenewalEvidence: ClaimRenewalEvidence | null = null
+      let queueWorkFinalizerCloseFence: QueueWorkFinalizerCloseFence | null = null
 
       if (explicitClose) {
         let qres
@@ -3185,6 +3192,11 @@ async function sendMessage(args: string[]) {
                 mismatches,
               },
             )
+          }
+          queueWorkFinalizerCloseFence = {
+            agent_id: qrow.agent_id,
+            claimed_by: qrow.claimed_by!,
+            claimed_at: normalizeDateString(qrow.claimed_at)!,
           }
           queueWorkFinalizerDoneReply = true
         }
@@ -3724,17 +3736,64 @@ async function sendMessage(args: string[]) {
         // the only path now. #420 keeps this default path for backward
         // compatibility; ACK/progress callers opt out with --no-close.
         // ─────────────────────────────────────────────────────────────────
-        await db.query(
-          `UPDATE message_queue
-              SET status = 'replied',
-                  replied_at = now(),
-                  replied_with = $1,
-                  claimed_by = NULL,
-                  claimed_at = NULL,
-                  claim_expires_at = NULL
-           WHERE id = $2`,
-          [id, target.queue_id],
-        )
+        if (queueWorkFinalizerCloseFence) {
+          // The initial authorization read is necessary but not sufficient:
+          // a lease can expire while the reply/fanout/projection writes are
+          // being prepared. Recheck the exact claim against a non-transaction-
+          // frozen database clock at the mutation itself. RETURNING gives the
+          // unified PG/SQLite adapter an exact affected-row count; throwing on
+          // anything other than one rolls back every earlier write in this
+          // transaction.
+          const mutationClockSql = isSqliteMode()
+            ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+            : 'clock_timestamp()'
+          const closed = await db.query<{ id: string | number }>(
+            `UPDATE message_queue
+                SET status = 'replied',
+                    replied_at = now(),
+                    replied_with = $1,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+             WHERE id = $2
+               AND status = 'done'
+               AND agent_id = $3
+               AND claimed_by = $4
+               AND claimed_at = $5
+               AND claim_expires_at > ${mutationClockSql}
+             RETURNING id`,
+            [
+              id,
+              target.queue_id,
+              queueWorkFinalizerCloseFence.agent_id,
+              queueWorkFinalizerCloseFence.claimed_by,
+              queueWorkFinalizerCloseFence.claimed_at,
+            ],
+          )
+          if (closed.rows.length !== 1) {
+            writeFailureJson(
+              'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+              'queue-work finalizer exact claim or live lease was lost before direct close',
+              {
+                queue_id: target.queue_id,
+                message_id: target.reply_to,
+                mismatches: ['mutation_time_claim_fence'],
+              },
+            )
+          }
+        } else {
+          await db.query(
+            `UPDATE message_queue
+                SET status = 'replied',
+                    replied_at = now(),
+                    replied_with = $1,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+             WHERE id = $2`,
+            [id, target.queue_id],
+          )
+        }
         // spec §4.2 step 10-11 — flip the agent based on remaining open
         // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
         // the send only closed ONE claim; if other claims are still 'received'

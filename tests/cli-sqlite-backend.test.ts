@@ -1342,6 +1342,78 @@ describe('F3 — agent-com send (SQLite)', () => {
       .toHaveLength(0)
   })
 
+  test('queue-work finalizer rolls back reply, fanout, outbound, and close when the lease is lost at mutation time', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    const { messageId, queueId } = seedPendingMessage('mutation-time lease race')
+    const reply = 'mutation-time lease race must not escape'
+    authorizeQueueWorkDone(queueId, reply)
+    const originalQueue = dbRead(
+      `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
+      [queueId],
+    )
+
+    const db = new Database(dbPath)
+    try {
+      const connectorId = randomUUID()
+      db.prepare(`INSERT INTO channel_adapters (channel_id, platform, external_id, metadata)
+        VALUES ('probe-f-ch', 'discord', 'probe-f-external', '{}')`).run()
+      db.prepare(`INSERT INTO connector_instances
+        (connector_instance_id, agent_id, provider, status, trust_status, metadata)
+        VALUES (?, 'cto', 'discord', 'active', 'local', '{}')`).run(connectorId)
+      db.prepare(`INSERT INTO connector_credentials
+        (credential_id, provider, agent_id, connector_instance_id, secret_ref, status, trust_status, metadata)
+        VALUES (?, 'discord', 'cto', ?, 'env:TEST_CTO_TOKEN', 'active', 'local', '{}')`)
+        .run(randomUUID(), connectorId)
+      db.prepare(`INSERT INTO channel_connector_bindings
+        (channel_binding_id, channel_id, provider, connector_instance_id, binding_role, priority, status, metadata)
+        VALUES (?, 'probe-f-ch', 'discord', ?, 'outbound', 1, 'active', '{}')`)
+        .run(randomUUID(), connectorId)
+      db.prepare(`INSERT INTO provider_channel_access
+        (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, capabilities, status, trust_status, metadata)
+        VALUES (?, 'discord', 'probe-f-external', ?, 'cto', '{"message_create":true}', 'active', 'local', '{}')`)
+        .run(randomUUID(), connectorId)
+
+      // The outbound insert proves initial validation already passed and the
+      // reply transaction reached projection. Expire the exact claim inside
+      // that same transaction so only the mutation-time close fence can stop
+      // it. The expected CLI failure must roll this trigger update and every
+      // reply/fanout/outbound write back together.
+      db.exec(`CREATE TRIGGER expire_queue_work_claim_after_outbound
+        AFTER INSERT ON outbound_queue
+        WHEN NEW.message_id IN (
+          SELECT id FROM agent_messages WHERE reply_to = '${messageId}'
+        )
+        BEGIN
+          UPDATE message_queue
+             SET claim_expires_at = '2000-01-01T00:00:00.000Z'
+           WHERE id = ${queueId};
+        END`)
+    } finally {
+      db.close()
+    }
+
+    const rejected = runCli([
+      'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
+      '--message-id', messageId, '--queue-work-finalizer', '--close',
+    ], { AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: 'codex-exec' })
+
+    expect(rejected.status).toBe(1)
+    expect(JSON.parse(rejected.stdout.trim())).toMatchObject({
+      ok: false,
+      code: 'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+      queue_id: queueId,
+      mismatches: ['mutation_time_claim_fence'],
+    })
+    expect(dbRead(
+      `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
+      [queueId],
+    )).toEqual(originalQueue)
+    expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
+      .toHaveLength(0)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(0)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
+  })
+
   test('D1 reserved internal reply writes once from done and replays the same durable message id', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('D1 internal reply')
