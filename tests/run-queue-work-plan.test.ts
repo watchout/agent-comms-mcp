@@ -4,6 +4,7 @@ import {
   buildCodexExecQueueWorkCommand,
   buildRunQueueWorkPlan,
   describeCodexExecFailure,
+  resolveQueueWorkBunExecutable,
   runQueueWork,
 } from '../bin/aun/run-queue-work'
 
@@ -58,6 +59,27 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       } as NodeJS.ProcessEnv,
     })
     expect(plan.runtime).toBe('codex-exec')
+  })
+
+  test('nested finalizers do not rely on bare bun under launchd PATH', () => {
+    const launchdEnv = {
+      PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    } as NodeJS.ProcessEnv
+
+    expect(resolveQueueWorkBunExecutable(launchdEnv)).toBe(process.execPath)
+    expect(resolveQueueWorkBunExecutable({
+      ...launchdEnv,
+      STATE_DAEMON_BUN_EXECUTABLE: '/operator/state-daemon-bun',
+    } as NodeJS.ProcessEnv)).toBe('/operator/state-daemon-bun')
+    expect(resolveQueueWorkBunExecutable({
+      ...launchdEnv,
+      STATE_DAEMON_BUN_EXECUTABLE: '/operator/state-daemon-bun',
+      AUN_BUN_EXECUTABLE: '/operator/aun-bun',
+    } as NodeJS.ProcessEnv)).toBe('/operator/aun-bun')
+
+    const runtimeV2Source = readFileSync(new URL('../bin/aun/runtime-v2.ts', import.meta.url), 'utf8')
+    expect(runtimeV2Source).toContain('execFileAsync(resolveQueueWorkBunExecutable(this.env), [')
+    expect(runtimeV2Source).not.toContain("execFileAsync('bun', [")
   })
 
   test('codex-exec queue-work command uses schema, output-last-message, sandbox, cd, and stdin prompt', () => {
