@@ -226,12 +226,13 @@ describe('T5 — truncateForDiscord (DISCORD_MAX=1900)', () => {
 describe('T5b — CLI + server outbound_queue INSERTs route through truncateForDiscord', () => {
   test('cli/index.ts imports + uses truncateForDiscord before outbound_queue INSERT', () => {
     expect(CLI_SRC).toContain(`import { truncateForDiscord } from '../core/truncate'`)
-    // send + notify both feed the INSERT via truncateForDiscord(...) while
-    // preserving canonical author and the adapter-owner consumer key. The
-    // display-only projection decorator may wrap content before truncation.
+    // The shared send + notify helper feeds the INSERT via
+    // truncateForDiscord(...) while preserving canonical author and the
+    // adapter-owner consumer key.
     expect(CLI_SRC).toContain('decorateProjectedContent')
+    expect((CLI_SRC.match(/enqueueOutboundProjection\(/g) ?? []).length).toBeGreaterThanOrEqual(3)
     expect(CLI_SRC).toMatch(
-      /\[\s*id,\s*agentId,\s*projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*discordExternalId,\s*truncateForDiscord\(decorateProjectedContent\(/,
+      /\[\s*input\.messageId,\s*input\.agentId,\s*projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*projection\.channelExternalId!,\s*truncateForDiscord\(decorateProjectedContent\(/,
     )
   })
 
