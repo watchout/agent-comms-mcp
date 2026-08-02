@@ -1,0 +1,399 @@
+schema_version: shirube-v3/cell_graph/v1
+graph_id: GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001
+version: 1.0.0
+artifact_state: FROZEN_FOR_PLANNING_AWAITING_INDEPENDENT_AUDIT
+control_source: https://github.com/watchout/agent-comms-mcp/issues/602
+owner_directive: >-
+  ゴールの設定、ゴールの定義、計画と手順、完了時チェックリスト、
+  テスト項目を先に設定し、凍結して実際に進める。全エージェント配布と
+  自動受信復旧を含む。
+supersedes_as_planning_authority:
+  - https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-4599113905
+  - https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-4599126762
+supersession_rule: >-
+  Prior June artifacts remain immutable evidence and constraints. They do not
+  constitute the current Shirube V3 graph or authorize a protected effect.
+release_baseline:
+  repository: watchout/agent-comms-mcp
+  base_commit: 9054c38d769cc1d50238fb327f60567c8d2fbe2c
+  base_tree: 61494635f156bac8f950b54e8446a6f22d5f1b85
+  merged_corrective_pr: https://github.com/watchout/agent-comms-mcp/pull/907
+  baseline_scope: control_artifact_authoring_only
+  runtime_authorized: false
+observed_preimage:
+  state_daemon:
+    release_commit: 9054c38d769cc1d50238fb327f60567c8d2fbe2c
+    current_allowlist:
+      - codex-aun
+    exact_queue_fence:
+      queue_id: 147565
+      message_id: 22e00a1c-c7cf-4067-96c3-c62a4e3ae08d
+      terminal_state: replied
+    conclusion: normal automatic receive is not restored
+  canonical_aun_seat:
+    agent_id: aun
+    profile_enabled: true
+    status: idle
+    runtime_session: discord-aun
+    runtime_port: 8811
+    running_runtime_count_observed: greater_than_one
+    ordinary_communication_enrollment: false
+    desired_release_commit_observed: b09a7bd5deca0e4814d1f6e57455579ba7af2c50
+    conclusion: profile, runtime, release, and enrollment equality are unresolved
+  registry_observation:
+    raw_selection_rule: profile_enabled=true AND disabled_at IS NULL AND agent_type=dev AND metadata.profile_class != test
+    raw_count: 39
+    active_now: 36
+    known_classification_leaks:
+      - __norm021_roundtrip_up__
+      - __ui_identity_roundtrip_up__
+      - ephemeral-test-79582
+      - test-self-kick-22844
+      - test-self-kick-43791
+      - test-self-kick-62185
+    authoritative_production_denominator: unresolved
+    freeze_39_as_production_scope: false
+  legacy_fleet_report:
+    ready: 0
+    activation_candidates: 38
+    excluded: 21
+    blockers: 123
+    authority: baseline_evidence_only
+execution_context:
+  author_agent_id: arc
+  active_function: control_artifact_author
+  implementation_executor: aun
+  audit_function: evidence_audit_gate
+  operator_function: operator_acceptance_gate
+  protected_surface_function: protected_surface_gate
+goal:
+  id: GOAL-AUN-AUTORECEIVE-FLEET-RECOVERY-001
+  statement: >-
+    From one exact owner-pinned agent-comms release, the canonical aun seat and
+    every target in the trusted production manifest automatically receive and
+    complete ordinary AUN work after daemon start or restart without manual
+    next or inbox, operator bypass, raw SQL queue edits, unmanaged retries, or
+    protected D1 authority bleed; a controlled login or reboot convergence test
+    proves recovery and rollback.
+  terminal_state: VERIFIED_DONE
+  not_done_if:
+    - code merged or daemon process healthy only
+    - one exact-fenced canary succeeded only
+    - Discord visibility exists without queue, result, reply, and terminal evidence
+    - any production target is excluded without an owner-bounded exclusion
+    - manifest count or digest is unresolved
+    - any PASS depends on manual next, inbox, queue drain, prompt injection, raw SQL, manual terminalization, or explicit operator bypass
+definitions:
+  state_daemon_new_release:
+    required:
+      - exact commit and tree
+      - immutable checkout and build provenance
+      - Bun executable independent of LaunchAgent PATH
+      - LaunchAgent plist and environment digest plus restore commit
+      - canonical manifest id, revision, artifact digest, and target digest
+      - rollback release, rollback config, and kill switch
+  automatic_receive_recovered:
+    required:
+      - ordinary post-activation queue detected by notification or bounded sweep
+      - automatic claim uses lease, fence, and correct runtime identity
+      - runner emits a schema-valid typed result
+      - finalizer emits reply or outbound projection evidence
+      - source queue reaches exactly one valid terminal state
+      - correlated audit evidence exists
+      - two fresh ordinary queues pass after removal of the one-row fence
+      - one approved daemon restart preserves convergence
+    prohibited_pass_contributions:
+      - manual next or inbox
+      - FIFO drain
+      - prompt injection
+      - explicit_operator_bypass
+      - raw SQL mutation
+      - manual terminalization
+  all_agent_recovered:
+    denominator_rule: >-
+      The production denominator is derived only from canonical profile policy
+      and explicit classification evidence; agent-name inference is forbidden.
+    required:
+      - trusted closed-world manifest has exact target_count N and stable target_sha256
+      - resolved_target_count equals expected_target_count
+      - every target has exactly one primary workspace and exactly one fresh selected runtime
+      - every target has explicit active_function, control_source, auto_receive, protected_d1, and Discord mode
+      - every target passes the same queue lifecycle
+      - blockers, drift, unexpected exclusions, and bypass count are all zero
+      - protected D1 admission remains independently fail-closed
+  distribution:
+    definition: >-
+      Desired-state publication plus manifest admission plus daemon scope plus
+      runtime and profile equality plus live per-target proof; file copying is
+      not distribution.
+architecture_boundaries:
+  aun_core: >-
+    Owns desired state, logical agent identity, queue readiness, wake policy,
+    claim, lease, fence, typed outcome, terminal evidence, and GO or NO-GO policy.
+  runtime_supervisor_adapter: >-
+    Owns host-specific inspect, readiness, wake, start, stop, restart, logs, and
+    attach implementations. tmux and launchd are local adapters, not architecture.
+  runtime_adapter: >-
+    Owns Codex, Claude Code, OpenClaw, or other invocation and typed result
+    parsing only after an exact queue row is admitted.
+  connector_projection_adapter: >-
+    Owns Discord or other provider delivery and read or write evidence. A
+    projection is not identity, ownership, or completion authority.
+  manifest_policy: >-
+    Owns closed-world target identity, canonical bytes and digests, revision,
+    expiry, revocation, owner pin, drift detection, and explicit D1 isolation.
+  mcp_surface: >-
+    Exposes or consumes the control-plane contract. It does not directly own OS
+    process lifecycle across all deployment platforms.
+  adapter_variation_axes:
+    ui: connector_projection_adapter
+    llm: runtime_adapter
+    database: repository_or_persistence_adapter
+    authentication: identity_and_provider_attestation_adapter
+    platform: runtime_supervisor_adapter
+  deterministic_skeleton: >-
+    Eligibility, identity, claim, lease, fence, manifest admission, lifecycle
+    transitions, finalization, rollback, and protected gates are script-controlled.
+    LLM output may supply task content but never admission or terminal authority.
+  learning_loop: >-
+    Every escaped failure becomes a versioned fixture, stable blocker code, or
+    conformance test before the next rollout wave; production inference by an
+    LLM is forbidden.
+cells:
+  - id: CELL-AUN-RECOVERY-CONTRACT-001
+    order: 10
+    type: control
+    risk_class: R2
+    depends_on: []
+    goal: Freeze goal, definitions, denominator policy, requirements, acceptance, test trace, stop and rollback rules, evidence sinks, and owner decision points.
+    implementation_boundary: Repository Control artifacts and immutable Issue 602 amendment only; no runtime or production mutation.
+    verification_boundary: YAML safe parse, exact cross-reference checks, Git identities, GitHub API body equality, and independent exact-head design audit.
+    completes_when: G1 through G7 PASS, machine-readable artifacts have immutable readback, and an independent exact-head audit passes.
+    lifecycle_state: control_artifact_candidate_published_awaiting_independent_audit
+  - id: CELL-AUN-REGISTRY-RECONCILIATION-001
+    order: 20
+    type: protected_data_reconciliation
+    risk_class: R3
+    depends_on:
+      - CELL-AUN-RECOVERY-CONTRACT-001
+    goal: Resolve production, test, disabled, duplicate runtime, workspace, profile, provider, and Control bindings into a zero-ambiguity candidate denominator.
+    implementation_boundary: Read-only inventory and owner-gated exact reconciliation plan; no inferred exclusions and no production mutation before OD-AUN-001.
+    verification_boundary: Candidate expected N equals resolved N, blockers zero, unknown classifications zero, and no agent-name-derived rule.
+    completes_when: Exact candidate denominator, target set, blocker report, and protected reconciliation plan pass independent audit and OD-AUN-001.
+    lifecycle_state: blocked_on_cell_10_and_exact_handoff
+  - id: CELL-AUN-CANONICAL-RECEIVE-001
+    order: 30
+    type: runtime_activation
+    risk_class: R3
+    depends_on:
+      - CELL-AUN-REGISTRY-RECONCILIATION-001
+    goal: Move from the retired codex-aun one-row fence to canonical aun and prove normal automatic receive without bypass.
+    implementation_boundary: One exact canonical aun activation scope under OD-AUN-001; unrelated seats and D1 remain untouched.
+    verification_boundary: Bounded canary PASS, two fresh unfenced ordinary queues PASS, and one approved daemon restart continuity PASS.
+    completes_when: Exact queue, result, reply, terminal, audit, identity, and no-bypass evidence all pass on the pinned release and config.
+    lifecycle_state: blocked_on_cell_20_and_owner_decision
+  - id: CELL-AUN-MANIFEST-PUBLISH-001
+    order: 40
+    type: protected_manifest
+    risk_class: R3
+    depends_on:
+      - CELL-AUN-CANONICAL-RECEIVE-001
+    goal: Build, independently audit, owner-pin, persist, and read back the closed-world ordinary communication manifest.
+    implementation_boundary: Exact reconciled target set and manifest store only; D1 admission tables and policy remain separate.
+    verification_boundary: Manifest target_count N, target digest, artifact digest, revision, owner pin, and projection equality all pass.
+    completes_when: Trusted manifest is accepted with expected N equal resolved N and drift, blockers, ambiguity, and unexpected exclusions all zero.
+    lifecycle_state: blocked_on_cell_30
+  - id: CELL-AUN-FLEET-ACTIVATION-001
+    order: 50
+    type: runtime_activation
+    risk_class: R3
+    depends_on:
+      - CELL-AUN-MANIFEST-PUBLISH-001
+    goal: Activate staged ordinary auto-receive for every exact manifest target with stop-on-first-failure and deterministic rollback.
+    implementation_boundary: Owner-approved exact waves under OD-AUN-002; no target outside the pinned manifest and no D1 expansion.
+    verification_boundary: Every target passes the identical live lifecycle; N of N verified; blockers, drift, bypass, and unexpected exclusions zero.
+    completes_when: All approved waves pass, rollback evidence remains usable, and independent audit confirms full target equality.
+    lifecycle_state: blocked_on_cell_40_and_owner_decision
+  - id: CELL-AUN-REBOOT-CONVERGENCE-001
+    order: 60
+    type: operator_acceptance
+    risk_class: R3
+    depends_on:
+      - CELL-AUN-FLEET-ACTIVATION-001
+    goal: Prove approved login or reboot restoration, queue convergence, identity safety, no duplicate execution, and rollback.
+    implementation_boundary: One owner-approved controlled window under OD-AUN-002 with exact host, release, manifest, queue, and rollback fences.
+    verification_boundary: Restore, watchdog, daemon, manifest, runtime equality, fresh automatic queue completion, and rollback rehearsal all pass.
+    completes_when: Independent evidence audit, operator acceptance, owner final decision, and VERIFIED_DONE control-source state are recorded.
+    lifecycle_state: blocked_on_cell_50_and_owner_decision
+requirements:
+  - {id: REQ-REC-001, source: owner_directive_and_PR907, text: exact release identity and immutable provenance, acceptance_ids: [AC-REC-001], test_ids: [TEST-001, TEST-002]}
+  - {id: REQ-REC-002, source: issue602_and_owner_comment_4580497318, text: durable supervisor install readiness and deterministic rollback through adapters, acceptance_ids: [AC-REC-002], test_ids: [TEST-005, TEST-017]}
+  - {id: REQ-REC-003, source: issue602, text: canonical aun automatic receive without manual prompting or retired-seat fencing, acceptance_ids: [AC-REC-003], test_ids: [TEST-003, TEST-006, TEST-007]}
+  - {id: REQ-REC-004, source: queue_lifecycle_contract, text: exactly-once claim lease and fence semantics, acceptance_ids: [AC-REC-004], test_ids: [TEST-003, TEST-004, TEST-010]}
+  - {id: REQ-REC-005, source: AUN_V2_clean_core, text: typed result reply or outbound evidence and one valid terminal closure, acceptance_ids: [AC-REC-005], test_ids: [TEST-002, TEST-004, TEST-006, TEST-009]}
+  - {id: REQ-REC-006, source: issue602_and_recovery_runbook, text: no manual next inbox drain prompt bypass raw SQL or manual close may contribute to PASS, acceptance_ids: [AC-REC-006], test_ids: [TEST-007, TEST-015]}
+  - {id: REQ-REC-007, source: issue602, text: restart convergence without duplicate execution, acceptance_ids: [AC-REC-007], test_ids: [TEST-008, TEST-010]}
+  - {id: REQ-REC-008, source: ordinary_manifest_contract, text: exact closed-world production manifest denominator from canonical policy only, acceptance_ids: [AC-REC-008], test_ids: [TEST-011, TEST-012]}
+  - {id: REQ-REC-009, source: issue602_incident_evidence, text: per-target workspace runtime profile provider and Control equality, acceptance_ids: [AC-REC-009], test_ids: [TEST-011, TEST-013, TEST-014, TEST-015]}
+  - {id: REQ-REC-010, source: owner_directive, text: staged fleet activation with stop-on-first-failure, acceptance_ids: [AC-REC-010], test_ids: [TEST-013, TEST-017]}
+  - {id: REQ-REC-011, source: issue602_and_supervisor_contract, text: failure containment kill switch and deterministic rollback, acceptance_ids: [AC-REC-011], test_ids: [TEST-005, TEST-009, TEST-010, TEST-017]}
+  - {id: REQ-REC-012, source: owner_directive_and_shirube_v3, text: immutable correlated evidence and maker-checker separation, acceptance_ids: [AC-REC-012], test_ids: [TEST-001, TEST-012, TEST-013, TEST-018]}
+  - {id: REQ-REC-013, source: ordinary_manifest_contract, text: ordinary communication may not expand protected D1 authority, acceptance_ids: [AC-REC-013], test_ids: [TEST-016]}
+  - {id: REQ-REC-014, source: issue602_owner_comment_4640703827, text: controlled login or reboot end-to-end convergence, acceptance_ids: [AC-REC-014], test_ids: [TEST-018]}
+acceptance_criteria:
+  - {id: AC-REC-001, predicate: release commit tree build plist environment manifest and rollback identities are exact and immutable}
+  - {id: AC-REC-002, predicate: normalized supervisor readiness and rollback pass without host-specific authority leaking into core}
+  - {id: AC-REC-003, predicate: canonical aun completes one canary and two fresh unfenced ordinary queues automatically with bypass_count zero}
+  - {id: AC-REC-004, predicate: each queue has one valid claim owner lease fence result and terminal transition; duplicate terminal count zero}
+  - {id: AC-REC-005, predicate: every successful queue has schema-valid typed outcome reply or outbound projection and correlated terminal evidence}
+  - {id: AC-REC-006, predicate: manual next inbox drain prompt raw SQL manual close and explicit bypass contribution count equals zero}
+  - {id: AC-REC-007, predicate: pending-before and new-after restart execute exactly once and terminal rows never re-execute}
+  - {id: AC-REC-008, predicate: expected_target_count equals resolved_target_count equals N with stable target digest blockers zero and name-derived exclusions zero}
+  - {id: AC-REC-009, predicate: each target has one workspace one fresh selected runtime and exact profile provider Control and Discord bindings}
+  - {id: AC-REC-010, predicate: every exact manifest target passes in owner-approved waves and first failure halts later admission}
+  - {id: AC-REC-011, predicate: kill switch previous manifest previous release and previous config restore deterministically with evidence preserved}
+  - {id: AC-REC-012, predicate: author auditor operator and owner evidence are distinct and immutable with exact-head correlation}
+  - {id: AC-REC-013, predicate: ordinary manifest changes leave protected D1 admission allowlist receipts and effects byte or semantic invariant}
+  - {id: AC-REC-014, predicate: one approved login or reboot restores services and completes a fresh ordinary queue without human prompting}
+test_matrix:
+  - {id: TEST-001, req: [REQ-REC-001, REQ-REC-012], kind: static, pass: commit tree build plist environment manifest and rollback digests exact and read back}
+  - {id: TEST-002, req: [REQ-REC-001, REQ-REC-005], kind: focused, pass: restricted PATH nested Bun and finalizer error propagation tests green}
+  - {id: TEST-003, req: [REQ-REC-003, REQ-REC-004], kind: focused, pass: scheduler notification sweep claim source lease and fence tests green}
+  - {id: TEST-004, req: [REQ-REC-004, REQ-REC-005], kind: postgres, pass: mutation-time fence affected-row one rollback and lease-race tests green on disposable PostgreSQL}
+  - {id: TEST-005, req: [REQ-REC-002, REQ-REC-011], kind: preflight, pass: immutable checkout install plan supervisor and rollback GO with mutation false}
+  - {id: TEST-006, req: [REQ-REC-003, REQ-REC-005], kind: live_canary, pass: one canonical aun queue automatically claims processes replies and terminates with no bypass}
+  - {id: TEST-007, req: [REQ-REC-003, REQ-REC-006], kind: live_normal, pass: two new ordinary aun queues pass after one-row fence removal}
+  - {id: TEST-008, req: [REQ-REC-007, REQ-REC-011], kind: restart, pass: pending-before and new-after restart execute once and done row never re-executes}
+  - {id: TEST-009, req: [REQ-REC-005, REQ-REC-011], kind: failure, pass: runner finalizer or provider failure cannot be reported as success and retry cap is respected}
+  - {id: TEST-010, req: [REQ-REC-004, REQ-REC-007, REQ-REC-011], kind: failure, pass: DB disconnect reconnect and lease expiry cause no duplicate or false terminal}
+  - {id: TEST-011, req: [REQ-REC-008, REQ-REC-009], kind: manifest, pass: strict schema denominator drift duplicate runtime stale identity and test leakage all fail closed}
+  - {id: TEST-012, req: [REQ-REC-008, REQ-REC-012], kind: postgres, pass: manifest up up down refusal up revision equivocation expiry revocation and projection equality green}
+  - {id: TEST-013, req: [REQ-REC-009, REQ-REC-010, REQ-REC-012], kind: live_fleet, pass: every exact manifest target lifecycle PASS and N of N evidence}
+  - {id: TEST-014, req: [REQ-REC-009], kind: negative, pass: disabled test stale wrong-identity and unverified-provider targets are rejected}
+  - {id: TEST-015, req: [REQ-REC-006, REQ-REC-009], kind: memory_gate, pass: fresh canonical memory readiness required expiry fails and explicit bypass cannot count PASS}
+  - {id: TEST-016, req: [REQ-REC-013], kind: regression, pass: ordinary manifest changes do not alter protected D1 admission or effects}
+  - {id: TEST-017, req: [REQ-REC-002, REQ-REC-010, REQ-REC-011], kind: rollback, pass: kill switch previous manifest previous release and previous config restore deterministically and read back}
+  - {id: TEST-018, req: [REQ-REC-012, REQ-REC-014], kind: operator, pass: controlled login or reboot restores services and completes a fresh queue without a human prompt}
+completion_checklist:
+  - {id: DONE-001, predicate: Issue 602 V3 amendment and graph v1 have immutable GitHub refs and API readback, status: pending}
+  - {id: DONE-002, predicate: all 14 requirements map to acceptance criteria tests and evidence, status: pending}
+  - {id: DONE-003, predicate: exact release commit tree build plist environment and rollback are recorded, status: pending}
+  - {id: DONE-004, predicate: profile classification and runtime equality are unambiguous, status: pending}
+  - {id: DONE-005, predicate: manifest candidate expected N equals resolved N with blockers zero, status: pending}
+  - {id: DONE-006, predicate: canonical aun canary and two unfenced normal queues PASS, status: pending}
+  - {id: DONE-007, predicate: one approved restart continuity test PASS, status: pending}
+  - {id: DONE-008, predicate: trusted manifest publication and projection readback PASS, status: pending}
+  - {id: DONE-009, predicate: staged fleet N of N lifecycle PASS, status: pending}
+  - {id: DONE-010, predicate: bypass manual-next manual-close prompt raw-SQL contribution count is zero, status: pending}
+  - {id: DONE-011, predicate: protected D1 isolation regression PASS, status: pending}
+  - {id: DONE-012, predicate: rollback rehearsal PASS, status: pending}
+  - {id: DONE-013, predicate: controlled login or reboot convergence PASS, status: pending}
+  - {id: DONE-014, predicate: independent audit operator acceptance and owner final decision are recorded, status: pending}
+  - {id: DONE-015, predicate: control source is VERIFIED_DONE with no unresolved blocking next action, status: pending}
+owner_decisions:
+  already_supplied:
+    - owner intent to define freeze and then execute the complete recovery set
+  future_required:
+    - id: OD-AUN-001
+      when: exact denominator manifest candidate canonical activation plan and pinned release and config are known
+      decision_owner: protected_surface_gate
+      scope: One combined exact decision for profile reconciliation, manifest publication, canonical aun activation, one daemon restart, and rollback authority.
+    - id: OD-AUN-002
+      when: canonical Cell PASS and exact fleet waves and controlled reboot window are known
+      decision_owner: protected_surface_gate
+      scope: One combined exact decision for staged fleet activation, rollback authority, and controlled login or reboot acceptance.
+  conditional_only:
+    - exact-head merge decision if an independently verified corrective code PR is necessary
+failure_modes:
+  - {id: FM-PLACED-NOT-DELIVERED, detection: artifact exists without API equality and AUN reach receipt, recovery: keep Cell nonterminal and re-deliver exact refs}
+  - {id: FM-DECLARED-NOT-VERIFIED, detection: profile status port session or label substitutes for current identity evidence, recovery: fail readiness and require fresh runtime-bound attestation}
+  - {id: FM-RAW-DENOMINATOR-AS-AUTHORITY, detection: raw count 39 or legacy candidate count is frozen as production N, recovery: reject and reconcile canonical classification without name inference}
+  - {id: FM-RETIRED-SEAT-FENCE, detection: daemon allowlist or queue fence targets codex-aun or a terminal row, recovery: keep activation blocked and produce an exact canonical transition plan under OD-AUN-001}
+  - {id: FM-DUPLICATE-RUNTIME, detection: one target resolves to zero or multiple fresh runtimes, recovery: deny target admission and reconcile ownership and freshness}
+  - {id: FM-PROFILE-STATE-CONTRADICTION, detection: profile_enabled true conflicts with disabled_at or lifecycle status, recovery: fail closed with explicit owner-bounded reconciliation}
+  - {id: FM-WRONG-ENDPOINT-IDENTITY, detection: listener session process or endpoint belongs to another agent or release, recovery: stop before claim and route bounded repair under protected approval}
+  - {id: FM-CLAIM-LEASE-RACE, detection: stale or duplicate claim result or terminal mutation, recovery: enforce mutation-time fence affected-row one and preserve retry evidence}
+  - {id: FM-FINALIZER-FALSE-SUCCESS, detection: runner provider or finalizer failure is reported as terminal success, recovery: reject terminalization and emit typed failure with bounded retry}
+  - {id: FM-RESTART-DUPLICATE, detection: pre-restart or terminal work executes again, recovery: trip kill switch rollback and preserve exact claim and fence evidence}
+  - {id: FM-PARTIAL-FLEET-ACTIVATION, detection: a wave continues after first failed target, recovery: stop later admission and restore previous manifest release and config}
+  - {id: FM-D1-AUTHORITY-BLEED, detection: ordinary manifest alters D1 allowlist receipts admission or effects, recovery: fail regression and rollback ordinary activation only}
+  - {id: FM-HUMAN-BYPASS-AS-PASS, detection: next inbox drain prompt raw SQL manual close or bypass contributes to success, recovery: invalidate PASS and repeat with contribution count zero}
+  - {id: FM-ROLLBACK-UNVERIFIED, detection: rollback command exists without restore readback, recovery: keep protected rollout blocked and rehearse exact previous state}
+design_flow:
+  G1_intent_capture:
+    result: PASS
+    sources:
+      - owner directive carried by AUN message f9279e96-a6c6-4805-944d-f540b163f847
+      - https://github.com/watchout/agent-comms-mcp/issues/602
+      - https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-4580497318
+      - https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-4640703827
+      - https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-4664490385
+      - https://github.com/watchout/agent-comms-mcp/pull/907
+    new_unsourced_domain_semantics: 0
+  G2_AI_native_conformance:
+    result: PASS
+    agent_first: Automatic ordinary work is driven by deterministic desired state and exact queue evidence; operator surfaces are projections and gates.
+    contract_event_core: Identity claim lease fence typed outcome terminal evidence and audit are explicit.
+    autonomy_tiers: Ordinary auto-receive and protected D1 are separate fail-closed lanes.
+    evidence_grade: Every success requires correlated typed and immutable evidence.
+    knowledge_grounded: Canonical profile and manifest policy are authority; names and model inference are forbidden.
+    MCP_surface: MCP exposes contract and evidence without becoming the universal host supervisor.
+    deterministic_skeleton: Script-controlled admission lifecycle finalization rollback and protected gates.
+    learning_loop_moat: Escaped failures become fixtures blocker codes and conformance tests.
+  G3_boundary_and_provenance:
+    result: PASS
+    adapter_axes_separated: true
+    domain_elements_provenanced: true
+    host_supervisor_not_identity: true
+  G4_measurable_criteria:
+    result: PASS
+    requirement_count: 14
+    acceptance_count: 14
+    test_count: 18
+    unmapped_requirement_count: 0
+    subjective_completion_predicates: 0
+  G5_failure_modes:
+    result: PASS
+    placed_not_delivered_closed: true
+    declared_not_verified_closed: true
+    failure_mode_count: 14
+  G6_protected_surface_and_role:
+    result: PASS
+    control_artifact_author_only: true
+    author_not_auditor: true
+    protected_decisions:
+      - OD-AUN-001
+      - OD-AUN-002
+    runtime_activation_authorized_now: false
+  G7_reflection_and_handoff:
+    result: PASS
+    next_action_complete: true
+    reach_check_required: GitHub API equality plus exact AUN delivery receipt
+gate_result:
+  verdict: PASS
+  meaning: Control artifact candidate is complete enough for independent exact-head audit.
+  frozen_for_planning: true
+  implementation_or_runtime_authorized: false
+  cell_10_complete: false
+  graph_advance_allowed: false
+  protected_effect_count: 0
+graph_change_rule: >-
+  No new Cell, split, reorder, weakened predicate, or changed protected decision
+  may be introduced outside a recorded graph amendment. Corrective code is a
+  successor implementation Cell under the owning graph node, not an exception.
+next_action:
+  blocking: true
+  owner_agent: codex-audit
+  owner_function: evidence_audit_gate
+  action: Independently audit the exact Control PR head against G1 through G7, all cross-reference invariants, the 14-requirement and 18-test trace, and the protected boundary without implementing fixes.
+  handoff_method: Exact-head GitHub review evidence plus AUN verdict delivery to ARC and AUN.
+  input_refs:
+    - https://github.com/watchout/agent-comms-mcp/issues/602
+    - https://github.com/watchout/agent-comms-mcp/pull/907
+    - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
+    - .shirube/specs/SPEC-AUN-AUTORECEIVE-FLEET-RECOVERY-001.md
+    - .shirube/control-handoffs/CH-AUN-RECOVERY-CONTRACT-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001.yaml
+  scope: Evidence audit only; no file edits, runtime, DB, queue, LaunchAgent, manifest publication, PR state, approval, merge, activation, or protected effect.
+  deliverable: Exact-head PASS, REQUEST_CHANGES, or ESCALATE verdict with itemized gate findings and complete next_action.
+  completion_evidence: Immutable verdict URL, exact head and tree, artifact hashes, machine-validation readback, and AUN delivery receipt.
