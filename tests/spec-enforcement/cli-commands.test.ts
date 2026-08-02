@@ -22,6 +22,10 @@
  *   - cli/index.ts                                            (handlers + dispatch)
  *   - github.com/watchout/agent-comms-mcp/issues/132
  *   - docs/agent-com-message-queue-spec.md §4-6              (canonical spec)
+ *
+ * Data-safety note: this source-enforcement file only reads command text.
+ * Any DELETE-like strings are assertions, not executable data operations;
+ * soft-delete policy is therefore not applicable to this test fixture.
  */
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -451,6 +455,12 @@ function nextMessageBody(): string {
   return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 }
 
+function enqueueOutboundProjectionBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function enqueueOutboundProjection')
+  const fnEnd = CLI_SRC.indexOf('\nfunction ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
 describe('T8 — thread_id flows from next → send → outbound', () => {
   // Phase 4 (Issue #130): the signal-mode fallback is removed. thread_id
   // now flows exclusively through the message_queue payload. The intent is
@@ -481,8 +491,10 @@ describe('T8 — thread_id flows from next → send → outbound', () => {
   // that threadId still flows into the lookup.
   test('sendMessage resolves channel_external_id via thread_adapters when threadId is set', () => {
     const body = sendMessageBody()
+    const helper = enqueueOutboundProjectionBody()
     const projectionSrc = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(body).toMatch(/resolveOutboundProjectionDecision\(db as any,\s*\{\s*channelId,\s*threadId,\s*senderAgentId:\s*agentId,\s*recipientAgentIds:\s*mentions,\s*\}/)
+    expect(body).toMatch(/enqueueOutboundProjection\(\{[\s\S]*?channelId,[\s\S]*?threadId,[\s\S]*?recipients:\s*mentions/)
+    expect(helper).toMatch(/resolveOutboundProjectionDecision\(input\.db as any,\s*\{[\s\S]*?channelId:\s*input\.channelId,[\s\S]*?threadId:\s*input\.threadId/)
     expect(projectionSrc).toMatch(/if\s*\(\s*input\.threadId\s*\)\s*\{[\s\S]{0,500}thread_adapters/)
   })
 })

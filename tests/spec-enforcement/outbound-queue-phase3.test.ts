@@ -50,7 +50,7 @@ const OUTBOUND_INSERT_COLUMNS_PATTERN = String.raw`INSERT INTO outbound_queue\s*
 const OUTBOUND_INSERT_COLUMNS_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN)
 const OUTBOUND_INSERT_COLUMNS_GLOBAL_RE = new RegExp(OUTBOUND_INSERT_COLUMNS_PATTERN, 'g')
 const SERVER_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*externalId/g
-const CLI_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*discordExternalId/g
+const CLI_OUTBOUND_BINDINGS_RE = /projection\.consumerAgentId,\s*projection\.consumerSource,\s*projection\.consumerEvidence\?\.connector_instance_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.channel_binding_id\s*\?\?\s*null,\s*projection\.consumerEvidence\?\.provider_channel_access_id\s*\?\?\s*null,\s*projection\.projectionIdentityId,\s*projection\.intendedProjectionIdentityId,\s*projection\.projectionSource,\s*projection\.projectionFallbackReason,\s*projection\.deliveryFallbackReason,\s*JSON\.stringify\(projection\.deliveryDiagnostics\),\s*projection\.channelExternalId!/g
 
 function serverToolBody(toolName: string): string {
   const start = SERVER_ONLY_SRC.indexOf(`if (name === '${toolName}')`)
@@ -290,31 +290,40 @@ function notifyMessageBody(): string {
   return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
 }
 
+function enqueueOutboundProjectionBody(): string {
+  const fnStart = CLI_SRC.indexOf('async function enqueueOutboundProjection')
+  const fnEnd = CLI_SRC.indexOf('\nfunction ', fnStart + 1)
+  return CLI_SRC.slice(fnStart, fnEnd === -1 ? undefined : fnEnd)
+}
+
 describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('sendMessage INSERTs into outbound_queue', () => {
-    const body = sendMessageBody()
-    expect(body).toMatch(OUTBOUND_INSERT_COLUMNS_RE)
+    expect(enqueueOutboundProjectionBody()).toMatch(OUTBOUND_INSERT_COLUMNS_RE)
+    expect(sendMessageBody()).toMatch(/enqueueOutboundProjection\(\{/)
   })
   test('CLI send + notify write projection_identity_id from the ADR-060 resolver', () => {
     const inserts = [...CLI_SRC.matchAll(OUTBOUND_INSERT_COLUMNS_GLOBAL_RE)]
-    expect(inserts.length).toBeGreaterThanOrEqual(2)
+    expect(inserts.length).toBeGreaterThanOrEqual(1)
     const bindings = [...CLI_SRC.matchAll(CLI_OUTBOUND_BINDINGS_RE)]
-    expect(bindings.length).toBeGreaterThanOrEqual(2)
+    expect(bindings.length).toBeGreaterThanOrEqual(1)
+    expect((CLI_SRC.match(/enqueueOutboundProjection\(/g) ?? []).length).toBeGreaterThanOrEqual(3)
   })
   test('CLI send + notify skip enqueue when the resolver has no delivery consumer', () => {
+    const helper = enqueueOutboundProjectionBody()
+    const skipIdx = helper.indexOf('outboundProjectionSkipReason(projection)')
+    const skipAuditIdx = helper.indexOf("outbound.enqueue_skipped")
+    const insertIdx = helper.indexOf('INSERT INTO outbound_queue')
+    expect(skipIdx).toBeGreaterThan(-1)
+    expect(skipAuditIdx).toBeGreaterThan(skipIdx)
+    expect(insertIdx).toBeGreaterThan(skipAuditIdx)
+    expect(helper).toMatch(/if\s*\(\s*outboundSkipReason\s*\)\s*\{[\s\S]*?outbound\.enqueue_skipped[\s\S]*?return\s*\{\s*outboundQueued:\s*false[\s\S]*?INSERT INTO outbound_queue/)
+    expect(helper).toMatch(/outboundProjectionSkipCode/)
     for (const body of [sendMessageBody(), notifyMessageBody()]) {
-      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection)')
-      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped")
-      const insertIdx = body.indexOf('INSERT INTO outbound_queue')
-      expect(skipIdx).toBeGreaterThan(-1)
-      expect(skipAuditIdx).toBeGreaterThan(skipIdx)
-      expect(insertIdx).toBeGreaterThan(skipAuditIdx)
-      expect(body).toMatch(/if\s*\(\s*outboundSkipReason\s*\)\s*\{[\s\S]*?outbound\.enqueue_skipped[\s\S]*?\}\s*else\s*\{[\s\S]*?INSERT INTO outbound_queue/)
-      expect(body).toMatch(/NO_ELIGIBLE_DELIVERY_CONSUMER|outboundProjectionSkipCode/)
+      expect(body).toMatch(/enqueueOutboundProjection\(\{/)
     }
   })
   test('sendMessage resolves channel_external_id via thread_adapters then channel_adapters', () => {
-    const body = sendMessageBody()
+    const body = enqueueOutboundProjectionBody()
     const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
     expect(body).toMatch(/resolveOutboundProjectionDecision/)
     expect(projection).toMatch(/SELECT external_id,\s*metadata FROM thread_adapters/)
@@ -339,8 +348,10 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   })
   test('outbound_queued is false (with skip reason) when no Discord adapter exists', () => {
     const body = sendMessageBody()
+    const helper = enqueueOutboundProjectionBody()
     const projection = readFileSync(join(REPO_ROOT, 'core', 'outbound-projection.ts'), 'utf-8')
-    expect(body).toMatch(/outboundProjectionSkipReason\(projection\)/)
+    expect(helper).toMatch(/outboundProjectionSkipReason\(projection\)/)
+    expect(helper).toMatch(/return\s*\{\s*outboundQueued:\s*false,\s*outboundSkipReason\s*\}/)
     expect(body).toMatch(/outbound_skip_reason/)
     expect(projection).toMatch(/OUTBOUND_SKIP_NO_DISCORD_ADAPTER/)
   })

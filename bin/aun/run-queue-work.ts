@@ -8,6 +8,7 @@ import {
   finalizeDoneQueueWork,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
+  type QueueWorkClaimFence,
   type QueueReplySender,
   type QueueWorkEnvelope,
   type QueueWorkGithubIssueCommentWriteback,
@@ -23,6 +24,8 @@ export interface RunQueueWorkOptions {
   runtime?: string
   invocationSource?: string
   expectedClaimSource?: string
+  claimFence?: QueueWorkClaimFence
+  requireClaimFence?: boolean
   finalize?: boolean
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
@@ -409,7 +412,13 @@ function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): L
 }
 
 class AgentComCliReplySender implements QueueReplySender {
-  constructor(private readonly repoRoot: string, private readonly env: NodeJS.ProcessEnv) {}
+  readonly queue_close_mode = 'sender' as const
+
+  constructor(
+    private readonly repoRoot: string,
+    private readonly env: NodeJS.ProcessEnv,
+    private readonly expectedRuntimeId: string,
+  ) {}
 
   async sendReply(input: {
     queue_id: string
@@ -432,22 +441,28 @@ class AgentComCliReplySender implements QueueReplySender {
       '--queue-id',
       input.queue_id,
       ...(input.message_id ? ['--message-id', input.message_id] : []),
-      ...(input.idempotency_key ? ['--d1-invocation-key', input.idempotency_key, '--no-close'] : []),
+      ...(input.idempotency_key
+        ? ['--d1-invocation-key', input.idempotency_key, '--no-close']
+        : ['--queue-work-finalizer', '--close']),
     ], {
       cwd: this.repoRoot,
       env: {
         ...this.env,
         AGENT_ID: input.agent_id,
         AGENT_COM_EXPECTED_AGENT_ID: input.agent_id,
+        AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: this.expectedRuntimeId,
       },
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 5,
     })
     if (child.status !== 0) {
-      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr}`)
+      throw new Error(`agent-com send failed status=${child.status} stderr=${child.stderr} stdout=${child.stdout}`)
     }
     const parsed = JSON.parse(child.stdout || '{}')
-    return { message_id: parsed.message_id ?? null }
+    return {
+      message_id: parsed.message_id ?? null,
+      queue_closed: parsed.work_closed === true,
+    }
   }
 }
 
@@ -557,6 +572,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
 
   const db = createDbAdapter()
   const legacyDb = {
+    dialect: db.dialect,
     async query<T = any>(sql: string, params?: unknown[]) {
       const rows = await db.query<T>(sql, params as any[])
       return { rows, rowCount: rows.length }
@@ -565,19 +581,28 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
 
   try {
     const writebackSender = createWritebackSender(plan, env)
+    const adapter = createRuntimeAdapter(plan, env)
     const runner = await runReceivedQueueWork(legacyDb, {
       queueId: plan.queue_id ?? undefined,
       agentId: plan.agent_id ?? undefined,
-      adapter: createRuntimeAdapter(plan, env),
+      adapter,
       invocationSource: plan.invocation_source ?? undefined,
       expectedClaimSource: plan.expected_claim_source ?? undefined,
+      claimFence: opts.claimFence,
+      requireClaimFence: opts.requireClaimFence ?? plan.expected_claim_source !== null,
     })
     let finalizer: unknown = undefined
     if (plan.finalize && runner.ok) {
       finalizer = await finalizeDoneQueueWork(legacyDb, {
         queueId: runner.queue_id,
-        replySender: new AgentComCliReplySender(plan.repoRoot, env),
+        replySender: new AgentComCliReplySender(plan.repoRoot, env, adapter.runtime_id),
         writebackSender,
+        ...(plan.expected_claim_source ? {
+          claimResultFence: {
+            expectedClaimSource: plan.expected_claim_source,
+            expectedRuntimeId: adapter.runtime_id,
+          },
+        } : {}),
       })
     }
     return {

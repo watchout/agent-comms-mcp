@@ -144,6 +144,15 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(source).not.toContain('killed: execErr.killed')
   })
 
+  test('production expected-claim-source requires and forwards an exact claim fence', () => {
+    const source = readFileSync(new URL('../bin/aun/run-queue-work.ts', import.meta.url), 'utf8')
+
+    expect(source).toContain('claimFence: opts.claimFence')
+    expect(source).toContain('requireClaimFence: opts.requireClaimFence ?? plan.expected_claim_source !== null')
+    expect(source).toContain('claimResultFence:')
+    expect(source).toContain('expectedRuntimeId: adapter.runtime_id')
+  })
+
   test('packaged queue-work result schema is Codex structured-output compatible', () => {
     const schema = JSON.parse(readFileSync(new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url), 'utf8'))
 

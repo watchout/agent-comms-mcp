@@ -73,17 +73,27 @@ class FakeQueueDb implements QueueWorkDb {
       if (sql.includes('WHERE agent_id = $1') && this.row.agent_id !== params?.[0]) {
         return { rows: [], rowCount: 0 }
       }
-      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return {
+        rows: [{
+          ...this.row,
+          ...(sql.includes('CURRENT_TIMESTAMP AS database_now') ? {
+            database_now: (this.databaseNow?.() ?? new Date('2026-05-21T01:00:00.000Z')).toISOString(),
+          } : {}),
+        }] as T[],
+        rowCount: 1,
+      }
     }
     if (sql.includes("SET status = 'in_progress'")) {
+      const hasPayloadWrite = sql.includes('payload = $3')
       if (
         this.row
         && String(this.row.id) === String(params?.[0])
         && this.row.status === 'received'
-        && this.ownsFence(sql, params, 2, 3, 1)
+        && this.ownsFence(sql, params, hasPayloadWrite ? 3 : 2, hasPayloadWrite ? 4 : 3, 1)
       ) {
         this.row.status = 'in_progress'
         this.row.last_heartbeat_at = params?.[1]
+        if (hasPayloadWrite) this.row.payload = params?.[2]
         return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
@@ -396,6 +406,114 @@ describe('runReceivedQueueWork', () => {
     expect(JSON.parse(db.row.payload).runner_error).toBeUndefined()
   })
 
+  test('same-agent expiry, reclaim, and re-receive cannot persist or finalize the stale result', async () => {
+    const oldClaimedAt = '2026-05-21T00:00:01.000Z'
+    const newClaimedAt = '2026-05-21T01:00:30.000Z'
+    const row = receivedRow({
+      payload: JSON.stringify({
+        content: 'stale same-agent race',
+        author_id: 'codex-cto',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+      }),
+      claim_expires_at: '2026-05-21T02:00:00.000Z',
+    })
+    const db = new FakeQueueDb(row)
+    let outbound = 0
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() {
+        // The old invocation is still running when the same agent receives a
+        // newer incarnation of the exact row.
+        db.row.status = 'in_progress'
+        db.row.claimed_by = 'codex-audit'
+        db.row.claimed_at = newClaimedAt
+        db.row.claim_expires_at = '2026-05-21T03:00:00.000Z'
+        return okResult()
+      },
+    }
+
+    const runner = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      claimFence: { claimedBy: 'codex-audit', claimedAt: oldClaimedAt },
+      requireClaimFence: true,
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+    expect(runner).toMatchObject({ ok: false, code: 'CLAIM_OWNERSHIP_LOST' })
+    expect(JSON.parse(db.row.payload).runner_result).toBeUndefined()
+
+    const replySender: QueueReplySender = {
+      async sendReply() {
+        outbound += 1
+        return { message_id: 'must-not-send' }
+      },
+    }
+    const finalizer = db.row.status === 'done'
+      ? await finalizeDoneQueueWork(db, { queueId: 42, replySender })
+      : null
+    expect(finalizer).toBeNull()
+    expect(outbound).toBe(0)
+    expect(db.row.status).toBe('in_progress')
+    expect(db.row.claimed_at).toBe(newClaimedAt)
+  })
+
+  test('fenced runner persists pre-invocation runtime authority and exact result claim', async () => {
+    const row = receivedRow({
+      payload: JSON.stringify({
+        content: 'fenced success',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+      }),
+      claim_expires_at: '2026-05-21T02:00:00.000Z',
+    })
+    const db = new FakeQueueDb(row)
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() { return okResult() },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      requireClaimFence: true,
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: true, code: 'DONE' })
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.queue_work_execution).toEqual({
+      source: 'state-daemon-queue-work-scheduler',
+      agent_id: 'codex-audit',
+      queue_id: '42',
+      runtime_id: 'fenced-runtime',
+      claimed_by: 'codex-audit',
+      claimed_at: '2026-05-21T00:00:01.000Z',
+      started_at: '2026-05-21T01:00:00.000Z',
+    })
+    expect(payload.runner_result.claim_fence).toEqual({
+      claimed_by: 'codex-audit',
+      claimed_at: '2026-05-21T00:00:01.000Z',
+    })
+    expect(payload.runner_result.completed_at).toBe(db.row.done_at)
+  })
+
   test('exact claim fence prevents stale runner_error persistence after ownership changes', async () => {
     const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
     const db = new FakeQueueDb(row)
@@ -539,6 +657,71 @@ describe('runReceivedQueueWork', () => {
 })
 
 describe('finalizeDoneQueueWork', () => {
+  test('claim/result fence blocks outbound and close for a stale same-agent result', async () => {
+    const oldClaimedAt = '2026-05-21T00:00:01.000Z'
+    const newClaimedAt = '2026-05-21T01:00:30.000Z'
+    const completedAt = '2026-05-21T01:01:00.000Z'
+    const result = {
+      ...okResult(),
+      runtime_id: 'fenced-runtime',
+      invocation_source: 'state-daemon-queue-work-scheduler',
+      completed_at: completedAt,
+      claim_fence: {
+        claimed_by: 'codex-audit',
+        claimed_at: oldClaimedAt,
+      },
+    }
+    const row = receivedRow({
+      status: 'done',
+      claimed_by: 'codex-audit',
+      claimed_at: newClaimedAt,
+      claim_expires_at: '2026-05-21T02:00:00.000Z',
+      done_at: completedAt,
+      payload: JSON.stringify({
+        content: 'stale result must not escape',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+        queue_work_execution: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+          runtime_id: 'fenced-runtime',
+          claimed_by: 'codex-audit',
+          claimed_at: oldClaimedAt,
+          started_at: '2026-05-21T00:30:00.000Z',
+        },
+        runner_result: result,
+      }),
+    })
+    const db = new FakeQueueDb(row, () => new Date('2026-05-21T01:02:00.000Z'))
+    let outbound = 0
+    const replySender: QueueReplySender = {
+      async sendReply() {
+        outbound += 1
+        return { message_id: 'must-not-send' }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      replySender,
+      claimResultFence: {
+        expectedClaimSource: 'state-daemon-queue-work-scheduler',
+        expectedRuntimeId: 'fenced-runtime',
+      },
+      now: () => new Date('2026-05-21T01:02:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'TERMINAL_EVIDENCE_INVALID' })
+    expect(outcome.detail).toContain('claimed_at')
+    expect(outbound).toBe(0)
+    expect(db.row.status).toBe('done')
+    expect(db.calls.some((call) => call.sql.includes("SET status = 'replied'"))).toBe(false)
+  })
+
   test('D1 done rows cannot close without an exact completed receipt DB fence', async () => {
     const row = receivedRow({
       status: 'done',
@@ -614,6 +797,64 @@ describe('finalizeDoneQueueWork', () => {
       'COMMIT',
     ])
     expect(events).not.toContain('ROLLBACK')
+  })
+
+  test('releases the row lock for a sender-owned close and verifies exact reply readback', async () => {
+    const row = receivedRow({
+      status: 'done',
+      payload: JSON.stringify({
+        channel_id: 'audit',
+        author_id: 'codex-cto',
+        content: 'Audit PR #489',
+        runner_result: okResult({ reply: 'L3 LGTM', next_action: 'reply' }),
+      }),
+    })
+    const events: string[] = []
+    const db = new FakeQueueDb(row)
+    const query = db.query.bind(db)
+    db.query = async (sql, params) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+        events.push(sql)
+      } else if (sql.includes('FOR UPDATE')) {
+        events.push('SELECT_FOR_UPDATE')
+      }
+      return query(sql, params)
+    }
+    const replySender: QueueReplySender = {
+      queue_close_mode: 'sender',
+      async sendReply() {
+        events.push('SEND_REPLY')
+        expect(events.at(-2)).toBe('COMMIT')
+        db.row.status = 'replied'
+        db.row.replied_with = 'reply-1'
+        db.row.claimed_by = null
+        db.row.claimed_at = null
+        db.row.claim_expires_at = null
+        return { message_id: 'reply-1', queue_closed: true }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      replySender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      code: 'REPLIED',
+      queue_id: '42',
+      replied_with: 'reply-1',
+    })
+    expect(events).toEqual([
+      'BEGIN',
+      'SELECT_FOR_UPDATE',
+      'COMMIT',
+      'SEND_REPLY',
+      'BEGIN',
+      'SELECT_FOR_UPDATE',
+      'COMMIT',
+    ])
   })
 
   test('sends the stored reply and closes done rows as replied', async () => {

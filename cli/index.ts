@@ -27,6 +27,7 @@ import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac } from 'node:crypto'
 import { computeShirubeD1InternalReplyMessageId } from '../core/shirube-d1-runtime'
+import { queueWorkClaimResultFenceMismatches } from '../core/queue-work'
 import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
@@ -244,6 +245,98 @@ function parseCsvFlag(value: string | undefined): string[] | null {
   return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
+async function emitPhase5Warnings(input: {
+  sender: string
+  mention: string | undefined
+  mentions: string[] | undefined
+  cc: string[]
+  fyi: string[]
+  content: string
+}): Promise<void> {
+  try {
+    const { resolvePhase5 } = await import('../core/routing/server-integration')
+    const phase5Warn = resolvePhase5({
+      sender: input.sender,
+      channel_id: '',
+      mention: input.mention,
+      mentions: input.mentions,
+      cc: input.cc,
+      fyi: input.fyi,
+      content: input.content,
+      isKnownAgent: () => true,
+    })
+    if (phase5Warn?.ok) {
+      for (const warning of phase5Warn.warnings) {
+        process.stderr.write(`agent-com: phase5 warning: ${warning}\n`)
+      }
+    }
+  } catch {}
+}
+
+type CliPhase5Resolution =
+  | {
+      ok: true
+      content: string
+      mentions: string[]
+      cc: string[]
+      fyi: string[]
+      warnings: string[]
+    }
+  | {
+      ok: false
+      code: string
+      detail: string
+      intendedRecipients: string[]
+      violations: string[]
+    }
+
+async function resolveCliPhase5(input: {
+  db: Client
+  sender: string
+  channelId: string
+  mention: string | undefined
+  mentions: string[] | undefined
+  cc: string[]
+  fyi: string[]
+  content: string
+}): Promise<CliPhase5Resolution> {
+  const { resolvePhase5 } = await import('../core/routing/server-integration')
+  const knownAgents = await loadKnownAgentIds(input.db)
+  await refreshChannelPolicyDbSnapshot(input.db)
+  const phase5 = resolvePhase5({
+    sender: input.sender,
+    channel_id: input.channelId,
+    mention: input.mention,
+    mentions: input.mentions,
+    cc: input.cc,
+    fyi: input.fyi,
+    content: input.content,
+    isKnownAgent: (id: string) => knownAgents.includes(id),
+  })
+  if (phase5?.ok) {
+    return {
+      ok: true,
+      content: phase5.content,
+      mentions: phase5.mentions,
+      cc: phase5.cc,
+      fyi: phase5.fyi,
+      warnings: phase5.warnings,
+    }
+  }
+
+  const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
+  const violations = phase5?.ok === false ? phase5.violations ?? [] : []
+  const intendedRecipients = phase5?.ok === false ? phase5.intended_recipients ?? [] : []
+  const detail = code === 'UNKNOWN_AGENT'
+    ? `mention agent_id "${phase5?.ok === false ? phase5.detail : ''}" not found in agents registry`
+    : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
+      ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
+      : code === 'OUTBOUND_ACL_VIOLATION'
+        ? `sender ${input.sender} or recipients ${violations.join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(input.channelId).outboundAllowlist)} policy_source=${getChannelPolicy(input.channelId).policySource}`
+        : 'mention/mentions must contain exactly one non-empty agent_id'
+  return { ok: false, code, detail, intendedRecipients, violations }
+}
+
 function parsePolicyArray(raw: unknown): string[] | null {
   if (Array.isArray(raw)) {
     return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -279,6 +372,102 @@ async function auditLog(db: Client, eventType: string, agentId: string | null, t
   )
 }
 
+async function enqueueOutboundProjection(input: {
+  db: Client
+  messageId: string
+  channelId: string
+  threadId: string | null
+  agentId: string
+  content: string
+  recipients: string[]
+}): Promise<{ outboundQueued: boolean; outboundSkipReason: string | null }> {
+  const projection = await resolveOutboundProjectionDecision(input.db as any, {
+    channelId: input.channelId,
+    threadId: input.threadId,
+    senderAgentId: input.agentId,
+    recipientAgentIds: input.recipients,
+  })
+  const outboundSkipReason = outboundProjectionSkipReason(projection)
+  if (outboundSkipReason) {
+    await auditLog(input.db, 'outbound.enqueue_skipped', input.agentId, input.channelId, {
+      code: outboundProjectionSkipCode(outboundSkipReason),
+      message_id: input.messageId,
+      channel_external_id: projection.channelExternalId,
+      consumer_source: projection.consumerSource,
+      consumer_evidence: projection.consumerEvidence,
+      projection_source: projection.projectionSource,
+      delivery_fallback_reason: projection.deliveryFallbackReason,
+      delivery_diagnostics: projection.deliveryDiagnostics,
+      reason: outboundSkipReason,
+    })
+    return { outboundQueued: false, outboundSkipReason }
+  }
+
+  await input.db.query(
+    `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+    [
+      input.messageId,
+      input.agentId,
+      projection.consumerAgentId,
+      projection.consumerSource,
+      projection.consumerEvidence?.connector_instance_id ?? null,
+      projection.consumerEvidence?.channel_binding_id ?? null,
+      projection.consumerEvidence?.provider_channel_access_id ?? null,
+      projection.projectionIdentityId,
+      projection.intendedProjectionIdentityId,
+      projection.projectionSource,
+      projection.projectionFallbackReason,
+      projection.deliveryFallbackReason,
+      JSON.stringify(projection.deliveryDiagnostics),
+      projection.channelExternalId!,
+      truncateForDiscord(decorateProjectedContent({
+        content: input.content,
+        authorAgentId: input.agentId,
+        consumerAgentId: projection.consumerAgentId,
+        recipients: input.recipients,
+      })),
+    ],
+  )
+  return { outboundQueued: true, outboundSkipReason: null }
+}
+
+function unavailableConversationControlPlaneSummary(
+  gate: { mode: string; audit_only: boolean; block_on_error: boolean },
+  queueRowAvailable: boolean,
+): Record<string, unknown> {
+  return {
+    ok: false,
+    action: 'skipped',
+    mode: gate.mode,
+    audit_only: gate.audit_only,
+    block_on_error: gate.block_on_error,
+    error: queueRowAvailable ? 'DB_ADAPTER_UNAVAILABLE' : 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
+  }
+}
+
+function cliSendResponseBase(input: {
+  messageId: string
+  channelId: string
+  threadId: string | null
+  replyTo: string
+  mentions: string[]
+  cc: string[]
+  fyi: string[]
+}): Record<string, unknown> {
+  return {
+    ok: true,
+    message_id: input.messageId,
+    channel_id: input.channelId,
+    thread_id: input.threadId,
+    reply_to: input.replyTo,
+    mentions: input.mentions,
+    active_owner: input.mentions[0] ?? null,
+    cc: input.cc,
+    fyi: input.fyi,
+  }
+}
+
 type ExplicitReplyQueueRow = {
   id: number | string
   agent_id: string
@@ -286,7 +475,10 @@ type ExplicitReplyQueueRow = {
   payload: string | null
   status: string
   claimed_by: string | null
+  claimed_at: string | Date | null
   claim_expires_at: string | Date | null
+  done_at: string | Date | null
+  database_now: string | Date | null
   replied_with: string | null
 }
 
@@ -304,6 +496,12 @@ type ClaimRenewalEvidence = {
   audit_event_type: 'queue.claim_renewed'
   authorization: 'exact_queue_id_and_same_claim_owner'
   free_form_text_authorizes_renewal: false
+}
+
+type QueueWorkFinalizerCloseFence = {
+  agent_id: string
+  claimed_by: string
+  claimed_at: string
 }
 
 const ACTIVE_REPLY_CLAIM_STATUSES = new Set(['received', 'in_progress'])
@@ -2814,6 +3012,7 @@ async function sendMessage(args: string[]) {
   const noClose = flagEnabled(flags['no-close'])
   const closeRequested = flagEnabled(flags.close)
   const d1InvocationKey = flags['d1-invocation-key']
+  const queueWorkFinalizer = flagEnabled(flags['queue-work-finalizer'])
 
   if (!content) {
     console.error('Error: --content is required')
@@ -2821,6 +3020,13 @@ async function sendMessage(args: string[]) {
   }
   if (noClose && closeRequested) {
     console.error('Error: --no-close and --close are mutually exclusive')
+    process.exit(2)
+  }
+  if (
+    queueWorkFinalizer
+    && (!queueIdRaw || !messageIdRaw || !closeRequested || noClose || d1InvocationKey !== undefined)
+  ) {
+    console.error('Error: --queue-work-finalizer requires --queue-id, --message-id, and --close; it cannot be combined with --no-close or --d1-invocation-key')
     process.exit(2)
   }
   if (
@@ -2841,25 +3047,7 @@ async function sendMessage(args: string[]) {
   let fyiObservers: string[] = []
 
   // Phase 5 — best-effort client-side warning (server/DB path is canonical).
-  // The authoritative resolver below runs after reply_to resolves a channel.
-  try {
-    const { resolvePhase5 } = await import('../core/routing/server-integration')
-    const phase5Warn = resolvePhase5({
-      sender: agentId,
-      channel_id: '',
-      mention: mentionRaw,
-      mentions: mentionsInput,
-      cc: ccInput,
-      fyi: fyiInput,
-      content,
-      isKnownAgent: () => true,
-    })
-    if (phase5Warn && phase5Warn.ok) {
-      for (const w of phase5Warn.warnings) {
-        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
-      }
-    }
-  } catch {}
+  await emitPhase5Warnings({ sender: agentId, mention: mentionRaw, mentions: mentionsInput, cc: ccInput, fyi: fyiInput, content })
 
   // ARC codex audit follow-up (PR#134) + Issue #278 (A) segment 3d:
   // wrap the entire DB-touching flow in BEGIN/COMMIT. The lock has
@@ -2923,6 +3111,7 @@ async function sendMessage(args: string[]) {
       let target: Target | null = null
       const explicitClose = !!queueIdRaw || !!messageIdRaw
       let claimRenewalEvidence: ClaimRenewalEvidence | null = null
+      let queueWorkFinalizerCloseFence: QueueWorkFinalizerCloseFence | null = null
 
       if (explicitClose) {
         let qres
@@ -2932,7 +3121,9 @@ async function sendMessage(args: string[]) {
             writeFailureJson('QUEUE_NOT_FOUND', `invalid queue_id: ${queueIdRaw}`, { queue_id: queueIdRaw })
           }
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by,
+                    claimed_at::text AS claimed_at,
+                    claim_expires_at, done_at, CURRENT_TIMESTAMP AS database_now, replied_with
                FROM message_queue
               WHERE id = $1
               FOR UPDATE`,
@@ -2940,7 +3131,9 @@ async function sendMessage(args: string[]) {
           )
         } else {
           qres = await db.query(
-            `SELECT id, agent_id, message_id, payload, status, claimed_by, claim_expires_at, replied_with
+            `SELECT id, agent_id, message_id, payload, status, claimed_by,
+                    claimed_at::text AS claimed_at,
+                    claim_expires_at, done_at, CURRENT_TIMESTAMP AS database_now, replied_with
                FROM message_queue
               WHERE agent_id = $1 AND message_id = $2
               ORDER BY created_at DESC
@@ -2971,8 +3164,55 @@ async function sendMessage(args: string[]) {
             message_id: qrow.message_id,
           })
         }
+        let queueWorkFinalizerDoneReply = false
+        if (queueWorkFinalizer && qrow.status === 'done' && !qrow.replied_with) {
+          const queuePayload = parseQueuePayloadLoose(qrow.payload)
+          const runnerResult = queuePayload.runner_result && typeof queuePayload.runner_result === 'object'
+            ? queuePayload.runner_result as Record<string, unknown>
+            : {}
+          const expectedSource = 'state-daemon-queue-work-scheduler'
+          const mismatches = queueWorkClaimResultFenceMismatches({
+            row: qrow,
+            payload: queuePayload,
+            expectedClaimSource: expectedSource,
+            expectedRuntimeId: process.env.AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID?.trim() || undefined,
+          })
+          if (runnerResult.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
+          if (runnerResult.ok !== true) mismatches.push('runner_result.ok')
+          if (runnerResult.next_action !== 'reply') mismatches.push('runner_result.next_action')
+          if (runnerResult.reply !== content) mismatches.push('runner_result.reply')
+          if (mismatches.length > 0) {
+            writeFailureJson(
+              'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+              `done-row queue-work reply authority mismatch: ${mismatches.join(', ')}`,
+              {
+                queue_id: qrow.id,
+                message_id: qrow.message_id,
+                status: qrow.status,
+                mismatches,
+              },
+            )
+          }
+          queueWorkFinalizerCloseFence = {
+            agent_id: qrow.agent_id,
+            claimed_by: qrow.claimed_by!,
+            claimed_at: normalizeDateString(qrow.claimed_at)!,
+          }
+          queueWorkFinalizerDoneReply = true
+        }
+        if (queueWorkFinalizer && qrow.status !== 'done' && qrow.status !== 'replied') {
+          writeFailureJson(
+            'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+            `queue-work finalizer requires a done row or an idempotent replied replay; got ${qrow.status}`,
+            {
+              queue_id: qrow.id,
+              message_id: qrow.message_id,
+              status: qrow.status,
+            },
+          )
+        }
         const d1DoneReply = d1InvocationKey !== undefined && qrow.status === 'done' && !qrow.replied_with
-        if ((qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) && !d1DoneReply) {
+        if ((qrow.replied_with || TERMINAL_REPLY_CLOSE_STATUSES.has(qrow.status)) && !d1DoneReply && !queueWorkFinalizerDoneReply) {
           const replay = await loadReplyCloseReplay(db, qrow, agentId)
           if (replay.kind === 'idempotent') {
             await db.query('COMMIT')
@@ -3024,14 +3264,14 @@ async function sendMessage(args: string[]) {
             })
           }
         }
-        if (!d1DoneReply && ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) && qrow.claimed_by && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is actively claimed by ${qrow.claimed_by}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
             claimed_by: qrow.claimed_by,
           })
         }
-        if (!d1DoneReply &&
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply &&
           ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status) &&
           qrow.claimed_by === agentId &&
           (dateMs(qrow.claim_expires_at) === null || dateMs(qrow.claim_expires_at)! <= Date.now())
@@ -3048,7 +3288,7 @@ async function sendMessage(args: string[]) {
           claimRenewalEvidence = await renewSameOwnerClaimForReplyClose(db, qrow, agentId)
           qrow.claim_expires_at = claimRenewalEvidence.new_claim_expires_at
         }
-        if (!d1DoneReply && !ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && !ACTIVE_REPLY_CLAIM_STATUSES.has(qrow.status)) {
           writeFailureJson('INVALID_STATE', `queue row status=${qrow.status}; expected received|in_progress for explicit close`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
@@ -3056,7 +3296,7 @@ async function sendMessage(args: string[]) {
             claimed_by: qrow.claimed_by,
           })
         }
-        if (!d1DoneReply && qrow.claimed_by !== agentId) {
+        if (!d1DoneReply && !queueWorkFinalizerDoneReply && qrow.claimed_by !== agentId) {
           writeFailureJson('NOT_CLAIM_OWNER', `queue row is not actively claimed by ${agentId}`, {
             queue_id: qrow.id,
             message_id: qrow.message_id,
@@ -3164,50 +3404,39 @@ async function sendMessage(args: string[]) {
       }
 
       {
-        const { resolvePhase5 } = await import('../core/routing/server-integration')
-        const knownAgents = await loadKnownAgentIds(db)
-        await refreshChannelPolicyDbSnapshot(db)
-        const phase5 = resolvePhase5({
+        const phase5 = await resolveCliPhase5({
+          db,
           sender: agentId,
-          channel_id: channelId,
+          channelId,
           mention: mentionRaw,
           mentions: mentionsInput,
           cc: ccInput,
           fyi: fyiInput,
           content,
-          isKnownAgent: (id: string) => knownAgents.includes(id),
         })
-        if (!phase5 || !phase5.ok) {
-          const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
-          const detail = code === 'UNKNOWN_AGENT'
-            ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
-            : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
-              ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
-              : code === 'OUTBOUND_ACL_VIOLATION'
-                ? `sender ${agentId} or recipients ${(phase5 && !phase5.ok ? phase5.violations ?? [] : []).join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(channelId).outboundAllowlist)} policy_source=${getChannelPolicy(channelId).policySource}`
-                : 'mention/mentions must contain exactly one non-empty agent_id'
-          if (code === 'OUTBOUND_ACL_VIOLATION' && phase5 && !phase5.ok) {
+        if (!phase5.ok) {
+          if (phase5.code === 'OUTBOUND_ACL_VIOLATION') {
             await db.query('ROLLBACK').catch(() => {})
             committed = true
-            await auditOutboundAclViolation(db, 'send', agentId, channelId, phase5.intended_recipients ?? [], {
+            await auditOutboundAclViolation(db, 'send', agentId, channelId, phase5.intendedRecipients, {
               ok: false,
-              violations: phase5.violations ?? [],
+              violations: phase5.violations,
               violated_policy: 'channel.outboundAllowlist',
               outbound_allowlist: getChannelPolicy(channelId).outboundAllowlist,
               policy_source: getChannelPolicy(channelId).policySource,
             }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
           }
           if (explicitClose) {
-            writeFailureJson(code, detail, {
+            writeFailureJson(phase5.code, phase5.detail, {
               queue_id: target.queue_id,
               message_id: replyTo,
               channel_id: channelId,
-              intended_recipients: phase5 && !phase5.ok ? phase5.intended_recipients ?? undefined : undefined,
-              violations: phase5 && !phase5.ok ? phase5.violations ?? undefined : undefined,
-            }, code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+              intended_recipients: phase5.intendedRecipients,
+              violations: phase5.violations,
+            }, phase5.code === 'INVALID_MENTION' || phase5.code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
           }
-          console.error(`Error [${code}]: ${detail}`)
-          throw new CliSendExit(code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+          console.error(`Error [${phase5.code}]: ${phase5.detail}`)
+          throw new CliSendExit(phase5.code === 'INVALID_MENTION' || phase5.code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
         }
         content = phase5.content
         mentions = phase5.mentions
@@ -3263,6 +3492,15 @@ async function sendMessage(args: string[]) {
       let conversationControlPlaneSummary: Record<string, unknown> | null = null
 
       const id = d1InvocationKey ? computeShirubeD1InternalReplyMessageId(d1InvocationKey) : randomUUID()
+      const responseBase = cliSendResponseBase({
+        messageId: id,
+        channelId,
+        threadId,
+        replyTo,
+        mentions,
+        cc: ccObservers,
+        fyi: fyiObservers,
+      })
       // ARC codex audit (2026-04-10): include HMAC auth metadata so receivers
       // in `enforce` mode don't drop CLI-originated rows as [UNVERIFIED]. The
       // helper returns undefined when AGENT_COMMS_AUTH_MODE === 'off' / no
@@ -3338,15 +3576,7 @@ async function sendMessage(args: string[]) {
           await db.query('COMMIT')
           committed = true
           process.stdout.write(JSON.stringify({
-            ok: true,
-            message_id: id,
-            channel_id: channelId,
-            thread_id: threadId,
-            reply_to: replyTo,
-            mentions,
-            active_owner: mentions[0] ?? null,
-            cc: ccObservers,
-            fyi: fyiObservers,
+            ...responseBase,
             outbound_queued: null,
             work_closed: false,
             close_mode: 'none',
@@ -3403,14 +3633,7 @@ async function sendMessage(args: string[]) {
         const queueRow = fanoutRes.inserted_rows.find((row) => row.recipient === activeOwner)
         const rawAdapter = getRawDbAdapter(db)
         if (!queueRow || !rawAdapter) {
-          conversationControlPlaneSummary = {
-            ok: false,
-            action: 'skipped',
-            mode: conversationGate.mode,
-            audit_only: conversationGate.audit_only,
-            block_on_error: conversationGate.block_on_error,
-            error: queueRow ? 'DB_ADAPTER_UNAVAILABLE' : 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
-          }
+          conversationControlPlaneSummary = unavailableConversationControlPlaneSummary(conversationGate, !!queueRow)
           await auditLog(db, 'conversation.control_plane.apply', agentId, channelId, {
             surface: 'cli.send',
             message_id: id,
@@ -3493,69 +3716,17 @@ async function sendMessage(args: string[]) {
       // queued. The receiver pipeline still picks up the agent_messages row
       // via pg_notify, so other bots see the message; only the human-facing
       // Discord display is skipped. We surface this in the response.
-      const projection = await resolveOutboundProjectionDecision(db as any, {
+      // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars before
+      // enqueue so an over-long LLM reply is truncated once, deterministically.
+      const { outboundQueued, outboundSkipReason } = await enqueueOutboundProjection({
+        db,
+        messageId: id,
         channelId,
         threadId,
-        senderAgentId: agentId,
-        recipientAgentIds: mentions,
+        agentId,
+        content,
+        recipients: mentions,
       })
-
-      let outboundQueued = false
-      const outboundSkipReason = outboundProjectionSkipReason(projection)
-      if (outboundSkipReason) {
-        await auditLog(db, 'outbound.enqueue_skipped', agentId, channelId, {
-          code: outboundProjectionSkipCode(outboundSkipReason),
-          message_id: id,
-          channel_external_id: projection.channelExternalId,
-          consumer_source: projection.consumerSource,
-          consumer_evidence: projection.consumerEvidence,
-          projection_source: projection.projectionSource,
-          delivery_fallback_reason: projection.deliveryFallbackReason,
-          delivery_diagnostics: projection.deliveryDiagnostics,
-          reason: outboundSkipReason,
-        })
-      } else {
-        const discordExternalId = projection.channelExternalId!
-        try {
-          // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars before
-          // enqueue so an over-long LLM reply is truncated once, deterministically,
-          // instead of being split across retries inside the Discord adapter.
-          await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-            [
-              id,
-              agentId,
-              projection.consumerAgentId,
-              projection.consumerSource,
-              projection.consumerEvidence?.connector_instance_id ?? null,
-              projection.consumerEvidence?.channel_binding_id ?? null,
-              projection.consumerEvidence?.provider_channel_access_id ?? null,
-              projection.projectionIdentityId,
-              projection.intendedProjectionIdentityId,
-              projection.projectionSource,
-              projection.projectionFallbackReason,
-              projection.deliveryFallbackReason,
-              JSON.stringify(projection.deliveryDiagnostics),
-              discordExternalId,
-              truncateForDiscord(decorateProjectedContent({
-                content,
-                authorAgentId: agentId,
-                consumerAgentId: projection.consumerAgentId,
-                recipients: mentions,
-              })),
-            ],
-          )
-          outboundQueued = true
-        } catch (err) {
-          // INSERT into outbound_queue failed — this is a DB error, not a
-          // Discord error. Roll back the entire transaction so the caller
-          // gets a clean retry path. The throw is caught by the inner finally
-          // (which ROLLBACKs because committed=false) and the outer catch
-          // (which exits non-zero).
-          throw err
-        }
-      }
 
       const workClosed = !noClose
       if (workClosed) {
@@ -3565,17 +3736,64 @@ async function sendMessage(args: string[]) {
         // the only path now. #420 keeps this default path for backward
         // compatibility; ACK/progress callers opt out with --no-close.
         // ─────────────────────────────────────────────────────────────────
-        await db.query(
-          `UPDATE message_queue
-              SET status = 'replied',
-                  replied_at = now(),
-                  replied_with = $1,
-                  claimed_by = NULL,
-                  claimed_at = NULL,
-                  claim_expires_at = NULL
-           WHERE id = $2`,
-          [id, target.queue_id],
-        )
+        if (queueWorkFinalizerCloseFence) {
+          // The initial authorization read is necessary but not sufficient:
+          // a lease can expire while the reply/fanout/projection writes are
+          // being prepared. Recheck the exact claim against a non-transaction-
+          // frozen database clock at the mutation itself. RETURNING gives the
+          // unified PG/SQLite adapter an exact affected-row count; throwing on
+          // anything other than one rolls back every earlier write in this
+          // transaction.
+          const mutationClockSql = isSqliteMode()
+            ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+            : 'clock_timestamp()'
+          const closed = await db.query<{ id: string | number }>(
+            `UPDATE message_queue
+                SET status = 'replied',
+                    replied_at = now(),
+                    replied_with = $1,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+             WHERE id = $2
+               AND status = 'done'
+               AND agent_id = $3
+               AND claimed_by = $4
+               AND claimed_at = $5
+               AND claim_expires_at > ${mutationClockSql}
+             RETURNING id`,
+            [
+              id,
+              target.queue_id,
+              queueWorkFinalizerCloseFence.agent_id,
+              queueWorkFinalizerCloseFence.claimed_by,
+              queueWorkFinalizerCloseFence.claimed_at,
+            ],
+          )
+          if (closed.rows.length !== 1) {
+            writeFailureJson(
+              'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
+              'queue-work finalizer exact claim or live lease was lost before direct close',
+              {
+                queue_id: target.queue_id,
+                message_id: target.reply_to,
+                mismatches: ['mutation_time_claim_fence'],
+              },
+            )
+          }
+        } else {
+          await db.query(
+            `UPDATE message_queue
+                SET status = 'replied',
+                    replied_at = now(),
+                    replied_with = $1,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    claim_expires_at = NULL
+             WHERE id = $2`,
+            [id, target.queue_id],
+          )
+        }
         // spec §4.2 step 10-11 — flip the agent based on remaining open
         // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
         // the send only closed ONE claim; if other claims are still 'received'
@@ -3606,15 +3824,7 @@ async function sendMessage(args: string[]) {
       committed = true
 
       process.stdout.write(JSON.stringify({
-        ok: true,
-        message_id: id,
-        channel_id: channelId,
-        thread_id: threadId,
-        reply_to: replyTo,
-        mentions,
-        active_owner: mentions[0] ?? null,
-        cc: ccObservers,
-        fyi: fyiObservers,
+        ...responseBase,
         auth_signed: authMeta !== undefined,
         outbound_queued: outboundQueued,
         work_closed: workClosed,
@@ -3704,25 +3914,7 @@ async function notifyMessage(args: string[]) {
   let fyiObservers: string[] = []
 
   // Phase 5 — best-effort client-side warning (server/DB path is canonical).
-  // The authoritative resolver below runs after channel name/id resolution.
-  try {
-    const { resolvePhase5 } = await import('../core/routing/server-integration')
-    const phase5Warn = resolvePhase5({
-      sender: agentId,
-      channel_id: '',
-      mention: mentionRaw,
-      mentions: mentionsInput,
-      cc: ccInput,
-      fyi: fyiInput,
-      content,
-      isKnownAgent: () => true,
-    })
-    if (phase5Warn && phase5Warn.ok) {
-      for (const w of phase5Warn.warnings) {
-        process.stderr.write(`agent-com: phase5 warning: ${w}\n`)
-      }
-    }
-  } catch {}
+  await emitPhase5Warnings({ sender: agentId, mention: mentionRaw, mentions: mentionsInput, cc: ccInput, fyi: fyiInput, content })
 
   const db = await getDb()
   try {
@@ -3803,39 +3995,28 @@ async function notifyMessage(args: string[]) {
     }
 
     {
-      const { resolvePhase5 } = await import('../core/routing/server-integration')
-      const knownAgents = await loadKnownAgentIds(db)
-      await refreshChannelPolicyDbSnapshot(db)
-      const phase5 = resolvePhase5({
+      const phase5 = await resolveCliPhase5({
+        db,
         sender: agentId,
-        channel_id: resolvedChannelId,
+        channelId: resolvedChannelId,
         mention: mentionRaw,
         mentions: mentionsInput,
         cc: ccInput,
         fyi: fyiInput,
         content,
-        isKnownAgent: (id: string) => knownAgents.includes(id),
       })
-      if (!phase5 || !phase5.ok) {
-        const code = phase5?.ok === false ? phase5.error : 'INVALID_MENTION'
-        const detail = code === 'UNKNOWN_AGENT'
-          ? `mention agent_id "${phase5 && !phase5.ok ? phase5.detail : ''}" not found in agents registry`
-          : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
-            ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
-            : code === 'OUTBOUND_ACL_VIOLATION'
-              ? `sender ${agentId} or recipients ${(phase5 && !phase5.ok ? phase5.violations ?? [] : []).join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(resolvedChannelId).outboundAllowlist)} policy_source=${getChannelPolicy(resolvedChannelId).policySource}`
-              : 'mention/mentions must contain exactly one non-empty agent_id'
-        if (code === 'OUTBOUND_ACL_VIOLATION' && phase5 && !phase5.ok) {
-          await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, phase5.intended_recipients ?? [], {
+      if (!phase5.ok) {
+        if (phase5.code === 'OUTBOUND_ACL_VIOLATION') {
+          await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, phase5.intendedRecipients, {
             ok: false,
-            violations: phase5.violations ?? [],
+            violations: phase5.violations,
             violated_policy: 'channel.outboundAllowlist',
             outbound_allowlist: getChannelPolicy(resolvedChannelId).outboundAllowlist,
             policy_source: getChannelPolicy(resolvedChannelId).policySource,
           }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
         }
-        console.error(`Error [${code}]: ${detail}`)
-        process.exit(code === 'INVALID_MENTION' || code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
+        console.error(`Error [${phase5.code}]: ${phase5.detail}`)
+        process.exit(phase5.code === 'INVALID_MENTION' || phase5.code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
       }
       content = phase5.content
       mentions = phase5.mentions
@@ -3923,14 +4104,7 @@ async function notifyMessage(args: string[]) {
         const queueRow = fanoutRes.inserted_rows.find((row) => row.recipient === activeOwner)
         const rawAdapter = getRawDbAdapter(db)
         if (!queueRow || !rawAdapter) {
-          conversationControlPlaneSummary = {
-            ok: false,
-            action: 'skipped',
-            mode: conversationGate.mode,
-            audit_only: conversationGate.audit_only,
-            block_on_error: conversationGate.block_on_error,
-            error: queueRow ? 'DB_ADAPTER_UNAVAILABLE' : 'CONVERSATION_QUEUE_ROW_NOT_INSERTED',
-          }
+          conversationControlPlaneSummary = unavailableConversationControlPlaneSummary(conversationGate, !!queueRow)
           await auditLog(db, 'conversation.control_plane.apply', agentId, resolvedChannelId, {
             surface: 'cli.notify',
             message_id: id,
@@ -3974,62 +4148,24 @@ async function notifyMessage(args: string[]) {
         }
       }
 
-      const projection = await resolveOutboundProjectionDecision(db as any, {
-        channelId: resolvedChannelId,
-        threadId: resolvedThreadId,
-        senderAgentId: agentId,
-        recipientAgentIds: mentions,
-      })
       let outboundQueued = false
-      const outboundSkipReason = outboundProjectionSkipReason(projection)
-      if (outboundSkipReason) {
-        await auditLog(db, 'outbound.enqueue_skipped', agentId, resolvedChannelId, {
-          code: outboundProjectionSkipCode(outboundSkipReason),
-          message_id: id,
-          channel_external_id: projection.channelExternalId,
-          consumer_source: projection.consumerSource,
-          consumer_evidence: projection.consumerEvidence,
-          projection_source: projection.projectionSource,
-          delivery_fallback_reason: projection.deliveryFallbackReason,
-          delivery_diagnostics: projection.deliveryDiagnostics,
-          reason: outboundSkipReason,
+      let outboundSkipReason: string | null = null
+      try {
+        const outbound = await enqueueOutboundProjection({
+          db,
+          messageId: id,
+          channelId: resolvedChannelId,
+          threadId: resolvedThreadId,
+          agentId,
+          content,
+          recipients: mentions,
         })
-      } else {
-        const discordExternalId = projection.channelExternalId!
-        try {
-          // v2.1.0: clamp outbound content at DISCORD_MAX (1900) chars.
-          await db.query(
-            `INSERT INTO outbound_queue (message_id, agent_id, consumer_agent_id, consumer_source, delivery_connector_instance_id, channel_binding_id, provider_channel_access_id, projection_identity_id, intended_projection_identity_id, projection_source, projection_fallback_reason, delivery_fallback_reason, delivery_diagnostics, channel_external_id, content)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
-            [
-              id,
-              agentId,
-              projection.consumerAgentId,
-              projection.consumerSource,
-              projection.consumerEvidence?.connector_instance_id ?? null,
-              projection.consumerEvidence?.channel_binding_id ?? null,
-              projection.consumerEvidence?.provider_channel_access_id ?? null,
-              projection.projectionIdentityId,
-              projection.intendedProjectionIdentityId,
-              projection.projectionSource,
-              projection.projectionFallbackReason,
-              projection.deliveryFallbackReason,
-              JSON.stringify(projection.deliveryDiagnostics),
-              discordExternalId,
-              truncateForDiscord(decorateProjectedContent({
-                content,
-                authorAgentId: agentId,
-                consumerAgentId: projection.consumerAgentId,
-                recipients: mentions,
-              })),
-            ],
-          )
-          outboundQueued = true
-        } catch (err) {
-          console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
-          process.exitCode = 1
-          return
-        }
+        outboundQueued = outbound.outboundQueued
+        outboundSkipReason = outbound.outboundSkipReason
+      } catch (err) {
+        console.error(`Error [OUTBOUND_ENQUEUE_FAILED]: ${String(err).slice(0, 200)}`)
+        process.exitCode = 1
+        return
       }
 
       await db.query('COMMIT')

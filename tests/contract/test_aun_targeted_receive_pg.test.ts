@@ -69,13 +69,23 @@ describe('targeted receive against real Postgres (lock shape regression)', () =>
     // nullable side of an outer join'
     expect(r.stderr).not.toContain('nullable side of an outer join')
     expect(r.ok).toBe(true)
+    expect(r.summary?.claimed).toMatchObject({
+      queue_id: String(queueId),
+      claimed_by: agent,
+    })
+    expect(Number.isFinite(Date.parse(r.summary?.claimed?.claimed_at ?? ''))).toBe(true)
+    expect(Number.isFinite(Date.parse(r.summary?.claimed?.claim_expires_at ?? ''))).toBe(true)
 
     const row = await pg.query(
-      `SELECT status, claimed_by FROM message_queue WHERE id = $1`,
+      `SELECT status, claimed_by, claimed_at::text AS claimed_at,
+              claim_expires_at::text AS claim_expires_at
+         FROM message_queue WHERE id = $1`,
       [queueId],
     )
     expect(row.rows[0].status).toBe('received')
     expect(row.rows[0].claimed_by).toBe(agent)
+    expect(row.rows[0].claimed_at).toBe(r.summary?.claimed?.claimed_at)
+    expect(row.rows[0].claim_expires_at).toBe(r.summary?.claimed?.claim_expires_at)
   })
 
   test('claim persists receive_claim.source evidence on PG when configured', async () => {

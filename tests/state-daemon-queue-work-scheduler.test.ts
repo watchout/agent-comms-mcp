@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
 } from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
@@ -255,6 +256,59 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
 }
 
 describe('state_daemon queue work scheduler boundary', () => {
+  test('targeted receive output becomes the exact immutable runner claim fence', () => {
+    const fence = exactClaimFenceFromTargetedReceive({
+      ok: true,
+      code: 0,
+      stdout: '',
+      stderr: '',
+      plan: {} as any,
+      summary: {
+        ok: true,
+        dry_run: false,
+        mode: 'targeted-receive',
+        agent_id: 'qa',
+        expected_agent_id: 'qa',
+        queue_id: '42',
+        selected: null,
+        claimed: {
+          waiting: 0,
+          queue_id: 42,
+          claimed_by: 'qa',
+          claimed_at: '2026-08-02T01:00:00.123Z',
+          claim_expires_at: '2026-08-02T01:01:00.123Z',
+        },
+        waiting: 0,
+        blocked_reason: null,
+        observed_status: 'pending',
+      },
+    }, { queueId: 42, agentId: 'qa' })
+
+    expect(fence).toEqual({
+      claimedBy: 'qa',
+      claimedAt: '2026-08-02T01:00:00.123Z',
+    })
+  })
+
+  test('targeted receive fence rejects a different queue incarnation', () => {
+    expect(() => exactClaimFenceFromTargetedReceive({
+      ok: true,
+      code: 0,
+      stdout: '',
+      stderr: '',
+      plan: {} as any,
+      summary: {
+        claimed: {
+          waiting: 0,
+          queue_id: 43,
+          claimed_by: 'qa',
+          claimed_at: '2026-08-02T01:00:00.000Z',
+          claim_expires_at: '2026-08-02T01:01:00.000Z',
+        },
+      } as any,
+    }, { queueId: 42, agentId: 'qa' })).toThrow('no exact claim fence')
+  })
+
   test('valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers', async () => {
     const agentId = 'dev-001'
     const calls: Array<{ queueId: number; agentId: string }> = []
