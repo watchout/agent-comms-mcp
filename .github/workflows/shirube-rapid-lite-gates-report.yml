@@ -21,7 +21,7 @@ env:
   TARGET_DIR: target
   RUNTIME_DIR: runtime-source
   ACTIVE_RUNTIME_DIR: runtime-base-source
-  RESULT_DIR: target/.shirube-rapid-lite
+  RESULT_DIR: .shirube-rapid-lite
   PUBLIC_RUNTIME_REF: 4ea4b8bc122e22c47323fc8836dc3d7aedd487e9
 
 jobs:
@@ -35,6 +35,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: ${{ env.TARGET_DIR }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout pinned public Rapid/Lite runtime
         uses: actions/checkout@v4
@@ -85,8 +86,9 @@ jobs:
         run: |
           set -euo pipefail
           node "$ACTIVE_RUNTIME_DIR/.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs" \
-            --target-dir "$TARGET_DIR" \
-            --result-dir .shirube-rapid-lite
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --target-dir "$GITHUB_WORKSPACE/$TARGET_DIR" \
+            --result-dir "$GITHUB_WORKSPACE/$RESULT_DIR"
           cat "$RESULT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
           cat "$RESULT_DIR/aggregate.json"
 

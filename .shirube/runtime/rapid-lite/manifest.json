@@ -1,7 +1,7 @@
 {
   "schema_version": "shirube-runtime-manifest/v1",
   "component": "rapid-lite",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "files": {
     "build-review-plan.mjs": "e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85",
     "check-adoption.mjs": "80c35f811abdb2d5b5c5653a56eea189244b41c70d0195953b13a4bd6b6369b3",
@@ -24,7 +24,7 @@
     "resolve-external-gate-subject-ref.mjs": "3903e63116d97c8615a2943185ea1bd24df18bc2e4362422ae512241b94291f4",
     "resolve-structured-audit-ref.mjs": "5a09843d10fe6e7ee7e4c39f8a2c810e406bb30fe99b9c626dda4efa060e17d6",
     "run-rapid-lite-report.mjs": "fcd96a5a0e4030509e57f08a5ef753ce3b4e35ee32f13745f249db9f331fff92",
-    "run-rapid-lite-workflow.mjs": "9e18b3a2a13b29ecff16a6dbc40d1e19cd7b034154785c2d0e61e34305388dda",
+    "run-rapid-lite-workflow.mjs": "c8f1bf3c94df7c1c0e0270ad628ebe33774242879bbc761884e4a00b1f657533",
     "shirube-v3-rapid-lite-gate-contract-matrix.yaml": "cc6cc4b39131847a606cd2aeec29f8e0d76ed330aae23dcadedbaf34317db049",
     "shirube-default-design-rules.yaml": "d6a5e1ababaa6dd8b8ce7b53cde13737f204c09054f0793cb700ff74745301df"
   }

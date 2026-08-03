@@ -1,13 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { evaluateFlowSafety } from "../.shirube/runtime/rapid-lite/check-flow-safety.mjs";
 import { generateExternalGateSubject } from "../.shirube/runtime/rapid-lite/generate-external-gate-subject.mjs";
 import { runFlowSafety } from "../.shirube/runtime/rapid-lite/run-rapid-lite-report.mjs";
+import {
+  prepareWorkflowDirectories,
+  writeNewResultFile,
+} from "../.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs";
 import {
   inspectExternalSubjectArchive,
   parseArtifactRef,
@@ -263,7 +276,82 @@ describe("workflow trust boundary", () => {
     expect(consumer).toContain("actions: read");
     expect(consumer).toContain("ACTIVE_RUNTIME_DIR: runtime-base-source");
     expect(consumer).toContain("ref: ${{ github.event.pull_request.base.sha }}");
+    expect(consumer).toContain("persist-credentials: false");
+    expect(consumer).toContain("RESULT_DIR: .shirube-rapid-lite");
+    expect(consumer).toContain('--workspace-root "$GITHUB_WORKSPACE"');
+    expect(consumer).toContain('--result-dir "$GITHUB_WORKSPACE/$RESULT_DIR"');
     expect(consumer).toContain("node \"$ACTIVE_RUNTIME_DIR/.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs\"");
+  });
+
+  test("keeps executable PR body bytes outside the target checkout and trusted runtime", async () => {
+    const workspace = tempDirectory();
+    const target = path.join(workspace, "target");
+    const runtime = path.join(workspace, "runtime-base-source");
+    const attackerResults = path.join(workspace, "attacker-results");
+    const targetResults = path.join(target, ".shirube-rapid-lite");
+    const trustedScript = path.join(runtime, "trusted-runtime.mjs");
+    const executionMarker = path.join(workspace, "target-code-executed");
+    mkdirSync(target, { recursive: true });
+    mkdirSync(attackerResults, { recursive: true });
+    mkdirSync(runtime, { recursive: true });
+    writeFileSync(trustedScript, "export const trustedRuntime = true;\n");
+    symlinkSync("../attacker-results", targetResults);
+    symlinkSync("../runtime-base-source/trusted-runtime.mjs", path.join(attackerResults, "pr-body.md"));
+
+    const prepared = prepareWorkflowDirectories({
+      workspaceRoot: workspace,
+      targetDir: target,
+      resultDir: ".shirube-rapid-lite",
+    });
+    const executableBody = `import { writeFileSync } from \"node:fs\"; writeFileSync(${JSON.stringify(executionMarker)}, \"executed\");\n`;
+    writeNewResultFile(path.join(prepared.resultDir, "pr-body.md"), executableBody);
+
+    expect(prepared.resultDir).toBe(path.join(prepared.workspaceRoot, ".shirube-rapid-lite"));
+    expect(readFileSync(path.join(prepared.resultDir, "pr-body.md"), "utf8")).toBe(executableBody);
+    expect(readFileSync(trustedScript, "utf8")).toBe("export const trustedRuntime = true;\n");
+    const trustedModule = await import(`${pathToFileURL(trustedScript).href}?test=${Date.now()}`);
+    expect(trustedModule.trustedRuntime).toBe(true);
+    expect(existsSync(executionMarker)).toBe(false);
+  });
+
+  test("rejects target-owned and symlinked result directories", () => {
+    const workspace = tempDirectory();
+    const target = path.join(workspace, "target");
+    const runtime = path.join(workspace, "runtime-base-source");
+    mkdirSync(target, { recursive: true });
+    mkdirSync(runtime, { recursive: true });
+
+    expect(() => prepareWorkflowDirectories({
+      workspaceRoot: workspace,
+      targetDir: target,
+      resultDir: path.join(target, ".shirube-rapid-lite"),
+    })).toThrow("result-dir must be outside target-dir");
+
+    symlinkSync(runtime, path.join(workspace, ".shirube-rapid-lite"));
+    expect(() => prepareWorkflowDirectories({
+      workspaceRoot: workspace,
+      targetDir: target,
+      resultDir: ".shirube-rapid-lite",
+    })).toThrow("result-dir must not be a symlink");
+  });
+
+  test("uses no-follow exclusive creation for every runner-owned output", () => {
+    const workspace = tempDirectory();
+    const target = path.join(workspace, "target");
+    const runtime = path.join(workspace, "runtime-base-source");
+    const trustedScript = path.join(runtime, "trusted-runtime.mjs");
+    mkdirSync(target, { recursive: true });
+    mkdirSync(runtime, { recursive: true });
+    writeFileSync(trustedScript, "export const trustedRuntime = true;\n");
+    const prepared = prepareWorkflowDirectories({
+      workspaceRoot: workspace,
+      targetDir: target,
+      resultDir: ".shirube-rapid-lite",
+    });
+    symlinkSync("../runtime-base-source/trusted-runtime.mjs", path.join(prepared.resultDir, "pr-body.md"));
+
+    expect(() => writeNewResultFile(path.join(prepared.resultDir, "pr-body.md"), "target-controlled\n")).toThrow();
+    expect(readFileSync(trustedScript, "utf8")).toBe("export const trustedRuntime = true;\n");
   });
 });
 

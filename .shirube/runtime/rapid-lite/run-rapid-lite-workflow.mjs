@@ -1,6 +1,17 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,7 +70,7 @@ function runResolver(script, args, outputPath) {
     encoding: "utf8",
     env: process.env,
   });
-  writeFileSync(outputPath, result.stdout || "{}\n");
+  writeNewResultFile(outputPath, result.stdout || "{}\n");
   try {
     return JSON.parse(result.stdout || "{}");
   } catch {
@@ -74,19 +85,100 @@ function appendResolvedRefs(bodyPath, marker, report, valueKey, sourceKey) {
   const lines = [];
   if (values) lines.push(`${valueKey}: ${values}`);
   if (report.source_metadata_path) lines.push(`${sourceKey}: ${report.source_metadata_path}`);
-  if (lines.length > 0) appendFileSync(bodyPath, `\n${marker}\n${lines.join("\n")}\n`);
+  if (lines.length > 0) appendResultFile(bodyPath, `\n${marker}\n${lines.join("\n")}\n`);
+}
+
+export function prepareWorkflowDirectories({ workspaceRoot, targetDir, resultDir }) {
+  const workspacePath = path.resolve(workspaceRoot);
+  const workspaceStat = lstatSync(workspacePath);
+  if (workspaceStat.isSymbolicLink() || !workspaceStat.isDirectory()) {
+    throw new Error("workspace-root must be a real directory, not a symlink");
+  }
+  const trustedWorkspace = realpathSync(workspacePath);
+
+  const targetPath = path.resolve(targetDir);
+  const targetStat = lstatSync(targetPath);
+  if (targetStat.isSymbolicLink() || !targetStat.isDirectory()) {
+    throw new Error("target-dir must be a real directory, not a symlink");
+  }
+  const trustedTarget = realpathSync(targetPath);
+  if (!isStrictDescendant(trustedWorkspace, trustedTarget)) {
+    throw new Error("target-dir must be inside workspace-root");
+  }
+
+  const unresolvedResult = path.isAbsolute(resultDir)
+    ? path.resolve(resultDir)
+    : path.resolve(workspacePath, resultDir);
+  const requestedResult = path.resolve(trustedWorkspace, path.relative(workspacePath, unresolvedResult));
+  if (requestedResult === trustedTarget || isStrictDescendant(trustedTarget, requestedResult)) {
+    throw new Error("result-dir must be outside target-dir");
+  }
+  if (path.dirname(requestedResult) !== trustedWorkspace) {
+    throw new Error("result-dir must be a direct workflow-owned child of workspace-root");
+  }
+  if (existsSync(requestedResult)) {
+    const resultStat = lstatSync(requestedResult);
+    const kind = resultStat.isSymbolicLink() ? "symlink" : "pre-existing path";
+    throw new Error(`result-dir must not be a ${kind}`);
+  }
+
+  mkdirSync(requestedResult, { mode: 0o700 });
+  const createdStat = lstatSync(requestedResult);
+  if (createdStat.isSymbolicLink() || !createdStat.isDirectory()) {
+    throw new Error("result-dir creation did not produce a real directory");
+  }
+  return {
+    workspaceRoot: trustedWorkspace,
+    targetDir: trustedTarget,
+    resultDir: realpathSync(requestedResult),
+  };
+}
+
+export function writeNewResultFile(filePath, contents) {
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const descriptor = openSync(filePath, flags, 0o600);
+  try {
+    if (!fstatSync(descriptor).isFile()) throw new Error(`result output is not a regular file: ${filePath}`);
+    writeFileSync(descriptor, contents);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function appendResultFile(filePath, contents) {
+  const stat = lstatSync(filePath);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`refusing to append to non-regular result file: ${filePath}`);
+  }
+  const flags = constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0);
+  const descriptor = openSync(filePath, flags);
+  try {
+    if (!fstatSync(descriptor).isFile()) throw new Error(`result output is not a regular file: ${filePath}`);
+    writeFileSync(descriptor, contents);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function isStrictDescendant(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
-  const targetDir = path.resolve(options["target-dir"] ?? ".");
+  const requestedTargetDir = path.resolve(options["target-dir"] ?? ".");
+  const workspaceRoot = path.resolve(options["workspace-root"] ?? path.dirname(requestedTargetDir));
   const resultDirName = options["result-dir"] ?? ".shirube-rapid-lite";
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   const pullRequest = event.pull_request;
   if (!pullRequest) throw new Error("Rapid/Lite workflow requires a pull_request event");
+  const { targetDir, resultDir } = prepareWorkflowDirectories({
+    workspaceRoot,
+    targetDir: requestedTargetDir,
+    resultDir: resultDirName,
+  });
   process.chdir(targetDir);
-  const resultDir = path.resolve(resultDirName);
-  mkdirSync(resultDir, { recursive: true });
 
   const collection = collectChangedFiles(
     process.env.BASE_SHA || pullRequest.base.sha,
@@ -95,23 +187,22 @@ function main() {
   );
   const changedFilesPath = path.join(resultDir, "changed-files.txt");
   const inputCollectionPath = path.join(resultDir, "input-collection.json");
-  writeFileSync(changedFilesPath, collection.files);
-  writeFileSync(inputCollectionPath, `${JSON.stringify({
+  writeNewResultFile(changedFilesPath, collection.files);
+  writeNewResultFile(inputCollectionPath, `${JSON.stringify({
     schema: "shirube-rapid-lite-input-collection/v1",
     status: collection.status,
     method: collection.method,
     attempts: collection.errors,
   }, null, 2)}\n`);
-  let inputFailurePath = "";
+  let inputFailure = null;
   if (collection.status !== "PASS") {
-    inputFailurePath = path.join(resultDir, "input-failure.json");
-    writeFileSync(inputFailurePath, `${JSON.stringify({
+    inputFailure = {
       schema: "shirube-rapid-lite-input-collection/v1",
       status: "FAILURE",
       code: "changed_files_collection_failed",
       message: "Unable to collect PR changed files from available merge-base strategies.",
       attempts: collection.errors,
-    }, null, 2)}\n`);
+    };
   }
 
   const prBodyPath = path.join(resultDir, "pr-body.md");
@@ -122,16 +213,17 @@ function main() {
     ["rule_pack_ref", refFromBody(pullRequest.body ?? "", ["rule_pack_ref", "rule_pack", "rules_ref"])],
   ].filter(([, value]) => value);
   if (suppliedControlRefs.length > 0) {
-    inputFailurePath = path.join(resultDir, "input-failure.json");
-    writeFileSync(inputFailurePath, `${JSON.stringify({
+    inputFailure = {
       schema: "shirube-rapid-lite-input-collection/v1",
       status: "FAILURE",
       code: "untrusted_control_input_override",
       message: "PR body must not supply matrix_ref or rule_pack_ref; both are bound to the manifest-verified exact-base runtime.",
       supplied_refs: Object.fromEntries(suppliedControlRefs),
       changed_files_collection: collection.status,
-    }, null, 2)}\n`);
+    };
   }
+  const inputFailurePath = inputFailure ? path.join(resultDir, "input-failure.json") : "";
+  if (inputFailure) writeNewResultFile(inputFailurePath, `${JSON.stringify(inputFailure, null, 2)}\n`);
   const defaultRefs = [
     ["execution_context_ref", ".shirube/execution-context.yaml"],
     ["adoption_plan_ref", ".shirube/adoption-intake.yaml"],
@@ -150,7 +242,7 @@ function main() {
     ...defaultRefs.map(([key, value]) => `${key}: ${value}`),
     "",
   ].join("\n");
-  writeFileSync(prBodyPath, body);
+  writeNewResultFile(prBodyPath, body);
 
   const actualRepo = process.env.GITHUB_REPOSITORY;
   const actualPr = String(pullRequest.number);
@@ -224,7 +316,7 @@ function main() {
     ];
     if (resolvedHandoffRef) resolverArgs.push("--handoff", resolvedHandoffRef);
     const report = runResolver("resolve-external-gate-subject-ref.mjs", resolverArgs, output);
-    appendFileSync(prBodyPath, `\n<!-- shirube:external-gate-subject-resolution/v1 -->\nexternal_gate_subject_resolution_ref: ${output}\n`);
+    appendResultFile(prBodyPath, `\n<!-- shirube:external-gate-subject-resolution/v1 -->\nexternal_gate_subject_resolution_ref: ${output}\n`);
     appendResolvedRefs(
       prBodyPath,
       "<!-- shirube:external-gate-subject-materialization/v1 -->",
@@ -248,14 +340,16 @@ function main() {
   if (inputFailurePath) reportArgs.push("--input-failure", inputFailurePath);
   reportArgs.push("--format", "json");
   const report = spawnSync(process.execPath, reportArgs, { encoding: "utf8", env: process.env });
-  writeFileSync(path.join(resultDir, "workflow-output.json"), report.stdout || "{}\n");
+  writeNewResultFile(path.join(resultDir, "workflow-output.json"), report.stdout || "{}\n");
   if (report.stderr) process.stderr.write(report.stderr);
   if (report.status !== 0) process.exitCode = report.status ?? 1;
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }
