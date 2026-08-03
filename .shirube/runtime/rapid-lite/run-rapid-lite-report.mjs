@@ -186,7 +186,7 @@ function runDesignRules({ resultDir, refs, changedFilesPath, prBodyPath, diffRoo
   return runGate({ gate: "design-rules", args, outputPath: path.join(resultDir, "design-rules.json") });
 }
 
-function runFlowSafety({ resultDir, refs, actual }) {
+export function runFlowSafety({ resultDir, refs, actual }) {
   const relevant = Boolean(refs.auditChecklist) || reviewPlanRuntimeRelevant(refs.handoff);
   if (!relevant) return skipped("flow-safety", "No audit request or audit-relevant handoff requires flow-safety binding.");
 
@@ -194,13 +194,18 @@ function runFlowSafety({ resultDir, refs, actual }) {
   const inputPath = path.join(resultDir, "flow-safety-input.json");
   try {
     const handoff = refs.handoff ? readStructuredFile(refs.handoff) : null;
-    const checklist = refs.auditChecklist ? readStructuredFile(refs.auditChecklist) : null;
-    const subject = checklist?.source?.gate_subject ?? null;
+    const subject = refs.externalGateSubject ? readStructuredFile(refs.externalGateSubject) : null;
+    const externalSubjectSource = refs.externalGateSubjectSource
+      ? readStructuredFile(refs.externalGateSubjectSource)
+      : null;
     const expectedSubject = expectedFlowSafetySubject({ handoff, handoffRef: refs.handoff, actual });
     const input = {
       schema_version: "shirube-flow-safety-input/v1",
       subject,
       expected_subject: expectedSubject,
+      subject_binding_mode: "external_github_actions_artifact",
+      external_subject_source: externalSubjectSource,
+      subject_bytes_sha256: refs.externalGateSubject ? digestFile(refs.externalGateSubject) : null,
       active_work: asArray(handoff?.flow_safety?.active_work),
       cells: asArray(handoff?.flow_safety?.cells),
       affected_cell_id: expectedSubject.cell_id,
@@ -219,7 +224,8 @@ function runFlowSafety({ resultDir, refs, actual }) {
         action: entry.message,
       })),
       input_path: inputPath,
-      trusted_expected_subject_sources: ["control_handoff", "github_pr_event"],
+      claimed_subject_source: "authenticated_github_actions_artifact",
+      trusted_expected_subject_sources: ["exact_control_handoff_bytes", "github_pr_event"],
     };
     writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
     return gateRecordFromReport({
@@ -240,7 +246,7 @@ function runFlowSafety({ resultDir, refs, actual }) {
       blockers: [{
         item_id: "FLOW-SAFETY-INTEGRATION-001",
         code: "FLOW_SAFETY_INTEGRATION_INPUT_ERROR",
-        path: refs.auditChecklist ?? refs.handoff ?? "flow-safety-input",
+        path: refs.externalGateSubject ?? refs.handoff ?? "flow-safety-input",
         message,
       }],
       warnings: [],
@@ -1071,6 +1077,9 @@ function discoverRefs({ prBody, changedFiles }) {
     auditRecord: refFromBody(prBody, ["audit_record_ref", "audit_record", "audit-ref", "reviewer_audit_ref"]),
     auditItemSet: refFromBody(prBody, ["audit_item_set_ref", "audit_item_set", "audit-item-set"]),
     controlState: refFromBody(prBody, ["control_state_ref", "control_state", "control-state", "control_state_completeness_ref"]),
+    externalGateSubject: refFromBody(prBody, ["external_gate_subject_ref", "external_gate_subject"]),
+    externalGateSubjectSource: refFromBody(prBody, ["external_gate_subject_source_ref", "external_gate_subject_source"]),
+    externalGateSubjectResolution: refFromBody(prBody, ["external_gate_subject_resolution_ref", "external_gate_subject_resolution"]),
   };
 
   const schemaMatches = schemasFromFiles(walkFiles(changedFiles));
@@ -1110,6 +1119,9 @@ function discoverRefs({ prBody, changedFiles }) {
     auditRecord: resolveRef({ name: "audit_record", explicit: explicit.auditRecord, candidates: [...bySchema(schemaMatches, "shirube-audit/v1"), ...bySchema(schemaMatches, "shirube-audit-record/v1")], defaults: [], records }),
     auditItemSet: resolveRef({ name: "audit_item_set", explicit: explicit.auditItemSet, candidates: bySchema(schemaMatches, "shirube-audit-item-set/v1"), defaults: [], records }),
     controlState: resolveRef({ name: "control_state", explicit: explicit.controlState, candidates: bySchema(schemaMatches, "shirube-control-state-completeness-config/v1"), defaults: [".shirube/control-state-completeness.yaml"], records }),
+    externalGateSubject: resolveRef({ name: "external_gate_subject", explicit: explicit.externalGateSubject, candidates: bySchema(schemaMatches, "shirube-external-gate-subject/v1").filter(notFixturePath), defaults: [], records }),
+    externalGateSubjectSource: resolveRef({ name: "external_gate_subject_source", explicit: explicit.externalGateSubjectSource, candidates: bySchema(schemaMatches, "shirube-external-gate-subject-source/v1").filter(notFixturePath), defaults: [], records }),
+    externalGateSubjectResolution: resolveRef({ name: "external_gate_subject_resolution", explicit: explicit.externalGateSubjectResolution, defaults: [], records }),
   };
   return { refs, records };
 }

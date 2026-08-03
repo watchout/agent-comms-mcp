@@ -1,0 +1,6 @@
+{
+  "id": "event_api_disagreement_negative",
+  "scenario": "event_api_disagreement",
+  "expected_verdict": "FAILURE",
+  "expected_code": "XSUBJ-013"
+}

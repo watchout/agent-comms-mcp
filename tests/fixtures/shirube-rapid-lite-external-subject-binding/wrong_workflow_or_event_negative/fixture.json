@@ -1,0 +1,6 @@
+{
+  "id": "wrong_workflow_or_event_negative",
+  "scenario": "wrong_workflow_or_event",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-006"
+}

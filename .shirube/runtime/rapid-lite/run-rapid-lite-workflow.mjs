@@ -204,6 +204,36 @@ function main() {
     appendResolvedRefs(prBodyPath, "<!-- shirube:additional-review-resolution/v1 -->", report, "additional_review_ref", "additional_review_source_ref");
   }
 
+  const externalSubjectArtifactRef = refFromBody(
+    readFileSync(prBodyPath, "utf8"),
+    ["external_gate_subject_artifact_ref", "external_gate_subject_artifact"],
+  );
+  if (externalSubjectArtifactRef) {
+    const resolvedHandoffRef = refFromBody(
+      readFileSync(prBodyPath, "utf8"),
+      ["handoff_ref", "handoff", "control_handoff_ref", "control_handoff"],
+    );
+    const output = path.join(resultDir, "external-gate-subject-ref-resolution.json");
+    const resolverArgs = [
+      "--external-gate-subject-artifact-ref", externalSubjectArtifactRef,
+      "--actual-repo", actualRepo,
+      "--actual-pr", actualPr,
+      "--actual-head", actualHead,
+      "--result-dir", resultDir,
+      ...tokenArg,
+    ];
+    if (resolvedHandoffRef) resolverArgs.push("--handoff", resolvedHandoffRef);
+    const report = runResolver("resolve-external-gate-subject-ref.mjs", resolverArgs, output);
+    appendFileSync(prBodyPath, `\n<!-- shirube:external-gate-subject-resolution/v1 -->\nexternal_gate_subject_resolution_ref: ${output}\n`);
+    appendResolvedRefs(
+      prBodyPath,
+      "<!-- shirube:external-gate-subject-materialization/v1 -->",
+      report,
+      "external_gate_subject_ref",
+      "external_gate_subject_source_ref",
+    );
+  }
+
   const reportArgs = [
     path.join(RUNTIME_DIR, "run-rapid-lite-report.mjs"),
     "--result-dir", resultDir,

@@ -1,0 +1,6 @@
+{
+  "id": "archive_shape_attack_negative",
+  "scenario": "archive_shape_attack",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-008"
+}
