@@ -26,9 +26,14 @@ const SUBJECT_FILENAME = "shirube-external-gate-subject.yaml";
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
 const MAX_SUBJECT_BYTES = 64 * 1024;
 const MAX_HANDOFF_BYTES = 1024 * 1024;
+const MAX_ARTIFACT_DOWNLOAD_REDIRECTS = 4;
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const REF_PATTERN = /^github-actions-artifact:\/\/([^/]+\/[^/]+)\/(\d+)$/;
+const GITHUB_API_HOST = "api.github.com";
+const GITHUB_RESULTS_RECEIVER_HOST = "results-receiver.actions.githubusercontent.com";
+const GITHUB_CONTENT_HOST_SUFFIX = ".githubusercontent.com";
+const AZURE_BLOB_HOST_SUFFIX = ".blob.core.windows.net";
 
 const FINDINGS = Object.freeze({
   "XSUBJ-001": ["unsupported_artifact_ref", "external_gate_subject_artifact_ref must be github-actions-artifact://owner/repo/<artifact_id>."],
@@ -322,7 +327,7 @@ async function loadGitHubTransport({ parsedRef, actualRepo, actualPr, tokenEnv }
   const [runResponse, prResponse, archiveBytes] = await Promise.all([
     fetchJsonResponse({ apiPath: `/repos/${parsedRef.repo}/actions/runs/${runId}`, token }),
     fetchJsonResponse({ apiPath: `/repos/${actualRepo}/pulls/${actualPr}`, token }),
-    downloadBuffer({
+    downloadArtifactBuffer({
       url: `https://api.github.com/repos/${parsedRef.repo}/actions/artifacts/${parsedRef.artifactId}/zip`,
       token,
     }),
@@ -562,12 +567,39 @@ function fetchJsonResponse({ apiPath, token }) {
   });
 }
 
-async function downloadBuffer({ url, token }) {
+export function isAllowedArtifactDownloadUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port) return false;
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === GITHUB_API_HOST || hostname === GITHUB_RESULTS_RECEIVER_HOST) return true;
+  if (hostname.endsWith(GITHUB_CONTENT_HOST_SUFFIX)) {
+    return hostname.length > GITHUB_CONTENT_HOST_SUFFIX.length;
+  }
+  if (!hostname.endsWith(AZURE_BLOB_HOST_SUFFIX)) return false;
+
+  const accountName = hostname.slice(0, -AZURE_BLOB_HOST_SUFFIX.length);
+  return /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/.test(accountName);
+}
+
+export function shouldSendArtifactAuthorization(value) {
+  if (!isAllowedArtifactDownloadUrl(value)) return false;
+  return new URL(value).hostname.toLowerCase() === GITHUB_API_HOST;
+}
+
+export async function downloadArtifactBuffer({ url, token, request = requestBuffer }) {
   let current = url;
-  for (let redirects = 0; redirects < 4; redirects += 1) {
-    const parsed = new URL(current);
-    const useToken = parsed.hostname === "api.github.com";
-    const response = await requestBuffer({
+  for (let redirects = 0; redirects < MAX_ARTIFACT_DOWNLOAD_REDIRECTS; redirects += 1) {
+    if (!isAllowedArtifactDownloadUrl(current)) {
+      throw new Error(`Refusing artifact download URL ${current}`);
+    }
+    const useToken = shouldSendArtifactAuthorization(current);
+    const response = await request({
       url: current,
       token: useToken ? token : null,
       accept: "application/vnd.github+json",
@@ -575,7 +607,7 @@ async function downloadBuffer({ url, token }) {
     });
     if ([301, 302, 303, 307, 308].includes(response.status) && response.location) {
       const next = new URL(response.location, current);
-      if (next.protocol !== "https:" || !(next.hostname === "api.github.com" || next.hostname.endsWith(".githubusercontent.com"))) {
+      if (!isAllowedArtifactDownloadUrl(next)) {
         throw new Error(`Refusing artifact redirect to ${next.hostname}`);
       }
       current = next.toString();

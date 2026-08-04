@@ -21,7 +21,7 @@
     "normalize-control-handoff.mjs": "47deccdf4bc633cc0b493f0df44f017d801933430cbd16b5ff0548b3656726c4",
     "resolve-additional-review-ref.mjs": "faba408ce66c6d450184043076044b11899ab8a6306323f1b4dde28faa33ed28",
     "resolve-control-handoff-ref.mjs": "0395f6881458e22090073d2521398bcde6d777840ee30e51411ee34b1b84c579",
-    "resolve-external-gate-subject-ref.mjs": "3903e63116d97c8615a2943185ea1bd24df18bc2e4362422ae512241b94291f4",
+    "resolve-external-gate-subject-ref.mjs": "4af73bfa8fb130128139b86f64a73064fac34d179812ac8b2a1e07e0bc081294",
     "resolve-structured-audit-ref.mjs": "5a09843d10fe6e7ee7e4c39f8a2c810e406bb30fe99b9c626dda4efa060e17d6",
     "run-rapid-lite-report.mjs": "fcd96a5a0e4030509e57f08a5ef753ce3b4e35ee32f13745f249db9f331fff92",
     "run-rapid-lite-workflow.mjs": "c8f1bf3c94df7c1c0e0270ad628ebe33774242879bbc761884e4a00b1f657533",
