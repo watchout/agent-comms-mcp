@@ -22,6 +22,7 @@ import {
   writeNewResultFile,
 } from "../.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs";
 import {
+  artifactDownloadRequestPolicy,
   inspectExternalSubjectArchive,
   parseArtifactRef,
   runFixtureMatrix,
@@ -103,6 +104,43 @@ describe("external exact-head subject producer", () => {
 });
 
 describe("external subject resolver fixture matrix", () => {
+  test("allows only credential-safe GitHub artifact download authorities", () => {
+    expect(artifactDownloadRequestPolicy("https://api.github.com/repos/watchout/agent-comms-mcp/actions/artifacts/42/zip")).toEqual({
+      allowed: true,
+      sendAuthorization: true,
+    });
+    expect(artifactDownloadRequestPolicy("https://results-receiver.actions.githubusercontent.com/results/subject.zip?sig=redacted")).toEqual({
+      allowed: true,
+      sendAuthorization: false,
+    });
+    expect(artifactDownloadRequestPolicy("https://productionresultssa0.blob.core.windows.net/actions-results/subject.zip?sig=redacted")).toEqual({
+      allowed: true,
+      sendAuthorization: false,
+    });
+  });
+
+  test("rejects redirect authority confusion and never forwards credentials off api.github.com", () => {
+    const rejected = [
+      "http://productionresultssa0.blob.core.windows.net/actions-results/subject.zip",
+      "https://blob.core.windows.net/actions-results/subject.zip",
+      "https://blob.core.windows.net.evil.example/actions-results/subject.zip",
+      "https://productionresultssa0.blob.core.windows.net.evil.example/actions-results/subject.zip",
+      "https://api.github.com.evil.example/repos/watchout/agent-comms-mcp/actions/artifacts/42/zip",
+      "https://watchout@example.com/subject.zip",
+      "https://watchout@productionresultssa0.blob.core.windows.net/subject.zip",
+      "https://productionresultssa0.blob.core.windows.net:444/subject.zip",
+      "not-a-url",
+    ];
+    for (const url of rejected) {
+      expect(artifactDownloadRequestPolicy(url)).toEqual({
+        allowed: false,
+        sendAuthorization: false,
+      });
+    }
+    expect(artifactDownloadRequestPolicy("https://objects.githubusercontent.com/subject.zip").sendAuthorization).toBe(false);
+    expect(artifactDownloadRequestPolicy("https://productionresultssa0.blob.core.windows.net/subject.zip").sendAuthorization).toBe(false);
+  });
+
   test("accepts the canonical artifact ref shape only", () => {
     expect(parseArtifactRef("github-actions-artifact://watchout/agent-comms-mcp/4242")).toEqual({
       repo: "watchout/agent-comms-mcp",
@@ -170,6 +208,10 @@ describe("external subject resolver fixture matrix", () => {
       source_independence_verified: true,
       artifact_id: 4242,
       workflow_run_id: 7001,
+    });
+    expect(source.authenticated_provenance).toMatchObject({
+      repository_get_status: 200,
+      producer_default_branch: "main",
     });
   });
 

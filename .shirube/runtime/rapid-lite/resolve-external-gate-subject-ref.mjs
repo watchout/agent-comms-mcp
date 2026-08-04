@@ -29,6 +29,9 @@ const MAX_HANDOFF_BYTES = 1024 * 1024;
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const REF_PATTERN = /^github-actions-artifact:\/\/([^/]+\/[^/]+)\/(\d+)$/;
+const GITHUB_API_HOST = "api.github.com";
+const GITHUB_CONTENT_HOST_SUFFIX = "githubusercontent.com";
+const AZURE_BLOB_HOST_SUFFIX = "blob.core.windows.net";
 
 const FINDINGS = Object.freeze({
   "XSUBJ-001": ["unsupported_artifact_ref", "external_gate_subject_artifact_ref must be github-actions-artifact://owner/repo/<artifact_id>."],
@@ -122,10 +125,24 @@ export async function resolveExternalGateSubject(options = {}) {
   const run = loaded.run;
   const runRepo = run?.repository?.full_name;
   const runRepoId = positiveInteger(run?.repository?.id);
-  if (normalizeRepo(runRepo) !== normalizeRepo(actualRepo) || runRepoId !== repositoryId) {
-    return blocked("XSUBJ-005", { expected: actualRepo, observed: runRepo ?? null, repository_id: runRepoId });
+  const repository = loaded.repository;
+  const canonicalRepo = repository?.full_name;
+  const canonicalRepoId = positiveInteger(repository?.id);
+  if (
+    normalizeRepo(runRepo) !== normalizeRepo(actualRepo)
+    || runRepoId !== repositoryId
+    || normalizeRepo(canonicalRepo) !== normalizeRepo(actualRepo)
+    || canonicalRepoId !== repositoryId
+  ) {
+    return blocked("XSUBJ-005", {
+      expected: actualRepo,
+      observed: runRepo ?? null,
+      canonical_repository: canonicalRepo ?? null,
+      repository_id: runRepoId,
+      canonical_repository_id: canonicalRepoId,
+    });
   }
-  const provenanceFinding = validateRunProvenance({ artifact, run });
+  const provenanceFinding = validateRunProvenance({ artifact, run, repository });
   if (provenanceFinding) return blocked("XSUBJ-006", provenanceFinding);
 
   const prApi = loaded.pullRequest;
@@ -214,10 +231,11 @@ export async function resolveExternalGateSubject(options = {}) {
       artifact_get_status: loaded.artifact_status ?? 200,
       workflow_run_get_status: loaded.run_status ?? 200,
       pull_request_get_status: loaded.pr_status ?? 200,
+      repository_get_status: loaded.repository_status ?? 200,
       producer_event: run.event,
       producer_actor: run.actor.login,
       producer_run_conclusion: run.conclusion,
-      producer_default_branch: run.repository.default_branch,
+      producer_default_branch: repository.default_branch,
       artifact_created_at: artifact.created_at,
       artifact_expires_at: artifact.expires_at,
       artifact_expired: false,
@@ -303,6 +321,27 @@ export function inspectExternalSubjectArchive(archiveBytes) {
   return subjectFromZipArchive(Buffer.from(archiveBytes));
 }
 
+export function artifactDownloadRequestPolicy(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { allowed: false, sendAuthorization: false };
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const hasSafeAuthority = parsed.protocol === "https:"
+    && !parsed.username
+    && !parsed.password
+    && !parsed.port;
+  const isGitHubApi = hostname === GITHUB_API_HOST;
+  const isGitHubContent = isStrictSubdomain(hostname, GITHUB_CONTENT_HOST_SUFFIX);
+  const isAzureBlob = isStrictSubdomain(hostname, AZURE_BLOB_HOST_SUFFIX);
+  return {
+    allowed: hasSafeAuthority && (isGitHubApi || isGitHubContent || isAzureBlob),
+    sendAuthorization: hasSafeAuthority && isGitHubApi,
+  };
+}
+
 async function loadGitHubTransport({ parsedRef, actualRepo, actualPr, tokenEnv }) {
   const token = process.env[tokenEnv];
   if (!token) throw new Error(`${tokenEnv} is not set`);
@@ -319,9 +358,10 @@ async function loadGitHubTransport({ parsedRef, actualRepo, actualPr, tokenEnv }
   }
   const runId = positiveInteger(artifact?.workflow_run?.id);
   if (!runId) return { artifact, artifact_status: artifactResponse.status, run: null };
-  const [runResponse, prResponse, archiveBytes] = await Promise.all([
+  const [runResponse, prResponse, repositoryResponse, archiveBytes] = await Promise.all([
     fetchJsonResponse({ apiPath: `/repos/${parsedRef.repo}/actions/runs/${runId}`, token }),
     fetchJsonResponse({ apiPath: `/repos/${actualRepo}/pulls/${actualPr}`, token }),
+    fetchJsonResponse({ apiPath: `/repos/${parsedRef.repo}`, token }),
     downloadBuffer({
       url: `https://api.github.com/repos/${parsedRef.repo}/actions/artifacts/${parsedRef.artifactId}/zip`,
       token,
@@ -334,6 +374,8 @@ async function loadGitHubTransport({ parsedRef, actualRepo, actualPr, tokenEnv }
     run_status: runResponse.status,
     pullRequest: prResponse.body,
     pr_status: prResponse.status,
+    repository: repositoryResponse.body,
+    repository_status: repositoryResponse.status,
     archive_bytes: archiveBytes,
   };
 }
@@ -352,19 +394,21 @@ function loadFixtureTransport(fixture) {
     run_status: fixture.run_status ?? 200,
     pullRequest: fixture.pull_request,
     pr_status: fixture.pr_status ?? 200,
+    repository: fixture.repository,
+    repository_status: fixture.repository_status ?? 200,
     archive_bytes: fixture.archive_bytes,
     archive_entries: fixture.archive_entries,
     deleted: fixture.deleted,
   };
 }
 
-function validateRunProvenance({ artifact, run }) {
+function validateRunProvenance({ artifact, run, repository }) {
   if (!run || Number(run.id) !== Number(artifact?.workflow_run?.id)) return { detail: "workflow run identity mismatch" };
   if (!positiveInteger(run.workflow_id) || run.path !== ALLOWED_WORKFLOW_PATH) return { detail: "producer workflow is not allowlisted", path: run.path ?? null };
   if (run.event !== "workflow_dispatch" || run.conclusion !== "success") return { event: run.event ?? null, conclusion: run.conclusion ?? null };
   if (!stringOption(run.actor?.login) || !lowerSha(run.head_sha)) return { detail: "producer actor or head SHA missing" };
   if (String(artifact?.workflow_run?.head_sha ?? "").toLowerCase() !== String(run.head_sha).toLowerCase()) return { detail: "artifact and producer run head SHA mismatch" };
-  if (!stringOption(run.head_branch) || run.head_branch !== run.repository?.default_branch) return { detail: "producer did not run from the repository default branch" };
+  if (!stringOption(repository?.default_branch) || run.head_branch !== repository.default_branch) return { detail: "producer did not run from the repository default branch" };
   const startedAt = Date.parse(run.run_started_at ?? run.created_at ?? "");
   const artifactCreatedAt = Date.parse(artifact.created_at ?? "");
   if (!Number.isFinite(startedAt) || !Number.isFinite(artifactCreatedAt) || artifactCreatedAt < startedAt) {
@@ -503,8 +547,9 @@ function buildFixture(descriptor) {
       head_sha: "dddddddddddddddddddddddddddddddddddddddd",
       head_branch: "main",
       run_started_at: "2026-08-04T00:00:00Z",
-      repository: { id: 1001, full_name: actualRepo, default_branch: "main" },
+      repository: { id: 1001, full_name: actualRepo },
     },
+    repository: { id: 1001, full_name: actualRepo, default_branch: "main" },
     pull_request: {
       number: actualPr,
       head: { sha: actualHead, repo: { full_name: actualRepo } },
@@ -565,17 +610,19 @@ function fetchJsonResponse({ apiPath, token }) {
 async function downloadBuffer({ url, token }) {
   let current = url;
   for (let redirects = 0; redirects < 4; redirects += 1) {
-    const parsed = new URL(current);
-    const useToken = parsed.hostname === "api.github.com";
+    const policy = artifactDownloadRequestPolicy(current);
+    if (!policy.allowed) {
+      throw new Error(`Refusing artifact download from ${safeHostname(current)}`);
+    }
     const response = await requestBuffer({
       url: current,
-      token: useToken ? token : null,
+      token: policy.sendAuthorization ? token : null,
       accept: "application/vnd.github+json",
       maxBytes: MAX_ARCHIVE_BYTES,
     });
     if ([301, 302, 303, 307, 308].includes(response.status) && response.location) {
       const next = new URL(response.location, current);
-      if (next.protocol !== "https:" || !(next.hostname === "api.github.com" || next.hostname.endsWith(".githubusercontent.com"))) {
+      if (!artifactDownloadRequestPolicy(next).allowed) {
         throw new Error(`Refusing artifact redirect to ${next.hostname}`);
       }
       current = next.toString();
@@ -589,6 +636,18 @@ async function downloadBuffer({ url, token }) {
     return response.body;
   }
   throw new Error("Too many artifact download redirects");
+}
+
+function isStrictSubdomain(hostname, suffix) {
+  return hostname.length > suffix.length + 1 && hostname.endsWith(`.${suffix}`);
+}
+
+function safeHostname(value) {
+  try {
+    return new URL(value).hostname || "invalid URL";
+  } catch {
+    return "invalid URL";
+  }
 }
 
 function requestBuffer({ url, token, accept, maxBytes = 2 * 1024 * 1024 }) {
