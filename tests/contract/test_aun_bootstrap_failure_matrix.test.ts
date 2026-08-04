@@ -120,6 +120,28 @@ if (crashFixtureStage) {
     })
   }
 
+  test('B5-EVIDENCE-001 receipt mismatch output is typed and digest-only', () => {
+    const checkout = realpathSync(process.cwd())
+    const tuple = {
+      agent_id: 'evidence-agent', runtime_engine: 'codex' as const, session_name: 'target-session',
+      process_id: 7312, port: 8812, checkout_path: checkout, commit_sha: HEAD,
+    }
+    const decision = bootstrapInternal.classifyRuntimeReceiptRows([{
+      runtime_instance_id: 'receipt-secret-fixture', ...tuple, process_id: 9999,
+      runtime_kind: 'bootstrap_bound_provider', status: 'running',
+      metadata: {
+        raw_command: 'codex --dangerously-pass-token SECRET_VALUE',
+        raw_env: 'DATABASE_URL=postgresql://secret',
+      },
+    }], tuple)
+    expect(decision).toMatchObject({ ok: false, discriminator: 'runtime_receipt_incompatible' })
+    expect(decision.evidenceDigest).toMatch(/^[0-9a-f]{64}$/)
+    const serialized = JSON.stringify(decision)
+    expect(serialized).not.toContain('SECRET_VALUE')
+    expect(serialized).not.toContain('DATABASE_URL')
+    expect(serialized).not.toContain('raw_command')
+  })
+
   test('B3/B4 subprocess hard crashes retain a fsynced admission and resume cannot duplicate the effect', async () => {
     for (const stage of ['B3', 'B4'] as const) {
       const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), `aun-bootstrap-crash-${stage.toLowerCase()}-`)))
