@@ -1,0 +1,96 @@
+schema_version: shirube-cell/v1
+cell_id: CELL-AUN-RECOVERY-CONTRACT-001
+graph_id: GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001
+graph_version: 2.0-final-pre-freeze
+graph_order: 10
+control_source: https://github.com/watchout/agent-comms-mcp/issues/602
+authority_refs:
+  - aun-message:45268548-a9fc-4735-be12-e35ec15d784a
+  - aun-message:4776a58d-f2bf-487b-ba6d-bd9d2642bea8
+  - https://github.com/watchout/agent-comms-mcp/issues/602
+  - https://github.com/watchout/agent-comms-mcp/issues/691
+  - https://github.com/watchout/agent-comms-mcp/issues/603
+  - https://github.com/watchout/agent-comms-mcp/issues/604
+  - https://github.com/watchout/agent-comms-mcp/issues/449
+  - https://github.com/watchout/agent-comms-mcp/issues/435
+risk_tier: R2
+goal: >-
+  Freeze the complete graph 2.0 automatic-receive fleet recovery goal,
+  definitions, ten-Cell dependency graph, 20 requirements, 20 acceptance
+  criteria, 24 tests, 24 completion predicates, failure and rollback rules,
+  evidence sinks, protected decisions, and frontmost handoff before protected
+  execution begins.
+primary_responsibility: Control contract and independently auditable planning freeze only.
+implementation_boundary:
+  allowed_paths:
+    - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
+    - .shirube/cells/CELL-AUN-RECOVERY-CONTRACT-001.yaml
+    - .shirube/specs/SPEC-AUN-AUTORECEIVE-FLEET-RECOVERY-001.md
+    - .shirube/control-handoffs/CH-AUN-RECOVERY-CONTRACT-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001.yaml
+  allowed_external_effects:
+    - Push a Control-only successor commit to the existing Draft PR 908 branch.
+    - Update the Draft PR body without changing Ready state.
+    - Publish one immutable superseding Issue 602 V3 amendment.
+    - Route one fresh independent exact-head evidence audit.
+  forbidden:
+    - product or runtime code edits
+    - DB or production queue mutation
+    - state-daemon or LaunchAgent mutation
+    - MCP registration, profile, runtime, endpoint, or manifest mutation
+    - Discord live write or queue canary
+    - runtime start stop restart wake or prompt injection
+    - PR Ready transition approval merge deploy rollout or release
+    - self-audit or self-acceptance
+verification_boundary:
+  - Exact base commit and tree match the pinned baseline.
+  - All five artifacts exist in the exact changed-path set and no sixth path changes.
+  - Every YAML file parses with aliases disabled.
+  - Graph contains exactly ten Cells ordered 10 through 100.
+  - Graph contains exactly 20 requirements, 20 acceptance criteria, 24 tests, 24 completion predicates, and 20 failure modes.
+  - Every requirement maps to at least one declared acceptance criterion and test.
+  - Every test references only declared requirements.
+  - Phase-0 baseline is recorded as 304 pass 0 fail but live status remains NO_GO.
+  - G1 through G7 are present and PASS in the candidate.
+  - Issue amendment and PR body equal GitHub API readback bytes.
+  - Independent auditor is not ARC or AUN.
+completes_parent_goal: false
+completion_rule: >-
+  Cell 10 completes only after the immutable superseding Issue amendment, Draft
+  Control PR, exact artifact hashes, machine-validation evidence, AUN delivery
+  receipt, and independent exact-head audit PASS are all present. Merge alone is
+  not Cell completion and no protected or runtime effect is authorized.
+lifecycle_state: control_artifact_candidate_published_awaiting_independent_audit
+gate_result:
+  current: PASS_AS_CONTROL_CANDIDATE
+  cell_complete: false
+  next_cell_admitted: false
+  protected_effect_count: 0
+stop_conditions:
+  - Base commit or tree differs from the pinned release baseline.
+  - Any sixth repository path changes.
+  - Runtime DB queue LaunchAgent MCP manifest provider credential or production state would change.
+  - A raw count test fixture or agent-name inference becomes production authority.
+  - A requirement lacks acceptance or test trace.
+  - Protected decisions OD-AUN-001 or OD-AUN-002 are bypassed or weakened.
+  - Ordinary communication expands protected D1 admission history receipts or effects.
+  - Issue 691 603 604 449 or 435 is treated as disposed without immutable requirement-level evidence.
+  - An author or requester attempts to provide independent audit evidence.
+next_action:
+  blocking: true
+  actor: codex-audit
+  active_function: evidence_audit_gate
+  action: Independently audit Draft PR 908 exact head and all five graph 2.0 artifacts without implementing fixes.
+  delivery: GitHub exact-head verdict plus AUN delivery to ARC and AUN.
+  input_refs:
+    - aun-message:45268548-a9fc-4735-be12-e35ec15d784a
+    - https://github.com/watchout/agent-comms-mcp/issues/602
+    - https://github.com/watchout/agent-comms-mcp/pull/908
+    - .shirube/cell-graphs/GRAPH-AUN-AUTORECEIVE-FLEET-RECOVERY-001.yaml
+    - .shirube/control-handoffs/CH-AUN-RECOVERY-CONTRACT-001.yaml
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-AUN-RECOVERY-CONTRACT-001.yaml
+  scope:
+    allowed: Exact-head evidence audit and reproducible read-only validation.
+    forbidden: Edits runtime or protected effects PR state changes approval merge activation or self-repair.
+  deliverable: Exact-head PASS REQUEST_CHANGES or ESCALATE with gate-specific findings.
+  completion_evidence: Immutable verdict URL head tree artifact hashes validation outputs API readback and AUN receipt.
