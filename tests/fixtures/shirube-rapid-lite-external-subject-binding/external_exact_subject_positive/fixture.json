@@ -1,0 +1,5 @@
+{
+  "id": "external_exact_subject_positive",
+  "scenario": "positive",
+  "expected_verdict": "PASS"
+}

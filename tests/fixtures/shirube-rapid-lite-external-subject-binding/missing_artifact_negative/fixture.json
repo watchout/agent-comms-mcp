@@ -1,0 +1,6 @@
+{
+  "id": "missing_artifact_negative",
+  "scenario": "missing_artifact",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-003"
+}

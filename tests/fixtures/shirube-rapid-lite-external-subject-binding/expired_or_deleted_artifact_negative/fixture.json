@@ -1,0 +1,6 @@
+{
+  "id": "expired_or_deleted_artifact_negative",
+  "scenario": "expired_or_deleted",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-004"
+}

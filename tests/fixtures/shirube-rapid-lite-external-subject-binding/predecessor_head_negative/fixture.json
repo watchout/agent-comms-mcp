@@ -1,0 +1,6 @@
+{
+  "id": "predecessor_head_negative",
+  "scenario": "predecessor_head",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-010"
+}

@@ -1,0 +1,145 @@
+name: Shirube External Gate Subject Request
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_pr:
+        description: Target pull request number
+        required: true
+        type: string
+      handoff_ref:
+        description: Exact repository-relative handoff path at the target PR head
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  produce-external-gate-subject:
+    name: Produce immutable exact-head gate subject
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require trusted default-branch dispatch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+
+      - name: Read current target PR identity
+        id: target
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const targetPr = Number(context.payload.inputs.target_pr);
+            if (!Number.isInteger(targetPr) || targetPr <= 0) {
+              throw new Error("target_pr must be a positive integer");
+            }
+            const response = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: targetPr,
+            });
+            core.setOutput("pr", String(targetPr));
+            core.setOutput("head_sha", response.data.head.sha);
+            core.setOutput("head_repo", response.data.head.repo.full_name);
+            core.setOutput("base_repo", response.data.base.repo.full_name);
+            core.setOutput("observed_at", new Date().toISOString());
+
+      - name: Checkout trusted producer runtime
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: runtime-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout target exact head as data only
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.target.outputs.head_repo }}
+          ref: ${{ steps.target.outputs.head_sha }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verify trusted producer runtime manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd runtime-source
+          jq -r '.files | to_entries[] | "\(.value)  .shirube/runtime/rapid-lite/\(.key)"' \
+            .shirube/runtime/rapid-lite/manifest.json |
+            sha256sum --check --strict
+
+      - name: Generate exact external subject
+        id: generate
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_PR: ${{ steps.target.outputs.pr }}
+          TARGET_HEAD: ${{ steps.target.outputs.head_sha }}
+          HANDOFF_REF: ${{ inputs.handoff_ref }}
+        run: |
+          set -euo pipefail
+          case "$HANDOFF_REF" in
+            /*|*..*|*\\*) echo "Unsafe handoff_ref: $HANDOFF_REF" >&2; exit 1 ;;
+          esac
+          test -f "target/$HANDOFF_REF"
+          test ! -L "target/$HANDOFF_REF"
+          target_root=$(realpath target)
+          handoff_path=$(realpath "target/$HANDOFF_REF")
+          case "$handoff_path" in
+            "$target_root"/*) ;;
+            *) echo "handoff_ref escaped the target checkout" >&2; exit 1 ;;
+          esac
+          mkdir -p subject-output
+          node runtime-source/.shirube/runtime/rapid-lite/generate-external-gate-subject.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$TARGET_PR" \
+            --handoff "$handoff_path" \
+            --checked-out-head "$TARGET_HEAD" \
+            --output subject-output/shirube-external-gate-subject.yaml \
+            --github-token-env GITHUB_TOKEN \
+            --format json |
+            tee subject-output/generation-report.json
+          test "$(find subject-output -maxdepth 1 -type f -name 'shirube-external-gate-subject.yaml' | wc -l | tr -d ' ')" = 1
+          echo "artifact_name=shirube-external-gate-subject-pr-${TARGET_PR}-${TARGET_HEAD}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable subject artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.generate.outputs.artifact_name }}
+          path: subject-output/shirube-external-gate-subject.yaml
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Record producer evidence
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          TARGET_PR: ${{ steps.target.outputs.pr }}
+          TARGET_HEAD: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## External exact-head subject"
+            echo "- target: $GITHUB_REPOSITORY#$TARGET_PR@$TARGET_HEAD"
+            echo "- producer commit: $GITHUB_SHA"
+            echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "- artifact id: $ARTIFACT_ID"
+            echo "- artifact digest: $ARTIFACT_DIGEST"
+            echo "- artifact URL: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

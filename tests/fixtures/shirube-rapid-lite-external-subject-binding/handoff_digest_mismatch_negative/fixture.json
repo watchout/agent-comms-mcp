@@ -1,0 +1,6 @@
+{
+  "id": "handoff_digest_mismatch_negative",
+  "scenario": "handoff_digest_mismatch",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-011"
+}
