@@ -997,6 +997,29 @@ type RuntimeReceiptTuple = {
   commit_sha: string
 }
 
+function expectedRuntimeReceiptTuple(
+  context: BootstrapStageContext,
+  env: Record<string, string>,
+  profile: any,
+): RuntimeReceiptTuple | null {
+  const sessionName = String(env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session || '').trim()
+  const port = Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || profile?.channel_port)
+  const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
+  const runtime = context.resolvedRuntime
+  if (!profile || !sessionName || !Number.isInteger(port) || port <= 0
+    || !Number.isInteger(providerPid) || providerPid <= 1
+    || (runtime !== 'codex' && runtime !== 'claude') || !context.repoHead) return null
+  return {
+    agent_id: context.agentId,
+    runtime_engine: runtime,
+    session_name: sessionName,
+    process_id: providerPid,
+    port,
+    checkout_path: realpathOrResolve(context.repoRoot),
+    commit_sha: context.repoHead,
+  }
+}
+
 type RuntimeReceiptDecision = {
   ok: true
   action: 'create' | 'reuse'
@@ -2131,15 +2154,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }
         }
       }
-      const runtimeTuple = {
-        agent_id: context.agentId,
-        runtime_engine: context.resolvedRuntime,
-        session_name: sessionName,
-        process_id: providerPid,
-        port,
-        checkout_path: realpathOrResolve(context.repoRoot),
-        commit_sha: context.repoHead,
-      }
+      const runtimeTuple = expectedRuntimeReceiptTuple(context, env, profile)!
       runtimeTupleDigest = bootstrapDigest(runtimeTuple)
       failureDiscriminator = 'runtime_receipt_db_read'
       const runtime = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
@@ -2314,12 +2329,41 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
 
   const memoryReadback = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
     const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
+    const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
     try {
-      const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
       const mutationPayload = mutation?.rollback_payload ?? {}
       const selectedRuntimeInstanceId = String(
         mutationPayload.runtime_instance_id ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? '',
       ).trim()
+      const readbackProfile = selectedRuntimeInstanceId ? await profileGet(context.agentId) : null
+      const expectedTuple = selectedRuntimeInstanceId
+        ? expectedRuntimeReceiptTuple(context, env, readbackProfile)
+        : null
+      const expectedTupleDigest = expectedTuple ? bootstrapDigest(expectedTuple) : null
+      const boundTupleDigest = typeof mutationPayload.runtime_tuple_digest === 'string'
+        ? mutationPayload.runtime_tuple_digest
+        : null
+      const tupleBindingMatches = !mutation
+        || (Boolean(boundTupleDigest) && expectedTupleDigest === boundTupleDigest)
+      if (selectedRuntimeInstanceId && (!expectedTuple || !tupleBindingMatches)) {
+        return {
+          ok: false,
+          reasonCodes: [mutation ? 'NO_GO_POST_MUTATION_READBACK' : 'NO_GO_RUNTIME_RECEIPT'],
+          evidenceRefs: [`memory-readback:runtime_receipt_input_invalid:${bootstrapDigest({
+            runtime_instance_id: selectedRuntimeInstanceId,
+            profile_present: Boolean(readbackProfile),
+            session_present: Boolean(env.AUN_BOOTSTRAP_TMUX_SESSION || readbackProfile?.tmux_session),
+            port_valid: Number.isInteger(Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || readbackProfile?.channel_port))
+              && Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || readbackProfile?.channel_port) > 0,
+            provider_pid_valid: Number.isInteger(Number(env.AUN_BOOTSTRAP_PROVIDER_PID))
+              && Number(env.AUN_BOOTSTRAP_PROVIDER_PID) > 1,
+            runtime_present: Boolean(context.resolvedRuntime),
+            commit_present: Boolean(context.repoHead),
+            tuple_binding_present: Boolean(boundTupleDigest),
+            tuple_binding_matches: tupleBindingMatches,
+          })}`],
+        }
+      }
       const gate = await withBootstrapDb(env, (db) => evaluateSelectedRuntimeMemoryReadyGate(
         db,
         {
@@ -2333,6 +2377,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
               evidenceId: mutationPayload.evidence_id as string | number | null | undefined,
             }
           : null,
+        expectedTuple ?? undefined,
       ))
       if (!env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID && gate.ok && gate.runtime_instance_id) {
         env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = gate.runtime_instance_id
@@ -2373,9 +2418,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             readinessPredicates: { memory_recovery_ready: true, runtime_receipt_present: true },
             readbackDigest: mutation?.actual_after_digest ?? bootstrapDigest(gate),
           }
-        : { ok: false, reasonCodes: [gate.runtime_instance_id ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'], evidenceRefs: [`memory-readback-no-go:${bootstrapDigest(gate)}`] }
+        : {
+            ok: false,
+            reasonCodes: [mutation
+              ? 'NO_GO_POST_MUTATION_READBACK'
+              : gate.runtime_instance_id ? 'NO_GO_MEMORY_RECOVERY' : 'NO_GO_RUNTIME_RECEIPT'],
+            evidenceRefs: [`memory-readback-no-go:${bootstrapDigest(gate)}`],
+          }
     } catch (err) {
-      return { ok: false, reasonCodes: ['NO_GO_MEMORY_RECOVERY'], evidenceRefs: [`memory-readback-error:${bootstrapDigest(String(err))}`] }
+      return {
+        ok: false,
+        reasonCodes: [mutation ? 'NO_GO_POST_MUTATION_READBACK' : 'NO_GO_MEMORY_RECOVERY'],
+        evidenceRefs: [`memory-readback-error:${bootstrapDigest(String(err))}`],
+      }
     }
   }
 

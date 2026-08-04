@@ -304,7 +304,7 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  test('B5-CONCURRENCY-001 binds create and reuse readback to one receipt while ordinary heartbeat advances', async () => {
+  test('B5-CONCURRENCY-001 and B5-FINAL-TUPLE-READBACK-001 bind readback and reject every authoritative tuple drift', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -389,17 +389,19 @@ describe('aun bootstrap clean-host journal', () => {
       }
       return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
     }
-    const runGate = (runId: string) => {
+    const runGate = async (runId: string) => {
       const env = { ...baseEnv }
       const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
-      return ports.ensureMemoryReadiness({
+      const context = {
         runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
         repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
         priorState: { mutations: [] } as any,
-      })
+      } as BootstrapStageContext
+      const outcome = await ports.ensureMemoryReadiness(context)
+      return { context, outcome, ports }
     }
     const outcomes = await Promise.all([runGate('b5-concurrent-a'), runGate('b5-concurrent-b')])
-    for (const outcome of outcomes) expect(outcome).toMatchObject({ ok: true })
+    for (const runResult of outcomes) expect(runResult.outcome).toMatchObject({ ok: true })
     const createReadback = new PgAdapter(databaseUrl)
     const activeAfterCreate = await createReadback.query<any>(
       `SELECT runtime_instance_id, runtime_kind, status FROM agent_runtime_instances
@@ -410,8 +412,60 @@ describe('aun bootstrap clean-host journal', () => {
     const createdReceipts = activeAfterCreate.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')
     expect(createdReceipts).toHaveLength(1)
 
-    const reuseOutcome = await runGate('b5-reuse-after-heartbeat')
-    expect(reuseOutcome.ok).toBe(true)
+    const reuseRun = await runGate('b5-reuse-after-heartbeat')
+    expect(reuseRun.outcome.ok).toBe(true)
+    expect(reuseRun.outcome.mutation).toBeDefined()
+
+    const expectedReceipt = {
+      runtime_kind: 'bootstrap_bound_provider', runtime_engine: 'codex', session_name: 'b5-session',
+      process_id: 7312, port: 8812, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
+    }
+    const driftCases = [
+      { id: 'runtime_kind', values: { ...expectedReceipt, runtime_kind: 'local_process' } },
+      { id: 'runtime_engine', values: { ...expectedReceipt, runtime_engine: 'claude' } },
+      { id: 'session_name', values: { ...expectedReceipt, session_name: 'drifted-session' } },
+      { id: 'process_id', values: { ...expectedReceipt, process_id: 9999 } },
+      { id: 'port', values: { ...expectedReceipt, port: 9999 } },
+      { id: 'checkout_path', values: { ...expectedReceipt, checkout_path: join(home, 'drifted-checkout') } },
+      { id: 'commit_sha', values: { ...expectedReceipt, commit_sha: 'b'.repeat(40) } },
+    ]
+    const driftDb = new PgAdapter(databaseUrl)
+    const writeReceiptTuple = async (values: typeof expectedReceipt) => driftDb.execute(
+      `UPDATE agent_runtime_instances
+          SET runtime_kind = $2, runtime_engine = $3, session_name = $4, process_id = $5,
+              port = $6, checkout_path = $7, commit_sha = $8
+        WHERE runtime_instance_id = $1`,
+      [createdReceipts[0].runtime_instance_id, values.runtime_kind, values.runtime_engine,
+        values.session_name, values.process_id, values.port, values.checkout_path, values.commit_sha],
+    )
+    const rejectedDrifts: string[] = []
+    try {
+      for (const drift of driftCases) {
+        await writeReceiptTuple(drift.values)
+        const outcome = await reuseRun.ports.revalidateStage!(
+          {
+            ...reuseRun.context,
+            priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+          },
+          'B5_MEMORY_READINESS',
+        )
+        expect(outcome.ok).toBe(false)
+        expect(outcome.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
+        rejectedDrifts.push(drift.id)
+      }
+      expect(rejectedDrifts).toEqual(driftCases.map((drift) => drift.id))
+      await writeReceiptTuple(expectedReceipt)
+      const restoredReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(restoredReadback.ok).toBe(true)
+    } finally {
+      await driftDb.close()
+    }
 
     const readback = new PgAdapter(databaseUrl)
     const active = await readback.query<any>(
@@ -431,7 +485,7 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBe(3)
+    expect(ordinaryHeartbeatAdvances).toBe(4)
     await readback.close()
   })
 
