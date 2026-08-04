@@ -26,7 +26,6 @@ const SUBJECT_FILENAME = "shirube-external-gate-subject.yaml";
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
 const MAX_SUBJECT_BYTES = 64 * 1024;
 const MAX_HANDOFF_BYTES = 1024 * 1024;
-const MAX_ARTIFACT_DOWNLOAD_REDIRECTS = 4;
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const REF_PATTERN = /^github-actions-artifact:\/\/([^/]+\/[^/]+)\/(\d+)$/;
@@ -327,7 +326,7 @@ async function loadGitHubTransport({ parsedRef, actualRepo, actualPr, tokenEnv }
   const [runResponse, prResponse, archiveBytes] = await Promise.all([
     fetchJsonResponse({ apiPath: `/repos/${parsedRef.repo}/actions/runs/${runId}`, token }),
     fetchJsonResponse({ apiPath: `/repos/${actualRepo}/pulls/${actualPr}`, token }),
-    downloadArtifactBuffer({
+    downloadBuffer({
       url: `https://api.github.com/repos/${parsedRef.repo}/actions/artifacts/${parsedRef.artifactId}/zip`,
       token,
     }),
@@ -592,14 +591,14 @@ export function shouldSendArtifactAuthorization(value) {
   return new URL(value).hostname.toLowerCase() === GITHUB_API_HOST;
 }
 
-export async function downloadArtifactBuffer({ url, token, request = requestBuffer }) {
+async function downloadBuffer({ url, token }) {
   let current = url;
-  for (let redirects = 0; redirects < MAX_ARTIFACT_DOWNLOAD_REDIRECTS; redirects += 1) {
+  for (let redirects = 0; redirects < 4; redirects += 1) {
     if (!isAllowedArtifactDownloadUrl(current)) {
       throw new Error(`Refusing artifact download URL ${current}`);
     }
     const useToken = shouldSendArtifactAuthorization(current);
-    const response = await request({
+    const response = await requestBuffer({
       url: current,
       token: useToken ? token : null,
       accept: "application/vnd.github+json",

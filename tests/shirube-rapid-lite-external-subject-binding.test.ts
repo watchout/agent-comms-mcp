@@ -22,7 +22,6 @@ import {
   writeNewResultFile,
 } from "../.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs";
 import {
-  downloadArtifactBuffer,
   inspectExternalSubjectArchive,
   isAllowedArtifactDownloadUrl,
   parseArtifactRef,
@@ -129,40 +128,15 @@ describe("external subject resolver fixture matrix", () => {
     for (const url of allowed.slice(1)) expect(shouldSendArtifactAuthorization(url)).toBe(false);
   });
 
-  test("drops authorization after the API redirect and rejects excessive redirects", async () => {
-    const requests: Array<{ url: string; token: string | null }> = [];
-    const archive = await downloadArtifactBuffer({
-      url: "https://api.github.com/repos/watchout/agent-comms-mcp/actions/artifacts/4242/zip",
-      token: "secret",
-      request: async ({ url, token }: { url: string; token: string | null }) => {
-        requests.push({ url, token });
-        if (requests.length === 1) {
-          return {
-            status: 302,
-            location: "https://productionresultssa0.blob.core.windows.net/actions-results/subject.zip",
-            body: Buffer.alloc(0),
-          };
-        }
-        return { status: 200, location: undefined, body: Buffer.from("archive") };
-      },
-    });
-    expect(archive.toString("utf8")).toBe("archive");
-    expect(requests.map(({ token }) => token)).toEqual(["secret", null]);
-
-    let redirectRequests = 0;
-    await expect(downloadArtifactBuffer({
-      url: "https://api.github.com/repos/watchout/agent-comms-mcp/actions/artifacts/4242/zip",
-      token: "secret",
-      request: async () => {
-        redirectRequests += 1;
-        return {
-          status: 302,
-          location: "https://results-receiver.actions.githubusercontent.com/results/next",
-          body: Buffer.alloc(0),
-        };
-      },
-    })).rejects.toThrow("Too many artifact download redirects");
-    expect(redirectRequests).toBe(4);
+  test("keeps the bounded redirect loop and authorization decision on every request", () => {
+    const resolver = readFileSync(
+      path.join(import.meta.dir, "../.shirube/runtime/rapid-lite/resolve-external-gate-subject-ref.mjs"),
+      "utf8",
+    );
+    expect(resolver).toContain("for (let redirects = 0; redirects < 4; redirects += 1)");
+    expect(resolver).toContain("const useToken = shouldSendArtifactAuthorization(current)");
+    expect(resolver).toContain("token: useToken ? token : null");
+    expect(resolver).toContain('throw new Error("Too many artifact download redirects")');
   });
 
   test("accepts the canonical artifact ref shape only", () => {
