@@ -1060,9 +1060,118 @@ function classifyRuntimeReceiptRows(active: any[], tuple: RuntimeReceiptTuple): 
   }
 }
 
+type RuntimeMemoryReadyGateInput = Parameters<typeof evaluateRuntimeMemoryReadyGate>[1]
+
+type SelectedMemoryReadySubject = {
+  runtimeInstanceId: string
+  evidenceId?: string | number | null
+}
+
+function isCurrentRuntimeSelection(sql: string): boolean {
+  const normalized = sql.replace(/\s+/g, ' ').trim()
+  return normalized.includes('FROM agent_runtime_instances')
+    && normalized.includes('WHERE agent_id = $1')
+    && normalized.includes("status IN ('running', 'active')")
+    && normalized.includes('ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC')
+    && normalized.endsWith('LIMIT 1')
+}
+
+function isCurrentMemoryEvidenceSelection(sql: string): boolean {
+  const normalized = sql.replace(/\s+/g, ' ').trim()
+  return normalized.includes('FROM runtime_memory_ready_evidence')
+    && normalized.includes('WHERE agent_id = $1')
+    && normalized.includes('AND project = $2')
+    && normalized.includes('ORDER BY completed_at DESC, id DESC')
+    && normalized.endsWith('LIMIT 1')
+}
+
+async function evaluateSelectedRuntimeMemoryReadyGate(
+  db: DbAdapter,
+  input: RuntimeMemoryReadyGateInput,
+  subject?: SelectedMemoryReadySubject | null,
+  expectedTuple?: RuntimeReceiptTuple,
+) {
+  if (!subject?.runtimeInstanceId) return evaluateRuntimeMemoryReadyGate(db as any, input)
+
+  if (expectedTuple) {
+    const selectedRows = await db.query<any>(
+      `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+              port, checkout_path, commit_sha, status, metadata
+         FROM agent_runtime_instances
+        WHERE runtime_instance_id = $1
+          AND agent_id = $2
+          AND status IN ('running', 'active')
+        LIMIT 1`,
+      [subject.runtimeInstanceId, input.agent_id],
+    )
+    const selection = classifyRuntimeReceiptRows(selectedRows, expectedTuple)
+    if (!selection.ok || selection.action !== 'reuse'
+      || selection.runtimeInstanceId !== subject.runtimeInstanceId) {
+      throw new RuntimeReceiptSelectionError(
+        'runtime_receipt_post_evidence_readback',
+        selection.evidenceDigest,
+      )
+    }
+  }
+
+  const selectedDb = {
+    query: <T = any>(sql: string, params?: any[]): Promise<T[]> => {
+      if (isCurrentRuntimeSelection(sql)) {
+        return db.query<T>(
+          `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha,
+                  started_at, last_seen_at, status
+             FROM agent_runtime_instances
+            WHERE agent_id = $1
+              AND runtime_instance_id = $2
+              AND status IN ('running', 'active')
+            LIMIT 1`,
+          [input.agent_id, subject.runtimeInstanceId],
+        )
+      }
+      if (isCurrentMemoryEvidenceSelection(sql)) {
+        const evidenceIdClause = subject.evidenceId === undefined || subject.evidenceId === null
+          ? ''
+          : ' AND id = $4'
+        const evidenceParams = subject.evidenceId === undefined || subject.evidenceId === null
+          ? [input.agent_id, input.project, subject.runtimeInstanceId]
+          : [input.agent_id, input.project, subject.runtimeInstanceId, subject.evidenceId]
+        return db.query<T>(
+          `SELECT id, agent_id, project, runtime_instance_id, profile_revision, profile_source,
+                  session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+                  recovery_command, result_status, failure_reason, completed_at,
+                  evidence_path, evidence_log_id, valid_until, source, metadata
+             FROM runtime_memory_ready_evidence
+            WHERE agent_id = $1
+              AND project = $2
+              AND runtime_instance_id = $3${evidenceIdClause}
+            ORDER BY completed_at DESC, id DESC
+            LIMIT 1`,
+          evidenceParams,
+        )
+      }
+      return db.query<T>(sql, params)
+    },
+  }
+  const gate = await evaluateRuntimeMemoryReadyGate(selectedDb, input)
+  if (gate.runtime_instance_id !== subject.runtimeInstanceId) {
+    return {
+      ...gate,
+      ok: false,
+      reason: 'runtime_instance_mismatch' as const,
+      details: {
+        ...gate.details,
+        selected_runtime_instance_id: subject.runtimeInstanceId,
+        observed_runtime_instance_id: gate.runtime_instance_id,
+      },
+    }
+  }
+  return gate
+}
+
 class RuntimeReceiptSelectionError extends Error {
   constructor(
-    readonly discriminator: 'runtime_receipt_incompatible' | 'runtime_receipt_ambiguous' | 'runtime_receipt_post_insert_readback',
+    readonly discriminator: 'runtime_receipt_incompatible' | 'runtime_receipt_ambiguous'
+      | 'runtime_receipt_post_insert_readback' | 'runtime_receipt_post_evidence_readback',
     readonly evidenceDigest: string,
   ) {
     super(discriminator)
@@ -2115,11 +2224,16 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           'SELECT valid_until FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
           [recorded.evidence_id, runtime.id],
         )
-        const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
-          agent_id: context.agentId,
-          expected_agent_id: context.agentId,
-          project,
-        })
+        const gate = await evaluateSelectedRuntimeMemoryReadyGate(
+          db,
+          {
+            agent_id: context.agentId,
+            expected_agent_id: context.agentId,
+            project,
+          },
+          { runtimeInstanceId: runtime.id, evidenceId: recorded.evidence_id },
+          runtimeTuple,
+        )
         return { recorded, gate, recovery, validUntil: storedEvidence?.valid_until ?? null }
       })
       evidenceId = result.recorded.evidence_id
@@ -2201,17 +2315,30 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   const memoryReadback = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
     const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
     try {
-      const gate = await withBootstrapDb(env, (db) => evaluateRuntimeMemoryReadyGate(db as any, {
-        agent_id: context.agentId,
-        expected_agent_id: context.agentId,
-        project,
-      }))
+      const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
+      const mutationPayload = mutation?.rollback_payload ?? {}
+      const selectedRuntimeInstanceId = String(
+        mutationPayload.runtime_instance_id ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? '',
+      ).trim()
+      const gate = await withBootstrapDb(env, (db) => evaluateSelectedRuntimeMemoryReadyGate(
+        db,
+        {
+          agent_id: context.agentId,
+          expected_agent_id: context.agentId,
+          project,
+        },
+        selectedRuntimeInstanceId
+          ? {
+              runtimeInstanceId: selectedRuntimeInstanceId,
+              evidenceId: mutationPayload.evidence_id as string | number | null | undefined,
+            }
+          : null,
+      ))
       if (!env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID && gate.ok && gate.runtime_instance_id) {
         env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = gate.runtime_instance_id
       }
       const runtimeMatches = Boolean(env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID)
         && gate.runtime_instance_id === env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID
-      const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
       let mutationMatches = true
       if (mutation) {
         const payload = mutation.rollback_payload ?? {}

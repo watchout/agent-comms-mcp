@@ -304,7 +304,7 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  test('B5-CONCURRENCY-001 serializes concurrent receipt selection and retains one bootstrap row beside ordinary runtime', async () => {
+  test('B5-CONCURRENCY-001 binds create and reuse readback to one receipt while ordinary heartbeat advances', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -337,11 +337,15 @@ describe('aun bootstrap clean-host journal', () => {
        VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5::jsonb)`,
       ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
     )
+    const storedProfile = await db.queryOne<any>(
+      `SELECT profile_revision, profile_source FROM agents WHERE agent_id = $1`,
+      ['b5-concurrency'],
+    )
     await db.close()
     const profile = {
       runtime: 'TUI', runtime_engine_preference: 'codex', home_directory: repoRoot,
       channel_port: 8812, tmux_session: 'b5-session', profile_enabled: true,
-      profile_revision: 1, profile_source: 'fixture',
+      profile_revision: Number(storedProfile?.profile_revision), profile_source: storedProfile?.profile_source,
     }
     const recoveryFixture = `
       const readline = require('node:readline');
@@ -353,12 +357,27 @@ describe('aun bootstrap clean-host journal', () => {
         if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project b5-concurrency-project recovered'}],isError:false}}));
       });
     `
+    let ordinaryHeartbeatAdvances = 0
     const run = async (command: string, args: string[]) => {
       const joined = args.join(' ')
       if (command === process.execPath && joined.includes('agent profile get')) {
         return { exitCode: 0, stdout: JSON.stringify({ profile }), stderr: '' }
       }
       if (command === 'codex' && joined === 'mcp get wasurezu --json') {
+        const heartbeatDb = new PgAdapter(databaseUrl)
+        try {
+          await heartbeatDb.execute(
+            `UPDATE agent_runtime_instances
+                SET last_seen_at = now() + interval '1 hour'
+              WHERE runtime_instance_id = $1
+                AND agent_id = $2
+                AND runtime_kind = 'local_process'`,
+            ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency'],
+          )
+          ordinaryHeartbeatAdvances++
+        } finally {
+          await heartbeatDb.close()
+        }
         return {
           exitCode: 0,
           stdout: JSON.stringify({
@@ -380,18 +399,39 @@ describe('aun bootstrap clean-host journal', () => {
       })
     }
     const outcomes = await Promise.all([runGate('b5-concurrent-a'), runGate('b5-concurrent-b')])
-    expect(outcomes.every((outcome) => outcome.ok || outcome.reasonCodes?.[0] === 'NO_GO_MEMORY_RECOVERY')).toBe(true)
-    expect(outcomes.every((outcome) => outcome.reasonCodes?.[0] !== 'NO_GO_RUNTIME_RECEIPT')).toBe(true)
-    const readback = new PgAdapter(databaseUrl)
-    const active = await readback.query<any>(
+    for (const outcome of outcomes) expect(outcome).toMatchObject({ ok: true })
+    const createReadback = new PgAdapter(databaseUrl)
+    const activeAfterCreate = await createReadback.query<any>(
       `SELECT runtime_instance_id, runtime_kind, status FROM agent_runtime_instances
         WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
       ['b5-concurrency'],
     )
-    expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toHaveLength(1)
+    await createReadback.close()
+    const createdReceipts = activeAfterCreate.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')
+    expect(createdReceipts).toHaveLength(1)
+
+    const reuseOutcome = await runGate('b5-reuse-after-heartbeat')
+    expect(reuseOutcome.ok).toBe(true)
+
+    const readback = new PgAdapter(databaseUrl)
+    const active = await readback.query<any>(
+      `SELECT runtime_instance_id, runtime_kind, session_name, process_id, port,
+              checkout_path, commit_sha, status, metadata
+         FROM agent_runtime_instances
+        WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
+      ['b5-concurrency'],
+    )
+    expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toEqual([
+      expect.objectContaining({
+        runtime_instance_id: createdReceipts[0].runtime_instance_id,
+        runtime_kind: 'bootstrap_bound_provider',
+        status: 'running',
+      }),
+    ])
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
-    ])
+    ].map((row) => expect.objectContaining(row)))
+    expect(ordinaryHeartbeatAdvances).toBe(3)
     await readback.close()
   })
 
