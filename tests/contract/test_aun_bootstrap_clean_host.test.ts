@@ -308,10 +308,11 @@ describe('aun bootstrap clean-host journal', () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
-    const databaseName = `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`
-    expect(Bun.spawnSync(['createdb', '-h', '/tmp', databaseName]).exitCode).toBe(0)
-    postgresDatabases.push(databaseName)
-    const databaseUrl = `postgresql:///${databaseName}?host=/tmp`
+    const postgresDatabase = createPostgresTestDatabase(
+      `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`,
+    )
+    postgresDatabases.push(postgresDatabase)
+    const databaseUrl = postgresDatabase.databaseUrl
     const baseEnv = {
       ...process.env,
       HOME: home,
