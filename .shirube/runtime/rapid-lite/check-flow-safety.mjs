@@ -25,6 +25,8 @@ const SUBJECT_FIELDS = Object.freeze({
 const ACTIVE_WORK_STATUSES = new Set(["pending", "queued", "received", "in_progress"]);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
+const EXTERNAL_SUBJECT_SOURCE_SCHEMA = "shirube-external-gate-subject-source/v1";
+const EXTERNAL_SUBJECT_WORKFLOW = ".github/workflows/shirube-external-gate-subject-request.yml";
 
 export function evaluateFlowSafety(input = {}) {
   const findings = [];
@@ -38,6 +40,12 @@ export function evaluateFlowSafety(input = {}) {
   findings.push(...expectedSubjectResult.findings);
   const bindingFindings = subjectBindingFindings(subjectResult.subject, expectedSubjectResult.subject);
   findings.push(...bindingFindings);
+  const externalBinding = validateExternalSubjectBinding({
+    input,
+    subject: subjectResult.subject,
+    expectedSubject: expectedSubjectResult.subject,
+  });
+  findings.push(...externalBinding.findings);
 
   const auditWorkKey = subjectResult.subject && expectedSubjectResult.subject && bindingFindings.length === 0
     ? buildAuditWorkKey(subjectResult.subject)
@@ -82,6 +90,7 @@ export function evaluateFlowSafety(input = {}) {
     verdict,
     would_block: verdict === "BLOCK",
     subject: subjectResult.subject,
+    subject_binding: externalBinding.binding,
     audit_work_key: auditWorkKey,
     findings: uniqueFindings,
     cell_effects: cellEffects,
@@ -92,6 +101,150 @@ export function evaluateFlowSafety(input = {}) {
         ? { action: "deliver_implementation_handoff", blocking: false }
         : { action: "continue_current_cell", blocking: false }
       : { action: "resolve_flow_safety_findings", blocking: true },
+  };
+}
+
+function validateExternalSubjectBinding({ input, subject, expectedSubject }) {
+  if (subject?.gate_type !== "PR_exact_head_audit" && expectedSubject?.gate_type !== "PR_exact_head_audit") {
+    return { findings: [], binding: null };
+  }
+  const source = input.external_subject_source;
+  if (input.subject_binding_mode !== "external_github_actions_artifact" || !isObject(source)) {
+    return {
+      findings: [finding(
+        "FLOW-SAFETY-009",
+        "MISSING_EXTERNAL_GATE_SUBJECT_BINDING",
+        "external_subject_source",
+        "PR_exact_head_audit requires an authenticated external GitHub Actions artifact subject; checklist or expected-subject fallback is forbidden.",
+      )],
+      binding: null,
+    };
+  }
+
+  const findings = [];
+  if (
+    source.schema_version !== EXTERNAL_SUBJECT_SOURCE_SCHEMA ||
+    source.verdict !== "PASS" ||
+    source.source_type !== "github_actions_artifact" ||
+    source.claimed_subject_source !== "external_artifact_bytes"
+  ) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "INVALID_EXTERNAL_GATE_SUBJECT_SOURCE",
+      "external_subject_source",
+      "External subject source metadata is not a verified GitHub Actions artifact resolution.",
+    ));
+  }
+  if (
+    source.source_independence_verified !== true ||
+    source.target_branch_mutated !== false ||
+    !Array.isArray(source.expected_subject_sources) ||
+    !source.expected_subject_sources.includes("github_pull_request_event") ||
+    !source.expected_subject_sources.includes("exact_handoff_bytes")
+  ) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "EXTERNAL_SUBJECT_SOURCE_INDEPENDENCE_VIOLATION",
+      "external_subject_source",
+      "Claimed artifact bytes and expected event/handoff subject must remain independently derived with no target mutation.",
+    ));
+  }
+
+  const identity = source.immutable_artifact_identity;
+  const provenance = source.authenticated_provenance;
+  const invalidIdentity = !isObject(identity) ||
+    !Number.isInteger(Number(identity.repository_id)) || Number(identity.repository_id) <= 0 ||
+    !Number.isInteger(Number(identity.artifact_id)) || Number(identity.artifact_id) <= 0 ||
+    !nonEmpty(identity.artifact_node_id) ||
+    !/^sha256:[a-f0-9]{64}$/i.test(String(identity.artifact_digest ?? "")) ||
+    !Number.isInteger(Number(identity.workflow_run_id)) || Number(identity.workflow_run_id) <= 0 ||
+    !Number.isInteger(Number(identity.producer_workflow_id)) || Number(identity.producer_workflow_id) <= 0 ||
+    identity.producer_workflow_path !== EXTERNAL_SUBJECT_WORKFLOW ||
+    !SHA_PATTERN.test(String(identity.producer_head_sha ?? ""));
+  if (invalidIdentity) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "INVALID_IMMUTABLE_ARTIFACT_IDENTITY",
+      "external_subject_source.immutable_artifact_identity",
+      "Artifact ID, node ID, digest, producer workflow/run, and producer head must all be API-verified.",
+    ));
+  }
+
+  const invalidProvenance = !isObject(provenance) ||
+    provenance.api_origin !== "api.github.com" ||
+    provenance.api_version !== "2022-11-28" ||
+    !nonEmpty(provenance.token_env_name) ||
+    Number(provenance.artifact_get_status) !== 200 ||
+    Number(provenance.workflow_run_get_status) !== 200 ||
+    Number(provenance.pull_request_get_status) !== 200 ||
+    provenance.producer_event !== "workflow_dispatch" ||
+    !nonEmpty(provenance.producer_actor) ||
+    provenance.producer_run_conclusion !== "success" ||
+    provenance.artifact_expired !== false ||
+    !nonEmpty(provenance.artifact_created_at) ||
+    !nonEmpty(provenance.artifact_expires_at);
+  if (invalidProvenance) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "INVALID_AUTHENTICATED_ARTIFACT_PROVENANCE",
+      "external_subject_source.authenticated_provenance",
+      "Artifact and producer provenance must come from successful authenticated GitHub API readback.",
+    ));
+  }
+
+  if (
+    !SHA256_PATTERN.test(String(input.subject_bytes_sha256 ?? "")) ||
+    String(source.subject_sha256 ?? "").toLowerCase() !== String(input.subject_bytes_sha256 ?? "").toLowerCase()
+  ) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "EXTERNAL_SUBJECT_BYTES_DIGEST_MISMATCH",
+      "subject_bytes_sha256",
+      "Materialized subject bytes must match the resolver-authenticated subject digest.",
+    ));
+  }
+
+  if (subject && isObject(source.exact_subject)) {
+    const mismatches = SUBJECT_FIELDS.PR_exact_head_audit.filter((field) =>
+      normalizeSubjectValue(field, subject[field]) !== normalizeSubjectValue(field, source.exact_subject[field]),
+    );
+    if (mismatches.length > 0) {
+      findings.push(finding(
+        "FLOW-SAFETY-009",
+        "EXTERNAL_SOURCE_SUBJECT_MISMATCH",
+        "external_subject_source.exact_subject",
+        `Source metadata does not bind the materialized subject fields: ${mismatches.join(", ")}.`,
+        { mismatch_fields: mismatches },
+      ));
+    }
+  } else {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "MISSING_EXTERNAL_SOURCE_SUBJECT",
+      "external_subject_source.exact_subject",
+      "Source metadata must contain the exact six-field claimed subject.",
+    ));
+  }
+
+  if (source.binding?.all_six_fields_equal !== true) {
+    findings.push(finding(
+      "FLOW-SAFETY-009",
+      "UNVERIFIED_EXTERNAL_SUBJECT_EQUALITY",
+      "external_subject_source.binding",
+      "Resolver evidence must prove exact equality across all six subject fields.",
+    ));
+  }
+  return {
+    findings,
+    binding: {
+      mode: input.subject_binding_mode,
+      source_schema: source.schema_version ?? null,
+      artifact_id: identity?.artifact_id ?? null,
+      workflow_run_id: identity?.workflow_run_id ?? null,
+      subject_sha256: source.subject_sha256 ?? null,
+      source_independence_verified: source.source_independence_verified === true,
+      authenticated: findings.length === 0,
+    },
   };
 }
 

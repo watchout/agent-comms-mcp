@@ -1,0 +1,6 @@
+{
+  "id": "wrong_repo_pr_cell_negative",
+  "scenario": "wrong_repo_pr_cell",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-010"
+}

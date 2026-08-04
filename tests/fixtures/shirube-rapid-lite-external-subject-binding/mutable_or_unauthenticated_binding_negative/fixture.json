@@ -1,0 +1,6 @@
+{
+  "id": "mutable_or_unauthenticated_binding_negative",
+  "scenario": "mutable_or_unauthenticated",
+  "expected_verdict": "BLOCKED",
+  "expected_code": "XSUBJ-012"
+}
