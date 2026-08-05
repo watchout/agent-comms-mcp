@@ -698,8 +698,18 @@ describe('T11b3 — Cell 20 registry identity reconciliation CLI surface', () =>
   test('canonical classification never reads agent names and unrelated Cell effects are zero', () => {
     expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/aun-registry-classification-input\/v1/)
     expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/aun-registry-identity-reconciliation-plan\/v1/)
-    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/cells_30_70_effects: 0/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/cells_30_70_effect_count: 0/)
     expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).not.toMatch(/test-looking|agentId.*test|agent_id.*includes\(['"]test/)
+  })
+
+  test('exact handoff fields, dotted audit events, and PostgreSQL lock fence are present', () => {
+    for (const field of [
+      'control_source_ref', 'input_manifest_sha256', 'entry_count', 'agents_preimage_sha256',
+      'related_read_set_sha256', 'proposed_postimage_sha256', 'permitted_effect',
+    ]) expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain(field)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('registry.identity_reconciliation.apply')
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('registry.identity_reconciliation.rollback')
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('IN SHARE ROW EXCLUSIVE MODE NOWAIT')
   })
 })
 

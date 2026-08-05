@@ -5246,7 +5246,7 @@ async function registryIdentityReconciliationCommand(
     raw_input: rawInput,
     evidence_bundle: evidenceBundle,
     exact_subject: {
-      target_repository: requiredRegistryFlag(flags, 'target-repository'),
+      repo: requiredRegistryFlag(flags, 'target-repository'),
       base_commit: requiredRegistryFlag(flags, 'base-commit').toLowerCase(),
       base_tree: requiredRegistryFlag(flags, 'base-tree').toLowerCase(),
     },

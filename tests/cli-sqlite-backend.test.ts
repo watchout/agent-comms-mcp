@@ -956,15 +956,14 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const planPath = join(tmpDir, 'plan.json')
     writeFileSync(inputPath, `${canonicalJson({
       schema_version: 'aun-registry-classification-input/v1',
-      target_repository: 'watchout/agent-comms-mcp',
-      base_commit: '05045be81165d0e151baf02f9fc1b93cb46c997e',
-      base_tree: '7d4e0109825fb63c7c343ae272bc8cc3b97ba89e',
-      cell_id: 'CELL-AUN-REGISTRY-IDENTITY-RECONCILIATION-001',
-      classifications: [{
+      control_source_ref: sourceRef,
+      source_commit: '05045be81165d0e151baf02f9fc1b93cb46c997e',
+      source_tree: '7d4e0109825fb63c7c343ae272bc8cc3b97ba89e',
+      entries: [{
         agent_id: 'probe-f',
-        profile_class: 'production',
-        source_ref: sourceRef,
-        source_sha256: sourceSha,
+        target_profile_class: 'production',
+        evidence_ref: sourceRef,
+        evidence_sha256: sourceSha,
       }],
     })}\n`)
     writeFileSync(evidencePath, JSON.stringify({ [sourceRef]: sourceBody }))
@@ -977,9 +976,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(dryRun.status).toBe(0)
     const dryPayload = JSON.parse(dryRun.stdout)
     expect(dryPayload.writes).toBe(0)
-    expect(dryPayload.plan.effects.cells_30_70_effects).toBe(0)
+    expect(dryPayload.plan.permitted_effect.cells_30_70_effect_count).toBe(0)
     expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
-    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry_identity_reconciliation.%'`)).toHaveLength(0)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry.identity_reconciliation.%'`)).toHaveLength(0)
 
     const planned = runCli([
       'runtime', 'reconcile-identities', 'plan',
@@ -1003,7 +1002,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(refused.status).toBe(1)
     expect(refused.stderr).toContain('REGISTRY_RECONCILIATION_FLAG_REQUIRED: --owner-decision-ref')
     expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
-    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry_identity_reconciliation.%'`)).toHaveLength(0)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry.identity_reconciliation.%'`)).toHaveLength(0)
   })
 
   test('strict profile doctor gates active connectors on runtime endpoint leases', () => {
