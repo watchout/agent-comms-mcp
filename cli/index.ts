@@ -138,6 +138,16 @@ import { syncChannelPolicyConnectors, type BindingRole, type OrderingScope } fro
 import { buildLiveTmuxProfileDoctorBlockers, parseTmuxListPanes } from '../core/tmux-runtime-inspector'
 import { profileExclusionReason } from '../core/profile-classification'
 import { reconcileDiscordDeliveryCredentialPromotion } from '../core/discord-credential-promotion'
+import {
+  applyRegistryIdentityReconciliation,
+  buildRegistryIdentityReconciliationPlan,
+  canonicalJson,
+  readRegistryIdentityReconciliationState,
+  rollbackRegistryIdentityReconciliation,
+  type RegistryApplyReceipt,
+  type RegistryEvidenceBundle,
+  type RegistryReconciliationPlan,
+} from '../core/registry-identity-reconciliation'
 
 // --- DB connection ---
 // `getDatabaseUrl()` is retained for callers that still need the raw PG URL
@@ -5065,15 +5075,19 @@ async function directory(args: string[]) {
 }
 
 async function runtimeCommand(subcommand: string | undefined, args: string[]) {
-  const { flags } = parseArgs(args)
-  if (subcommand !== 'inventory' && subcommand !== 'cleanup') {
-    console.error('Usage: agent-com runtime <inventory|cleanup> ...')
+  const { positional, flags } = parseArgs(args)
+  if (subcommand !== 'inventory' && subcommand !== 'cleanup' && subcommand !== 'reconcile-identities') {
+    console.error('Usage: agent-com runtime <inventory|cleanup|reconcile-identities> ...')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
   const staleMinutes = parsePositiveIntFlag(flags['stale-minutes'], 15, 'stale-minutes')
   const db = await getDb()
   try {
+    if (subcommand === 'reconcile-identities') {
+      await registryIdentityReconciliationCommand((db as any).__adapter, positional[0], flags)
+      return
+    }
     if (subcommand === 'inventory') {
       const report = await buildRuntimeInventoryReport((db as any).__adapter, {
         staleMinutes,
@@ -5125,6 +5139,119 @@ async function runtimeCommand(subcommand: string | undefined, args: string[]) {
   } finally {
     await db.end()
   }
+}
+
+function requiredRegistryFlag(flags: Record<string, string>, name: string): string {
+  const value = flags[name]?.trim()
+  if (!value) throw new Error(`REGISTRY_RECONCILIATION_FLAG_REQUIRED: --${name}`)
+  return value
+}
+
+function readRegistryJsonFile<T>(path: string, label: string): T {
+  try {
+    return JSON.parse(readFileSync(resolve(path), 'utf8')) as T
+  } catch (err) {
+    throw new Error(`REGISTRY_RECONCILIATION_FILE_INVALID: ${label}:${(err as Error).message}`)
+  }
+}
+
+function registryOwnerDecisionFromFlags(flags: Record<string, string>) {
+  const ref = requiredRegistryFlag(flags, 'owner-decision-ref')
+  const match = /^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/602#issuecomment-(\d+)$/.exec(ref)
+  if (!match) throw new Error('REGISTRY_RECONCILIATION_OWNER_DECISION_REF_INVALID')
+  let readback: { html_url?: unknown; body?: unknown; user?: { login?: unknown } }
+  try {
+    readback = JSON.parse(execFileSync('gh', [
+      'api',
+      `repos/watchout/agent-comms-mcp/issues/comments/${match[1]}`,
+    ], { encoding: 'utf8' }))
+  } catch (err) {
+    throw new Error(`REGISTRY_RECONCILIATION_OWNER_DECISION_API_READBACK_FAILED:${(err as Error).message}`)
+  }
+  if (readback.html_url !== ref || readback.user?.login !== 'watchout' || typeof readback.body !== 'string') {
+    throw new Error('REGISTRY_RECONCILIATION_OWNER_DECISION_API_READBACK_INVALID')
+  }
+  if (flags['owner-decision-body-file']) {
+    const localBody = readFileSync(resolve(flags['owner-decision-body-file']), 'utf8')
+    if (localBody !== readback.body) {
+      throw new Error('REGISTRY_RECONCILIATION_OWNER_DECISION_LOCAL_BODY_MISMATCH')
+    }
+  }
+  return {
+    ref,
+    body: readback.body,
+    body_sha256: requiredRegistryFlag(flags, 'owner-decision-body-sha256').toLowerCase(),
+  }
+}
+
+async function registryIdentityReconciliationCommand(
+  db: DbAdapter,
+  operation: string | undefined,
+  flags: Record<string, string>,
+): Promise<void> {
+  if (!operation || !['plan', 'dry-run', 'apply', 'readback', 'rollback'].includes(operation)) {
+    throw new Error('Usage: agent-com runtime reconcile-identities <plan|dry-run|apply|readback|rollback> ...')
+  }
+
+  if (operation === 'rollback') {
+    if (!hasFlag(flags, 'execute') || !flagEnabled(flags.execute)) {
+      throw new Error('REGISTRY_RECONCILIATION_ROLLBACK_REQUIRES_EXECUTE')
+    }
+    const receipt = readRegistryJsonFile<RegistryApplyReceipt>(
+      requiredRegistryFlag(flags, 'apply-receipt-file'),
+      'apply-receipt-file',
+    )
+    const result = await rollbackRegistryIdentityReconciliation(db, receipt, {
+      confirm_receipt_sha256: requiredRegistryFlag(flags, 'confirm-receipt-sha256').toLowerCase(),
+      owner_decision: registryOwnerDecisionFromFlags(flags),
+    })
+    process.stdout.write(`${canonicalJson(result)}\n`)
+    return
+  }
+
+  const inputPath = requiredRegistryFlag(flags, 'input')
+  const evidencePath = requiredRegistryFlag(flags, 'evidence-bundle')
+  const rawInput = readFileSync(resolve(inputPath))
+  const evidenceBundle = readRegistryJsonFile<RegistryEvidenceBundle>(evidencePath, 'evidence-bundle')
+
+  if (operation === 'plan' || operation === 'dry-run') {
+    const plan = await buildRegistryIdentityReconciliationPlan(db, rawInput, evidenceBundle)
+    if (operation === 'plan') {
+      process.stdout.write(`${canonicalJson(plan)}\n`)
+    } else {
+      process.stdout.write(`${canonicalJson({
+        schema_version: 'aun-registry-identity-reconciliation-dry-run/v1',
+        writes: 0,
+        plan,
+      })}\n`)
+    }
+    return
+  }
+
+  const plan = readRegistryJsonFile<RegistryReconciliationPlan>(
+    requiredRegistryFlag(flags, 'plan-file'),
+    'plan-file',
+  )
+  if (operation === 'readback') {
+    process.stdout.write(`${canonicalJson(await readRegistryIdentityReconciliationState(db, plan))}\n`)
+    return
+  }
+
+  if (!hasFlag(flags, 'execute') || !flagEnabled(flags.execute)) {
+    throw new Error('REGISTRY_RECONCILIATION_APPLY_REQUIRES_EXECUTE')
+  }
+  const result = await applyRegistryIdentityReconciliation(db, plan, {
+    confirm_plan_sha256: requiredRegistryFlag(flags, 'confirm-plan-sha256').toLowerCase(),
+    owner_decision: registryOwnerDecisionFromFlags(flags),
+    raw_input: rawInput,
+    evidence_bundle: evidenceBundle,
+    exact_subject: {
+      target_repository: requiredRegistryFlag(flags, 'target-repository'),
+      base_commit: requiredRegistryFlag(flags, 'base-commit').toLowerCase(),
+      base_tree: requiredRegistryFlag(flags, 'base-tree').toLowerCase(),
+    },
+  })
+  process.stdout.write(`${canonicalJson(result)}\n`)
 }
 
 function collectRuntimeCleanupSnapshots() {
@@ -6308,6 +6435,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — read-only runtime/connector/binding freshness report
   runtime cleanup [--format json|text] [--stale-minutes 15] [--execute --confirm <plan_hash>] [--allow-unknown-risk] [--include-disabled] [--include-test]
                                                        — dry-run stale runtime/listener/tmux cleanup plan; execute requires a matching plan hash
+  runtime reconcile-identities <plan|dry-run|apply|readback|rollback> --input <json> --evidence-bundle <json> [--plan-file <json>]
+                                                       — Cell 20 source-bound identity classification; apply/rollback require exact hashes, immutable owner-decision evidence, and --execute
   inbound smoke [--format json|text] [--window-hours 168]
                                                        — read-only Discord inbound smoke evidence by channel
   fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]

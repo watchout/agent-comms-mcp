@@ -18,11 +18,12 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
+import { canonicalJson } from '../core/registry-identity-reconciliation'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const CLI = join(REPO_ROOT, 'cli', 'index.ts')
@@ -944,6 +945,65 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const rerun = runCli(['runtime', 'cleanup', '--format', 'json'])
     expect(rerun.status).toBe(0)
     expect(JSON.parse(rerun.stdout).summary.cleanup_targets).toBe(0)
+  })
+
+  test('registry identity reconciliation CLI plans with zero writes and gates apply on OD evidence', () => {
+    const sourceRef = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5186249673'
+    const sourceBody = 'owner-frozen Cell 20 registry classification\n'
+    const sourceSha = createHash('sha256').update(sourceBody).digest('hex')
+    const inputPath = join(tmpDir, 'classification-input.json')
+    const evidencePath = join(tmpDir, 'evidence-bundle.json')
+    const planPath = join(tmpDir, 'plan.json')
+    writeFileSync(inputPath, `${canonicalJson({
+      schema_version: 'aun-registry-classification-input/v1',
+      target_repository: 'watchout/agent-comms-mcp',
+      base_commit: '05045be81165d0e151baf02f9fc1b93cb46c997e',
+      base_tree: '7d4e0109825fb63c7c343ae272bc8cc3b97ba89e',
+      cell_id: 'CELL-AUN-REGISTRY-IDENTITY-RECONCILIATION-001',
+      classifications: [{
+        agent_id: 'probe-f',
+        profile_class: 'production',
+        source_ref: sourceRef,
+        source_sha256: sourceSha,
+      }],
+    })}\n`)
+    writeFileSync(evidencePath, JSON.stringify({ [sourceRef]: sourceBody }))
+
+    const dryRun = runCli([
+      'runtime', 'reconcile-identities', 'dry-run',
+      '--input', inputPath,
+      '--evidence-bundle', evidencePath,
+    ])
+    expect(dryRun.status).toBe(0)
+    const dryPayload = JSON.parse(dryRun.stdout)
+    expect(dryPayload.writes).toBe(0)
+    expect(dryPayload.plan.effects.cells_30_70_effects).toBe(0)
+    expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry_identity_reconciliation.%'`)).toHaveLength(0)
+
+    const planned = runCli([
+      'runtime', 'reconcile-identities', 'plan',
+      '--input', inputPath,
+      '--evidence-bundle', evidencePath,
+    ])
+    expect(planned.status).toBe(0)
+    const plan = JSON.parse(planned.stdout)
+    writeFileSync(planPath, planned.stdout)
+    const refused = runCli([
+      'runtime', 'reconcile-identities', 'apply',
+      '--input', inputPath,
+      '--evidence-bundle', evidencePath,
+      '--plan-file', planPath,
+      '--execute',
+      '--confirm-plan-sha256', plan.plan_sha256,
+      '--target-repository', 'watchout/agent-comms-mcp',
+      '--base-commit', '05045be81165d0e151baf02f9fc1b93cb46c997e',
+      '--base-tree', '7d4e0109825fb63c7c343ae272bc8cc3b97ba89e',
+    ])
+    expect(refused.status).toBe(1)
+    expect(refused.stderr).toContain('REGISTRY_RECONCILIATION_FLAG_REQUIRED: --owner-decision-ref')
+    expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry_identity_reconciliation.%'`)).toHaveLength(0)
   })
 
   test('strict profile doctor gates active connectors on runtime endpoint leases', () => {

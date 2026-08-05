@@ -9,6 +9,15 @@ export type ProfileLike = {
 
 export type ProfileExclusionReason = 'disabled_profile' | 'test_profile' | null
 
+export type AuthoritativeProfileClass = 'production' | 'test'
+
+export type AuthoritativeProfileClassification = {
+  profile_class: AuthoritativeProfileClass
+  source_ref: string | null
+  source_sha256: string | null
+  plan_sha256: string | null
+}
+
 export function normalizeText(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
   const value = String(raw).trim()
@@ -58,6 +67,27 @@ export function isTestProfile(row: ProfileLike): boolean {
   if (agentType === 'test') return true
   const agentId = normalizeText(row.agent_id)?.toLowerCase() ?? ''
   return agentId === 'test' || /^test[-_]/.test(agentId) || /[-_]test$/.test(agentId)
+}
+
+/**
+ * Reads only an explicit persisted classification. Identity names, display
+ * names, agent types, and legacy `test_profile` convenience flags are never
+ * authoritative inputs here.
+ */
+export function authoritativeProfileClassification(
+  row: ProfileLike,
+): AuthoritativeProfileClassification | null {
+  const metadata = parseJsonObject(row.metadata)
+  const profileClass = normalizeText(metadata.profile_class)?.toLowerCase()
+  if (profileClass !== 'production' && profileClass !== 'test') return null
+  const sourceSha256 = normalizeText(metadata.profile_class_source_sha256)?.toLowerCase() ?? null
+  const planSha256 = normalizeText(metadata.profile_class_plan_sha256)?.toLowerCase() ?? null
+  return {
+    profile_class: profileClass,
+    source_ref: normalizeText(metadata.profile_class_source_ref),
+    source_sha256: sourceSha256 && /^[a-f0-9]{64}$/.test(sourceSha256) ? sourceSha256 : null,
+    plan_sha256: planSha256 && /^[a-f0-9]{64}$/.test(planSha256) ? planSha256 : null,
+  }
 }
 
 export function profileExclusionReason(

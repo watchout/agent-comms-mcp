@@ -203,6 +203,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     includeUnresolvedNewSeat = false,
     liveRuntimeEngine = 'codex',
     includeProductionNameCollisionSeat = false,
+    includeUnclassifiedSeat = false,
   ) {
     const now = '2026-07-26T00:00:00Z'
     return {
@@ -211,15 +212,19 @@ describe('ordinary all-agent manifest candidate inventory', () => {
         if (/FROM agents/.test(sql)) return [
           {
             agent_id: 'dev-001', agent_type: 'dev', profile_revision: 7, profile_enabled: true,
-            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'production' },
           },
           ...(includeUnresolvedNewSeat ? [{
             agent_id: 'new-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
-            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'production' },
           }] : []),
           ...(includeProductionNameCollisionSeat ? [{
             agent_id: 'contest-dev', agent_type: 'dev', profile_revision: 3, profile_enabled: true,
             disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'production' },
+          }] : []),
+          ...(includeUnclassifiedSeat ? [{
+            agent_id: 'test-looking-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
           }] : []),
           { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'test' } },
         ]
@@ -329,6 +334,16 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers).toContain('dev-001:protected_d1_not_explicit')
     expect(report.resolved_target_count).toBe(0)
+  })
+
+  test('enabled unclassified seats fail closed and are never classified from their names', async () => {
+    const report = await generateAllAgentCommunicationManifestCandidates(
+      fakeManifestDb(false, 'codex', false, true),
+      candidateOptions(),
+    )
+    expect(report.ok).toBe(false)
+    expect(report.blockers).toContain('test-looking-dev:profile_class_unclassified')
+    expect(report.expected_agent_ids).toEqual(['dev-001'])
   })
 
   test('profile/runtime engine mismatch fails closed instead of choosing either value', async () => {

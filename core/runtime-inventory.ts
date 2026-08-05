@@ -13,6 +13,7 @@ import {
   normalizeApprovedCheckoutRoots,
   type FleetCheckoutDriftResult,
 } from './fleet-checkout-drift'
+import { authoritativeProfileClassification } from './profile-classification'
 
 export type BootstrapRuntimeKind = 'codex' | 'claude'
 
@@ -222,13 +223,16 @@ export async function readV2NativeFrozenEnabledSet(
        FROM agents
       ORDER BY agent_id`,
   )
-  const selected = rows.filter(row => {
-    const metadata = metadataObject(row.metadata)
-    return (row.profile_enabled === true || Number(row.profile_enabled) === 1)
-      && row.disabled_at === null
-      && String(row.agent_type) !== 'human'
-      && String(metadata.profile_class ?? '') !== 'test'
-  })
+  const eligible = rows.filter(row => (row.profile_enabled === true || Number(row.profile_enabled) === 1)
+    && row.disabled_at === null
+    && String(row.agent_type) !== 'human')
+  const unclassified = eligible
+    .filter(row => authoritativeProfileClassification(row) === null)
+    .map(row => String(row.agent_id))
+  if (unclassified.length > 0) {
+    throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: authoritative profile class missing for ${unclassified.sort().join(',')}`)
+  }
+  const selected = eligible.filter(row => authoritativeProfileClassification(row)?.profile_class === 'production')
   if (selected.length < 2) throw new Error('V2_NATIVE_FROZEN_SET_BLOCKED: fewer than two production-enabled non-human agents')
 
   const result: V2NativeMeshFrozenAgentV1[] = []
@@ -320,20 +324,20 @@ export async function generateAllAgentCommunicationManifestCandidates(
 ): Promise<AllAgentCommunicationCandidateReport> {
   const nowMs = options.nowMs ?? Date.now()
   const maxAgeMs = options.maxHeartbeatAgeMs ?? 15 * 60_000
-  const agents = (await db.query<any>(
+  const eligibleAgents = (await db.query<any>(
     `SELECT agent_id, agent_type, profile_revision, profile_enabled, disabled_at,
             runtime_engine_preference, metadata
        FROM agents
       ORDER BY agent_id`,
-  )).filter(row => {
-    const metadata = metadataObject(row.metadata)
-    return (row.profile_enabled === true || Number(row.profile_enabled) === 1)
-      && row.disabled_at === null
-      && String(row.agent_type) === 'dev'
-      && String(metadata.profile_class ?? '') !== 'test'
-  })
+  )).filter(row => (row.profile_enabled === true || Number(row.profile_enabled) === 1)
+    && row.disabled_at === null
+    && String(row.agent_type) === 'dev')
+  const unclassified = eligibleAgents
+    .filter(row => authoritativeProfileClassification(row) === null)
+    .map(row => String(row.agent_id))
+  const agents = eligibleAgents.filter(row => authoritativeProfileClassification(row)?.profile_class === 'production')
   const expectedAgentIds = agents.map(row => String(row.agent_id)).sort()
-  const blockers: string[] = []
+  const blockers: string[] = unclassified.map(agentId => `${agentId}:profile_class_unclassified`)
   const targets: AllAgentCommunicationManifestTargetV1[] = []
 
   const gatewayRows = await db.query<any>(
