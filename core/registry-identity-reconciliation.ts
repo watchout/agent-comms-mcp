@@ -368,10 +368,14 @@ async function readRelatedRows(db: DbAdapter, agentIds: string[]): Promise<unkno
   const rows: Array<Record<string, unknown>> = []
   const orderedIds = [...agentIds].sort()
   for (const agentId of orderedIds) {
+    // Heartbeats advance binding.updated_at and runtime.last_seen_at without
+    // changing registry identity. Keep every semantic binding/runtime field in
+    // the fence, but exclude those two liveness clocks so an approved plan does
+    // not expire solely because the healthy runtime reported in.
     rows.push({
       agent_id: agentId,
       workspaces: await db.query(
-        `SELECT b.agent_id, b.workspace_id, b.binding_role, b.active, b.created_at, b.updated_at,
+        `SELECT b.agent_id, b.workspace_id, b.binding_role, b.active, b.created_at,
                 w.org_id, w.name, w.workspace_type, w.local_path, w.repo_url, w.default_branch, w.metadata
            FROM agent_workspace_bindings b
            JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
@@ -382,7 +386,7 @@ async function readRelatedRows(db: DbAdapter, agentIds: string[]): Promise<unkno
       runtimes: await db.query(
         `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, host_id,
                 session_name, process_id, port, checkout_path, commit_sha, endpoint_uri, status,
-                started_at, stopped_at, last_seen_at, metadata
+                started_at, stopped_at, metadata
            FROM agent_runtime_instances
           WHERE agent_id = $1
           ORDER BY runtime_instance_id`,

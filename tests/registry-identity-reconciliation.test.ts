@@ -366,6 +366,45 @@ describe('Cell 20 registry identity reconciliation', () => {
     }
   })
 
+  test('heartbeat-only timestamps keep the plan byte-stable and do not invalidate apply', async () => {
+    const { db, rawInput } = await fixture()
+    try {
+      await db.execute(
+        `INSERT INTO agent_runtime_instances
+           (runtime_instance_id, agent_id, workspace_id, runtime_engine, status, commit_sha,
+            endpoint_uri, last_seen_at)
+         VALUES
+           ('runtime-heartbeat', 'dev-001', 'ws-dev', 'codex', 'active', 'runtime-head',
+            'http://127.0.0.1:3000', '2026-08-05T00:00:00Z')`,
+      )
+      await db.execute(
+        `UPDATE agent_workspace_bindings
+            SET updated_at = '2026-08-05T00:00:00Z'
+          WHERE agent_id = 'dev-001'`,
+      )
+      const before = await buildRegistryIdentityReconciliationPlan(db, rawInput, { [SOURCE_REF]: SOURCE_BODY })
+
+      await db.execute(
+        `UPDATE agent_runtime_instances
+            SET last_seen_at = '2026-08-05T00:05:00Z'
+          WHERE runtime_instance_id = 'runtime-heartbeat'`,
+      )
+      await db.execute(
+        `UPDATE agent_workspace_bindings
+            SET updated_at = '2026-08-05T00:05:00Z'
+          WHERE agent_id = 'dev-001'`,
+      )
+      const after = await buildRegistryIdentityReconciliationPlan(db, rawInput, { [SOURCE_REF]: SOURCE_BODY })
+
+      expect(canonicalJson(after)).toBe(canonicalJson(before))
+      expect(after.plan_sha256).toBe(before.plan_sha256)
+      const result = await applyRegistryIdentityReconciliation(db, before, applyOptions(before, rawInput))
+      expect(result).toMatchObject({ status: 'applied', affected_agents: 2, audit_rows: 1 })
+    } finally {
+      await db.close()
+    }
+  })
+
   test('agent denominator drift after planning aborts before any write', async () => {
     const { db, rawInput, plan } = await fixture()
     try {
@@ -511,9 +550,36 @@ describe('Cell 20 registry identity reconciliation', () => {
           'dev-001', 'default', 'dev', 'idle', true, NULL, '{"custom":"preserved"}',
           4, 'legacy', '2026-08-01T00:00:00Z', 'codex', '{}'
         );
+        INSERT INTO agent_workspaces VALUES (
+          'ws-dev', 'default', 'Dev workspace', 'local_path', '/work/dev',
+          'https://github.com/watchout/agent-comms-mcp.git', 'main', '{}'
+        );
+        INSERT INTO agent_workspace_bindings VALUES (
+          'dev-001', 'ws-dev', 'primary', true,
+          '2026-08-05T00:00:00Z', '2026-08-05T00:00:00Z'
+        );
+        INSERT INTO agent_runtime_instances
+          (runtime_instance_id, agent_id, workspace_id, runtime_engine, status, commit_sha,
+           endpoint_uri, last_seen_at, metadata)
+        VALUES (
+          'runtime-heartbeat', 'dev-001', 'ws-dev', 'codex', 'active', 'runtime-head',
+          'http://127.0.0.1:3000', '2026-08-05T00:00:00Z', '{}'
+        );
       `)
       const rawInput = inputFor([{ agent_id: 'dev-001', target_profile_class: 'production' }])
       const plan = await buildRegistryIdentityReconciliationPlan(db, rawInput, { [SOURCE_REF]: SOURCE_BODY })
+
+      await admin.query(`
+        UPDATE agent_runtime_instances
+           SET last_seen_at = '2026-08-05T00:05:00Z'
+         WHERE runtime_instance_id = 'runtime-heartbeat';
+        UPDATE agent_workspace_bindings
+           SET updated_at = '2026-08-05T00:05:00Z'
+         WHERE agent_id = 'dev-001';
+      `)
+      const afterHeartbeat = await buildRegistryIdentityReconciliationPlan(db, rawInput, { [SOURCE_REF]: SOURCE_BODY })
+      expect(canonicalJson(afterHeartbeat)).toBe(canonicalJson(plan))
+      expect(afterHeartbeat.plan_sha256).toBe(plan.plan_sha256)
 
       await writer.query('BEGIN')
       await writer.query(`
