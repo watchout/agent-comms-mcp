@@ -129,6 +129,11 @@ describe('V2-native S0 cutover and zero-effect fences', () => {
 
   test('canonical selector freezes every enabled non-human agent with one exact ready runtime', async () => {
     const now = new Date().toISOString()
+    const classificationEvidence = {
+      profile_class_source_ref: 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5186249673',
+      profile_class_source_sha256: '82c3f997ecaed6a3e852a32118714169d078fcc24a2b05d8e4be725135524779',
+      profile_class_plan_sha256: 'b'.repeat(64),
+    }
     for (const [agentId, agentType, profileClass] of [
       ['alpha', 'bot', 'production'],
       ['beta', 'bot', 'production'],
@@ -137,7 +142,7 @@ describe('V2-native S0 cutover and zero-effect fences', () => {
     ]) {
       await db.execute(
         `INSERT INTO agents VALUES ($1, 1, 'deterministic-s0', $2, 1, NULL, $3)`,
-        [agentId, JSON.stringify({ profile_class: profileClass }), agentType],
+        [agentId, JSON.stringify({ profile_class: profileClass, ...classificationEvidence }), agentType],
       )
       await db.execute(
         `INSERT INTO agent_runtime_instances VALUES ($1, $2, 'deterministic-s0', $3, $4, 'ready', NULL, $5, $5)`,

@@ -102,6 +102,17 @@ export type RegistryOwnerDecisionEvidence = {
   body_sha256: string
 }
 
+export const REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF = 'https://github.com/watchout/agent-comms-mcp/pull/914' as const
+
+export type RegistryExactSubject = {
+  repo: typeof REGISTRY_RECONCILIATION_REPOSITORY
+  base_commit: string
+  base_tree: string
+  implementation_pr_ref: typeof REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF
+  head_commit: string
+  head_tree: string
+}
+
 export type RegistryApplyReceipt = {
   schema_version: 'aun-registry-identity-reconciliation-apply-receipt/v1'
   cell_id: typeof REGISTRY_RECONCILIATION_CELL_ID
@@ -110,6 +121,7 @@ export type RegistryApplyReceipt = {
   related_rows_sha256: string
   owner_decision_ref: string
   owner_decision_body_sha256: string
+  exact_subject: RegistryExactSubject
   applied_at: string
   plan: RegistryReconciliationPlan
   entries: Array<{
@@ -706,6 +718,7 @@ function parseOwnerDecisionPayload(body: string): RegistryOwnerDecisionPayload {
 function verifyOwnerDecision(
   evidence: RegistryOwnerDecisionEvidence,
   plan: RegistryReconciliationPlan,
+  exactSubject: RegistryExactSubject,
   action: 'apply' | 'rollback',
   effectiveAt: string,
 ): RegistryOwnerDecisionPayload {
@@ -734,14 +747,14 @@ function verifyOwnerDecision(
     && decision.verdict === 'APPROVED_EXACT_PLAN'
     && decision.actor === 'watchout'
     && decision.decision_ref === evidence.ref
-    && decision.repo === plan.repo
-    && decision.base_commit === plan.base_commit
-    && decision.base_tree === plan.base_tree
-    && GIT_SHA_RE.test(decision.head_commit)
-    && GIT_SHA_RE.test(decision.head_tree)
+    && decision.repo === exactSubject.repo
+    && decision.base_commit === exactSubject.base_commit
+    && decision.base_tree === exactSubject.base_tree
+    && decision.head_commit === exactSubject.head_commit
+    && decision.head_tree === exactSubject.head_tree
     && decision.handoff_ref === REGISTRY_RECONCILIATION_CONTROL_SOURCE_REF
     && decision.handoff_sha256 === REGISTRY_RECONCILIATION_HANDOFF_SHA256
-    && /^https:\/\/github\.com\/watchout\/agent-comms-mcp\/pull\/\d+$/.test(decision.implementation_pr_ref)
+    && decision.implementation_pr_ref === exactSubject.implementation_pr_ref
     && SHA256_RE.test(decision.independent_audit_sha256)
     && decision.input_manifest_sha256 === plan.input_manifest_sha256
     && decision.plan_sha256 === plan.plan_sha256
@@ -795,9 +808,21 @@ function sameCanonical(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right)
 }
 
+function verifyExactSubject(plan: RegistryReconciliationPlan, subject: RegistryExactSubject): void {
+  if (subject.repo !== plan.repo
+    || subject.base_commit !== plan.base_commit
+    || subject.base_tree !== plan.base_tree
+    || subject.implementation_pr_ref !== REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF
+    || !GIT_SHA_RE.test(subject.head_commit)
+    || !GIT_SHA_RE.test(subject.head_tree)) {
+    throw new Error('REGISTRY_RECONCILIATION_EXACT_SUBJECT_OR_INPUT_DRIFT')
+  }
+}
+
 function receiptFor(
   plan: RegistryReconciliationPlan,
   ownerDecision: RegistryOwnerDecisionEvidence,
+  exactSubject: RegistryExactSubject,
   appliedAt: string,
 ): RegistryApplyReceipt {
   return {
@@ -808,6 +833,7 @@ function receiptFor(
     related_rows_sha256: plan.related_rows_sha256,
     owner_decision_ref: ownerDecision.ref,
     owner_decision_body_sha256: ownerDecision.body_sha256,
+    exact_subject: exactSubject,
     applied_at: appliedAt,
     plan,
     entries: plan.entries.map(entry => ({
@@ -826,11 +852,7 @@ export async function applyRegistryIdentityReconciliation(
     owner_decision: RegistryOwnerDecisionEvidence
     raw_input: string | Uint8Array
     evidence_bundle: RegistryEvidenceBundle
-    exact_subject: {
-      repo: string
-      base_commit: string
-      base_tree: string
-    }
+    exact_subject: RegistryExactSubject
     now?: () => Date
   },
 ): Promise<RegistryApplyResult> {
@@ -838,8 +860,9 @@ export async function applyRegistryIdentityReconciliation(
   if (options.confirm_plan_sha256 !== plan.plan_sha256) {
     throw new Error('REGISTRY_RECONCILIATION_CONFIRM_PLAN_SHA256_MISMATCH')
   }
+  verifyExactSubject(plan, options.exact_subject)
   const appliedAt = (options.now?.() ?? new Date()).toISOString()
-  verifyOwnerDecision(options.owner_decision, plan, 'apply', appliedAt)
+  verifyOwnerDecision(options.owner_decision, plan, options.exact_subject, 'apply', appliedAt)
   const currentInput = parseRegistryClassificationInput(options.raw_input)
   verifyEvidence(currentInput.input, options.evidence_bundle)
   if (currentInput.input_sha256 !== plan.input_manifest_sha256
@@ -892,7 +915,7 @@ export async function applyRegistryIdentityReconciliation(
       if (!existingAppliedAt || updatedAtValues.some(value => value !== existingAppliedAt)) {
         throw new Error('REGISTRY_RECONCILIATION_POSTIMAGE_TIMESTAMP_DRIFT')
       }
-      const receipt = receiptFor(plan, options.owner_decision, existingAppliedAt)
+      const receipt = receiptFor(plan, options.owner_decision, options.exact_subject, existingAppliedAt)
       const receiptSha256 = canonicalSha256(receipt)
       const audits = await tx.query<any>(
         `SELECT detail FROM audit_log
@@ -915,7 +938,7 @@ export async function applyRegistryIdentityReconciliation(
         receipt_sha256: receiptSha256,
       }
     }
-    const receipt = receiptFor(plan, options.owner_decision, appliedAt)
+    const receipt = receiptFor(plan, options.owner_decision, options.exact_subject, appliedAt)
     const receiptSha256 = canonicalSha256(receipt)
     for (const entry of plan.entries) {
       const result = await tx.execute(
@@ -998,6 +1021,7 @@ export async function rollbackRegistryIdentityReconciliation(
   options: {
     confirm_receipt_sha256: string
     owner_decision: RegistryOwnerDecisionEvidence
+    exact_subject: RegistryExactSubject
     now?: () => Date
   },
 ): Promise<RegistryRollbackResult> {
@@ -1005,6 +1029,7 @@ export async function rollbackRegistryIdentityReconciliation(
     || receipt.cell_id !== REGISTRY_RECONCILIATION_CELL_ID
     || receipt.plan?.plan_sha256 !== receipt.plan_sha256
     || receipt.input_manifest_sha256 !== receipt.plan?.input_manifest_sha256
+    || !sameCanonical(receipt.exact_subject, options.exact_subject)
     || !sameCanonical(receipt.entries, receipt.plan?.entries.map(entry => ({
       agent_id: entry.agent_id,
       preimage: entry.agents_preimage,
@@ -1014,8 +1039,9 @@ export async function rollbackRegistryIdentityReconciliation(
     throw new Error('REGISTRY_RECONCILIATION_RECEIPT_INVALID')
   }
   verifyRegistryReconciliationPlan(receipt.plan)
+  verifyExactSubject(receipt.plan, options.exact_subject)
   const rolledBackAt = (options.now?.() ?? new Date()).toISOString()
-  verifyOwnerDecision(options.owner_decision, receipt.plan, 'rollback', rolledBackAt)
+  verifyOwnerDecision(options.owner_decision, receipt.plan, options.exact_subject, 'rollback', rolledBackAt)
   return db.transaction(async (tx) => {
     await lockRegistryReconciliationReadSet(tx)
     const current = new Map((await readAgentRows(tx, true)).map(agent => [agent.agent_id, agent]))

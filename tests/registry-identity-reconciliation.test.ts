@@ -15,8 +15,10 @@ import {
   canonicalSha256,
   readRegistryIdentityReconciliationState,
   REGISTRY_RECONCILIATION_CELL_ID,
+  REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF,
   rollbackRegistryIdentityReconciliation,
   type RegistryApplyReceipt,
+  type RegistryExactSubject,
   type RegistryOwnerDecisionEvidence,
   type RegistryReconciliationPlan,
 } from '../core/registry-identity-reconciliation'
@@ -26,6 +28,14 @@ const BASE_TREE = '7d4e0109825fb63c7c343ae272bc8cc3b97ba89e'
 const SOURCE_REF = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5186249673'
 const SOURCE_BODY = 'owner-frozen Cell 20 production denominator and test-fixture classification\n'
 const SOURCE_SHA = createHash('sha256').update(SOURCE_BODY).digest('hex')
+const EXACT_SUBJECT = {
+  repo: 'watchout/agent-comms-mcp',
+  base_commit: BASE_COMMIT,
+  base_tree: BASE_TREE,
+  implementation_pr_ref: REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF,
+  head_commit: '1'.repeat(40),
+  head_tree: '2'.repeat(40),
+} satisfies RegistryExactSubject
 const cleanup: string[] = []
 const POSSIBLE_PG_TEST_URL = process.env.AGENT_COM_TEST_DATABASE_URL
   ?? (/(?:^|[/_])[^/?]*_test(?:\?|$)/.test(process.env.DATABASE_URL ?? '') ? process.env.DATABASE_URL : undefined)
@@ -49,7 +59,11 @@ function inputFor(entries: Array<{ agent_id: string; target_profile_class: 'prod
   return `${canonicalJson(input)}\n`
 }
 
-function ownerDecision(plan: RegistryReconciliationPlan, action: 'apply' | 'rollback' = 'apply'): RegistryOwnerDecisionEvidence {
+function ownerDecision(
+  plan: RegistryReconciliationPlan,
+  action: 'apply' | 'rollback' = 'apply',
+  exactSubject: RegistryExactSubject = EXACT_SUBJECT,
+): RegistryOwnerDecisionEvidence {
   const ref = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5187000000'
   const body = canonicalJson({
     schema_version: 'shirube-v3/owner_decision/v1',
@@ -60,14 +74,14 @@ function ownerDecision(plan: RegistryReconciliationPlan, action: 'apply' | 'roll
     verdict: 'APPROVED_EXACT_PLAN',
     actor: 'watchout',
     decision_ref: ref,
-    repo: 'watchout/agent-comms-mcp',
-    base_commit: plan.base_commit,
-    base_tree: plan.base_tree,
-    head_commit: '1'.repeat(40),
-    head_tree: '2'.repeat(40),
+    repo: exactSubject.repo,
+    base_commit: exactSubject.base_commit,
+    base_tree: exactSubject.base_tree,
+    head_commit: exactSubject.head_commit,
+    head_tree: exactSubject.head_tree,
     handoff_ref: SOURCE_REF,
     handoff_sha256: '82c3f997ecaed6a3e852a32118714169d078fcc24a2b05d8e4be725135524779',
-    implementation_pr_ref: 'https://github.com/watchout/agent-comms-mcp/pull/914',
+    implementation_pr_ref: exactSubject.implementation_pr_ref,
     independent_audit_ref: 'https://github.com/watchout/agent-comms-mcp/pull/914#issuecomment-5188000000',
     independent_audit_sha256: '3'.repeat(64),
     input_manifest_ref: 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5188000001',
@@ -145,11 +159,7 @@ function applyOptions(plan: RegistryReconciliationPlan, rawInput: string) {
     owner_decision: ownerDecision(plan),
     raw_input: rawInput,
     evidence_bundle: { [SOURCE_REF]: SOURCE_BODY },
-    exact_subject: {
-      repo: 'watchout/agent-comms-mcp',
-      base_commit: BASE_COMMIT,
-      base_tree: BASE_TREE,
-    },
+    exact_subject: EXACT_SUBJECT,
     now: () => new Date('2026-08-05T01:00:00.000Z'),
   }
 }
@@ -278,6 +288,9 @@ describe('Cell 20 registry identity reconciliation', () => {
       for (const [field, wrongValue] of [
         ['base_commit', 'e'.repeat(40)],
         ['base_tree', 'f'.repeat(40)],
+        ['head_commit', 'e'.repeat(40)],
+        ['head_tree', 'f'.repeat(40)],
+        ['implementation_pr_ref', 'https://github.com/watchout/agent-comms-mcp/pull/999'],
       ] as const) {
         const wrongSubject = JSON.parse(String(validOwner.body))
         wrongSubject[field] = wrongValue
@@ -303,11 +316,15 @@ describe('Cell 20 registry identity reconciliation', () => {
     try {
       await expect(applyRegistryIdentityReconciliation(db, plan, {
         ...applyOptions(plan, rawInput),
-        exact_subject: { repo: 'watchout/agent-comms-mcp', base_commit: 'f'.repeat(40), base_tree: BASE_TREE },
+        exact_subject: { ...EXACT_SUBJECT, base_commit: 'f'.repeat(40) },
       })).rejects.toThrow('REGISTRY_RECONCILIATION_EXACT_SUBJECT_OR_INPUT_DRIFT')
       await expect(applyRegistryIdentityReconciliation(db, plan, {
         ...applyOptions(plan, rawInput),
-        exact_subject: { repo: 'watchout/agent-comms-mcp', base_commit: BASE_COMMIT, base_tree: 'f'.repeat(40) },
+        exact_subject: { ...EXACT_SUBJECT, base_tree: 'f'.repeat(40) },
+      })).rejects.toThrow('REGISTRY_RECONCILIATION_EXACT_SUBJECT_OR_INPUT_DRIFT')
+      await expect(applyRegistryIdentityReconciliation(db, plan, {
+        ...applyOptions(plan, rawInput),
+        exact_subject: { ...EXACT_SUBJECT, implementation_pr_ref: 'https://github.com/watchout/agent-comms-mcp/pull/999' as any },
       })).rejects.toThrow('REGISTRY_RECONCILIATION_EXACT_SUBJECT_OR_INPUT_DRIFT')
 
       const changedInput = JSON.parse(rawInput)
@@ -381,6 +398,7 @@ describe('Cell 20 registry identity reconciliation', () => {
       const rolledBack = await rollbackRegistryIdentityReconciliation(first.db, applied.receipt, {
         confirm_receipt_sha256: applied.receipt_sha256,
         owner_decision: rollbackOwner,
+        exact_subject: EXACT_SUBJECT,
         now: () => new Date('2026-08-05T01:05:00.000Z'),
       })
       expect(rolledBack).toMatchObject({ status: 'rolled_back', affected_agents: 2, audit_rows: 1 })
@@ -405,6 +423,7 @@ describe('Cell 20 registry identity reconciliation', () => {
       await expect(rollbackRegistryIdentityReconciliation(drift.db, applied.receipt as RegistryApplyReceipt, {
         confirm_receipt_sha256: applied.receipt_sha256,
         owner_decision: ownerDecision(drift.plan, 'rollback'),
+        exact_subject: EXACT_SUBJECT,
         now: () => new Date('2026-08-05T01:05:00.000Z'),
       })).rejects.toThrow('REGISTRY_RECONCILIATION_ROLLBACK_POSTIMAGE_DRIFT')
       expect(await drift.db.query<any>(`SELECT * FROM audit_log WHERE event_type = 'registry.identity_reconciliation.rollback'`)).toHaveLength(0)

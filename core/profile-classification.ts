@@ -13,10 +13,13 @@ export type AuthoritativeProfileClass = 'production' | 'test'
 
 export type AuthoritativeProfileClassification = {
   profile_class: AuthoritativeProfileClass
-  source_ref: string | null
-  source_sha256: string | null
-  plan_sha256: string | null
+  source_ref: string
+  source_sha256: string
+  plan_sha256: string
 }
+
+const SHA256_RE = /^[a-f0-9]{64}$/
+const IMMUTABLE_CLASSIFICATION_SOURCE_RE = /^(?:https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+|git:[a-f0-9]{40}:.+|aun-message:[0-9a-f-]{36})$/
 
 export function normalizeText(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
@@ -80,13 +83,17 @@ export function authoritativeProfileClassification(
   const metadata = parseJsonObject(row.metadata)
   const profileClass = normalizeText(metadata.profile_class)?.toLowerCase()
   if (profileClass !== 'production' && profileClass !== 'test') return null
-  const sourceSha256 = normalizeText(metadata.profile_class_source_sha256)?.toLowerCase() ?? null
-  const planSha256 = normalizeText(metadata.profile_class_plan_sha256)?.toLowerCase() ?? null
+  const sourceRef = normalizeText(metadata.profile_class_source_ref)
+  const sourceSha256 = normalizeText(metadata.profile_class_source_sha256)?.toLowerCase()
+  const planSha256 = normalizeText(metadata.profile_class_plan_sha256)?.toLowerCase()
+  if (!sourceRef || !IMMUTABLE_CLASSIFICATION_SOURCE_RE.test(sourceRef)
+    || !sourceSha256 || !SHA256_RE.test(sourceSha256)
+    || !planSha256 || !SHA256_RE.test(planSha256)) return null
   return {
     profile_class: profileClass,
-    source_ref: normalizeText(metadata.profile_class_source_ref),
-    source_sha256: sourceSha256 && /^[a-f0-9]{64}$/.test(sourceSha256) ? sourceSha256 : null,
-    plan_sha256: planSha256 && /^[a-f0-9]{64}$/.test(planSha256) ? planSha256 : null,
+    source_ref: sourceRef,
+    source_sha256: sourceSha256,
+    plan_sha256: planSha256,
   }
 }
 

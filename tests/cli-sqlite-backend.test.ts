@@ -18,7 +18,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1003,6 +1003,111 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(refused.stderr).toContain('REGISTRY_RECONCILIATION_FLAG_REQUIRED: --owner-decision-ref')
     expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
     expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry.identity_reconciliation.%'`)).toHaveLength(0)
+
+    const implementationHead = 'c'.repeat(40)
+    const implementationTree = 'd'.repeat(40)
+    const ownerRef = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5187000000'
+    const ghPath = join(tmpDir, 'gh')
+    writeFileSync(ghPath, `#!/usr/bin/env bun
+const fixtures = JSON.parse(process.env.FAKE_GH_RESPONSES ?? '{}')
+const endpoint = process.argv.at(-1)
+if (!endpoint || !(endpoint in fixtures)) process.exit(2)
+process.stdout.write(JSON.stringify(fixtures[endpoint]))
+`)
+    chmodSync(ghPath, 0o755)
+    const ownerBody = (headCommit: string) => canonicalJson({
+      schema_version: 'shirube-v3/owner_decision/v1',
+      decision_id: 'OD-AUN-001',
+      cell_id: 'CELL-AUN-REGISTRY-IDENTITY-RECONCILIATION-001',
+      scope: 'CELL-AUN-REGISTRY-IDENTITY-RECONCILIATION-001_registry_apply_only',
+      action: 'apply',
+      verdict: 'APPROVED_EXACT_PLAN',
+      actor: 'watchout',
+      decision_ref: ownerRef,
+      repo: 'watchout/agent-comms-mcp',
+      base_commit: plan.base_commit,
+      base_tree: plan.base_tree,
+      head_commit: headCommit,
+      head_tree: implementationTree,
+      handoff_ref: sourceRef,
+      handoff_sha256: '82c3f997ecaed6a3e852a32118714169d078fcc24a2b05d8e4be725135524779',
+      implementation_pr_ref: 'https://github.com/watchout/agent-comms-mcp/pull/914',
+      independent_audit_ref: 'https://github.com/watchout/agent-comms-mcp/pull/914#issuecomment-5188000000',
+      independent_audit_sha256: 'e'.repeat(64),
+      input_manifest_ref: 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5188000001',
+      input_manifest_sha256: plan.input_manifest_sha256,
+      plan_ref: 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5188000002',
+      plan_sha256: plan.plan_sha256,
+      ordered_agent_ids: plan.entries.map((entry: any) => entry.agent_id),
+      ordered_agent_count: plan.entry_count,
+      ordered_exclusions: plan.exclusions,
+      ordered_exclusion_count: plan.exclusions.length,
+      per_row_digests: plan.entries.map((entry: any) => ({
+        agent_id: entry.agent_id,
+        agents_preimage_sha256: entry.agents_preimage_sha256,
+        proposed_postimage_sha256: entry.proposed_postimage_sha256,
+      })),
+      permitted_effect: plan.permitted_effect,
+      apply_window_start: new Date(Date.now() - 60_000).toISOString(),
+      apply_window_end: new Date(Date.now() + 60_000).toISOString(),
+      readback_acceptance: [
+        'all_plan_entries_match_postimage',
+        'one_apply_audit_row_matches_receipt',
+        'second_apply_is_verified_noop',
+      ],
+      rollback_trigger: ['any_postimage_drift', 'readback_mismatch', 'operator_requested_rollback'],
+      rollback_receipt_contract: [
+        'confirm_receipt_sha256',
+        'audited_apply_receipt_required',
+        'exact_postimage_match_required',
+        'restore_exact_preimages',
+      ],
+      forbidden_effects: { activation: false, endpoint: false, mcp: false, queue: false, restart: false, schema: false },
+    })
+    const runApply = (body: string) => runCli([
+      'runtime', 'reconcile-identities', 'apply',
+      '--input', inputPath,
+      '--evidence-bundle', evidencePath,
+      '--plan-file', planPath,
+      '--execute',
+      '--confirm-plan-sha256', plan.plan_sha256,
+      '--target-repository', 'watchout/agent-comms-mcp',
+      '--base-commit', plan.base_commit,
+      '--base-tree', plan.base_tree,
+      '--owner-decision-ref', ownerRef,
+      '--owner-decision-body-sha256', createHash('sha256').update(body).digest('hex'),
+    ], {
+      PATH: `${tmpDir}:${env.PATH}`,
+      FAKE_GH_RESPONSES: JSON.stringify({
+        'repos/watchout/agent-comms-mcp/issues/comments/5187000000': {
+          html_url: ownerRef,
+          body,
+          user: { login: 'watchout' },
+        },
+        'repos/watchout/agent-comms-mcp/pulls/914': {
+          number: 914,
+          html_url: 'https://github.com/watchout/agent-comms-mcp/pull/914',
+          head: { sha: implementationHead, repo: { full_name: 'watchout/agent-comms-mcp' } },
+          base: { repo: { full_name: 'watchout/agent-comms-mcp' } },
+        },
+        [`repos/watchout/agent-comms-mcp/git/commits/${implementationHead}`]: {
+          sha: implementationHead,
+          tree: { sha: implementationTree },
+        },
+      }),
+    })
+
+    const wrongHead = runApply(ownerBody('f'.repeat(40)))
+    expect(wrongHead.status).toBe(1)
+    expect(wrongHead.stderr).toContain('REGISTRY_RECONCILIATION_OWNER_DECISION_INVALID')
+    expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(1)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type LIKE 'registry.identity_reconciliation.%'`)).toHaveLength(0)
+
+    const applied = runApply(ownerBody(implementationHead))
+    expect(applied.status).toBe(0)
+    expect(JSON.parse(applied.stdout)).toMatchObject({ status: 'applied', affected_agents: 1, audit_rows: 1 })
+    expect(dbRead(`SELECT profile_revision FROM agents WHERE agent_id = 'probe-f'`)[0].profile_revision).toBe(2)
+    expect(dbRead(`SELECT * FROM audit_log WHERE event_type = 'registry.identity_reconciliation.apply'`)).toHaveLength(1)
   })
 
   test('strict profile doctor gates active connectors on runtime endpoint leases', () => {

@@ -143,9 +143,12 @@ import {
   buildRegistryIdentityReconciliationPlan,
   canonicalJson,
   readRegistryIdentityReconciliationState,
+  REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF,
+  REGISTRY_RECONCILIATION_REPOSITORY,
   rollbackRegistryIdentityReconciliation,
   type RegistryApplyReceipt,
   type RegistryEvidenceBundle,
+  type RegistryExactSubject,
   type RegistryReconciliationPlan,
 } from '../core/registry-identity-reconciliation'
 
@@ -5184,6 +5187,53 @@ function registryOwnerDecisionFromFlags(flags: Record<string, string>) {
   }
 }
 
+function registryImplementationSubjectReadback(): Pick<
+  RegistryExactSubject,
+  'repo' | 'implementation_pr_ref' | 'head_commit' | 'head_tree'
+> {
+  let pull: {
+    number?: unknown
+    html_url?: unknown
+    head?: { sha?: unknown; repo?: { full_name?: unknown } }
+    base?: { repo?: { full_name?: unknown } }
+  }
+  try {
+    pull = JSON.parse(execFileSync('gh', [
+      'api',
+      'repos/watchout/agent-comms-mcp/pulls/914',
+    ], { encoding: 'utf8' }))
+  } catch (err) {
+    throw new Error(`REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_READBACK_FAILED:${(err as Error).message}`)
+  }
+  const headCommit = typeof pull.head?.sha === 'string' ? pull.head.sha.toLowerCase() : ''
+  if (pull.number !== 914
+    || pull.html_url !== REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF
+    || pull.head?.repo?.full_name !== REGISTRY_RECONCILIATION_REPOSITORY
+    || pull.base?.repo?.full_name !== REGISTRY_RECONCILIATION_REPOSITORY
+    || !/^[a-f0-9]{40}$/.test(headCommit)) {
+    throw new Error('REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_READBACK_INVALID')
+  }
+  let commit: { sha?: unknown; tree?: { sha?: unknown } }
+  try {
+    commit = JSON.parse(execFileSync('gh', [
+      'api',
+      `repos/watchout/agent-comms-mcp/git/commits/${headCommit}`,
+    ], { encoding: 'utf8' }))
+  } catch (err) {
+    throw new Error(`REGISTRY_RECONCILIATION_IMPLEMENTATION_COMMIT_READBACK_FAILED:${(err as Error).message}`)
+  }
+  const headTree = typeof commit.tree?.sha === 'string' ? commit.tree.sha.toLowerCase() : ''
+  if (commit.sha !== headCommit || !/^[a-f0-9]{40}$/.test(headTree)) {
+    throw new Error('REGISTRY_RECONCILIATION_IMPLEMENTATION_COMMIT_READBACK_INVALID')
+  }
+  return {
+    repo: REGISTRY_RECONCILIATION_REPOSITORY,
+    implementation_pr_ref: REGISTRY_RECONCILIATION_IMPLEMENTATION_PR_REF,
+    head_commit: headCommit,
+    head_tree: headTree,
+  }
+}
+
 async function registryIdentityReconciliationCommand(
   db: DbAdapter,
   operation: string | undefined,
@@ -5204,6 +5254,11 @@ async function registryIdentityReconciliationCommand(
     const result = await rollbackRegistryIdentityReconciliation(db, receipt, {
       confirm_receipt_sha256: requiredRegistryFlag(flags, 'confirm-receipt-sha256').toLowerCase(),
       owner_decision: registryOwnerDecisionFromFlags(flags),
+      exact_subject: {
+        ...registryImplementationSubjectReadback(),
+        base_commit: receipt.plan.base_commit,
+        base_tree: receipt.plan.base_tree,
+      },
     })
     process.stdout.write(`${canonicalJson(result)}\n`)
     return
@@ -5246,6 +5301,7 @@ async function registryIdentityReconciliationCommand(
     raw_input: rawInput,
     evidence_bundle: evidenceBundle,
     exact_subject: {
+      ...registryImplementationSubjectReadback(),
       repo: requiredRegistryFlag(flags, 'target-repository'),
       base_commit: requiredRegistryFlag(flags, 'base-commit').toLowerCase(),
       base_tree: requiredRegistryFlag(flags, 'base-tree').toLowerCase(),

@@ -29,20 +29,22 @@ describe('authoritative profile classification', () => {
     })
   })
 
-  test('malformed optional digests are never surfaced as verified digests', () => {
+  test('missing source provenance is unclassified even with an explicit class', () => {
+    expect(authoritativeProfileClassification({
+      agent_id: 'dev-001',
+      metadata: { profile_class: 'production' },
+    })).toBeNull()
+  })
+
+  test('mutable source refs or malformed digests fail closed as unclassified', () => {
     expect(authoritativeProfileClassification({
       agent_id: 'dev-001',
       metadata: {
         profile_class: 'production',
-        profile_class_source_ref: 'immutable-ref',
+        profile_class_source_ref: 'mutable-ref',
         profile_class_source_sha256: 'wrong',
         profile_class_plan_sha256: 'wrong',
       },
-    })).toEqual({
-      profile_class: 'production',
-      source_ref: 'immutable-ref',
-      source_sha256: null,
-      plan_sha256: null,
-    })
+    })).toBeNull()
   })
 })

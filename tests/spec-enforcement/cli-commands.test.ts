@@ -691,8 +691,13 @@ describe('T11b3 — Cell 20 registry identity reconciliation CLI surface', () =>
     expect(CLI_SRC).toMatch(/owner-decision-body-sha256/)
     expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/issues\/comments/)
     expect(CLI_SRC).toMatch(/readback\.user\?\.login !== 'watchout'/)
+    expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/pulls\/914/)
+    expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/git\/commits\/\$\{headCommit\}/)
     expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/OD-AUN-001/)
     expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/APPROVED_EXACT_PLAN/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.head_commit === exactSubject\.head_commit/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.head_tree === exactSubject\.head_tree/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.implementation_pr_ref === exactSubject\.implementation_pr_ref/)
   })
 
   test('canonical classification never reads agent names and unrelated Cell effects are zero', () => {
