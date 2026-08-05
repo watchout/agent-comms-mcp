@@ -14,6 +14,16 @@ import { allAgentCommunicationTargetSha256 } from '../core/all-agent-communicati
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const CLASSIFICATION_SOURCE_REF = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5186249673'
+
+function classificationMetadata(profileClass: 'production' | 'test') {
+  return {
+    profile_class: profileClass,
+    profile_class_source_ref: CLASSIFICATION_SOURCE_REF,
+    profile_class_source_sha256: 'a'.repeat(64),
+    profile_class_plan_sha256: 'b'.repeat(64),
+  }
+}
 
 async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'agent-comms-runtime-'))
@@ -203,6 +213,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     includeUnresolvedNewSeat = false,
     liveRuntimeEngine = 'codex',
     includeProductionNameCollisionSeat = false,
+    includeUnclassifiedSeat = false,
   ) {
     const now = '2026-07-26T00:00:00Z'
     return {
@@ -211,17 +222,21 @@ describe('ordinary all-agent manifest candidate inventory', () => {
         if (/FROM agents/.test(sql)) return [
           {
             agent_id: 'dev-001', agent_type: 'dev', profile_revision: 7, profile_enabled: true,
-            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: classificationMetadata('production'),
           },
           ...(includeUnresolvedNewSeat ? [{
             agent_id: 'new-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
-            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: classificationMetadata('production'),
           }] : []),
           ...(includeProductionNameCollisionSeat ? [{
             agent_id: 'contest-dev', agent_type: 'dev', profile_revision: 3, profile_enabled: true,
-            disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'production' },
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: classificationMetadata('production'),
           }] : []),
-          { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: { profile_class: 'test' } },
+          ...(includeUnclassifiedSeat ? [{
+            agent_id: 'test-looking-dev', agent_type: 'dev', profile_revision: 1, profile_enabled: true,
+            disabled_at: null, runtime_engine_preference: 'codex', metadata: {},
+          }] : []),
+          { agent_id: 'test-agent', agent_type: 'dev', profile_revision: 1, profile_enabled: true, disabled_at: null, runtime_engine_preference: 'codex', metadata: classificationMetadata('test') },
         ]
         if (/FROM channels c/.test(sql)) return []
         if (/FROM agent_workspace_bindings/.test(sql)) {
@@ -329,6 +344,16 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers).toContain('dev-001:protected_d1_not_explicit')
     expect(report.resolved_target_count).toBe(0)
+  })
+
+  test('enabled unclassified seats fail closed and are never classified from their names', async () => {
+    const report = await generateAllAgentCommunicationManifestCandidates(
+      fakeManifestDb(false, 'codex', false, true),
+      candidateOptions(),
+    )
+    expect(report.ok).toBe(false)
+    expect(report.blockers).toContain('test-looking-dev:profile_class_unclassified')
+    expect(report.expected_agent_ids).toEqual(['dev-001'])
   })
 
   test('profile/runtime engine mismatch fails closed instead of choosing either value', async () => {

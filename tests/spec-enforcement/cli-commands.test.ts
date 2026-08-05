@@ -43,6 +43,7 @@ const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
 const RUNTIME_CLEANUP_PATH = join(REPO_ROOT, 'core', 'runtime-cleanup.ts')
+const REGISTRY_IDENTITY_RECONCILIATION_PATH = join(REPO_ROOT, 'core', 'registry-identity-reconciliation.ts')
 const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
 const AUN_FLEET_READINESS_PATH = join(REPO_ROOT, 'core', 'aun-fleet-readiness.ts')
 const FULL_CHANNEL_SMOKE_PATH = join(REPO_ROOT, 'core', 'full-channel-smoke.ts')
@@ -65,6 +66,7 @@ const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
 const RUNTIME_CLEANUP_SRC = readFileSync(RUNTIME_CLEANUP_PATH, 'utf-8')
+const REGISTRY_IDENTITY_RECONCILIATION_SRC = readFileSync(REGISTRY_IDENTITY_RECONCILIATION_PATH, 'utf-8')
 const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
 const AUN_FLEET_READINESS_SRC = readFileSync(AUN_FLEET_READINESS_PATH, 'utf-8')
 const FULL_CHANNEL_SMOKE_SRC = readFileSync(FULL_CHANNEL_SMOKE_PATH, 'utf-8')
@@ -672,6 +674,47 @@ describe('T11b2 — runtime cleanup lifecycle CLI surface', () => {
     expect(RUNTIME_CLEANUP_SRC).toMatch(/tmux_session/)
     expect(RUNTIME_CLEANUP_SRC).toMatch(/kill_process/)
     expect(RUNTIME_CLEANUP_SRC).toMatch(/kill_tmux_session/)
+  })
+})
+
+describe('T11b3 — Cell 20 registry identity reconciliation CLI surface', () => {
+  test('help exposes plan, dry-run, apply, readback, and rollback as one bounded command', () => {
+    expect(CLI_SRC).toMatch(/runtime reconcile-identities <plan\|dry-run\|apply\|readback\|rollback>/)
+    expect(CLI_SRC).toMatch(/Cell 20 source-bound identity classification/)
+  })
+
+  test('apply and rollback require exact hashes, immutable OD evidence, and explicit execute', () => {
+    expect(CLI_SRC).toMatch(/REGISTRY_RECONCILIATION_APPLY_REQUIRES_EXECUTE/)
+    expect(CLI_SRC).toMatch(/REGISTRY_RECONCILIATION_ROLLBACK_REQUIRES_EXECUTE/)
+    expect(CLI_SRC).toMatch(/confirm-plan-sha256/)
+    expect(CLI_SRC).toMatch(/confirm-receipt-sha256/)
+    expect(CLI_SRC).toMatch(/owner-decision-body-sha256/)
+    expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/issues\/comments/)
+    expect(CLI_SRC).toMatch(/readback\.user\?\.login !== 'watchout'/)
+    expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/pulls\/914/)
+    expect(CLI_SRC).toMatch(/repos\/watchout\/agent-comms-mcp\/git\/commits\/\$\{headCommit\}/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/OD-AUN-001/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/APPROVED_EXACT_PLAN/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.head_commit === exactSubject\.head_commit/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.head_tree === exactSubject\.head_tree/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/decision\.implementation_pr_ref === exactSubject\.implementation_pr_ref/)
+  })
+
+  test('canonical classification never reads agent names and unrelated Cell effects are zero', () => {
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/aun-registry-classification-input\/v1/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/aun-registry-identity-reconciliation-plan\/v1/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toMatch(/cells_30_70_effect_count: 0/)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).not.toMatch(/test-looking|agentId.*test|agent_id.*includes\(['"]test/)
+  })
+
+  test('exact handoff fields, dotted audit events, and PostgreSQL lock fence are present', () => {
+    for (const field of [
+      'control_source_ref', 'input_manifest_sha256', 'entry_count', 'agents_preimage_sha256',
+      'related_read_set_sha256', 'proposed_postimage_sha256', 'permitted_effect',
+    ]) expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain(field)
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('registry.identity_reconciliation.apply')
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('registry.identity_reconciliation.rollback')
+    expect(REGISTRY_IDENTITY_RECONCILIATION_SRC).toContain('IN SHARE ROW EXCLUSIVE MODE NOWAIT')
   })
 })
 

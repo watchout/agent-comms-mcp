@@ -9,6 +9,18 @@ export type ProfileLike = {
 
 export type ProfileExclusionReason = 'disabled_profile' | 'test_profile' | null
 
+export type AuthoritativeProfileClass = 'production' | 'test'
+
+export type AuthoritativeProfileClassification = {
+  profile_class: AuthoritativeProfileClass
+  source_ref: string
+  source_sha256: string
+  plan_sha256: string
+}
+
+const SHA256_RE = /^[a-f0-9]{64}$/
+const IMMUTABLE_CLASSIFICATION_SOURCE_RE = /^(?:https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+|git:[a-f0-9]{40}:\S+|aun-message:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/
+
 export function normalizeText(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null
   const value = String(raw).trim()
@@ -58,6 +70,31 @@ export function isTestProfile(row: ProfileLike): boolean {
   if (agentType === 'test') return true
   const agentId = normalizeText(row.agent_id)?.toLowerCase() ?? ''
   return agentId === 'test' || /^test[-_]/.test(agentId) || /[-_]test$/.test(agentId)
+}
+
+/**
+ * Reads only an explicit persisted classification. Identity names, display
+ * names, agent types, and legacy `test_profile` convenience flags are never
+ * authoritative inputs here.
+ */
+export function authoritativeProfileClassification(
+  row: ProfileLike,
+): AuthoritativeProfileClassification | null {
+  const metadata = parseJsonObject(row.metadata)
+  const profileClass = typeof metadata.profile_class === 'string' ? metadata.profile_class : null
+  if (profileClass !== 'production' && profileClass !== 'test') return null
+  const sourceRef = typeof metadata.profile_class_source_ref === 'string' ? metadata.profile_class_source_ref : null
+  const sourceSha256 = typeof metadata.profile_class_source_sha256 === 'string' ? metadata.profile_class_source_sha256 : null
+  const planSha256 = typeof metadata.profile_class_plan_sha256 === 'string' ? metadata.profile_class_plan_sha256 : null
+  if (!sourceRef || !IMMUTABLE_CLASSIFICATION_SOURCE_RE.test(sourceRef)
+    || !sourceSha256 || !SHA256_RE.test(sourceSha256)
+    || !planSha256 || !SHA256_RE.test(planSha256)) return null
+  return {
+    profile_class: profileClass,
+    source_ref: sourceRef,
+    source_sha256: sourceSha256,
+    plan_sha256: planSha256,
+  }
 }
 
 export function profileExclusionReason(
