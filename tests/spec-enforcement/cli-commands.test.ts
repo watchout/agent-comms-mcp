@@ -42,6 +42,7 @@ const QUEUE_TERMINAL_STATE_PREFLIGHT_PATH = join(REPO_ROOT, 'core', 'queue-termi
 const QUEUE_REPAIR_PATH = join(REPO_ROOT, 'core', 'queue-repair.ts')
 const DIRECTORY_PATH = join(REPO_ROOT, 'core', 'directory.ts')
 const RUNTIME_INVENTORY_PATH = join(REPO_ROOT, 'core', 'runtime-inventory.ts')
+const COMMUNICATION_READINESS_PATH = join(REPO_ROOT, 'core', 'communication-readiness.ts')
 const RUNTIME_CLEANUP_PATH = join(REPO_ROOT, 'core', 'runtime-cleanup.ts')
 const REGISTRY_IDENTITY_RECONCILIATION_PATH = join(REPO_ROOT, 'core', 'registry-identity-reconciliation.ts')
 const INBOUND_SMOKE_PATH = join(REPO_ROOT, 'core', 'inbound-smoke.ts')
@@ -65,6 +66,7 @@ const QUEUE_TERMINAL_STATE_PREFLIGHT_SRC = readFileSync(QUEUE_TERMINAL_STATE_PRE
 const QUEUE_REPAIR_SRC = readFileSync(QUEUE_REPAIR_PATH, 'utf-8')
 const DIRECTORY_SRC = readFileSync(DIRECTORY_PATH, 'utf-8')
 const RUNTIME_INVENTORY_SRC = readFileSync(RUNTIME_INVENTORY_PATH, 'utf-8')
+const COMMUNICATION_READINESS_SRC = readFileSync(COMMUNICATION_READINESS_PATH, 'utf-8')
 const RUNTIME_CLEANUP_SRC = readFileSync(RUNTIME_CLEANUP_PATH, 'utf-8')
 const REGISTRY_IDENTITY_RECONCILIATION_SRC = readFileSync(REGISTRY_IDENTITY_RECONCILIATION_PATH, 'utf-8')
 const INBOUND_SMOKE_SRC = readFileSync(INBOUND_SMOKE_PATH, 'utf-8')
@@ -184,7 +186,7 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/async function stateDaemonCommand[\s\S]*?buildStateDaemonLaunchAgentReadinessReport/)
   })
   test("'state-daemon install-plan' invokes the dry-run local supervisor install planner", () => {
-    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan'/)
+    expect(CLI_SRC).toMatch(/subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'communication-readiness' && subcommand !== 'queue-work-activation-plan'/)
     expect(CLI_SRC).toMatch(/subcommand === 'install-plan'[\s\S]*?buildLocalLaunchdInstallDryRunPlan/)
     expect(CLI_SRC).toMatch(/state-daemon install-plan is dry-run only/)
   })
@@ -192,6 +194,14 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?fetchBotStatusFromDb/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?buildQueueProcessingReadinessReport/)
     expect(CLI_SRC).toMatch(/subcommand === 'queue-readiness'[\s\S]*?formatQueueProcessingReadinessText/)
+  })
+  test("'state-daemon communication-readiness' invokes the read-only all-bot communication report", () => {
+    expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?fetchBotStatusFromDb/)
+    expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?buildRuntimeInventoryReport/)
+    expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?buildCommunicationReadinessReport/)
+    expect(CLI_SRC).toMatch(/subcommand === 'communication-readiness'[\s\S]*?formatCommunicationReadinessText/)
+    expect(CLI_SRC).toMatch(/state-daemon communication-readiness \[--agent-id <id>\]/)
+    expect(CLI_SRC).toMatch(/--mode complete\|queue-consumer/)
   })
   test("'state-daemon queue-work-activation-plan' invokes the read-only exact-row planner", () => {
     expect(CLI_SRC).toMatch(/subcommand === 'queue-work-activation-plan'[\s\S]*?buildQueueWorkActivationPlan/)
@@ -819,6 +829,28 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/no_live_smoke: true/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/QUEUE_WAKE_STUCK/)
     expect(STATE_DAEMON_READINESS_SRC).toMatch(/STATE_DAEMON_TRANSPORT_NOT_READY/)
+  })
+
+  test('help documents state-daemon all-bot communication readiness diagnostic', () => {
+    expect(CLI_SRC).toMatch(/state-daemon communication-readiness \[--agent-id <id>\]/)
+    expect(CLI_SRC).toMatch(/read-only bot communication readiness; separates DB-primary queue consumer blockers from complete runtime\/endpoint blockers/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/mode: CommunicationReadinessMode/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/mode === 'complete'/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/issue_ref: '#722'/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/ACTIVE_PENDING_OVER_SLO/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/RUNTIME_NOT_FRESH/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/ENDPOINT_LEASE_NOT_READY/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/OUTBOUND_POLICY_GAP/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/no_db_mutation: true/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/no_state_daemon_restart: true/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/no_launchctl_mutation: true/)
+    expect(COMMUNICATION_READINESS_SRC).toMatch(/no_live_smoke: true/)
+    expect(COMMUNICATION_READINESS_SRC).not.toMatch(/INSERT INTO|UPDATE .*SET|DELETE FROM/)
+  })
+
+  test('communication readiness changes require protected PR routing', () => {
+    const classifier = readFileSync(join(REPO_ROOT, 'scripts', 'classify-pr.sh'), 'utf8')
+    expect(classifier).toMatch(/core\/communication-readiness\\\./)
   })
 
   test('help documents state-daemon exact-row queue-work activation planner', () => {

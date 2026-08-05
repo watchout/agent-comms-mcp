@@ -73,6 +73,7 @@ fi
 check_pattern 'core/state-daemon/'               "State-daemon core"
 check_pattern 'bin/(aun-watchdog|wake-daemon)'   "Daemon entrypoint"
 check_pattern 'adapters/(discord|outbound)'      "Runtime adapter (Discord/outbound)"
+check_pattern 'core/communication-readiness\.'   "Communication recovery readiness"
 
 # ── Queue / routing / claim / recovery ────────────────────────────────────
 check_pattern 'core/route-message\.'             "Core routing logic"

@@ -66,6 +66,10 @@ import {
   formatQueueWakeSmokeText,
   inspectStateDaemonRuntime,
 } from '../core/state-daemon-readiness'
+import {
+  buildCommunicationReadinessReport,
+  formatCommunicationReadinessText,
+} from '../core/communication-readiness'
 import { fetchBotStatusFromDb } from '../core/bot-status-db'
 import {
   buildStateDaemonLaunchAgentReadinessReport,
@@ -4747,8 +4751,8 @@ async function recoveryCommand(subcommand: string | undefined, args: string[]) {
 }
 
 async function stateDaemonCommand(subcommand: string | undefined, args: string[]) {
-  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'queue-work-activation-plan') {
-    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|queue-work-activation-plan> ...')
+  if (subcommand !== 'readiness' && subcommand !== 'install-plan' && subcommand !== 'queue-readiness' && subcommand !== 'communication-readiness' && subcommand !== 'queue-work-activation-plan') {
+    console.error('Usage: agent-com state-daemon <readiness|install-plan|queue-readiness|communication-readiness|queue-work-activation-plan> ...')
     process.exit(2)
   }
   const { flags } = parseArgs(args)
@@ -4758,6 +4762,8 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       ? 'Usage: agent-com state-daemon install-plan --commit <sha> [--restore-root <path>] [--launch-agents-dir <path>] [--format json|text]'
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
+        : subcommand === 'communication-readiness'
+          ? 'Usage: agent-com state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]'
         : subcommand === 'queue-work-activation-plan'
           ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]'
           : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
@@ -4810,6 +4816,40 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       const report = buildQueueProcessingReadinessReport(rows, inspectStateDaemonRuntime())
       if (format === 'text') {
         process.stdout.write(formatQueueProcessingReadinessText(report))
+      } else {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      }
+      if (!report.ok) process.exitCode = 1
+    } finally {
+      await db.end()
+    }
+    return
+  }
+  if (subcommand === 'communication-readiness') {
+    const db = await getDb()
+    try {
+      const statusRows = await fetchBotStatusFromDb(db as any)
+      const agentIds = parseCsvFlag(flags['agent-id'] ?? flags['agent-ids']) ?? []
+      const mode = flags.mode ?? 'complete'
+      if (mode !== 'complete' && mode !== 'queue-consumer') {
+        console.error('Usage: agent-com state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]')
+        process.exit(2)
+      }
+      const stalePendingMinutes = parsePositiveIntFlag(flags['stale-pending-minutes'], 15, 'stale-pending-minutes')
+      const runtimeStaleMinutes = parsePositiveIntFlag(flags['runtime-stale-minutes'], 15, 'runtime-stale-minutes')
+      const inventory = await buildRuntimeInventoryReport((db as any).__adapter, {
+        staleMinutes: runtimeStaleMinutes,
+        provider: flags.provider ?? 'discord',
+        bindingRole: flags['binding-role'] ?? 'outbound',
+      })
+      const report = buildCommunicationReadinessReport(
+        statusRows.values(),
+        inventory,
+        inspectStateDaemonRuntime(),
+        { mode, agentIds, stalePendingMinutes, runtimeStaleMinutes },
+      )
+      if (format === 'text') {
+        process.stdout.write(formatCommunicationReadinessText(report))
       } else {
         process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       }
@@ -6460,6 +6500,8 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
+  state-daemon communication-readiness [--agent-id <id>] [--mode complete|queue-consumer] [--stale-pending-minutes 15] [--runtime-stale-minutes 15] [--format json|text]
+                                                       — read-only bot communication readiness; separates DB-primary queue consumer blockers from complete runtime/endpoint blockers
   state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]
                                                        — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
