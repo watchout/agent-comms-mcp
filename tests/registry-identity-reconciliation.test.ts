@@ -215,6 +215,26 @@ describe('Cell 20 registry identity reconciliation', () => {
         JSON.stringify(JSON.parse(rawInput)),
         { [SOURCE_REF]: SOURCE_BODY },
       )).rejects.toThrow('input must use one LF terminator')
+
+      const malformedAunRef = 'aun-message:------------------------------------'
+      const malformed = JSON.parse(rawInput)
+      malformed.entries = malformed.entries.map((entry: any) => ({ ...entry, evidence_ref: malformedAunRef }))
+      await expect(buildRegistryIdentityReconciliationPlan(
+        db,
+        `${canonicalJson(malformed)}\n`,
+        { [malformedAunRef]: SOURCE_BODY },
+      )).rejects.toThrow('mutable source_ref')
+
+      const uppercaseDigest = JSON.parse(rawInput)
+      uppercaseDigest.entries = uppercaseDigest.entries.map((entry: any) => ({
+        ...entry,
+        evidence_sha256: String(entry.evidence_sha256).toUpperCase(),
+      }))
+      await expect(buildRegistryIdentityReconciliationPlan(
+        db,
+        `${canonicalJson(uppercaseDigest)}\n`,
+        { [SOURCE_REF]: SOURCE_BODY },
+      )).rejects.toThrow('input must be RFC 8785 canonical JSON plus LF')
     } finally {
       await db.close()
     }

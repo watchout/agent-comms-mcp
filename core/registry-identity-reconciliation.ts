@@ -259,8 +259,8 @@ function evidenceBytes(value: RegistryEvidenceBundle[string]): Uint8Array {
 
 function assertImmutableEvidenceRef(ref: string): void {
   const immutable = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/.test(ref)
-    || /^git:[a-f0-9]{40}:.+/.test(ref)
-    || /^aun-message:[0-9a-f-]{36}$/.test(ref)
+    || /^git:[a-f0-9]{40}:\S+$/.test(ref)
+    || /^aun-message:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(ref)
   if (!immutable) throw new Error(`REGISTRY_RECONCILIATION_EVIDENCE_INVALID: mutable source_ref ${ref}`)
 }
 

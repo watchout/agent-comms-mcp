@@ -47,4 +47,33 @@ describe('authoritative profile classification', () => {
       },
     })).toBeNull()
   })
+
+  test('noncanonical digests and malformed AUN message refs remain unclassified', () => {
+    const base = {
+      profile_class: 'production',
+      profile_class_source_ref: 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-123',
+      profile_class_source_sha256: 'a'.repeat(64),
+      profile_class_plan_sha256: 'b'.repeat(64),
+    }
+    for (const metadata of [
+      { ...base, profile_class_source_sha256: 'A'.repeat(64) },
+      { ...base, profile_class_plan_sha256: 'B'.repeat(64) },
+      { ...base, profile_class_source_ref: 'aun-message:------------------------------------' },
+      { ...base, profile_class_source_ref: ` ${base.profile_class_source_ref}` },
+    ]) {
+      expect(authoritativeProfileClassification({ agent_id: 'dev-001', metadata })).toBeNull()
+    }
+  })
+
+  test('a canonical AUN message UUID is an immutable classification source', () => {
+    expect(authoritativeProfileClassification({
+      agent_id: 'dev-001',
+      metadata: {
+        profile_class: 'production',
+        profile_class_source_ref: 'aun-message:7b0a2ead-050b-455f-b666-1e9d8ed3b36d',
+        profile_class_source_sha256: 'a'.repeat(64),
+        profile_class_plan_sha256: 'b'.repeat(64),
+      },
+    })?.source_ref).toBe('aun-message:7b0a2ead-050b-455f-b666-1e9d8ed3b36d')
+  })
 })
