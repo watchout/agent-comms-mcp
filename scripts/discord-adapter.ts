@@ -7,7 +7,7 @@
  *
  * Access control sources (Phase 2 G, v2.1.0):
  *   - channels.members (DB) — per-channel allowlist (agent_id → discord_user_id)
- *   - agents.discord_user_id (DB) — DM allowlist (any registered agent)
+ *   - agents.metadata.discord_id (DB) — DM allowlist (any registered agent)
  *
  * Pre-v2.1.0 read these from `access.json`. That file is now ignored; the DB
  * is the single source of truth (spec §20 廃止: access.json / plugin:discord).
@@ -133,9 +133,9 @@ async function getAccessPgClient(): Promise<PgClient | null> {
  *   - groups[channel_id]: `{ requireMention: true, allowFrom: <members as discord ids> }`
  *
  * `requireMention: true` is the pre-v2.1.0 default — this preserves the
- * pattern where bots only receive messages they are @mentioned in. There is
- * no DB column for overriding it; channels that need "accept all" can add
- * a single member + rely on the webhook bridge's downstream filter.
+ * pattern where bots only receive messages they are @mentioned in. An empty
+ * or unresolved member projection denies every guild sender; it never means
+ * "accept all".
  *
  * Note: the SQLite adapter's `adaptSql()` rewrites `metadata->>'discord_id'`
  * into `json_extract(metadata, '$.discord_id')` at query time, so the exact
@@ -195,7 +195,7 @@ export function gate(
   if (!policy) return { action: 'drop', reason: `channel ${lookupId} not in groups` }
 
   const groupAllowFrom = policy.allowFrom ?? []
-  if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+  if (!groupAllowFrom.includes(senderId)) {
     return { action: 'drop', reason: 'not in channel allowFrom' }
   }
 

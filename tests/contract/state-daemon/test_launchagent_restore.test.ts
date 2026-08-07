@@ -9,6 +9,9 @@ import {
   planStateDaemonRestorePrune,
   protectedPathsFromLaunchAgentPlists,
   renderStateDaemonLaunchAgentPlist,
+  STATE_DAEMON_DB_SSOT_CANARY_TARGETS,
+  STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+  validateStateDaemonCanaryOverlayEnv,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
@@ -55,6 +58,19 @@ class RecordingResidueDb {
 
 const RESIDUE_POLICY_FILE = join(REPO, 'config', 'queue-work-residue-policy.json')
 
+function canaryOverlayEnv(target = 'aun'): Record<string, string> {
+  return {
+    STATE_DAEMON_AGENT_ALLOWLIST: target,
+    STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213450982',
+    STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213090076',
+    STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2099-08-08T14:59:59.000Z',
+    STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: 'a'.repeat(64),
+    STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: 'cp /evidence/prior.plist /evidence/installed.plist',
+    STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-observed',
+    STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+  }
+}
+
 function queueWorkResidueEnv(agentId: string, withPolicy: boolean): Record<string, string> {
   return {
     STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
@@ -98,6 +114,35 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(config.workingDirectory).toBe(plan.checkoutPath)
     expect(plist).not.toContain('/private/tmp/agent-comms-state-daemon')
     expect(plist).not.toContain('<key>STATE_DAEMON_AGENT_ALLOWLIST</key>')
+    expect(plist).not.toContain('STATE_DAEMON_CANARY_OVERLAY_')
+  })
+
+  test('Issue #917 typed canary overlay accepts one exact cohort target with complete rollback evidence', () => {
+    const result = validateStateDaemonCanaryOverlayEnv(
+      canaryOverlayEnv('aun'),
+      new Date('2026-08-07T00:00:00.000Z'),
+    )
+
+    expect(result).toMatchObject({ active: true, target: 'aun', issues: [] })
+    expect(STATE_DAEMON_DB_SSOT_CANARY_TARGETS).toEqual(['aun', 'codex-audit', 'adf-lead', 'devauditor'])
+  })
+
+  test('Issue #917 typed canary overlay blocks missing, duplicate, expired, retired, wrong-subject, and outside-cohort records', () => {
+    const valid = canaryOverlayEnv('aun')
+    const fixtures: Array<[string, Record<string, string>, string]> = [
+      ['missing', { ...valid, STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: '' }, 'state_daemon_canary_overlay_identity_incomplete'],
+      ['duplicate', { ...valid, STATE_DAEMON_AGENT_ALLOWLIST: 'aun,codex-audit' }, 'state_daemon_canary_overlay_target_not_exact'],
+      ['expired', { ...valid, STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2026-08-06T00:00:00.000Z' }, 'state_daemon_canary_overlay_expired'],
+      ['retired', canaryOverlayEnv('codex-aun'), 'state_daemon_canary_overlay_retired_target'],
+      ['wrong-subject', { ...valid, STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: `sha256:${'b'.repeat(64)}` }, 'state_daemon_canary_overlay_subject_digest_mismatch'],
+      ['outside-cohort', canaryOverlayEnv('qa'), 'state_daemon_canary_overlay_target_outside_cohort'],
+      ['same-control-and-owner-ref', { ...valid, STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: valid.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF }, 'state_daemon_canary_overlay_refs_not_distinct'],
+    ]
+
+    for (const [name, env, expectedCode] of fixtures) {
+      const result = validateStateDaemonCanaryOverlayEnv(env, new Date('2026-08-07T00:00:00.000Z'))
+      expect(result.issues.map((issue) => issue.code), name).toContain(expectedCode)
+    }
   })
 
   test('preflight refuses missing ProgramArguments[1] and WorkingDirectory before launchd load', () => {
@@ -333,7 +378,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(out.extraEnv.GITHUB_TOKEN).toBeUndefined()
   })
 
-  test('queue-work scheduler activation fails closed without a single-agent allowlist and runtime', () => {
+  test('queue-work scheduler steady state needs runtime and a fleet decision or bounded fence, not a host allowlist', () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
@@ -349,10 +394,10 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
 
     expect(result.ok).toBe(false)
     expect(result.errors.map((err) => err.code)).toEqual(expect.arrayContaining([
-      'queue_work_scheduler_requires_single_agent_allowlist',
       'queue_work_runtime_unconfigured',
       'queue_work_scheduler_requires_canary_fence',
     ]))
+    expect(result.errors.map((err) => err.code)).not.toContain('queue_work_scheduler_requires_single_agent_allowlist')
   })
 
   test('queue-work scheduler codex-exec activation requires the result schema before launchd load', () => {
@@ -362,7 +407,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
       extraEnv: {
         STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        ...canaryOverlayEnv('aun'),
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
         STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
       },
@@ -381,14 +426,14 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     ]))
   })
 
-  test('queue-work scheduler codex-exec activation passes with exact qa allowlist and schema', () => {
+  test('queue-work scheduler codex-exec activation passes with exact typed aun overlay and schema', () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
       launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
       extraEnv: {
         STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-        STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+        ...canaryOverlayEnv('aun'),
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
         STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
         STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
@@ -402,7 +447,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
 
     expect(result.ok).toBe(true)
     const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
-    expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBe('qa')
+    expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBe('aun')
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_RUNTIME).toBe('codex-exec')
     expect(config.environmentVariables.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS).toBe('msg-canary')
   })
@@ -414,7 +459,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
       extraEnv: {
         STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-        STATE_DAEMON_AGENT_ALLOWLIST: 'l2auditor',
+        ...canaryOverlayEnv('codex-audit'),
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
         STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
         STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
@@ -441,7 +486,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
       extraEnv: {
         STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-        STATE_DAEMON_AGENT_ALLOWLIST: 'l2auditor',
+        ...canaryOverlayEnv('codex-audit'),
         STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
         STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
         STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
@@ -865,6 +910,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
 
   test('restore helper dry-run merges GitHub puller and queue-work activation env', () => {
     const tokenFile = '/Users/yuji/.config/agent-comms/github-work-token'
+    const { STATE_DAEMON_AGENT_ALLOWLIST: _, ...overlayMetadata } = canaryOverlayEnv('aun')
     const proc = Bun.spawnSync([
       'bun',
       'scripts/state-daemon-launchagent.ts',
@@ -882,7 +928,9 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       tokenFile,
       '--enable-queue-work-scheduler',
       '--agent-allowlist',
-      'qa',
+      'aun',
+      '--canary-overlay-env-json',
+      JSON.stringify(overlayMetadata),
       '--queue-work-runtime',
       'codex-exec',
       '--queue-work-finalize',
@@ -900,7 +948,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       STATE_DAEMON_GITHUB_WORK_PULLER_ENABLED: '1',
       STATE_DAEMON_GITHUB_TOKEN_FILE: tokenFile,
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-      STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+      STATE_DAEMON_AGENT_ALLOWLIST: 'aun',
       STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
       STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
       STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-canary',
@@ -909,6 +957,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
   })
 
   test('restore helper dry-run can render bounded queue-work rollback env', () => {
+    const { STATE_DAEMON_AGENT_ALLOWLIST: _, ...overlayMetadata } = canaryOverlayEnv('codex-audit')
     const proc = Bun.spawnSync([
       'bun',
       'scripts/state-daemon-launchagent.ts',
@@ -916,7 +965,9 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       '--commit',
       '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       '--agent-allowlist',
-      'qa',
+      'codex-audit',
+      '--canary-overlay-env-json',
+      JSON.stringify(overlayMetadata),
       '--disable-codex-runner',
     ], {
       cwd: REPO,
@@ -928,7 +979,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     const out = JSON.parse(proc.stdout.toString())
     expect(out.dry_run).toBe(true)
     expect(out.extraEnv).toMatchObject({
-      STATE_DAEMON_AGENT_ALLOWLIST: 'qa',
+      STATE_DAEMON_AGENT_ALLOWLIST: 'codex-audit',
       STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
     })
     expect(out.extraEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED).toBeUndefined()

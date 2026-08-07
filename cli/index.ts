@@ -344,8 +344,8 @@ async function resolveCliPhase5(input: {
     ? `mention agent_id "${phase5?.ok === false ? phase5.detail : ''}" not found in agents registry`
     : code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED'
       ? 'send/notify supports exactly one active owner. Use --mention for the owner and --cc/--fyi for observers.'
-      : code === 'OUTBOUND_ACL_VIOLATION'
-        ? `sender ${input.sender} or recipients ${violations.join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(getChannelPolicy(input.channelId).outboundAllowlist)} policy_source=${getChannelPolicy(input.channelId).policySource}`
+      : code === 'CHANNEL_MEMBERSHIP_VIOLATION'
+        ? `sender ${input.sender} or recipients ${violations.join(',')} are not in channels.members; members=${JSON.stringify(getChannelPolicy(input.channelId).members)} authority=channels.members`
         : 'mention/mentions must contain exactly one non-empty agent_id'
   return { ok: false, code, detail, intendedRecipients, violations }
 }
@@ -779,65 +779,69 @@ async function pgNotify(db: Client, channel: string, payload: Record<string, unk
   }
 }
 
-type CliOutboundPolicyResult =
-  | { ok: true; outbound_allowlist: string[] | null; policy_source: string }
+type CliCommunicationAuthorityResult =
+  | {
+      ok: true
+      members: string[]
+      authority: 'channels.members'
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE'
+    }
   | {
       ok: false
       violations: string[]
-      outbound_allowlist: string[] | null
-      policy_source: string
-      violated_policy: 'channel.outboundAllowlist'
+      members: string[]
+      authority: 'channels.members'
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE'
+      violated_policy: 'channels.members'
     }
 
-type CliOutboundPolicyViolation = Extract<CliOutboundPolicyResult, { ok: false }>
+type CliCommunicationAuthorityViolation = Extract<CliCommunicationAuthorityResult, { ok: false }>
 
-async function validateCliOutboundPolicy(
+async function validateCliCommunicationAuthority(
   db: Client,
   sender: string,
   channelId: string,
   recipients: string[],
-): Promise<CliOutboundPolicyResult> {
+): Promise<CliCommunicationAuthorityResult> {
   await refreshChannelPolicyDbSnapshot(db as any)
   const policy = getChannelPolicy(channelId)
-  const sourceRows = await db.query(
-    `SELECT policy_source FROM channel_routing_policy WHERE channel_id = $1`,
-    [channelId],
-  ).catch(() => ({ rows: [] as any[] }))
-  const policySource = sourceRows.rows[0]?.policy_source ?? policy.policySource
   const result = createOutboundPolicyValidator().validate(sender, channelId, recipients)
   if (result.ok === true) {
     return {
       ok: true,
-      outbound_allowlist: policy.outboundAllowlist,
-      policy_source: policySource,
+      members: policy.members,
+      authority: 'channels.members',
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
     }
   }
   return {
     ok: false,
     violations: result.violations,
-    outbound_allowlist: policy.outboundAllowlist,
-    policy_source: policySource,
-    violated_policy: 'channel.outboundAllowlist',
+    members: policy.members,
+    authority: 'channels.members',
+    outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+    violated_policy: 'channels.members',
   }
 }
 
-async function auditOutboundAclViolation(
+async function auditCommunicationAuthorityViolation(
   db: Client,
   operation: 'send' | 'notify',
   sender: string,
   channelId: string,
   recipients: string[],
-  aclResult: CliOutboundPolicyViolation,
+  authorityResult: CliCommunicationAuthorityViolation,
 ) {
-  await auditLog(db, 'outbound.acl_violation', sender, channelId, {
+  await auditLog(db, 'channel.membership_violation', sender, channelId, {
     operation,
     sender,
     intended_recipients: recipients,
     channel_id: channelId,
-    violated_policy: aclResult.violated_policy,
-    outbound_allowlist: aclResult.outbound_allowlist,
-    policy_source: aclResult.policy_source,
-    violations: aclResult.violations,
+    violated_policy: authorityResult.violated_policy,
+    authority: authorityResult.authority,
+    members: authorityResult.members,
+    outbound_allowlist_status: authorityResult.outbound_allowlist_status,
+    violations: authorityResult.violations,
   })
 }
 
@@ -3428,16 +3432,17 @@ async function sendMessage(args: string[]) {
           content,
         })
         if (!phase5.ok) {
-          if (phase5.code === 'OUTBOUND_ACL_VIOLATION') {
+          if (phase5.code === 'CHANNEL_MEMBERSHIP_VIOLATION') {
             await db.query('ROLLBACK').catch(() => {})
             committed = true
-            await auditOutboundAclViolation(db, 'send', agentId, channelId, phase5.intendedRecipients, {
+            await auditCommunicationAuthorityViolation(db, 'send', agentId, channelId, phase5.intendedRecipients, {
               ok: false,
               violations: phase5.violations,
-              violated_policy: 'channel.outboundAllowlist',
-              outbound_allowlist: getChannelPolicy(channelId).outboundAllowlist,
-              policy_source: getChannelPolicy(channelId).policySource,
-            }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+              violated_policy: 'channels.members',
+              members: getChannelPolicy(channelId).members,
+              authority: 'channels.members',
+              outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+            }).catch((err) => process.stderr.write(`agent-com: communication authority audit failed (non-fatal): ${err}\n`))
           }
           if (explicitClose) {
             writeFailureJson(phase5.code, phase5.detail, {
@@ -3460,27 +3465,28 @@ async function sendMessage(args: string[]) {
         }
       }
 
-      const aclResult = await validateCliOutboundPolicy(db, agentId, channelId, mentions)
-      if (aclResult.ok === false) {
-        const detail = `sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist`
+      const authorityResult = await validateCliCommunicationAuthority(db, agentId, channelId, mentions)
+      if (authorityResult.ok === false) {
+        const detail = `sender ${agentId} or recipients ${authorityResult.violations.join(',')} are not in channels.members`
         await db.query('ROLLBACK').catch(() => {})
         committed = true
-        await auditOutboundAclViolation(db, 'send', agentId, channelId, mentions, aclResult)
-          .catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+        await auditCommunicationAuthorityViolation(db, 'send', agentId, channelId, mentions, authorityResult)
+          .catch((err) => process.stderr.write(`agent-com: communication authority audit failed (non-fatal): ${err}\n`))
         if (explicitClose) {
-          writeFailureJson('OUTBOUND_ACL_VIOLATION', detail, {
+          writeFailureJson('CHANNEL_MEMBERSHIP_VIOLATION', detail, {
             queue_id: target.queue_id,
             message_id: replyTo,
             channel_id: channelId,
-            violations: aclResult.violations,
+            violations: authorityResult.violations,
             sender: agentId,
             intended_recipients: mentions,
-            violated_policy: aclResult.violated_policy,
-            outbound_allowlist: aclResult.outbound_allowlist,
-            policy_source: aclResult.policy_source,
+            violated_policy: authorityResult.violated_policy,
+            authority: authorityResult.authority,
+            members: authorityResult.members,
+            outbound_allowlist_status: authorityResult.outbound_allowlist_status,
           })
         } else {
-          console.error(`Error [OUTBOUND_ACL_VIOLATION]: ${detail}; allowlist=${JSON.stringify(aclResult.outbound_allowlist)} policy_source=${aclResult.policy_source}`)
+          console.error(`Error [CHANNEL_MEMBERSHIP_VIOLATION]: ${detail}; members=${JSON.stringify(authorityResult.members)} authority=${authorityResult.authority}`)
           throw new CliSendExit(1)
         }
       }
@@ -4019,14 +4025,15 @@ async function notifyMessage(args: string[]) {
         content,
       })
       if (!phase5.ok) {
-        if (phase5.code === 'OUTBOUND_ACL_VIOLATION') {
-          await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, phase5.intendedRecipients, {
+        if (phase5.code === 'CHANNEL_MEMBERSHIP_VIOLATION') {
+          await auditCommunicationAuthorityViolation(db, 'notify', agentId, resolvedChannelId, phase5.intendedRecipients, {
             ok: false,
             violations: phase5.violations,
-            violated_policy: 'channel.outboundAllowlist',
-            outbound_allowlist: getChannelPolicy(resolvedChannelId).outboundAllowlist,
-            policy_source: getChannelPolicy(resolvedChannelId).policySource,
-          }).catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
+            violated_policy: 'channels.members',
+            members: getChannelPolicy(resolvedChannelId).members,
+            authority: 'channels.members',
+            outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+          }).catch((err) => process.stderr.write(`agent-com: communication authority audit failed (non-fatal): ${err}\n`))
         }
         console.error(`Error [${phase5.code}]: ${phase5.detail}`)
         process.exit(phase5.code === 'INVALID_MENTION' || phase5.code === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' ? 2 : 1)
@@ -4040,11 +4047,11 @@ async function notifyMessage(args: string[]) {
       }
     }
 
-    const aclResult = await validateCliOutboundPolicy(db, agentId, resolvedChannelId, mentions)
-    if (aclResult.ok === false) {
-      await auditOutboundAclViolation(db, 'notify', agentId, resolvedChannelId, mentions, aclResult)
-        .catch((err) => process.stderr.write(`agent-com: outbound ACL audit failed (non-fatal): ${err}\n`))
-      console.error(`Error [OUTBOUND_ACL_VIOLATION]: sender ${agentId} or recipients ${aclResult.violations.join(',')} violate channel.outboundAllowlist; allowlist=${JSON.stringify(aclResult.outbound_allowlist)} policy_source=${aclResult.policy_source}`)
+    const authorityResult = await validateCliCommunicationAuthority(db, agentId, resolvedChannelId, mentions)
+    if (authorityResult.ok === false) {
+      await auditCommunicationAuthorityViolation(db, 'notify', agentId, resolvedChannelId, mentions, authorityResult)
+        .catch((err) => process.stderr.write(`agent-com: communication authority audit failed (non-fatal): ${err}\n`))
+      console.error(`Error [CHANNEL_MEMBERSHIP_VIOLATION]: sender ${agentId} or recipients ${authorityResult.violations.join(',')} are not in channels.members; members=${JSON.stringify(authorityResult.members)} authority=${authorityResult.authority}`)
       process.exit(1)
     }
 

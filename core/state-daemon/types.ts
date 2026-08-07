@@ -81,8 +81,11 @@ export interface StateDaemonConfig {
   memoryReadyGateEnabled: boolean
   memoryReadyProject: string
   /**
-   * Optional emergency narrowing gate. Production should normally leave this
-   * null so DB agent/channel state decides the fleet surface.
+   * Temporary one-target canary overlay only. A non-null value is valid only
+   * after LaunchAgent preflight verifies the Issue #917 control/owner refs,
+   * subject, expiry, prior-plist digest, rollback command, and receipt
+   * destination. It never makes an agent eligible; DB agent/channel state
+   * remains authoritative and steady-state production leaves this null.
    */
   agentAllowlist: string[] | null
   /**

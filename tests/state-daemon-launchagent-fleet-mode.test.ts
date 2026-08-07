@@ -1,11 +1,6 @@
-// Fleet-mode scheduler activation contract (owner ruling 6 amended,
-// iyasaka-arc#24 comment 4921804733; canary terminal PASS + audit PASS on
-// agent-comms-mcp#846 are the release preconditions).
-//
-// Canary discipline stays the DEFAULT: single-seat allowlist + fence.
-// Fleet mode relaxes exactly those two constraints and nothing else, and is
-// itself fail-closed: it must cite the authorizing decision as a GitHub URL
-// and must carry a governed residue policy file.
+// Issue #917 Phase 1 supersedes a broad host fleet allowlist as runtime
+// authority. Legacy fleet metadata remains readable, but any non-empty host
+// allowlist must now be one exact, typed canary overlay.
 
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
@@ -55,7 +50,7 @@ function validate(plan: ReturnType<typeof buildPlan>, extraFiles: string[] = [])
 }
 
 describe('fleet-mode scheduler activation', () => {
-  test('fleet mode + multi-seat allowlist + no fence + decision ref + residue policy → passes', () => {
+  test('legacy fleet mode + multi-seat host allowlist is rejected as non-authoritative', () => {
     const plan = buildPlan({
       STATE_DAEMON_QUEUE_WORK_FLEET_MODE: '1',
       STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF: DECISION_REF,
@@ -63,8 +58,11 @@ describe('fleet-mode scheduler activation', () => {
       STATE_DAEMON_AGENT_ALLOWLIST: FLEET,
     })
     const result = validate(plan, [RESIDUE_POLICY])
-    expect(result.errors).toEqual([])
-    expect(result.ok).toBe(true)
+    expect(result.errors.map(e => e.code)).toEqual(expect.arrayContaining([
+      'state_daemon_canary_overlay_target_not_exact',
+      'queue_work_scheduler_requires_single_agent_allowlist',
+    ]))
+    expect(result.ok).toBe(false)
   })
 
   test('fleet mode WITHOUT decision ref fails closed', () => {
@@ -101,16 +99,16 @@ describe('fleet-mode scheduler activation', () => {
     )
   })
 
-  test('fleet mode with an EMPTY allowlist fails closed', () => {
+  test('fleet mode steady state permits an empty host allowlist', () => {
     const plan = buildPlan({
       STATE_DAEMON_QUEUE_WORK_FLEET_MODE: '1',
       STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF: DECISION_REF,
       STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: RESIDUE_POLICY,
       STATE_DAEMON_AGENT_ALLOWLIST: '',
     })
-    expect(validate(plan, [RESIDUE_POLICY]).errors.map(e => e.code)).toContain(
-      'queue_work_scheduler_requires_single_agent_allowlist',
-    )
+    const result = validate(plan, [RESIDUE_POLICY])
+    expect(result.errors.map(e => e.code)).not.toContain('queue_work_scheduler_requires_single_agent_allowlist')
+    expect(result.errors.map(e => e.code)).not.toContain('state_daemon_canary_overlay_identity_incomplete')
   })
 
   test('REGRESSION: without fleet mode, canary discipline is unchanged (single seat + fence required)', () => {

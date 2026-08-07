@@ -1,26 +1,24 @@
 /**
  * Phase 5 §1.7 Port C — OutboundPolicyValidator.
  *
- * Responsibility: enforce `channel.outboundAllowlist` on the SENDER side.
+ * Responsibility: enforce DB `channels.members` for every sender/recipient.
  *
- * §2.4 (AMEND-2 reject 一本化):
- *   - send で `mention` / `cc` のいずれかが allowlist 違反 →
- *     server-side reject with `OUTBOUND_ACL_VIOLATION`.
- *   - cc[] strip is a separate concern (legacy v1 §4.5) and is REMOVED.
- *   - allowlist 不在 channel (entry 自体無し) → 全 sender 許可 (legacy compat).
+ * #917 Phase 1: `channel_routing_policy.outbound_allowlist` remains readable
+ * compatibility data, but it has zero authorization effect.
  *
  * §1.4: server-side enforcement is canonical; client-side warning is
  * best-effort (UX only, not a gate). In production, missing DB policy becomes
- * an empty allowlist so routing fails closed instead of reading static config.
+ * empty membership so routing fails closed instead of reading static config.
  */
 import { getChannelPolicy, type AgentId } from '../../channel-policy'
+import { evaluateCommunicationAuthority } from '../../communication-authority'
 
 export interface OutboundPolicyValidator {
   /**
    * Validates that `sender` may post to `channel_id` with the given recipients.
    * Returns `{ ok: true }` on pass, `{ ok: false, violations: AgentId[] }` on
    * reject — `violations` lists the sender or recipients (in `[sender, ...recipients]`
-   * order) that fail the allowlist.
+   * order) that are absent from channel membership.
    */
   validate(sender: AgentId, channel_id: string, recipients: AgentId[]):
     | { ok: true }
@@ -30,17 +28,12 @@ export interface OutboundPolicyValidator {
 export function createOutboundPolicyValidator(): OutboundPolicyValidator {
   return {
     validate(sender, channel_id, recipients) {
-      const policy = getChannelPolicy(channel_id)
-      // §2.4 — explicit compatibility entries with no allowlist allow all.
-      // Missing production DB policy resolves to [] and rejects all.
-      if (policy.outboundAllowlist === null) return { ok: true }
-      const allow = new Set(policy.outboundAllowlist)
-      const violations: AgentId[] = []
-      if (!allow.has(sender)) violations.push(sender)
-      for (const r of recipients) {
-        if (!allow.has(r)) violations.push(r)
-      }
-      if (violations.length > 0) return { ok: false, violations }
+      const verdict = evaluateCommunicationAuthority({
+        sender,
+        recipients,
+        members: getChannelPolicy(channel_id).members,
+      })
+      if (!verdict.ok) return { ok: false, violations: verdict.violations }
       return { ok: true }
     },
   }

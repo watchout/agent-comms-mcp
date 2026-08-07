@@ -13,6 +13,7 @@ import {
   renderStateDaemonLaunchAgentPlist,
   validateShirubeD1LaunchAgentEnv,
   validateAllAgentCommunicationManifestLaunchAgentEnv,
+  validateStateDaemonCanaryOverlayEnv,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
   loadQueueWorkResiduePolicyFromEnv,
@@ -65,6 +66,33 @@ const ALL_AGENT_MANIFEST_RESTORE_ENV_KEYS = new Set([
   'STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF',
   'STATE_DAEMON_ALL_AGENT_MANIFEST_PATH',
 ])
+
+const CANARY_OVERLAY_RESTORE_ENV_KEYS = new Set([
+  'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT',
+  'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256',
+  'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND',
+  'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION',
+  'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST',
+])
+
+function parseCanaryOverlayRestoreEnv(raw: string): Record<string, string> {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { throw new Error('--canary-overlay-env-json requires a valid JSON object') }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--canary-overlay-env-json requires a JSON object')
+  }
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!CANARY_OVERLAY_RESTORE_ENV_KEYS.has(key)) {
+      throw new Error(`--canary-overlay-env-json does not allow key: ${key}`)
+    }
+    if (typeof value !== 'string') throw new Error(`--canary-overlay-env-json requires a string value for ${key}`)
+    result[key] = value
+  }
+  return result
+}
 
 function parseAllAgentManifestRestoreEnv(raw: string): Record<string, string> {
   let parsed: unknown
@@ -128,6 +156,7 @@ Usage:
      --github-token-file <path>]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --enable-queue-work-scheduler --agent-allowlist <agent>
+    --canary-overlay-env-json <bounded-json>
     --queue-work-runtime codex-exec --queue-work-fence-message-ids <id>
     [--queue-work-fence-created-after <iso>]
     [--queue-work-github-writeback-mode mediated]
@@ -135,7 +164,7 @@ Usage:
     [--github-token-file <path>]
     [--queue-work-residue-policy-file <path>] [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
-    --agent-allowlist <agent> --disable-codex-runner [--execute]
+    --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --shirube-d1-env-json <bounded-json> [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
@@ -183,6 +212,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--sqlite-path') args.sqlitePath = resolve(next())
     else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
     else if (arg === '--all-agent-manifest-env-json') Object.assign(args.extraEnv, parseAllAgentManifestRestoreEnv(next()))
+    else if (arg === '--canary-overlay-env-json') Object.assign(args.extraEnv, parseCanaryOverlayRestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
     else if (arg === '--github-work-labels') args.githubWorkLabels = next()
@@ -350,6 +380,10 @@ function commandRestore(args: ParsedArgs): void {
     ...(args.sqlitePath ? { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: args.sqlitePath } : {}),
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
+  }
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv(extraEnv)
+  if (overlayValidation.issues.length > 0) {
+    throw new Error(`state-daemon canary overlay failed preflight: ${overlayValidation.issues.map(issue => issue.code).join(',')}`)
   }
   if (args.bootstrapSafeDefaults) {
     const expected = {

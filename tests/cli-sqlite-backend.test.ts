@@ -118,6 +118,7 @@ function allowOutboundAgents(...agentIds: string[]): void {
     for (const agentId of agentIds) {
       if (agentId !== 'probe-f') insertAgent.run(agentId, agentId)
     }
+    db.prepare(`UPDATE channels SET members = ? WHERE id = 'probe-f-ch'`).run(JSON.stringify(agentIds))
     db.prepare(`
       INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('probe-f-ch', ?, 'cli-test')
@@ -1812,24 +1813,25 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(fail.stderr).toContain('INVALID_REPLY_TO')
   })
 
-  test('rejects DB channel policy outbound allowlist violations before writing reply rows', () => {
+  test('rejects channels.members violations before writing reply rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
-    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
     const { queueId } = seedPendingMessage('acl send')
     runCli(['next'])
 
     const blocked = runCli(['send', '--content', 'blocked send', '--mentions', 'cto'])
     expect(blocked.status).not.toBe(0)
-    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
-    expect(blocked.stderr).toContain('allowlist=["cto"]')
+    expect(blocked.stderr).toContain('CHANNEL_MEMBERSHIP_VIOLATION')
+    expect(blocked.stderr).toContain('members=["probe-f"]')
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('received')
     expect(q[0].replied_with).toBeNull()
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked send'`)
     expect(written.length).toBe(0)
-    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'channel.membership_violation'`)
     expect(audits).toHaveLength(1)
     expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-f-ch' })
     expect(JSON.parse(audits[0].detail)).toMatchObject({
@@ -1837,10 +1839,11 @@ describe('F3 — agent-com send (SQLite)', () => {
       sender: 'probe-f',
       intended_recipients: ['cto'],
       channel_id: 'probe-f-ch',
-      violated_policy: 'channel.outboundAllowlist',
-      outbound_allowlist: ['cto'],
-      policy_source: 'db',
-      violations: ['probe-f'],
+      violated_policy: 'channels.members',
+      authority: 'channels.members',
+      members: ['probe-f'],
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+      violations: ['cto'],
     })
   })
 })
@@ -2054,31 +2057,33 @@ describe('F5 — agent-com notify (SQLite)', () => {
     })
   })
 
-  test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
+  test('notify rejects channels.members violations before writing rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
-    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
 
     const blocked = runCli(['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
     expect(blocked.status).not.toBe(0)
-    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
-    expect(blocked.stderr).toContain('allowlist=["cto"]')
+    expect(blocked.stderr).toContain('CHANNEL_MEMBERSHIP_VIOLATION')
+    expect(blocked.stderr).toContain('members=["probe-f"]')
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked notify'`)
     expect(written.length).toBe(0)
     const queued = dbRead(`SELECT id FROM message_queue WHERE payload LIKE '%blocked notify%'`)
     expect(queued.length).toBe(0)
-    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'channel.membership_violation'`)
     expect(audits).toHaveLength(1)
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       operation: 'notify',
       sender: 'probe-f',
       intended_recipients: ['cto'],
       channel_id: 'probe-f-ch',
-      violated_policy: 'channel.outboundAllowlist',
-      outbound_allowlist: ['cto'],
-      policy_source: 'db',
-      violations: ['probe-f'],
+      violated_policy: 'channels.members',
+      authority: 'channels.members',
+      members: ['probe-f'],
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+      violations: ['cto'],
     })
   })
 })

@@ -21,6 +21,19 @@ export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist
 export const DEFAULT_STATE_DAEMON_BUN_PATH = '/Users/yuji/.bun/bin/bun'
 export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 export const DEFAULT_STATE_DAEMON_DENYLIST = 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
+export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor'] as const
+export const STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID = 'codex-aun'
+export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:aec4d6cc4184b10a30ca5de63fd1924f091ab5cea401d7f1cd6abfbd1fde1661'
+
+const STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS = [
+  'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT',
+  'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256',
+  'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND',
+  'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION',
+  'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST',
+] as const
 
 export type StateDaemonLaunchAgentConfig = {
   label: string | null
@@ -375,7 +388,10 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
     PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     ...mergedExtraEnv,
   }
-  if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) delete env.STATE_DAEMON_AGENT_ALLOWLIST
+  if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) {
+    delete env.STATE_DAEMON_AGENT_ALLOWLIST
+    for (const key of STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS) delete env[key]
+  }
 
   const envXml = Object.entries(env)
     .map(([key, value]) => `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(value)}</string>`)
@@ -434,6 +450,124 @@ function parseCsvValue(value: string | undefined): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
+export type StateDaemonCanaryOverlayValidation = {
+  active: boolean
+  target: string | null
+  expiresAt: string | null
+  issues: StateDaemonPreflightIssue[]
+}
+
+export function validateStateDaemonCanaryOverlayEnv(
+  env: Record<string, string>,
+  now = new Date(),
+): StateDaemonCanaryOverlayValidation {
+  const allowlist = parseCsvValue(env.STATE_DAEMON_AGENT_ALLOWLIST)
+  const target = allowlist.length === 1 ? allowlist[0] : null
+  const issues: StateDaemonPreflightIssue[] = []
+  const populatedOverlayKeys = STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS
+    .filter((key) => Boolean(env[key]?.trim()))
+
+  if (allowlist.length === 0) {
+    if (populatedOverlayKeys.length > 0) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_without_target',
+        message: 'Canary overlay metadata must not remain when STATE_DAEMON_AGENT_ALLOWLIST is absent.',
+      })
+    }
+    return { active: false, target: null, expiresAt: null, issues }
+  }
+
+  if (allowlist.length !== 1) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_target_not_exact',
+      message: 'A temporary DB-SSOT canary overlay requires exactly one STATE_DAEMON_AGENT_ALLOWLIST target.',
+    })
+  }
+
+  for (const key of STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS) {
+    if (!env[key]?.trim()) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_identity_incomplete',
+        message: `${key} is required whenever STATE_DAEMON_AGENT_ALLOWLIST is present.`,
+      })
+    }
+  }
+
+  if (target === STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_retired_target',
+      message: `${STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID} is retired; the canonical agent id is aun.`,
+    })
+  } else if (target && !STATE_DAEMON_DB_SSOT_CANARY_TARGETS.includes(target as typeof STATE_DAEMON_DB_SSOT_CANARY_TARGETS[number])) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_target_outside_cohort',
+      message: `Canary overlay target ${target} is outside the owner-authorized four-agent cohort.`,
+    })
+  }
+
+  for (const key of ['STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF', 'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF'] as const) {
+    const value = env[key]?.trim()
+    if (value && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/.test(value)) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_ref_invalid',
+        message: `${key} must be an immutable GitHub issue or pull-request comment URL.`,
+      })
+    }
+  }
+  const controlRef = env.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF?.trim()
+  const ownerDecisionRef = env.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF?.trim()
+  if (controlRef && ownerDecisionRef && controlRef === ownerDecisionRef) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_refs_not_distinct',
+      message: 'Canary control handoff and owner activation decision must cite separate immutable comments.',
+    })
+  }
+
+  const expiresAt = env.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT?.trim() || null
+  if (expiresAt) {
+    const expiresAtMs = Date.parse(expiresAt)
+    if (!Number.isFinite(expiresAtMs)) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_expiry_invalid',
+        message: 'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT must be a valid timestamp.',
+      })
+    } else if (expiresAtMs <= now.getTime()) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_expired',
+        message: 'The temporary state-daemon canary overlay has expired and must be removed before processing.',
+      })
+    }
+  }
+
+  const priorPlistDigest = env.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256?.trim()
+  if (priorPlistDigest && !/^[0-9a-f]{64}$/.test(priorPlistDigest)) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_prior_plist_digest_invalid',
+      message: 'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256 must be 64 lowercase hex.',
+    })
+  }
+
+  const observedStateDestination = env.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION?.trim()
+  if (observedStateDestination
+    && !observedStateDestination.startsWith('/')
+    && !/^https:\/\/github\.com\/[^\s]+$/.test(observedStateDestination)) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_observed_state_destination_invalid',
+      message: 'Observed-state destination must be an absolute path or immutable GitHub URL.',
+    })
+  }
+
+  const subjectDigest = env.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST?.trim()
+  if (subjectDigest && subjectDigest !== STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_subject_digest_mismatch',
+      message: 'Canary overlay subject digest does not match the admitted Issue #917 DesignPack.',
+    })
+  }
+
+  return { active: true, target, expiresAt, issues }
+}
+
 function isCanaryLabel(label: string): boolean {
   return label.trim().toLowerCase().startsWith('canary:')
 }
@@ -488,6 +622,7 @@ export function validateStateDaemonLaunchAgentConfig(
     probe?: PathProbe
     allowRestoreOwnedTemp?: boolean
     restoreRoot?: string | null
+    now?: () => Date
   } = {},
 ): StateDaemonPreflightResult {
   const probe = options.probe ?? {
@@ -597,6 +732,7 @@ export function validateStateDaemonLaunchAgentConfig(
 
   errors.push(...validateShirubeD1LaunchAgentEnv(env))
   errors.push(...validateAllAgentCommunicationManifestLaunchAgentEnv(env))
+  errors.push(...validateStateDaemonCanaryOverlayEnv(env, options.now?.() ?? new Date()).issues)
   const allAgentManifestPath = env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH?.trim()
   if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED === '1' && allAgentManifestPath) {
     if (!probe.exists(allAgentManifestPath)) {
@@ -686,12 +822,10 @@ export function validateStateDaemonLaunchAgentConfig(
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    if (fleetMode ? allowlist.length === 0 : allowlist.length !== 1) {
+    if (allowlist.length > 1) {
       errors.push({
         code: 'queue_work_scheduler_requires_single_agent_allowlist',
-        message: fleetMode
-          ? 'Fleet-mode scheduler activation must specify at least one STATE_DAEMON_AGENT_ALLOWLIST entry.'
-          : 'Queue-work scheduler activation must specify exactly one STATE_DAEMON_AGENT_ALLOWLIST entry for bounded canary launch.',
+        message: 'Queue-work scheduler activation may use at most one temporary STATE_DAEMON_AGENT_ALLOWLIST overlay; broad persistent host allowlists are not authoritative.',
       })
     }
 

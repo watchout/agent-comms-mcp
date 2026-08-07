@@ -15,6 +15,7 @@
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { gate, type Access } from '../scripts/discord-adapter'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const SCRIPT = readFileSync(join(REPO_ROOT, 'scripts', 'discord-adapter.ts'), 'utf-8')
@@ -67,6 +68,35 @@ describe('G2 — DB-backed Access source', () => {
     // would flood every bot with every channel message. The v2.1.0 default
     // preserves the pre-v2.1.0 "only @mentions" gate.
     expect(SCRIPT).toMatch(/requireMention: true/)
+  })
+
+  test('empty channels.members projection fails closed instead of accepting every guild sender', () => {
+    const access: Access = {
+      dmPolicy: 'allowlist',
+      allowFrom: ['discord-member'],
+      groups: { 'channel-a': { requireMention: true, allowFrom: [] } },
+      pending: {},
+    }
+
+    expect(gate(access, 'discord-member', 'channel-a', null, false, true)).toEqual({
+      action: 'drop',
+      reason: 'not in channel allowFrom',
+    })
+  })
+
+  test('guild receive passes only for a projected channels.members identity', () => {
+    const access: Access = {
+      dmPolicy: 'allowlist',
+      allowFrom: ['discord-member', 'discord-outsider'],
+      groups: { 'channel-a': { requireMention: true, allowFrom: ['discord-member'] } },
+      pending: {},
+    }
+
+    expect(gate(access, 'discord-member', 'channel-a', null, false, true)).toEqual({ action: 'deliver' })
+    expect(gate(access, 'discord-outsider', 'channel-a', null, false, true)).toEqual({
+      action: 'drop',
+      reason: 'not in channel allowFrom',
+    })
   })
 })
 

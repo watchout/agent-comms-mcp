@@ -2,7 +2,7 @@
  * Phase 5 §4 — port unit tests + behavioral fixtures (merge gate).
  *
  * Covers §4.1 dedup / §4.2 sender + multi-mention normalization / §4.3 missing target /
- * §4.4 outbound ACL reject / §4.5 failure modes / §4.6 cc[] body injection.
+ * #917 channel-membership reject / §4.5 failure modes / §4.6 cc[] body injection.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { writeFileSync, unlinkSync, existsSync, rmSync } from 'node:fs'
@@ -16,13 +16,14 @@ import {
   refreshChannelPolicyDbSnapshot,
   resetChannelPolicyCache,
 } from '../../core/routing'
+import { resolvePhase5 } from '../../core/routing/server-integration'
 
 const KNOWN_AGENTS = new Set(['alice', 'bob', 'carol', 'dan', 'agent-com-dev', 'cto', 'codex-cto', 'lead-ama'])
 const isKnown = (id: string) => KNOWN_AGENTS.has(id)
 
 const TMP_CONFIG = `/tmp/phase5-routing-${process.pid}-${Date.now()}.json`
 
-function setRoutingConfig(channels: Record<string, { primary?: string | null; adapterOwner?: string | null; outboundAllowlist?: string[] }>) {
+function setRoutingConfig(channels: Record<string, { members?: string[]; primary?: string | null; adapterOwner?: string | null; outboundAllowlist?: string[] }>) {
   writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels }), 'utf8')
   process.env.AGENT_COM_BOT_ROUTING_PATH = TMP_CONFIG
   resetChannelPolicyCache()
@@ -45,10 +46,12 @@ afterEach(() => {
 // §1.8 channel-policy source
 // ============================================================
 describe('channel-policy (§1.8)', () => {
-  test('absent channel → null primary + null outboundAllowlist (legacy compat)', () => {
+  test('absent channel → empty members and deprecated compatibility allowlist', () => {
     const p = getChannelPolicy('unknown-channel')
+    expect(p.members).toEqual([])
     expect(p.primary).toBeNull()
     expect(p.outboundAllowlist).toBeNull()
+    expect(p.outboundAllowlistStatus).toBe('DEPRECATED_NON_AUTHORITATIVE')
     expect(p.policySource).toBe('config/bot-routing.json')
   })
 
@@ -77,12 +80,14 @@ describe('channel-policy (§1.8)', () => {
     })
   })
 
-  test('present channel returns configured primary + allowlist', () => {
-    setRoutingConfig({ 'ch1': { primary: 'alice', adapterOwner: 'bob', outboundAllowlist: ['alice', 'bob'] } })
+  test('present channel returns configured members, primary, and compatibility allowlist', () => {
+    setRoutingConfig({ 'ch1': { members: ['alice', 'bob'], primary: 'alice', adapterOwner: 'bob', outboundAllowlist: ['legacy-only'] } })
     const p = getChannelPolicy('ch1')
+    expect(p.members).toEqual(['alice', 'bob'])
     expect(p.primary).toBe('alice')
     expect(p.adapterOwner).toBe('bob')
-    expect(p.outboundAllowlist).toEqual(['alice', 'bob'])
+    expect(p.outboundAllowlist).toEqual(['legacy-only'])
+    expect(p.outboundAllowlistStatus).toBe('DEPRECATED_NON_AUTHORITATIVE')
   })
 
   test('§1.8 reloads file mutations in a long-lived process', () => {
@@ -96,7 +101,7 @@ describe('channel-policy (§1.8)', () => {
     expect(p.outboundAllowlist).toEqual(['bob'])
   })
 
-  test('invalid reload keeps the last known valid config instead of relaxing ACL', () => {
+  test('invalid reload keeps the last known valid compatibility routing config', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
     writeFileSync(TMP_CONFIG, '{invalid-json', 'utf8')
@@ -105,7 +110,7 @@ describe('channel-policy (§1.8)', () => {
     expect(p.outboundAllowlist).toEqual(['alice'])
   })
 
-  test('schema-invalid reload keeps the last known valid config instead of crashing or relaxing ACL', () => {
+  test('schema-invalid reload keeps the last known valid compatibility routing config', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
     writeFileSync(TMP_CONFIG, JSON.stringify({ version: 1, channels: null }), 'utf8')
@@ -114,7 +119,7 @@ describe('channel-policy (§1.8)', () => {
     expect(p.outboundAllowlist).toEqual(['alice'])
   })
 
-  test('missing-file reload keeps the last known valid config instead of relaxing ACL', () => {
+  test('missing-file reload keeps the last known valid compatibility routing config', () => {
     setRoutingConfig({ 'ch1': { primary: 'alice', outboundAllowlist: ['alice'] } })
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['alice'])
     rmSync(TMP_CONFIG, { force: true })
@@ -134,6 +139,7 @@ describe('channel-policy (§1.8)', () => {
           rows: [
             {
               channel_id: 'ch1',
+              members: '["db-primary","db-owner"]',
               primary_agent_id: 'db-primary',
               adapter_owner_agent_id: 'db-owner',
               outbound_allowlist: '["db-primary","db-owner"]',
@@ -147,9 +153,10 @@ describe('channel-policy (§1.8)', () => {
 
     expect(loaded).toEqual({ loaded: true, count: 1 })
     expect(getChannelPolicy('ch1').primary).toBe('db-primary')
+    expect(getChannelPolicy('ch1').members).toEqual(['db-primary', 'db-owner'])
     expect(getChannelPolicy('ch1').adapterOwner).toBe('db-owner')
     expect(getChannelPolicy('ch1').outboundAllowlist).toEqual(['db-primary', 'db-owner'])
-    expect(getChannelPolicy('ch1').policySource).toBe('db')
+    expect(getChannelPolicy('ch1').policySource).toBe('db:channels.members')
     expect(getChannelPolicy('ch1').nativeRoleOutboundOwners['codex-cto']).toBe('codex-cto')
     expect(getChannelPolicy('ch2').primary).toBe('json-only')
   })
@@ -295,34 +302,54 @@ describe('InboundResolver — §1.6 / §4.5 mention/cc validation (failure modes
 // ============================================================
 // §1.7 Port C — OutboundPolicyValidator + §2.4 reject 一本化
 // ============================================================
-describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', () => {
-  test('§4.4 absent allowlist → all senders permitted (legacy compat)', () => {
+describe('Communication membership validator (§1.7 Port C)', () => {
+  test('F02 absent channel membership fails closed', () => {
     const v = createOutboundPolicyValidator()
     const r = v.validate('alice', 'unknown-ch', ['bob'])
-    expect(r.ok).toBe(true)
+    expect(r).toEqual({ ok: false, violations: ['alice', 'bob'] })
   })
 
-  test('§4.4 sender in allowlist + recipient in allowlist → ok', () => {
-    setRoutingConfig({ 'ch1': { outboundAllowlist: ['alice', 'bob'] } })
+  test('F02 sender and recipient in channels.members → ok', () => {
+    setRoutingConfig({ 'ch1': { members: ['alice', 'bob'], outboundAllowlist: [] } })
     const v = createOutboundPolicyValidator()
     const r = v.validate('alice', 'ch1', ['bob'])
     expect(r.ok).toBe(true)
   })
 
-  test('§4.4 sender violates allowlist → reject', () => {
-    setRoutingConfig({ 'ch1': { outboundAllowlist: ['bob'] } })
+  test('F02 nonmember sender → reject', () => {
+    setRoutingConfig({ 'ch1': { members: ['bob'], outboundAllowlist: ['alice', 'bob'] } })
     const v = createOutboundPolicyValidator()
     const r = v.validate('alice', 'ch1', ['bob'])
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.violations).toContain('alice')
   })
 
-  test('§4.4 recipient violates allowlist → reject (cc[] strip 削除、reject 一本化)', () => {
-    setRoutingConfig({ 'ch1': { outboundAllowlist: ['alice'] } })
+  test('F02 nonmember recipient → reject', () => {
+    setRoutingConfig({ 'ch1': { members: ['alice'], outboundAllowlist: ['alice', 'bob'] } })
     const v = createOutboundPolicyValidator()
     const r = v.validate('alice', 'ch1', ['bob'])
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.violations).toContain('bob')
+  })
+
+  test('F02 integration validates sender, active owner, cc, and fyi against one membership set', () => {
+    setRoutingConfig({ 'ch1': { members: ['alice', 'bob', 'carol'], outboundAllowlist: ['legacy-only'] } })
+    const result = resolvePhase5({
+      sender: 'alice',
+      channel_id: 'ch1',
+      mention: 'bob',
+      cc: ['carol'],
+      fyi: ['dan'],
+      content: 'membership fixture',
+      isKnownAgent: isKnown,
+    })
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'CHANNEL_MEMBERSHIP_VIOLATION',
+      intended_recipients: ['bob', 'carol', 'dan'],
+      violations: ['dan'],
+    })
   })
 
   // PR-routing-acl-extend: pin the channel `1487368919613444156` (#agent-com)
@@ -334,7 +361,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
   // length / order / forbidden additions are all gated by a single
   // assertion (cycle 1 `toContain` only verified inclusion, missed
   // contamination + reorder regressions).
-  test('§4.4 channel 1487368919613444156 — repaired allowlist + adapter owner', () => {
+  test('F03 channel 1487368919613444156 retains allowlist as compatibility data', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -360,7 +387,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     ])
   })
 
-  test('§4.4 channel 1487368919613444156 — CTO direct routes + codex-aun / hotel-dev / dev-001 ok, unknown sender → violations contains it', () => {
+  test('F02 channel members allow mutual routes while a nonmember is rejected', () => {
     const fs = require('node:fs')
     const path = require('node:path')
     const cfg = JSON.parse(
@@ -371,8 +398,9 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     )
     setRoutingConfig({
       '1487368919613444156': {
+        members: cfg.channels['1487368919613444156'].outboundAllowlist,
         primary: cfg.channels['1487368919613444156']?.primary ?? 'agent-com-dev',
-        outboundAllowlist: cfg.channels['1487368919613444156'].outboundAllowlist,
+        outboundAllowlist: [],
       },
     })
     const v = createOutboundPolicyValidator()
@@ -389,9 +417,7 @@ describe('OutboundPolicyValidator (§1.7 Port C) — §2.4 reject 一本化', ()
     expect(v.validate('agent-com-dev', '1487368919613444156', ['dev-001']).ok).toBe(true)
     // cycle 2 rigor: unknown sender must reject AND surface the offender in
     // `violations` (the OutboundPolicyValidator's violation kind field).
-    // The integration layer maps this to the `OUTBOUND_ACL_VIOLATION` error
-    // class (core/routing/server-integration.ts:92), so pinning `violations`
-    // here is equivalent to pinning the violation kind at this port.
+    // The integration layer maps this to CHANNEL_MEMBERSHIP_VIOLATION.
     const r = v.validate('nonexistent-foo', '1487368919613444156', ['codex-aun'])
     expect(r.ok).toBe(false)
     if (!r.ok) {

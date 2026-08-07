@@ -161,7 +161,7 @@ import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
 import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from './core/outbound-projection'
 import { decorateProjectedContent } from './core/projection-text-decorator'
-import { refreshChannelPolicyDbSnapshot } from './core/channel-policy'
+import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import {
   heartbeatRuntimeInstance,
   hasRuntimeConnectorIdentityEvidence,
@@ -174,11 +174,6 @@ import {
   markAgentOfflineIfNoOtherLiveRuntime,
 } from './core/agent-status-lifecycle'
 import { resolveDbDiscordBotToken } from './core/discord-token-resolution'
-import {
-  buildOutboundAclViolationDetail,
-  formatOutboundAclViolation,
-  recordOutboundAclViolation,
-} from './core/outbound-acl-diagnostic'
 import {
   applyConversationControlPlaneAllocation,
   type ConversationControlPlaneApplyResult,
@@ -1744,7 +1739,7 @@ async function writeAuditLog(eventType: string, agentId: string | null, target: 
   ).catch(err => process.stderr.write(`agent-comms: audit_log write failed: ${err}\n`))
 }
 
-async function writeMcpOutboundAclViolationAudit(
+async function writeMcpCommunicationAuthorityViolationAudit(
   client: Client,
   operation: 'send' | 'notify',
   sender: string,
@@ -1752,17 +1747,33 @@ async function writeMcpOutboundAclViolationAudit(
   intendedRecipients: string[],
   violations: string[],
 ) {
-  const detail = await buildOutboundAclViolationDetail(
-    client as any,
+  await refreshChannelPolicyDbSnapshot(client as any)
+  const policy = getChannelPolicy(channelId)
+  const detail = {
     operation,
     sender,
-    channelId,
-    intendedRecipients,
+    intended_recipients: intendedRecipients,
+    channel_id: channelId,
+    violated_policy: 'channels.members' as const,
+    authority: 'channels.members' as const,
+    members: policy.members,
+    outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE' as const,
     violations,
-  )
-  await recordOutboundAclViolation(client as any, detail)
-    .catch(err => process.stderr.write(`agent-comms: outbound ACL audit failed (non-fatal): ${err}\n`))
+  }
+  await client.query(
+    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+     VALUES ('channel.membership_violation', $1, $2, $3, 'default')`,
+    [sender, channelId, JSON.stringify(detail)],
+  ).catch(err => process.stderr.write(`agent-comms: communication authority audit failed (non-fatal): ${err}\n`))
   return detail
+}
+
+function formatCommunicationAuthorityViolation(detail: {
+  sender: string
+  violations: string[]
+  members: string[]
+}): string {
+  return `sender ${detail.sender} or recipients ${detail.violations.join(',')} are not in channels.members; members=${JSON.stringify(detail.members)} authority=channels.members`
 }
 
 // --- Access Control (§4.1 - Communication Bus Layer) ---
@@ -2516,7 +2527,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         claimedMqId = decision.claimedMqId
       }
 
-    // Phase 5 cleanup — mention/mentions validation + outbound ACL.
+    // Phase 5 cleanup — mention/mentions validation + channel membership authority.
     // Resolves channel from claim, applies validation, decorates content.
     // mention and mentions[] normalize through one canonical port.
     {
@@ -2551,9 +2562,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await txClient.query('ROLLBACK'); txCommitted = true
           return { content: [{ type: 'text', text: 'Error [MULTI_ACTIVE_RECIPIENT_UNSUPPORTED]: send/notify supports exactly one active owner. Use mention for the owner and cc[]/fyi[] for observers.' }], isError: true }
         }
-        if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
+        if (phase5.error === 'CHANNEL_MEMBERSHIP_VIOLATION') {
           await txClient.query('ROLLBACK'); txCommitted = true
-          const detail = await writeMcpOutboundAclViolationAudit(
+          const detail = await writeMcpCommunicationAuthorityViolationAudit(
             txClient,
             'send',
             agentId,
@@ -2561,7 +2572,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             phase5.intended_recipients ?? [],
             phase5.violations ?? [],
           )
-          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: ${formatOutboundAclViolation(detail)}` }], isError: true }
+          return { content: [{ type: 'text', text: `Error [CHANNEL_MEMBERSHIP_VIOLATION]: ${formatCommunicationAuthorityViolation(detail)}` }], isError: true }
         }
       }
       if (phase5 && phase5.ok) {
@@ -3260,8 +3271,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (phase5.error === 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED') {
           return { content: [{ type: 'text', text: 'Error [MULTI_ACTIVE_RECIPIENT_UNSUPPORTED]: send/notify supports exactly one active owner. Use mention for the owner and cc[]/fyi[] for observers.' }], isError: true }
         }
-        if (phase5.error === 'OUTBOUND_ACL_VIOLATION') {
-          const detail = await writeMcpOutboundAclViolationAudit(
+        if (phase5.error === 'CHANNEL_MEMBERSHIP_VIOLATION') {
+          const detail = await writeMcpCommunicationAuthorityViolationAudit(
             client,
             'notify',
             agentId,
@@ -3269,7 +3280,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             phase5.intended_recipients ?? [],
             phase5.violations ?? [],
           )
-          return { content: [{ type: 'text', text: `Error [OUTBOUND_ACL_VIOLATION]: ${formatOutboundAclViolation(detail)}` }], isError: true }
+          return { content: [{ type: 'text', text: `Error [CHANNEL_MEMBERSHIP_VIOLATION]: ${formatCommunicationAuthorityViolation(detail)}` }], isError: true }
         }
       }
       if (phase5 && phase5.ok) {

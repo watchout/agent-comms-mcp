@@ -352,6 +352,7 @@ describe('state-daemon readiness diagnostics', () => {
         '<plist><dict><key>EnvironmentVariables</key><dict>',
         '<key>STATE_DAEMON_CODEX_RUNNER_ENABLED</key><string>1</string>',
         '<key>STATE_DAEMON_AGENT_ALLOWLIST</key><string>qa</string>',
+        '<key>STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF</key><string>plist-only</string>',
         '</dict></dict></plist>',
       ].join('')) as any,
       statSync: (() => ({ size: 0 })) as any,
@@ -362,6 +363,7 @@ describe('state-daemon readiness diagnostics', () => {
     expect(readiness.environment.codex_runner_enabled).toBe('0')
     expect(readiness.environment.agent_allowlist).toBe('kodama')
     expect(readiness.environment.agent_denylist).toBe('ceo,test')
+    expect(readiness.environment.canary_overlay_control_ref).toBeNull()
   })
 })
 
@@ -424,7 +426,7 @@ describe('#603 queue-processing readiness', () => {
     expect(report.queue_processing_readiness.blocker_codes).toEqual([])
   })
 
-  test('fails closed when live daemon cannot run or scope target queue agents', () => {
+  test('fails closed when runner is disabled or a persistent host allowlist lacks its typed overlay', () => {
     const report = buildQueueProcessingReadinessReport([
       botStatusRow({
         agent_id: 'check',
@@ -448,11 +450,12 @@ describe('#603 queue-processing readiness', () => {
       agent_id: 'check',
       pending_count: 2,
       active_claim_count: 0,
-      blocker_codes: ['STATE_DAEMON_RUNNER_DISABLED', 'STATE_DAEMON_AGENT_NOT_ALLOWLISTED'],
+      blocker_codes: ['STATE_DAEMON_RUNNER_DISABLED'],
     }])
     expect(report.queue_processing_readiness.blocker_codes).toEqual([
+      'STATE_DAEMON_CANARY_OVERLAY_IDENTITY_INCOMPLETE',
+      'STATE_DAEMON_CANARY_OVERLAY_TARGET_OUTSIDE_COHORT',
       'STATE_DAEMON_RUNNER_DISABLED',
-      'STATE_DAEMON_AGENT_NOT_ALLOWLISTED',
     ])
   })
 

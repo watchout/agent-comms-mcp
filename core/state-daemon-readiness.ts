@@ -11,6 +11,7 @@ import {
 } from './all-agent-communication-manifest'
 import type { BotStatusDbRow, QueueWakeState } from './bot-status-db'
 import { defaultConfigPort } from './ports/config-port'
+import { validateStateDaemonCanaryOverlayEnv } from './state-daemon/launchagent'
 
 const DEFAULT_LABEL = 'com.agent-comms.state-daemon'
 const DEFAULT_SMOKE_AGENT_ID = '__queue_wake_smoke__'
@@ -53,6 +54,13 @@ export interface StateDaemonRuntimeReadiness {
     queue_work_scheduler_enabled: string | null
     agent_allowlist: string | null
     agent_denylist: string | null
+    canary_overlay_control_ref?: string | null
+    canary_overlay_owner_decision_ref?: string | null
+    canary_overlay_expires_at?: string | null
+    canary_overlay_prior_plist_sha256?: string | null
+    canary_overlay_rollback_command?: string | null
+    canary_overlay_observed_state_destination?: string | null
+    canary_overlay_subject_digest?: string | null
     shirube_d1_enabled?: string | null
     shirube_d1_kill_switch?: string | null
     shirube_d1_target_allowlist?: string | null
@@ -498,8 +506,17 @@ export function inspectStateDaemonRuntime(options: StateDaemonRuntimeOptions = {
       database_url: launchctlEnv.DATABASE_URL ?? plistEnv.DATABASE_URL ?? null,
       codex_runner_enabled: launchctlEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED ?? plistEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED ?? null,
       queue_work_scheduler_enabled: launchctlEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? plistEnv.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED ?? null,
-      agent_allowlist: launchctlEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? plistEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null,
+      agent_allowlist: loaded === true
+        ? launchctlEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null
+        : plistEnv.STATE_DAEMON_AGENT_ALLOWLIST ?? null,
       agent_denylist: launchctlEnv.STATE_DAEMON_AGENT_DENYLIST ?? plistEnv.STATE_DAEMON_AGENT_DENYLIST ?? null,
+      canary_overlay_control_ref: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF ?? null,
+      canary_overlay_owner_decision_ref: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF ?? null,
+      canary_overlay_expires_at: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT ?? null,
+      canary_overlay_prior_plist_sha256: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256 ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256 ?? null,
+      canary_overlay_rollback_command: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND ?? null,
+      canary_overlay_observed_state_destination: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION ?? null,
+      canary_overlay_subject_digest: loaded === true ? launchctlEnv.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST ?? null : plistEnv.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST ?? null,
       shirube_d1_enabled: launchctlEnv.SHIRUBE_D1_ENABLED ?? plistEnv.SHIRUBE_D1_ENABLED ?? null,
       shirube_d1_kill_switch: launchctlEnv.SHIRUBE_D1_KILL_SWITCH ?? plistEnv.SHIRUBE_D1_KILL_SWITCH ?? null,
       shirube_d1_target_allowlist: launchctlEnv.SHIRUBE_D1_TARGET_ALLOWLIST ?? plistEnv.SHIRUBE_D1_TARGET_ALLOWLIST ?? null,
@@ -931,7 +948,6 @@ export function buildQueueProcessingReadinessReport(
       evidence: agent,
     }))
   }
-  const allowlist = parseCsv(runtime.environment.agent_allowlist)
   const denylist = parseCsv(runtime.environment.agent_denylist)
   const codexRunnerEnabled = envEnabled(runtime.environment.codex_runner_enabled)
   const queueWorkSchedulerEnabled = envEnabled(runtime.environment.queue_work_scheduler_enabled)
@@ -941,11 +957,32 @@ export function buildQueueProcessingReadinessReport(
     if (!queueBlockerCodes.includes(code)) queueBlockerCodes.push(code)
   }
 
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv({
+    STATE_DAEMON_AGENT_ALLOWLIST: runtime.environment.agent_allowlist ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: runtime.environment.canary_overlay_control_ref ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: runtime.environment.canary_overlay_owner_decision_ref ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: runtime.environment.canary_overlay_expires_at ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: runtime.environment.canary_overlay_prior_plist_sha256 ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: runtime.environment.canary_overlay_rollback_command ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: runtime.environment.canary_overlay_observed_state_destination ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: runtime.environment.canary_overlay_subject_digest ?? '',
+  }, options.now ?? new Date())
+  for (const issue of overlayValidation.issues) {
+    const code = issue.code.toUpperCase()
+    addQueueBlockerCode(code)
+    blockers.push(readinessFinding(code, 'blocker', issue.message, {
+      evidence: {
+        source_code: issue.code,
+        active_target: overlayValidation.target,
+        expires_at: overlayValidation.expiresAt,
+      },
+    }))
+  }
+
   for (const row of rowList) {
     const blockerCodes: string[] = []
     const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
     if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
-    if (allowlist.length > 0 && !allowlist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_NOT_ALLOWLISTED')
     if (denylist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_DENYLISTED')
     if (blockerCodes.length === 0) continue
 
@@ -960,9 +997,7 @@ export function buildQueueProcessingReadinessReport(
       const message =
         code === 'STATE_DAEMON_RUNNER_DISABLED'
           ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
-          : code === 'STATE_DAEMON_AGENT_NOT_ALLOWLISTED'
-            ? 'state-daemon agent allowlist excludes the target agent'
-            : 'state-daemon agent denylist excludes the target agent'
+          : 'state-daemon agent denylist excludes the target agent'
       blockers.push(readinessFinding(code, 'blocker', message, {
         agent_id: row.agent_id,
         evidence: {
