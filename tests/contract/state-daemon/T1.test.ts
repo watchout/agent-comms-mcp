@@ -21,7 +21,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
 
 let pg: Client
 
@@ -69,12 +69,12 @@ describe('T1 new_pending_dispatched', () => {
       // Insert the row directly so we control the id; the trigger fires its own
       // pg_notify on the real DB but FakePgListen is what the daemon listens to,
       // so we drive the event ourselves to keep the test deterministic.
-      const ins = await pg.query(
-        `INSERT INTO message_queue (agent_id, status, payload, created_at)
-         VALUES ($1, 'pending', $3, $2) RETURNING id`,
-        [agent, t0, JSON.stringify({ message_type: 'instruction', content: 'T1 fixture work' })],
-      )
-      const rowId = Number((ins.rows as Array<{ id: number }>)[0].id)
+      const rowId = await seedQueueRow(pg, {
+        agent_id: agent,
+        status: 'pending',
+        created_at: t0,
+        payload: JSON.stringify({ message_type: 'instruction', content: 'T1 fixture work' }),
+      })
 
       await daemon.__testHandleEvent({
         op: 'INSERT',

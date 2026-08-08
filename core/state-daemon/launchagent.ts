@@ -23,7 +23,7 @@ export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host
 export const DEFAULT_STATE_DAEMON_DENYLIST = 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
 export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor'] as const
 export const STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID = 'codex-aun'
-export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:aec4d6cc4184b10a30ca5de63fd1924f091ab5cea401d7f1cd6abfbd1fde1661'
+export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:3dda8cd2b471e907245b28b4a1c4f6e656d2d76c6eff9f5c5a44db698f2372bc'
 
 const STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS = [
   'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF',

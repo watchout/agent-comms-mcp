@@ -22,6 +22,27 @@ import {
 } from './contract/state-daemon/fakes'
 
 const REPO = join(import.meta.dir, '..')
+const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
+
+function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; rowCount: number } | null {
+  if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) {
+    return {
+      rows: [{
+        agent_id: agentId,
+        runtime: 'codex',
+        runtime_engine_preference: 'codex',
+        status: 'idle',
+        profile_enabled: true,
+        disabled_at: null,
+      }] as T[],
+      rowCount: 1,
+    }
+  }
+  if (sql.includes('SELECT members FROM channels WHERE id=$1')) {
+    return { rows: [{ members: [agentId] }] as T[], rowCount: 1 }
+  }
+  return null
+}
 
 test('queue-work failure reporting surfaces the failed finalizer instead of the successful runner', () => {
   const detail = describeQueueWorkFailure({
@@ -45,12 +66,14 @@ class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (
       sql.includes('FROM message_queue WHERE id = $1')
       || (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1'))
     ) {
       if (String(this.row.id) === String(params?.[0])) {
-        return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     }
@@ -77,8 +100,10 @@ class PendingLlmDb implements DBClient {
   ) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.agentId)
+    if (authority) return authority
     if (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1')) {
-      if (String(this.row.id) === String(params?.[0])) return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      if (String(this.row.id) === String(params?.[0])) return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('FROM agents WHERE agent_id=$1')) {
@@ -167,8 +192,10 @@ class ExpiredSchedulerClaimDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
-      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
     }
     if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')")) {
       return { rows: [] as T[], rowCount: 0 }
@@ -190,6 +217,8 @@ class RunnerErrorSweepDb implements DBClient {
   constructor(public row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (
       sql.includes('FROM message_queue mq')
       && sql.includes("mq.status='in_progress'")
@@ -202,7 +231,7 @@ class RunnerErrorSweepDb implements DBClient {
         return { rows: [] as T[], rowCount: 0 }
       }
       if (this.row?.status === 'in_progress') {
-        return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       }
       return { rows: [] as T[], rowCount: 0 }
     }
@@ -243,8 +272,10 @@ class D1DoneRecoveryDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes("mq.status = 'done'") && sql.includes('shirube_v4_d1')) {
-      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
     }
     if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
     return { rows: [] as T[], rowCount: 0 }
@@ -256,9 +287,11 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
       return this.row.status === 'received'
-        ? { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        ? { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
         : { rows: [] as T[], rowCount: 0 }
     }
     if (sql.trim().startsWith('UPDATE message_queue') && String(params?.[0]) === String(this.row.id)) {
@@ -841,22 +874,23 @@ describe('state_daemon queue work scheduler boundary', () => {
       },
     }
     const metrics = new FakeMetrics()
-    const daemon = new StateDaemon({
-      db: new PendingLlmDb(agentId, {
-        id: 491,
-        agent_id: agentId,
-        status: 'pending',
-        message_id: 'msg-491',
-        payload: JSON.stringify({
-          author_id: 'codex-cto',
-          content: 'Audit PR #491',
-          message_type: 'instruction',
-        }),
-        claim_expires_at: null,
-        created_at: new Date('2026-05-08T00:00:00.000Z'),
-        last_wake_attempt_at: null,
-        last_heartbeat_at: null,
+    const row = {
+      id: 491,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-491',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'Audit PR #491',
+        message_type: 'instruction',
       }),
+      claim_expires_at: null,
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, row),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
       clock: new FakeClock(),
@@ -876,6 +910,7 @@ describe('state_daemon queue work scheduler boundary', () => {
         claim_expires_at: null,
       })
       await pendingStarted
+      row.status = 'received'
       await daemon.__testHandleEvent({
         op: 'UPDATE',
         id: 491,

@@ -622,7 +622,10 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       h.pgListen.emit(JSON.stringify({
         op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
       }))
-      await new Promise((r) => setTimeout(r, 50))
+      for (let attempt = 0; attempt < 50; attempt++) {
+        if (h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' }) === 1) break
+        await Bun.sleep(10)
+      }
 
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)

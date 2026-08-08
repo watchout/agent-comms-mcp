@@ -472,11 +472,12 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     await h.daemon.start()
     try {
       for (let i = 0; i < 5; i++) {
-        const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
-          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
-        )
-        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        const id = await seedQueueRow(pg, {
+          agent_id: agent,
+          status: 'pending',
+          created_at: T0,
+          payload: JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' }),
+        })
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
@@ -506,11 +507,12 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     await h.daemon.start()
     try {
       for (let i = 0; i < 4; i++) {
-        const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
-          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
-        )
-        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        const id = await seedQueueRow(pg, {
+          agent_id: agent,
+          status: 'pending',
+          created_at: T0,
+          payload: JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' }),
+        })
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })

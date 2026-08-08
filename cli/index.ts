@@ -4766,7 +4766,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       : subcommand === 'queue-readiness'
         ? 'Usage: agent-com state-daemon queue-readiness [--agent-id <id>] [--format json|text]'
         : subcommand === 'queue-work-activation-plan'
-          ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]'
+          ? 'Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] --canary-control-ref <url> --canary-owner-decision-ref <url> --canary-expires-at <timestamp> --canary-prior-plist-sha256 <sha256> --canary-rollback-command <command> --canary-observed-state-destination <path-or-url> --canary-subject-digest <sha256> [--format json|text]'
           : 'Usage: agent-com state-daemon readiness [--plist-path <path>] [--require-running] [--allow-private-tmp] [--expected-commit <sha>] [--expected-checkout-root <path>] [--format json|text]')
     process.exit(2)
   }
@@ -4834,7 +4834,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     const agentId = flags['agent-id']
     const commit = flags.commit
     if (!agentId || !commit) {
-      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]')
+      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] --canary-control-ref <url> --canary-owner-decision-ref <url> --canary-expires-at <timestamp> --canary-prior-plist-sha256 <sha256> --canary-rollback-command <command> --canary-observed-state-destination <path-or-url> --canary-subject-digest <sha256> [--format json|text]')
       process.exit(2)
     }
     const db = await getDb()
@@ -4849,6 +4849,13 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
         githubWritebackMode: flags['github-writeback-mode'] ?? flags['queue-work-github-writeback-mode'],
         mediatedPostingCommand: flags['mediated-posting-command'] ?? flags['queue-work-mediated-posting-command'],
         mediatedPostingArgsJson: flags['mediated-posting-args-json'] ?? flags['queue-work-mediated-posting-args-json'],
+        canaryControlRef: flags['canary-control-ref'],
+        canaryOwnerDecisionRef: flags['canary-owner-decision-ref'],
+        canaryExpiresAt: flags['canary-expires-at'],
+        canaryPriorPlistSha256: flags['canary-prior-plist-sha256'],
+        canaryRollbackCommand: flags['canary-rollback-command'],
+        canaryObservedStateDestination: flags['canary-observed-state-destination'],
+        canarySubjectDigest: flags['canary-subject-digest'],
       })
       if (format === 'text') {
         process.stdout.write(formatQueueWorkActivationPlanText(report))
@@ -6467,7 +6474,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — dry-run persistent install and atomic LaunchAgent update plan; no write, rename, load, or restart
   state-daemon queue-readiness [--agent-id <id>] [--format json|text]
                                                        — read-only queue-processing readiness; separates transport health from queue wake progress
-  state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] [--github-writeback-mode none|mediated] [--mediated-posting-command <path>] [--format json|text]
+  state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--runtime codex-exec|echo|command-json] --canary-control-ref <url> --canary-owner-decision-ref <url> --canary-expires-at <timestamp> --canary-prior-plist-sha256 <sha256> --canary-rollback-command <command> --canary-observed-state-destination <path-or-url> --canary-subject-digest <sha256> [--format json|text]
                                                        — read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart
   queue doctor [--agent-id <id>] [--stale-minutes 15] [--format json|text]
                                                        — queue health blockers and stale-work diagnostics

@@ -44,8 +44,8 @@ describe('T1: routeMessage A1 — channel_non_member drop emits log + counter', 
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null }, // not a member
     ]
     const msg = {
-      authorAgentId: 'ceo',
-      authorIsBot: false,
+      authorAgentId: 'agent-a',
+      authorIsBot: true,
       content: '@agent-b hi',
       mentions: ['agent-b'],
       messageType: 'chat',
@@ -77,8 +77,8 @@ describe('T2: core routing ignores adapter external IDs', () => {
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null }, // null discordId → A4
     ]
     const msg = {
-      authorAgentId: 'ceo',
-      authorIsBot: false,
+      authorAgentId: 'agent-a',
+      authorIsBot: true,
       content: '<@1486351481871794207> hi',
       mentions: ['1486351481871794207'],
       messageType: 'chat',
@@ -100,8 +100,8 @@ describe('T2: core routing ignores adapter external IDs', () => {
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
     ]
     const msg = {
-      authorAgentId: 'ceo',
-      authorIsBot: false,
+      authorAgentId: 'agent-a',
+      authorIsBot: true,
       content: '@agent-b hi',
       mentions: ['agent-b'],
       messageType: 'chat',
@@ -274,7 +274,7 @@ describe('T6: human agents are dropped from pushTargets (no message_queue insert
     expect(counters['route_message_drops_total|reason=human_agent_no_queue']).toBe(1)
   })
 
-  test('senderIsHuman + noMentions does not enqueue bots or humans', () => {
+  test('human native inbound sender is rejected before recipient routing', () => {
     captureLogger()
 
     const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'ceo'], type: 'channel' }
@@ -293,7 +293,38 @@ describe('T6: human agents are dropped from pushTargets (no message_queue insert
     const result = routeMessage(msg, channel, agents, 'inbound')
 
     expect(result.pushTargets).toEqual([])
-    expect(result.dropTargets['agent-a']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets).toEqual({})
+    expect(result.senderViolation).toBe('SENDER_HUMAN_NOT_ALLOWED')
+  })
+})
+
+describe('T6b: native inbound sender fail-closed matrix', () => {
+  test.each([
+    ['null identity', null, false, ['agent-a', 'agent-b', 'ceo'], 'SENDER_ID_UNRESOLVED', 'sender_identity_unresolved'],
+    ['unmapped member identity', 'ghost', true, ['agent-a', 'agent-b', 'ceo', 'ghost'], 'SENDER_ID_UNRESOLVED', 'sender_identity_unresolved'],
+    ['human identity', 'ceo', false, ['agent-a', 'agent-b', 'ceo'], 'SENDER_HUMAN_NOT_ALLOWED', 'sender_human_not_allowed'],
+    ['nonmember identity', 'outside', true, ['agent-a', 'agent-b', 'ceo'], 'SENDER_NOT_A_MEMBER', 'sender_not_a_member'],
+  ])('%s produces no queue target', (_name, authorAgentId, authorIsBot, members, violation, reason) => {
+    const { events } = captureLogger()
+    const channel: ChannelInfo = { channelId: 'ch-1', members, type: 'channel' }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
+      { agentId: 'ceo', agentType: 'human', observerMode: false, discordId: '1227059781265653783' },
+    ]
+    const result = routeMessage({
+      authorAgentId,
+      authorIsBot,
+      content: '@agent-b inspect',
+      mentions: ['agent-b'],
+      messageType: 'chat',
+    }, channel, agents, 'inbound')
+
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets).toEqual({})
+    expect(result.senderViolation).toBe(violation)
+    expect(events.some((event) => event.event === 'route_drop' && event.reason === reason)).toBe(true)
+    expect(getObservabilityCounters()[`route_message_drops_total|reason=${reason}`]).toBe(1)
   })
 })
 
@@ -303,18 +334,19 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
 
     const channel: ChannelInfo = {
       channelId: 'ch-1',
-      members: ['agent-a', 'agent-b', 'agent-c'],
+      members: ['sender', 'agent-a', 'agent-b', 'agent-c'],
       type: 'channel',
       primary: 'agent-a',
     }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
     ]
     const msg = {
-      authorAgentId: 'ceo',
-      authorIsBot: false,
+      authorAgentId: 'sender',
+      authorIsBot: true,
       content: 'hello fleet (no mention)',
       mentions: [],
       messageType: 'chat',
@@ -338,16 +370,17 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
 
     const channel: ChannelInfo = {
       channelId: 'ch-1',
-      members: ['agent-a', 'agent-b'],
+      members: ['sender', 'agent-a', 'agent-b'],
       type: 'channel',
       // primary omitted
     }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
     ]
     const msg = {
-      authorAgentId: 'ceo',
+      authorAgentId: 'sender',
       authorIsBot: false,
       content: 'legacy ceo bypass',
       mentions: [],
@@ -365,18 +398,19 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
 
     const channel: ChannelInfo = {
       channelId: 'ch-1',
-      members: ['agent-a', 'agent-b', 'agent-c'],
+      members: ['sender', 'agent-a', 'agent-b', 'agent-c'],
       type: 'channel',
       primary: 'agent-a',
     }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
     ]
     const msg = {
-      authorAgentId: 'ceo',
-      authorIsBot: false,
+      authorAgentId: 'sender',
+      authorIsBot: true,
       content: 'announce @everyone',
       mentions: ['everyone'],
       messageType: 'chat',
@@ -389,17 +423,18 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
   test('emergency with explicit mention routes only to the mentioned agent', () => {
     const channel: ChannelInfo = {
       channelId: 'ch-1',
-      members: ['agent-a', 'agent-b', 'agent-c'],
+      members: ['sender', 'agent-a', 'agent-b', 'agent-c'],
       type: 'channel',
       primary: null,
     }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-c', agentType: 'dev', observerMode: false, discordId: null },
     ]
     const msg = {
-      authorAgentId: 'aun',
+      authorAgentId: 'sender',
       authorIsBot: true,
       content: 'P0 targeted emergency',
       mentions: ['agent-b'],
@@ -413,19 +448,21 @@ describe('T7: missing-mention alert routing + @everyone broadcast', () => {
   })
 
   test('@all alias still works (regression)', () => {
-    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['sender', 'agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
     ]
-    const msg = { authorAgentId: 'ceo', authorIsBot: false, content: 'all hands @all', mentions: ['all'], messageType: 'chat' }
+    const msg = { authorAgentId: 'sender', authorIsBot: true, content: 'all hands @all', mentions: ['all'], messageType: 'chat' }
     const result = routeMessage(msg, channel, agents, 'inbound')
     expect(result.pushTargets.sort()).toEqual(['agent-a', 'agent-b'])
   })
 
   test('bot sender with no mentions and primary set → no enqueue', () => {
-    const channel: ChannelInfo = { channelId: 'ch-1', members: ['agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
+    const channel: ChannelInfo = { channelId: 'ch-1', members: ['other-bot', 'agent-a', 'agent-b'], type: 'channel', primary: 'agent-a' }
     const agents: AgentInfo[] = [
+      { agentId: 'other-bot', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
     ]
@@ -459,11 +496,12 @@ describe('T8: #527 cycle 3 — Discord inbound parser passes @everyone / @here t
     const { GROUP_KEYWORDS } = require('../core/send-errors')
     const channel: ChannelInfo = {
       channelId: 'ch-1',
-      members: ['agent-a', 'agent-b'],
+      members: ['sender', 'agent-a', 'agent-b'],
       type: 'channel',
       primary: 'agent-a',
     }
     const agents: AgentInfo[] = [
+      { agentId: 'sender', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-a', agentType: 'dev', observerMode: false, discordId: null },
       { agentId: 'agent-b', agentType: 'dev', observerMode: false, discordId: null },
     ]
@@ -477,7 +515,7 @@ describe('T8: #527 cycle 3 — Discord inbound parser passes @everyone / @here t
     expect(mentions).toContain('everyone')
 
     const result = routeMessage(
-      { authorAgentId: 'ceo', authorIsBot: false, content, mentions, messageType: 'chat' },
+      { authorAgentId: 'sender', authorIsBot: true, content, mentions, messageType: 'chat' },
       channel,
       agents,
       'inbound',

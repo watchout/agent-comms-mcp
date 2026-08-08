@@ -7,10 +7,6 @@ import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } from '../core/channel-policy'
 import { resolvePhase5 } from '../core/routing/server-integration'
-import {
-  buildOutboundAclViolationDetail,
-  recordOutboundAclViolation,
-} from '../core/outbound-acl-diagnostic'
 
 const REPO_ROOT = new URL('..', import.meta.url).pathname
 
@@ -27,10 +23,10 @@ async function withAclDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
         ('sender-a', 'sender-a', 'dev', 'idle'),
         ('target-b', 'target-b', 'dev', 'idle')
     `)
-    seed.exec(`INSERT INTO channels (id, name, members) VALUES ('acl-ch', 'acl-ch', '["sender-a","target-b"]')`)
+    seed.exec(`INSERT INTO channels (id, name, members) VALUES ('acl-ch', 'acl-ch', '["target-b"]')`)
     seed.exec(`
       INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
-      VALUES ('acl-ch', '["target-b"]', 'test-mcp-policy')
+      VALUES ('acl-ch', '["sender-a","target-b"]', 'test-mcp-policy')
     `)
     seed.close()
 
@@ -50,8 +46,8 @@ async function withAclDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
 }
 
 describe('MCP outbound ACL diagnostics', () => {
-  test('resolvePhase5 exposes canonical recipients for durable ACL evidence', async () => {
-    await withAclDb(async (db) => {
+  test('resolvePhase5 ignores a permissive legacy allowlist and exposes channels.members violations', async () => {
+    await withAclDb(async () => {
       const phase5 = resolvePhase5({
         sender: 'sender-a',
         channel_id: 'acl-ch',
@@ -62,64 +58,29 @@ describe('MCP outbound ACL diagnostics', () => {
 
       expect(phase5 && !phase5.ok ? phase5 : null).toMatchObject({
         ok: false,
-        error: 'OUTBOUND_ACL_VIOLATION',
+        error: 'CHANNEL_MEMBERSHIP_VIOLATION',
         intended_recipients: ['target-b'],
         violations: ['sender-a'],
       })
-
-      if (!phase5 || phase5.ok || phase5.error !== 'OUTBOUND_ACL_VIOLATION') {
-        throw new Error('expected outbound ACL violation')
-      }
-
-      const detail = await buildOutboundAclViolationDetail(
-        db as any,
-        'notify',
-        'sender-a',
-        'acl-ch',
-        phase5.intended_recipients ?? [],
-        phase5.violations ?? [],
-      )
-      expect(detail).toEqual({
-        operation: 'notify',
-        sender: 'sender-a',
-        intended_recipients: ['target-b'],
-        channel_id: 'acl-ch',
-        violated_policy: 'channel.outboundAllowlist',
-        outbound_allowlist: ['target-b'],
-        policy_source: 'test-mcp-policy',
-        violations: ['sender-a'],
-      })
-
-      await recordOutboundAclViolation(db as any, detail)
-      const audits = await db.query<any>(
-        `SELECT event_type, agent_id, target, detail
-           FROM audit_log
-          WHERE event_type = 'outbound.acl_violation'`,
-      )
-      expect(audits).toHaveLength(1)
-      expect(audits[0]).toMatchObject({
-        agent_id: 'sender-a',
-        target: 'acl-ch',
-      })
-      expect(JSON.parse(audits[0].detail)).toMatchObject(detail)
     })
   })
 
-  test('server send and notify ACL branches record durable audit evidence', () => {
+  test('server send and notify membership branches record durable DB-authority audit evidence', () => {
     const src = readFileSync(join(REPO_ROOT, 'server.ts'), 'utf8')
     const sendIdx = src.indexOf("if (name === 'send')")
     const notifyIdx = src.indexOf("if (name === 'notify')")
     const quoteIdx = src.indexOf("if (name === 'quote')", notifyIdx)
     const sendBody = src.slice(sendIdx, notifyIdx)
     const notifyBody = src.slice(notifyIdx, quoteIdx === -1 ? src.length : quoteIdx)
-    const helper = readFileSync(join(REPO_ROOT, 'core', 'outbound-acl-diagnostic.ts'), 'utf8')
+    const authority = readFileSync(join(REPO_ROOT, 'core', 'communication-authority.ts'), 'utf8')
 
-    expect(sendBody).toContain("writeMcpOutboundAclViolationAudit(")
+    expect(sendBody).toContain("writeMcpCommunicationAuthorityViolationAudit(")
     expect(sendBody).toContain("'send'")
-    expect(sendBody).toContain('formatOutboundAclViolation(detail)')
-    expect(notifyBody).toContain("writeMcpOutboundAclViolationAudit(")
+    expect(sendBody).toContain('formatCommunicationAuthorityViolation(detail)')
+    expect(notifyBody).toContain("writeMcpCommunicationAuthorityViolationAudit(")
     expect(notifyBody).toContain("'notify'")
-    expect(notifyBody).toContain('formatOutboundAclViolation(detail)')
-    expect(helper).toContain("'outbound.acl_violation'")
+    expect(notifyBody).toContain('formatCommunicationAuthorityViolation(detail)')
+    expect(src).toContain("'channel.membership_violation'")
+    expect(authority).toContain("OUTBOUND_ALLOWLIST_COMPATIBILITY_STATUS = 'DEPRECATED_NON_AUTHORITATIVE'")
   })
 })

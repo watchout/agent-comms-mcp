@@ -8,6 +8,7 @@ import {
 } from '../queue-work'
 import {
   loadQueueWorkResiduePolicyFromEnv,
+  validateStateDaemonCanaryOverlayEnv,
   validateQueueWorkCanaryResiduePreflight,
   type QueueWorkCanaryResidueDb,
 } from './launchagent'
@@ -24,6 +25,13 @@ export interface QueueWorkActivationPlanOptions {
   githubWritebackMode?: string | null
   mediatedPostingCommand?: string | null
   mediatedPostingArgsJson?: string | null
+  canaryControlRef?: string | null
+  canaryOwnerDecisionRef?: string | null
+  canaryExpiresAt?: string | null
+  canaryPriorPlistSha256?: string | null
+  canaryRollbackCommand?: string | null
+  canaryObservedStateDestination?: string | null
+  canarySubjectDigest?: string | null
   now?: () => Date
 }
 
@@ -95,6 +103,15 @@ type QueueRow = {
 const DEFAULT_RESIDUE_POLICY_FILE = 'config/queue-work-residue-policy.json'
 const DEFAULT_CODEX_OUTPUT_SCHEMA = 'schemas/queue-work-result-v1.schema.json'
 const SUPPORTED_RUNTIMES = new Set(['codex-exec', 'echo', 'command-json'])
+const CANARY_OVERLAY_OPTION_ENV = [
+  ['canaryControlRef', 'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF'],
+  ['canaryOwnerDecisionRef', 'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF'],
+  ['canaryExpiresAt', 'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT'],
+  ['canaryPriorPlistSha256', 'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256'],
+  ['canaryRollbackCommand', 'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND'],
+  ['canaryObservedStateDestination', 'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION'],
+  ['canarySubjectDigest', 'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST'],
+] as const satisfies readonly (readonly [keyof QueueWorkActivationPlanOptions, string])[]
 
 function execFileJson(
   command: string,
@@ -173,6 +190,7 @@ function buildActivationEnv(
   handoffContract: QueueWorkHandoffContract,
   mediatedPostingCommand: string | null,
   mediatedPostingArgsJson: string | null,
+  options: QueueWorkActivationPlanOptions,
 ): Record<string, string> {
   const env: Record<string, string> = {
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
@@ -202,6 +220,10 @@ function buildActivationEnv(
   if (runtime === 'command-json' && queueWorkCommand) {
     env.STATE_DAEMON_QUEUE_WORK_COMMAND = queueWorkCommand
   }
+  for (const [optionKey, envKey] of CANARY_OVERLAY_OPTION_ENV) {
+    const value = normalizeText(options[optionKey] as string | null | undefined)
+    if (value) env[envKey] = value
+  }
   return env
 }
 
@@ -222,6 +244,14 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
     '--queue-work-fence-queue-ids',
     env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS,
   ]
+  const canaryOverlayEnv = Object.fromEntries(
+    CANARY_OVERLAY_OPTION_ENV
+      .map(([, envKey]) => [envKey, env[envKey]] as const)
+      .filter((entry): entry is readonly [string, string] => Boolean(entry[1])),
+  )
+  if (Object.keys(canaryOverlayEnv).length > 0) {
+    command.push('--canary-overlay-env-json', JSON.stringify(canaryOverlayEnv))
+  }
   if (env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS) {
     command.push('--queue-work-fence-message-ids', env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
   }
@@ -531,7 +561,19 @@ export async function buildQueueWorkActivationPlan(
     handoffContract,
     mediatedPostingCommand,
     mediatedPostingArgsJson,
+    options,
   )
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv(
+    activationEnv,
+    options.now?.() ?? new Date(),
+  )
+  for (const issue of overlayValidation.issues) {
+    blockers.push({
+      code: issue.code,
+      message: issue.message,
+      evidence: issue.path ? { path: issue.path } : undefined,
+    })
+  }
   let residuePolicy = null
   try {
     residuePolicy = loadQueueWorkResiduePolicyFromEnv(activationEnv)

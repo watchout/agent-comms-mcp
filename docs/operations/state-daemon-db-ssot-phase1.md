@@ -1,11 +1,12 @@
 # State-daemon DB SSOT Phase 1
 
-Issue #917 Phase 1 makes database desired state the ordinary communication and automatic-processing authority. This implementation does not migrate data, reload production, or authorize activation.
+Issue #917 Phase 1 DesignPack generation 2 makes database desired state the ordinary communication and automatic-processing authority. This implementation does not migrate data, reload production, or authorize activation.
 
 ## Authority
 
 - `channels.members` is the only channel send/receive authorization record. The sender and every active recipient must be members.
 - Discord member-to-provider projections fail closed: an empty or unresolved `channels.members` projection does not mean “accept all.”
+- Native Discord inbound resolves the sender through DB-owned channel membership before adapter callbacks. Null/unmapped identities, nonmembers, and DB `human` agents are rejected before `agent_messages` or `message_queue` effects.
 - `channel_routing_policy.outbound_allowlist` remains physically present for compatibility and diagnostics with status `DEPRECATED_NON_AUTHORITATIVE`. Changing it alone has no authorization effect.
 - Automatic processing requires all of the following DB-derived conditions: the agent is enrolled, `profile_enabled` is true, `disabled_at` is null, a non-empty ready runtime and non-empty status are configured, the status is not disabled/offline/retired, the target agent is in the message channel's `channels.members`, and the agent is not denylisted.
 - `STATE_DAEMON_AGENT_ALLOWLIST` never makes an agent eligible. It may only narrow a separately eligible target during one protected canary.
@@ -22,7 +23,7 @@ A non-empty `STATE_DAEMON_AGENT_ALLOWLIST` is rejected unless it contains exactl
 - `STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256`: lowercase SHA-256 of captured prior plist bytes
 - `STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND`: exact rollback command recorded before activation
 - `STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION`: absolute evidence path or GitHub destination
-- `STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST`: `sha256:aec4d6cc4184b10a30ca5de63fd1924f091ab5cea401d7f1cd6abfbd1fde1661`
+- `STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST`: `sha256:3dda8cd2b471e907245b28b4a1c4f6e656d2d76c6eff9f5c5a44db698f2372bc`
 
 The only Phase 1 targets, in order, are:
 

@@ -17,7 +17,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
 
 const SUPPRESS_SEC = 30
 
@@ -41,12 +41,12 @@ beforeEach(async () => {
 async function insertPending(agent: string, when: Date, count: number): Promise<number[]> {
   const ids: number[] = []
   for (let i = 0; i < count; i++) {
-    const ins = await pg.query(
-      `INSERT INTO message_queue (agent_id, status, payload, created_at)
-         VALUES ($1, 'pending', $3, $2) RETURNING id`,
-      [agent, when, JSON.stringify({ message_type: 'instruction', content: 'TUI prompt-disabled fixture work' })],
-    )
-    ids.push(Number((ins.rows as Array<{ id: number }>)[0].id))
+    ids.push(await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      created_at: when,
+      payload: JSON.stringify({ message_type: 'instruction', content: 'TUI prompt-disabled fixture work' }),
+    }))
   }
   return ids
 }
@@ -182,11 +182,15 @@ describe('TUI prompt wake is disabled', () => {
     const daemon = mkDaemon(clock, tmux, metrics)
     await daemon.start()
     try {
-      await pg.query(
-        `INSERT INTO message_queue (agent_id, status, payload, created_at, claimed_by, claimed_at, claim_expires_at)
-         VALUES ($1, 'received', '{}', $2, $1, $2, $3)`,
-        [agent, t0, new Date(t0.getTime() + 60_000)],
-      )
+      await seedQueueRow(pg, {
+        agent_id: agent,
+        status: 'received',
+        payload: '{}',
+        created_at: t0,
+        claimed_by: agent,
+        claimed_at: t0,
+        claim_expires_at: new Date(t0.getTime() + 60_000),
+      })
       const [id] = await insertPending(agent, t0, 1)
       await daemon.__testHandleEvent({
         op: 'INSERT',
@@ -218,13 +222,15 @@ describe('TUI prompt wake is disabled', () => {
       tmux_session: `${agent}-session`,
       status: 'online',
     })
-    const ins = await pg.query<{ id: number }>(
-      `INSERT INTO message_queue
-         (agent_id, status, payload, created_at, claimed_by, claimed_at, claim_expires_at)
-       VALUES ($1, 'received', '{}', $2, $1, $2, $3)
-       RETURNING id`,
-      [agent, t0, new Date(t0.getTime() + 60_000)],
-    )
+    const rowId = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'received',
+      payload: '{}',
+      created_at: t0,
+      claimed_by: agent,
+      claimed_at: t0,
+      claim_expires_at: new Date(t0.getTime() + 60_000),
+    })
 
     const clock = new FakeClock(t0)
     const tmux = new FakeTmux()
@@ -234,7 +240,7 @@ describe('TUI prompt wake is disabled', () => {
     try {
       await daemon.__testHandleEvent({
         op: 'UPDATE',
-        id: Number(ins.rows[0].id),
+        id: rowId,
         agent_id: agent,
         status: 'received',
         claim_expires_at: new Date(t0.getTime() + 60_000).toISOString(),

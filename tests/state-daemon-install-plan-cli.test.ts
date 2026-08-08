@@ -23,10 +23,10 @@ function runCli(args: string[]) {
 }
 
 describe('state-daemon install-plan CLI dry-run', () => {
-  test('bootstrap restore plan writes all five explicit safe defaults', () => {
+  test('bootstrap restore plan writes safe defaults without a steady-state host allowlist', () => {
     const result = Bun.spawnSync([
       'bun', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', COMMIT,
-      '--agent-allowlist', 'bootstrap-probe', '--bootstrap-safe-defaults', '--sqlite-path', '/tmp/bootstrap-probe.db',
+      '--bootstrap-safe-defaults', '--sqlite-path', '/tmp/bootstrap-probe.db',
     ], { cwd: REPO, stdout: 'pipe', stderr: 'pipe' })
     expect(result.exitCode).toBe(0)
     const json = JSON.parse(result.stdout.toString())
@@ -37,10 +37,10 @@ describe('state-daemon install-plan CLI dry-run', () => {
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
       STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED: '0',
-      STATE_DAEMON_AGENT_ALLOWLIST: 'bootstrap-probe',
       AGENT_COM_DB: 'sqlite',
       AGENT_COM_SQLITE_PATH: '/tmp/bootstrap-probe.db',
     })
+    expect(json.extraEnv.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
     expect(json.extraEnv.STATE_DAEMON_CODEX_RUNNER_ENABLED).toBeUndefined()
   })
 

@@ -78,7 +78,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } fr
 import { Client } from 'pg'
 import { randomUUID } from 'crypto'
 import { resolvePhase5 } from '../../core/routing/server-integration'
-import { resetChannelPolicyCache } from '../../core/channel-policy'
+import { refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } from '../../core/channel-policy'
 import { enqueueWithDedup } from '../../core/queue-dedup'
 import {
   buildSendMentions,
@@ -89,23 +89,41 @@ import {
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const SKIP = !process.env.DATABASE_URL
 
-const known = new Set(['ceo', 'cto', 'agent-com-dev', 'sender-bot'])
+const known = new Set(['ceo', 'cto', 'codex-cto', 'agent-com-dev', 'sender-bot'])
 const isKnown = (id: string) => known.has(id)
+const TEST_RUN_ID = `cycle3-${process.pid}-${Date.now()}`
 
-let previousFileFallback: string | undefined
+function policyRows() {
+  const fixedMembers = ['sender-bot', 'ceo', 'cto', 'codex-cto', 'agent-com-dev']
+  const sendMention = `__cc_test_${TEST_RUN_ID}_send_mention__`
+  const sendCc = [1, 2, 3].map((n) => `__cc_test_${TEST_RUN_ID}_send_cc${n}__`)
+  const notifyMention = `__cc_test_${TEST_RUN_ID}_notify_mention__`
+  const notifyCc = [1, 2, 3].map((n) => `__cc_test_${TEST_RUN_ID}_notify_cc${n}__`)
+  const row = (channel_id: string, members: string[]) => ({
+    channel_id,
+    members,
+    primary_agent_id: null,
+    adapter_owner_agent_id: null,
+    outbound_allowlist: [],
+    native_role_outbound_owners: {},
+    native_projection_identities: {},
+    policy_source: 'test:db-channels-members',
+  })
+  return [
+    row('test-cc-non-enqueue-a', fixedMembers),
+    row('test-cc-non-enqueue-b', fixedMembers),
+    row('test-cc-non-enqueue-c', fixedMembers),
+    row('test-cc-non-enqueue-d-send', ['sender-bot', sendMention, ...sendCc]),
+    row('test-cc-non-enqueue-d-notify', ['sender-bot', notifyMention, ...notifyCc]),
+  ]
+}
 
-beforeEach(() => {
-  previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-  process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+beforeEach(async () => {
   resetChannelPolicyCache()
+  await refreshChannelPolicyDbSnapshot({ query: async () => ({ rows: policyRows() }) })
 })
 
 afterEach(() => {
-  if (previousFileFallback === undefined) {
-    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-  } else {
-    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
-  }
   resetChannelPolicyCache()
 })
 
@@ -227,7 +245,6 @@ describe('(c) cc=[] empty → enqueue=[mention], no body suffix', () => {
 
 let dbClient: Client | null = null
 let dbAvailable = false
-const TEST_RUN_ID = `cycle3-${process.pid}-${Date.now()}`
 
 beforeAll(async () => {
   if (SKIP) return
@@ -319,7 +336,7 @@ describe('(d) empirical — send-shape pipeline, cc[] excluded from message_queu
           messageType: 'chat',
         },
         { channelId, threadId: null, members: channelMembers },
-        makeAgents([mentionId, ...ccIds]),
+        makeAgents([sender, mentionId, ...ccIds]),
       )
       expect(delivery.pushTargets).toContain(mentionId)
       for (const cc of ccIds) {
@@ -425,7 +442,7 @@ describe(`(d') empirical — notify-shape pipeline, cc[] excluded from message_q
           messageType: 'chat',
         },
         { channelId, threadId: null, members: channelMembers },
-        makeAgents([mentionId, ...ccIds]),
+        makeAgents([sender, mentionId, ...ccIds]),
       )
       expect(delivery.pushTargets).toContain(mentionId)
       for (const cc of ccIds) {

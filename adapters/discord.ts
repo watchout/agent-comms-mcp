@@ -5,8 +5,9 @@
  * Handles Gateway connection, typing indicators, message send/receive,
  * and history fetching. Access control (mentions / channel membership /
  * human auto-warn) runs in `core/route-message.ts`'s `routeInbound()`
- * against `channels.members` in the DB — this adapter does no routing
- * gate of its own (spec §20 廃止要素の項)。
+ * against `channels.members` in the DB. The native inbound boundary also
+ * resolves the sender against that same DB membership before any callback,
+ * so rejected platform events cannot create agent_messages or queue rows.
  *
  * Origin note: the pre-v2 file-based access path was derived from the
  * Anthropic Claude Code Discord plugin (Apache 2.0,
@@ -29,6 +30,11 @@ import {
 } from 'discord.js'
 import type { UIAdapter, Adapter, AdapterConfig, UnifiedMessage, InboundMessage, PlatformCapabilities, SendOptions, StrictDiscordProviderPort } from './types'
 import { getAgentDiscordUiId, resolveAgentFromDiscordUiId } from '../core/ui-bindings'
+import {
+  resolveAgentFromDiscordIdInMembers,
+  resolveInboundChannel,
+  type DbAdapter as RoutingDbAdapter,
+} from '../core/route-message-db'
 import {
   decodeDiscordProviderAck,
   decodeDiscordProviderRequest,
@@ -66,6 +72,34 @@ export function shouldIgnoreDiscordInboundMessage(
 ): boolean {
   if (msg.author.bot === true) return true
   return Boolean(ownUserId && msg.author.id === ownUserId)
+}
+
+export type DiscordInboundSenderAuthorization =
+  | { ok: true; agentId: string; channelId: string }
+  | { ok: false; code: 'DB_UNAVAILABLE' | 'CHANNEL_UNRESOLVED' | 'SENDER_ID_UNRESOLVED' | 'SENDER_NOT_A_MEMBER' | 'SENDER_HUMAN_NOT_ALLOWED' }
+
+export async function authorizeDiscordInboundSender(
+  db: RoutingDbAdapter | null,
+  externalChannelId: string,
+  authorExternalId: string,
+): Promise<DiscordInboundSenderAuthorization> {
+  if (!db) return { ok: false, code: 'DB_UNAVAILABLE' }
+  const channel = await resolveInboundChannel(db, externalChannelId)
+  if (!channel) return { ok: false, code: 'CHANNEL_UNRESOLVED' }
+  const resolved = await resolveAgentFromDiscordIdInMembers(db, authorExternalId, channel.members)
+  if ('error' in resolved) {
+    return {
+      ok: false,
+      code: resolved.error === 'not_found' ? 'SENDER_NOT_A_MEMBER' : 'SENDER_ID_UNRESOLVED',
+    }
+  }
+  const agent = await db.query<{ agent_type: string }>(
+    'SELECT agent_type FROM agents WHERE agent_id = $1',
+    [resolved.agentId],
+  )
+  if (agent.rows.length !== 1) return { ok: false, code: 'SENDER_ID_UNRESOLVED' }
+  if (agent.rows[0]?.agent_type === 'human') return { ok: false, code: 'SENDER_HUMAN_NOT_ALLOWED' }
+  return { ok: true, agentId: resolved.agentId, channelId: channel.channelId }
 }
 
 // --- Typing indicator management ---
@@ -668,10 +702,8 @@ export class DiscordAdapter implements UIAdapter, Adapter, StrictDiscordProvider
 
   // --- Internal: handle inbound message ---
   //
-  // No access-control gate here: routing + mention / membership enforcement run
-  // in `routeInbound()` (core/route-message.ts) against `channels.members` in
-  // the DB. The adapter's job is to normalise the platform event and forward it
-  // to the server layer; drop decisions happen downstream.
+  // Native sender authorization is enforced before either callback. Recipient
+  // routing still runs in `routeInbound()` against the same DB member list.
   private async handleInbound(msg: Message): Promise<void> {
     // Resolve parent channel for threads (fetch partial if needed)
     let parentChannelId: string | null = null
@@ -703,6 +735,18 @@ export class DiscordAdapter implements UIAdapter, Adapter, StrictDiscordProvider
       const emoji = behavior === 'allow' ? '✅' : '❌'
       await msg.react(emoji).catch(() => {})
       pendingPermissions.delete(request_id)
+      return
+    }
+
+    const senderAuthorization = await authorizeDiscordInboundSender(
+      this.dbQuery,
+      parentChannelId ?? msg.channelId,
+      msg.author.id,
+    )
+    if (!senderAuthorization.ok) {
+      process.stderr.write(
+        `discord-adapter: inbound sender blocked code=${senderAuthorization.code} channel=${parentChannelId ?? msg.channelId}\n`,
+      )
       return
     }
 

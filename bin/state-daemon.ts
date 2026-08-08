@@ -46,7 +46,12 @@ import {
   type AunConfigurationCandidate,
 } from '../core/aun-configuration-candidate'
 import { configurationDigest, type AunConfigurationDesiredState } from '../core/aun-configuration-desired-state'
-import { parseStateDaemonLaunchAgentPlist, STATE_DAEMON_PLIST_NAME } from '../core/state-daemon/launchagent'
+import {
+  parseStateDaemonLaunchAgentPlist,
+  STATE_DAEMON_PLIST_NAME,
+  validateStateDaemonCanaryOverlayEnv,
+  type StateDaemonCanaryOverlayValidation,
+} from '../core/state-daemon/launchagent'
 import { parseClaudeMcpGet } from './aun/bootstrap-adapter-claude'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
 import {
@@ -464,6 +469,27 @@ function loadConfig(): Partial<StateDaemonConfig> {
   return cfg
 }
 
+export function validateStateDaemonDirectEntryEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  now = new Date(),
+): StateDaemonCanaryOverlayValidation {
+  const values: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') values[key] = value
+  }
+  return validateStateDaemonCanaryOverlayEnv(values, now)
+}
+
+export function assertStateDaemonDirectEntryEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  now = new Date(),
+): void {
+  const validation = validateStateDaemonDirectEntryEnv(env, now)
+  if (validation.issues.length === 0) return
+  const detail = validation.issues.map((issue) => `${issue.code}: ${issue.message}`).join('; ')
+  throw new Error(`STATE_DAEMON_CANARY_OVERLAY_NO_GO: ${detail}`)
+}
+
 export function referenceMatches(actual: string | undefined, reference: string): boolean {
   if (actual === undefined) return false
   if (reference.startsWith('literal:')) return actual === reference.slice('literal:'.length)
@@ -805,6 +831,9 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
 }
 
 export async function main(): Promise<void> {
+  // Fail before DB connection, daemon construction, LISTEN, or any runtime
+  // effect when a host allowlist lacks the complete Issue #917 overlay.
+  assertStateDaemonDirectEntryEnv(process.env)
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()

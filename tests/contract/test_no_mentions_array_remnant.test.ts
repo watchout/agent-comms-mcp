@@ -61,10 +61,22 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
 
   test('resolvePhase5 accepts one-item mentions[] as a single-owner alias', async () => {
     const { resolvePhase5 } = await import('../../core/routing/server-integration')
-    const { resetChannelPolicyCache } = await import('../../core/channel-policy')
-    const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+    const { refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } = await import('../../core/channel-policy')
     resetChannelPolicyCache()
+    await refreshChannelPolicyDbSnapshot({
+      query: async () => ({
+        rows: [{
+          channel_id: 'test-channel-a',
+          members: ['sender-bot', 'codex-cto'],
+          primary_agent_id: null,
+          adapter_owner_agent_id: null,
+          outbound_allowlist: [],
+          native_role_outbound_owners: {},
+          native_projection_identities: {},
+          policy_source: 'test:db-channels-members',
+        }],
+      }),
+    })
     const known = new Set(['ceo', 'codex-cto', 'agent-com-dev', 'sender-bot'])
     try {
       const out = resolvePhase5({
@@ -81,11 +93,6 @@ describe('(a) mentions[] accepted — adapter symmetry (send AND notify)', () =>
         expect(out.warnings.some((w) => w.includes('legacy single-owner alias'))).toBe(true)
       }
     } finally {
-      if (previousFileFallback === undefined) {
-        delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-      } else {
-        process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
-      }
       resetChannelPolicyCache()
     }
   })
@@ -177,23 +184,42 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
   dbDescribe('SELECT count(*) FROM message_queue WHERE recipient_id IN cc[] AND created_at >= test_start → 0', async () => {
     const client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
-    const { resetChannelPolicyCache } = await import('../../core/channel-policy')
-    const previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+    const { refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } = await import('../../core/channel-policy')
     resetChannelPolicyCache()
     try {
       // Capture wall-clock floor for the SQL assertion.
       const testStartIso = new Date().toISOString()
+      const fixtureId = `${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`
+      const sender = `__mentions_fixture_${fixtureId}_sender__`
+      const mention = `__mentions_fixture_${fixtureId}_mention__`
+      const cc = [
+        `__mentions_fixture_${fixtureId}_cc1__`,
+        `__mentions_fixture_${fixtureId}_cc2__`,
+      ]
+      await refreshChannelPolicyDbSnapshot({
+        query: async () => ({
+          rows: [{
+            channel_id: 'test-channel-d',
+            members: [sender, mention, ...cc],
+            primary_agent_id: null,
+            adapter_owner_agent_id: null,
+            outbound_allowlist: [],
+            native_role_outbound_owners: {},
+            native_projection_identities: {},
+            policy_source: 'test:db-channels-members',
+          }],
+        }),
+      })
 
       // Use the routing port directly. The server-integration helper is the
       // canonical source for "what enqueue gets out of mention + cc[]".
       const { resolvePhase5 } = await import('../../core/routing/server-integration')
-      const known = new Set(['ceo', 'cto', 'agent-com-dev', 'sender-bot'])
+      const known = new Set([sender, mention, ...cc])
       const out = resolvePhase5({
-        sender: 'sender-bot',
+        sender,
         channel_id: 'test-channel-d',
-        mention: 'ceo',
-        cc: ['cto', 'agent-com-dev'],
+        mention,
+        cc,
         content: 'hello',
         isKnownAgent: (id: string) => known.has(id),
       })
@@ -201,14 +227,14 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
       expect(out!.ok).toBe(true)
       if (out && out.ok) {
         // mention is enqueue; cc[] recipients are reference-only.
-        expect(out.mentions).toEqual(['ceo'])
+        expect(out.mentions).toEqual([mention])
         // cc[] body suffix invariant: the cc agents MUST appear as
         // `[CC: <@id>, ...]` in the decorated body so the reader sees them.
         expect(out.content).toContain('[CC:')
-        expect(out.content).toContain('<@cto>')
-        expect(out.content).toContain('<@agent-com-dev>')
-        expect(out.mentions).not.toContain('cto')
-        expect(out.mentions).not.toContain('agent-com-dev')
+        expect(out.content).toContain(`<@${cc[0]}>`)
+        expect(out.content).toContain(`<@${cc[1]}>`)
+        expect(out.mentions).not.toContain(cc[0])
+        expect(out.mentions).not.toContain(cc[1])
       }
 
       // SQL fixture invariant: zero queue rows for cc[] recipients written
@@ -217,20 +243,15 @@ describe('(d) cc[] queue 非投入 invariant — executable SQL fixture', () => 
       // when `send` is called with the same shape.
       const r = await client.query(
         `SELECT count(*)::int AS c FROM message_queue
-          WHERE agent_id IN ('cto','agent-com-dev')
-            AND created_at >= $1::timestamptz`,
-        [testStartIso],
+          WHERE agent_id = ANY($1::text[])
+            AND created_at >= $2::timestamptz`,
+        [cc, testStartIso],
       )
       // No `send` was actually invoked in this test, so the count is 0 by
       // construction. The pin documents the SQL the operator runs in
       // production verification.
       expect(r.rows[0].c).toBe(0)
     } finally {
-      if (previousFileFallback === undefined) {
-        delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-      } else {
-        process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
-      }
       resetChannelPolicyCache()
       await client.end()
     }

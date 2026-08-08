@@ -32,22 +32,27 @@ import {
   buildReplyContextSuffix,
 } from '../../core/send-errors'
 import { resolvePhase5 } from '../../core/routing/server-integration'
-import { resetChannelPolicyCache } from '../../core/channel-policy'
+import { refreshChannelPolicyDbSnapshot, resetChannelPolicyCache } from '../../core/channel-policy'
 
-let previousFileFallback: string | undefined
-
-beforeEach(() => {
-  previousFileFallback = process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-  process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = 'true'
+beforeEach(async () => {
   resetChannelPolicyCache()
+  await refreshChannelPolicyDbSnapshot({
+    query: async () => ({
+      rows: [{
+        channel_id: 'ch-test',
+        members: ['agent-com-dev', 'cto'],
+        primary_agent_id: null,
+        adapter_owner_agent_id: null,
+        outbound_allowlist: [],
+        native_role_outbound_owners: {},
+        native_projection_identities: {},
+        policy_source: 'test:db-channels-members',
+      }],
+    }),
+  })
 })
 
 afterEach(() => {
-  if (previousFileFallback === undefined) {
-    delete process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK
-  } else {
-    process.env.AGENT_COM_ENABLE_BOT_ROUTING_FILE_FALLBACK = previousFileFallback
-  }
   resetChannelPolicyCache()
 })
 

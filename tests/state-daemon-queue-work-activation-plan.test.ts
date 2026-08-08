@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { DbAdapter } from '../core/db'
 import {
-  buildQueueWorkActivationPlan,
+  buildQueueWorkActivationPlan as buildQueueWorkActivationPlanRaw,
   formatQueueWorkActivationPlanText,
 } from '../core/state-daemon/queue-work-activation-plan'
+import { STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST } from '../core/state-daemon/launchagent'
 
 class FakeDb implements DbAdapter {
   readonly calls: Array<{ sql: string; params?: any[] }> = []
@@ -57,7 +58,7 @@ function probeCommand(body: string = 'echo \'{"ok":true,"summary":"probe passed"
 function row(patch: Partial<Record<string, unknown>> = {}) {
   return {
     id: 121877,
-    agent_id: 'check',
+    agent_id: 'aun',
     message_id: 'msg-121877',
     status: 'pending',
     created_at: '2026-06-17T01:00:00.000Z',
@@ -70,7 +71,7 @@ function row(patch: Partial<Record<string, unknown>> = {}) {
 function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
   return row({
     id: 121926,
-    agent_id: 'l2auditor',
+    agent_id: 'codex-audit',
     message_id: 'msg-121926',
     payload: JSON.stringify({
       message_type: 'phase_handoff',
@@ -78,6 +79,23 @@ function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
     }),
     ...patch,
   })
+}
+
+const CANARY_OVERLAY = {
+  canaryControlRef: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5223398908',
+  canaryOwnerDecisionRef: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213090076',
+  canaryExpiresAt: '2099-08-08T14:59:59.000Z',
+  canaryPriorPlistSha256: 'a'.repeat(64),
+  canaryRollbackCommand: 'cp /evidence/prior.plist /evidence/installed.plist',
+  canaryObservedStateDestination: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-observed',
+  canarySubjectDigest: STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+}
+
+async function buildQueueWorkActivationPlan(
+  db: DbAdapter,
+  options: Parameters<typeof buildQueueWorkActivationPlanRaw>[1] = {},
+) {
+  return buildQueueWorkActivationPlanRaw(db, { ...CANARY_OVERLAY, ...options })
 }
 
 function shirubeD1GithubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
@@ -98,7 +116,7 @@ describe('queue-work activation planner', () => {
   test('builds an exact-row read-only restore command without echoing payload', async () => {
     const db = new FakeDb({ 121877: [row()] })
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'check',
+      agentId: 'aun',
       queueId: '121877',
       commit: '42d2c0a2624554369d9536ed4dd0e5d2ad1ccffe',
       now: () => new Date('2026-06-17T01:10:00.000Z'),
@@ -119,7 +137,7 @@ describe('queue-work activation planner', () => {
     expect(report.activation_env).toMatchObject({
       STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
       STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
-      STATE_DAEMON_AGENT_ALLOWLIST: 'check',
+      STATE_DAEMON_AGENT_ALLOWLIST: 'aun',
       STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
       STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
       STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS: '121877',
@@ -130,6 +148,17 @@ describe('queue-work activation planner', () => {
     expect(report.dry_run_command).toContain('121877')
     expect(report.dry_run_command).not.toContain('--execute')
     expect(report.execute_command).toContain('--execute')
+    const overlayArgIndex = report.dry_run_command.indexOf('--canary-overlay-env-json')
+    expect(overlayArgIndex).toBeGreaterThan(-1)
+    expect(JSON.parse(report.dry_run_command[overlayArgIndex + 1]!)).toEqual({
+      STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: CANARY_OVERLAY.canaryControlRef,
+      STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: CANARY_OVERLAY.canaryOwnerDecisionRef,
+      STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: CANARY_OVERLAY.canaryExpiresAt,
+      STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: CANARY_OVERLAY.canaryPriorPlistSha256,
+      STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: CANARY_OVERLAY.canaryRollbackCommand,
+      STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: CANARY_OVERLAY.canaryObservedStateDestination,
+      STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: CANARY_OVERLAY.canarySubjectDigest,
+    })
     expect(report.mutation_performed).toBe(false)
     expect(report.restart_performed).toBe(false)
     expect(json).not.toContain('secret')
@@ -139,13 +168,13 @@ describe('queue-work activation planner', () => {
 
   test('requires --queue-id when an agent has multiple pending rows', async () => {
     const db = new FakeDb({}, {
-      check: [
+      aun: [
         row({ id: 1, message_id: 'old' }),
         row({ id: 2, message_id: 'new' }),
       ],
     })
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'check',
+      agentId: 'aun',
       commit: '42d2c0a',
     })
 
@@ -158,7 +187,7 @@ describe('queue-work activation planner', () => {
   test('blocks exact rows that are not pending', async () => {
     const db = new FakeDb({ 121877: [row({ status: 'in_progress' })] })
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'check',
+      agentId: 'aun',
       queueId: '121877',
       commit: '42d2c0a',
     })
@@ -171,7 +200,7 @@ describe('queue-work activation planner', () => {
   test('blocks GitHub-backed role handoffs when codex-exec has no mediated posting contract', async () => {
     const db = new FakeDb({ 121926: [githubHandoffRow()] })
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'l2auditor',
+      agentId: 'codex-audit',
       queueId: '121926',
       commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
     })
@@ -196,7 +225,7 @@ describe('queue-work activation planner', () => {
     const db = new FakeDb({ 121926: [githubHandoffRow()] })
     try {
       const report = await buildQueueWorkActivationPlan(db, {
-        agentId: 'l2auditor',
+        agentId: 'codex-audit',
         queueId: '121926',
         commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
         githubWritebackMode: 'mediated',
@@ -237,7 +266,7 @@ describe('queue-work activation planner', () => {
     const db = new FakeDb({ 121926: [shirubeD1GithubHandoffRow()] })
     try {
       const report = await buildQueueWorkActivationPlan(db, {
-        agentId: 'l2auditor',
+        agentId: 'codex-audit',
         queueId: '121926',
         commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
         runtime: 'codex-exec',
@@ -261,7 +290,7 @@ describe('queue-work activation planner', () => {
     const db = new FakeDb({ 121926: [shirubeD1GithubHandoffRow()] })
     try {
       const report = await buildQueueWorkActivationPlan(db, {
-        agentId: 'l2auditor',
+        agentId: 'codex-audit',
         queueId: '121926',
         commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
         runtime: 'command-json',
@@ -289,7 +318,7 @@ describe('queue-work activation planner', () => {
     const db = new FakeDb({ 121926: [githubHandoffRow()] })
     try {
       const report = await buildQueueWorkActivationPlan(db, {
-        agentId: 'l2auditor',
+        agentId: 'codex-audit',
         queueId: '121926',
         commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
         githubWritebackMode: 'mediated',
@@ -315,7 +344,7 @@ describe('queue-work activation planner', () => {
       }),
     ])
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'check',
+      agentId: 'aun',
       queueId: '121877',
       commit: '42d2c0a',
       residuePolicyFile: null,
@@ -330,7 +359,7 @@ describe('queue-work activation planner', () => {
   test('returns NO_GO instead of throwing when residue policy cannot be loaded', async () => {
     const db = new FakeDb({ 121877: [row()] })
     const report = await buildQueueWorkActivationPlan(db, {
-      agentId: 'check',
+      agentId: 'aun',
       queueId: '121877',
       commit: '42d2c0a',
       residuePolicyFile: 'missing-residue-policy.json',
@@ -340,5 +369,60 @@ describe('queue-work activation planner', () => {
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_residue_policy_load_failed')
     expect(report.dry_run_command).toEqual([])
     expect(report.execute_command).toEqual([])
+  })
+
+  test('blocks missing, expired, retired, wrong-subject, and outside-cohort overlays', async () => {
+    const cases = [
+      {
+        name: 'missing',
+        agentId: 'aun',
+        row: row(),
+        overlay: { ...CANARY_OVERLAY, canaryRollbackCommand: '' },
+        code: 'state_daemon_canary_overlay_identity_incomplete',
+      },
+      {
+        name: 'expired',
+        agentId: 'aun',
+        row: row(),
+        overlay: { ...CANARY_OVERLAY, canaryExpiresAt: '2026-08-06T00:00:00.000Z' },
+        code: 'state_daemon_canary_overlay_expired',
+      },
+      {
+        name: 'retired',
+        agentId: 'codex-aun',
+        row: row({ agent_id: 'codex-aun' }),
+        overlay: CANARY_OVERLAY,
+        code: 'state_daemon_canary_overlay_retired_target',
+      },
+      {
+        name: 'wrong-subject',
+        agentId: 'aun',
+        row: row(),
+        overlay: { ...CANARY_OVERLAY, canarySubjectDigest: `sha256:${'b'.repeat(64)}` },
+        code: 'state_daemon_canary_overlay_subject_digest_mismatch',
+      },
+      {
+        name: 'outside-cohort',
+        agentId: 'check',
+        row: row({ agent_id: 'check' }),
+        overlay: CANARY_OVERLAY,
+        code: 'state_daemon_canary_overlay_target_outside_cohort',
+      },
+    ] as const
+
+    for (const fixture of cases) {
+      const db = new FakeDb({ 121877: [fixture.row] })
+      const report = await buildQueueWorkActivationPlanRaw(db, {
+        ...fixture.overlay,
+        agentId: fixture.agentId,
+        queueId: '121877',
+        commit: '42d2c0a',
+        now: () => new Date('2026-08-07T00:00:00.000Z'),
+      })
+      expect(report.go_no_go, fixture.name).toBe('NO_GO')
+      expect(report.blockers.map((blocker) => blocker.code), fixture.name).toContain(fixture.code)
+      expect(report.dry_run_command, fixture.name).toEqual([])
+      expect(report.execute_command, fixture.name).toEqual([])
+    }
   })
 })
