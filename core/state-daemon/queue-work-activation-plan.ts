@@ -25,6 +25,7 @@ export interface QueueWorkActivationPlanOptions {
   githubWritebackMode?: string | null
   mediatedPostingCommand?: string | null
   mediatedPostingArgsJson?: string | null
+  githubTokenFile?: string | null
   canaryControlRef?: string | null
   canaryOwnerDecisionRef?: string | null
   canaryExpiresAt?: string | null
@@ -124,12 +125,14 @@ const CANARY_OVERLAY_OPTION_ENV = [
 function execFileJson(
   command: string,
   args: string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     execFile(command, args, {
       encoding: 'utf-8',
       timeout: 30_000,
       maxBuffer: 1024 * 1024,
+      env,
     }, (err, stdout, stderr) => {
       const execErr = err as (NodeJS.ErrnoException & { code?: unknown }) | null
       resolvePromise({
@@ -263,6 +266,7 @@ function buildActivationEnv(
   handoffContract: QueueWorkHandoffContract,
   mediatedPostingCommand: string | null,
   mediatedPostingArgsJson: string | null,
+  githubTokenFile: string | null,
   options: QueueWorkActivationPlanOptions,
 ): Record<string, string> {
   const env: Record<string, string> = {
@@ -289,6 +293,7 @@ function buildActivationEnv(
   if (mediatedPostingArgsJson) {
     env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = mediatedPostingArgsJson
   }
+  if (githubTokenFile) env.STATE_DAEMON_GITHUB_TOKEN_FILE = githubTokenFile
   if (runtime === 'codex-exec') {
     env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = DEFAULT_CODEX_OUTPUT_SCHEMA
     env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
@@ -361,6 +366,9 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   if (env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON) {
     command.push('--queue-work-mediated-posting-args-json', env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON)
   }
+  if (env.STATE_DAEMON_GITHUB_TOKEN_FILE) {
+    command.push('--github-token-file', env.STATE_DAEMON_GITHUB_TOKEN_FILE)
+  }
   if (execute) command.push('--execute')
   return command
 }
@@ -428,6 +436,7 @@ export async function buildQueueWorkActivationPlan(
   const githubWritebackMode = normalizeText(options.githubWritebackMode ?? null) ?? 'none'
   const mediatedPostingCommand = normalizeText(options.mediatedPostingCommand ?? null)
   const mediatedPostingArgsJson = normalizeText(options.mediatedPostingArgsJson ?? null)
+  const githubTokenFile = normalizeText(options.githubTokenFile ?? null)
   const blockers: QueueWorkActivationFinding[] = []
   const warnings: QueueWorkActivationFinding[] = []
   const mediatedPostingReadiness: QueueWorkActivationMediatedPostingReadiness = {
@@ -481,6 +490,13 @@ export async function buildQueueWorkActivationPlan(
         message: '--queue-work-mediated-posting-args-json must be a JSON string array.',
       })
     }
+  }
+  if (githubTokenFile && !existsSync(githubTokenFile)) {
+    blockers.push({
+      code: 'queue_work_github_token_file_not_found',
+      message: '--github-token-file must point to an existing credential file.',
+      evidence: { path: githubTokenFile },
+    })
   }
   if (blockers.length > 0 || !agentId || !commit) return emptyReport(options, blockers)
 
@@ -623,7 +639,10 @@ export async function buildQueueWorkActivationPlan(
     blockers.length === 0
   ) {
     const probeArgs = mediatedPostingArgsJson ? JSON.parse(mediatedPostingArgsJson) as string[] : []
-    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'])
+    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'], {
+      ...process.env,
+      ...(githubTokenFile ? { STATE_DAEMON_GITHUB_TOKEN_FILE: githubTokenFile } : {}),
+    })
     try {
       const parsed = JSON.parse(probe.stdout || '{}')
       if (probe.status === 0 && parsed.ok === true) {
@@ -664,6 +683,7 @@ export async function buildQueueWorkActivationPlan(
     handoffContract,
     mediatedPostingCommand,
     mediatedPostingArgsJson,
+    githubTokenFile,
     options,
   )
   const overlayValidation = validateStateDaemonCanaryOverlayEnv(

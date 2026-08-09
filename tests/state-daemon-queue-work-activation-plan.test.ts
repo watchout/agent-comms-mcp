@@ -397,6 +397,37 @@ describe('queue-work activation planner', () => {
     }
   })
 
+  test('forwards a token-file reference to mediated probe and restore without exposing token bytes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'queue-work-token-file-'))
+    const tokenFile = join(dir, 'github-token')
+    writeFileSync(tokenFile, 'test-token-value\n', { mode: 0o600 })
+    const db = new FakeDb({ 121926: [githubHandoffRow()] })
+    try {
+      const report = await buildQueueWorkActivationPlan(db, {
+        agentId: 'codex-audit',
+        queueId: '121926',
+        commit: 'c8bb4415e5a3276e4f2c1b5882547fce23108402',
+        githubWritebackMode: 'mediated',
+        mediatedPostingCommand: process.execPath,
+        mediatedPostingArgsJson: JSON.stringify([
+          join(import.meta.dir, '..', 'scripts', 'queue-work-github-writeback.ts'),
+          '--allow-repo',
+          'watchout/agent-comms-mcp',
+        ]),
+        githubTokenFile: tokenFile,
+      })
+      const serialized = JSON.stringify(report)
+
+      expect(report.ok).toBe(true)
+      expect(report.mediated_posting.command_probe).toBe('passed')
+      expect(report.activation_env.STATE_DAEMON_GITHUB_TOKEN_FILE).toBe(tokenFile)
+      expect(report.execute_command).toEqual(expect.arrayContaining(['--github-token-file', tokenFile]))
+      expect(serialized).not.toContain('test-token-value')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('blocks a Shirube D1 canary when the runtime is not deterministic', async () => {
     const command = probeCommand()
     const db = new FakeDb({ 121926: [shirubeD1GithubHandoffRow()] })

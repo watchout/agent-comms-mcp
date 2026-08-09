@@ -4849,6 +4849,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
         githubWritebackMode: flags['github-writeback-mode'] ?? flags['queue-work-github-writeback-mode'],
         mediatedPostingCommand: flags['mediated-posting-command'] ?? flags['queue-work-mediated-posting-command'],
         mediatedPostingArgsJson: flags['mediated-posting-args-json'] ?? flags['queue-work-mediated-posting-args-json'],
+        githubTokenFile: flags['github-token-file'],
         canaryControlRef: flags['canary-control-ref'],
         canaryOwnerDecisionRef: flags['canary-owner-decision-ref'],
         canaryExpiresAt: flags['canary-expires-at'],
