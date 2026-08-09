@@ -954,6 +954,79 @@ describe('finalizeDoneQueueWork', () => {
     ])
   })
 
+  test('persists mediated writeback receipt before sender-owned reply close', async () => {
+    const postedWith = 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-1'
+    const writeback = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 917,
+      body: 'current-head audit result',
+      body_sha256: 'b'.repeat(64),
+      evidence: ['exact_head:current'],
+    }
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'aun',
+        content: 'Audit issue #917. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/issues/917',
+        message_type: 'phase_handoff',
+        finalizer_error: {
+          code: 'WRITEBACK_FAILED',
+          attempts: 1,
+        },
+        runner_result: okResult({
+          reply: 'audit complete',
+          next_action: 'reply',
+          writeback,
+        }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    const writebackSender: QueueWorkWritebackSender = {
+      async sendWriteback() {
+        return { posted_with: postedWith, body_sha256: 'b'.repeat(64) }
+      },
+    }
+    const replySender: QueueReplySender = {
+      queue_close_mode: 'sender',
+      async sendReply() {
+        const persisted = JSON.parse(db.row.payload)
+        expect(persisted.writeback_result).toMatchObject({
+          posted_with: postedWith,
+          body_sha256: 'b'.repeat(64),
+        })
+        expect(persisted.finalizer_error).toBeUndefined()
+        db.row.status = 'replied'
+        db.row.replied_with = 'reply-with-writeback'
+        db.row.claimed_by = null
+        db.row.claimed_at = null
+        db.row.claim_expires_at = null
+        return { message_id: 'reply-with-writeback', queue_closed: true }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      replySender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      code: 'REPLIED',
+      replied_with: 'reply-with-writeback',
+      writeback_posted_with: postedWith,
+    })
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.writeback_result).toMatchObject({
+      posted_with: postedWith,
+      body_sha256: 'b'.repeat(64),
+      completed_at: '2026-05-21T01:05:00.000Z',
+    })
+    expect(payload.finalizer_error).toBeUndefined()
+  })
+
   test('sends the stored reply and closes done rows as replied', async () => {
     const row = receivedRow({
       status: 'done',

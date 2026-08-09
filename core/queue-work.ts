@@ -1069,7 +1069,7 @@ export async function finalizeDoneQueueWork(
       }
     }
 
-    const payload = parsePayload(row.payload)
+    let payload = parsePayload(row.payload)
     const result = payload.runner_result as QueueWorkResult | undefined
     if (!resultLooksValid(result)) {
       await db.query('ROLLBACK')
@@ -1088,16 +1088,17 @@ export async function finalizeDoneQueueWork(
       writebackBodySha256?: string | null,
     ): Promise<QueueWorkFinalizeOutcome> => {
       const closedAt = opts.now?.() ?? new Date()
-      const nextPayload = writebackPostedWith
-        ? JSON.stringify({
-            ...payload,
+      const { finalizer_error: _staleFinalizerError, ...successfulPayload } = payload
+      const nextPayload = JSON.stringify(writebackPostedWith
+        ? {
+            ...successfulPayload,
             writeback_result: {
               posted_with: writebackPostedWith,
               body_sha256: writebackBodySha256 ?? null,
               completed_at: closedAt.toISOString(),
             },
-          })
-        : row.payload
+          }
+        : successfulPayload)
       const closeFence = opts.d1CompletionFence
       const closeParams: unknown[] = [
         row.id,
@@ -1338,6 +1339,19 @@ export async function finalizeDoneQueueWork(
       return failClosed('TERMINAL_EVIDENCE_INVALID', validation.detail)
     }
 
+    if (result.next_action === 'reply') {
+      if (!result.reply || result.reply.trim().length === 0) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
+      }
+      if (!d1CompletedReceipt && !opts.replySender) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
+      }
+    }
+
     let writebackPostedWith: string | null = null
     let writebackBodySha256: string | null = null
     if (handoffContract.github_backed) {
@@ -1388,21 +1402,62 @@ export async function finalizeDoneQueueWork(
       }
     }
 
+    const finalizationPreparedAt = opts.now?.() ?? new Date()
+    const { finalizer_error: _staleFinalizerError, ...successfulPayload } = payload
+    payload = writebackPostedWith
+      ? {
+          ...successfulPayload,
+          writeback_result: {
+            posted_with: writebackPostedWith,
+            body_sha256: writebackBodySha256 ?? null,
+            completed_at: finalizationPreparedAt.toISOString(),
+          },
+        }
+      : successfulPayload
+
     if (result.next_action === 'reply') {
-      if (!result.reply || result.reply.trim().length === 0) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
-      }
-      if (!d1CompletedReceipt && !opts.replySender) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
-      }
       if (d1CompletedReceipt) {
         return closeDirectly(d1CompletedReceipt, 'REPLIED', writebackPostedWith, writebackBodySha256)
       }
       if (opts.replySender!.queue_close_mode === 'sender') {
+        // A sender-owned close happens on another connection. Persist the
+        // successful mediated writeback receipt (and clear any stale prior
+        // finalizer error) before releasing this exact row lock. If the reply
+        // send later fails, failClosed adds the new error without losing the
+        // durable receipt, so a retry can resume without reposting.
+        const preparedPayload = JSON.stringify(payload)
+        const preparedParams: unknown[] = [
+          row.id,
+          preparedPayload,
+          finalizationPreparedAt.toISOString(),
+        ]
+        let claimGuard = ''
+        if (opts.claimResultFence) {
+          const resultClaimFence = recordValue(result.claim_fence)
+          const ownerParam = preparedParams.push(resultClaimFence.claimed_by)
+          const claimedAtParam = preparedParams.push(resultClaimFence.claimed_at)
+          claimGuard = `AND claimed_by = $${ownerParam}
+              AND claimed_at = $${claimedAtParam}`
+        }
+        const prepared = await db.query<{ id: string | number }>(
+          `UPDATE message_queue
+              SET payload = $2,
+                  last_heartbeat_at = $3
+            WHERE id = $1
+              AND status = 'done'
+              ${claimGuard}
+            RETURNING id`,
+          preparedParams,
+        )
+        if (rowCount(prepared) === 0) {
+          await db.query('ROLLBACK')
+          committed = true
+          return {
+            ok: false,
+            code: 'FINALIZE_RACE',
+            queue_id: queueIdOf(row),
+          }
+        }
         // The production CLI sender closes the exact queue row atomically with
         // its reply. Release this transaction's FOR UPDATE lock first; keeping
         // it while spawning the CLI would deadlock the second connection.
