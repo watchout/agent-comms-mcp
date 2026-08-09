@@ -795,6 +795,7 @@ export function validateStateDaemonLaunchAgentConfig(
 
   const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
   const expiredClaimRecoveryValue = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim()
+  const doneFinalizationResumeValue = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim()
   if (expiredClaimRecoveryValue && expiredClaimRecoveryValue !== '1') {
     errors.push({
       code: 'queue_work_expired_claim_recovery_flag_invalid',
@@ -805,6 +806,24 @@ export function validateStateDaemonLaunchAgentConfig(
     errors.push({
       code: 'queue_work_expired_claim_recovery_requires_scheduler',
       message: 'Expired scheduler claim recovery requires the queue-work scheduler to be enabled.',
+    })
+  }
+  if (doneFinalizationResumeValue && doneFinalizationResumeValue !== '1') {
+    errors.push({
+      code: 'queue_work_done_finalization_resume_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION must be 1 when present.',
+    })
+  }
+  if (doneFinalizationResumeValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_done_finalization_resume_requires_scheduler',
+      message: 'Done queue-work finalization resume requires the queue-work scheduler to be enabled.',
+    })
+  }
+  if (expiredClaimRecoveryValue === '1' && doneFinalizationResumeValue === '1') {
+    errors.push({
+      code: 'queue_work_activation_mode_conflict',
+      message: 'Expired scheduler claim recovery and done finalization resume are mutually exclusive.',
     })
   }
   if (queueWorkSchedulerEnabled) {
@@ -1043,8 +1062,10 @@ export async function validateQueueWorkCanaryResiduePreflight(
   const fenceMessageIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
   const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
   const expiredClaimRecovery = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim() === '1'
+  const doneFinalizationResume = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim() === '1'
+  const exactResume = expiredClaimRecovery || doneFinalizationResume
   if (
-    expiredClaimRecovery
+    exactResume
     && (
       allowlist.length !== 1
       || fenceQueueIds.length !== 1
@@ -1054,8 +1075,10 @@ export async function validateQueueWorkCanaryResiduePreflight(
     )
   ) {
     errors.push({
-      code: 'queue_work_expired_claim_recovery_requires_exact_fence',
-      message: 'Expired scheduler claim recovery residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.',
+      code: doneFinalizationResume
+        ? 'queue_work_done_finalization_resume_requires_exact_fence'
+        : 'queue_work_expired_claim_recovery_requires_exact_fence',
+      message: `${doneFinalizationResume ? 'Done finalization resume' : 'Expired scheduler claim recovery'} residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.`,
     })
     return { ok: false, errors, warnings, residues: [] }
   }
@@ -1089,7 +1112,7 @@ export async function validateQueueWorkCanaryResiduePreflight(
     )
     const residues = result.rows ?? []
     if (residues.length > 0) {
-      if (expiredClaimRecovery) {
+      if (exactResume) {
         const targetCreatedAtMs = Date.parse(fenceCreatedAfter!)
         const unsafeResidues = residues.filter((row) => {
           const createdAtMs = row.created_at instanceof Date
@@ -1117,14 +1140,18 @@ export async function validateQueueWorkCanaryResiduePreflight(
         })
         if (unsafeResidues.length > 0) {
           errors.push({
-            code: 'queue_work_expired_claim_recovery_unsafe_residue',
-            message: `Expired scheduler claim recovery found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
+            code: doneFinalizationResume
+              ? 'queue_work_done_finalization_resume_unsafe_residue'
+              : 'queue_work_expired_claim_recovery_unsafe_residue',
+            message: `${doneFinalizationResume ? 'Done finalization resume' : 'Expired scheduler claim recovery'} found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
               unsafeResidues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
             }. Refusing activation.`,
           })
         } else {
           warnings.push({
-            code: 'queue_work_expired_claim_recovery_newer_pending_deferred',
+            code: doneFinalizationResume
+              ? 'queue_work_done_finalization_resume_newer_pending_deferred'
+              : 'queue_work_expired_claim_recovery_newer_pending_deferred',
             message: `${residues.length} newer untouched pending row(s) remain deferred behind the exact recovery fence.`,
           })
         }

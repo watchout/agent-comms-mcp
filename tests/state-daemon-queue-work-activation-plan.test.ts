@@ -348,7 +348,15 @@ describe('queue-work activation planner', () => {
   })
 
   test('plans exact done-row stored-result finalization without replaying the runtime', async () => {
-    const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [doneFinalizationRow()] }), {
+    const db = new FakeDb({ 154244: [doneFinalizationRow()] }, {}, [
+      row({
+        id: 154249,
+        message_id: 'msg-154249',
+        created_at: '2026-08-08T08:10:00.000Z',
+        payload: JSON.stringify({ content: 'newer work' }),
+      }),
+    ])
+    const report = await buildQueueWorkActivationPlan(db, {
       agentId: 'aun',
       queueId: '154244',
       commit: 'ee98ade',
@@ -359,6 +367,9 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(true)
     expect(report.candidate?.status).toBe('done')
     expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_exact_done_finalization_resume')
+    expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_done_finalization_resume_newer_pending_deferred')
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION).toBe('1')
+    expect(report.execute_command).toContain('--resume-done-finalization')
   })
 
   test('done-row finalization resume fails closed on result-fence drift or retry exhaustion', async () => {

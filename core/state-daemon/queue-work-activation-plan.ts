@@ -385,6 +385,9 @@ function buildActivationEnv(
   if (options.recoverExpiredSchedulerClaim) {
     env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
   }
+  if (options.resumeDoneFinalization) {
+    env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
+  }
   env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
   if (handoffContract.github_backed) {
     env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = handoffContract.posting_mode
@@ -443,6 +446,9 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM === '1') {
     command.push('--recover-expired-scheduler-claim')
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION === '1') {
+    command.push('--resume-done-finalization')
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE) {
     command.push('--queue-work-residue-policy-file', env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE)

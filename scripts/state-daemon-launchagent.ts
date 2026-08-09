@@ -275,6 +275,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
     else if (arg === '--recover-expired-scheduler-claim') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
+    else if (arg === '--resume-done-finalization') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
     else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = next()
     else if (arg === '--queue-work-fleet-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_MODE = '1'
     else if (arg === '--queue-work-fleet-decision-ref') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF = next()
