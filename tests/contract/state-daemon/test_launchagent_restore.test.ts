@@ -693,6 +693,56 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     ]))
   })
 
+  test('exact serial residue preflight blocks when a 21st unsafe row proves the bounded scan is truncated', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'codex-audit',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS: '154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-08-08T08:00:00.000Z',
+        STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING: '1',
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const safeRows = Array.from({ length: 20 }, (_, index) => ({
+      id: 154250 + index,
+      agent_id: 'codex-audit',
+      message_id: `newer-safe-${index + 1}`,
+      payload: '{}',
+      status: 'pending',
+      created_at: `2026-08-08T08:${String(index + 1).padStart(2, '0')}:00.000Z`,
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }))
+    const db = new RecordingResidueDb([...safeRows, {
+      id: 154999,
+      agent_id: 'codex-audit',
+      message_id: 'hidden-unsafe-21',
+      payload: JSON.stringify({ receive_claim: { source: 'state-daemon-queue-work-scheduler' } }),
+      status: 'received',
+      created_at: '2026-08-08T08:59:00.000Z',
+      claimed_by: 'codex-audit',
+      claimed_at: '2026-08-08T08:59:01.000Z',
+      claim_expires_at: '2026-08-08T09:00:01.000Z',
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_canary_residue_preflight_truncated' }),
+    ]))
+    expect(result.residues).toHaveLength(21)
+    expect(db.queries[0]?.params?.at(-1)).toBe(21)
+  })
+
   test('queue-work scheduler canary residue preflight passes for exact policy-classified residue', async () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',

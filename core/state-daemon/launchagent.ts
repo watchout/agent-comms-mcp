@@ -1124,7 +1124,17 @@ export async function validateQueueWorkCanaryResiduePreflight(
     return { ok: true, errors, warnings, residues: [] }
   }
   const limit = options.limit ?? 20
-  params.push(limit)
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= Number.MAX_SAFE_INTEGER) {
+    errors.push({
+      code: 'queue_work_canary_residue_preflight_limit_invalid',
+      message: 'Queue-work scheduler canary residue preflight requires a positive safe row limit.',
+    })
+    return { ok: false, errors, warnings, residues: [] }
+  }
+  // Fetch one sentinel row beyond the bounded validation set. A plain
+  // LIMIT would otherwise let an unsafe claimed/executed row hide just
+  // beyond the scan and incorrectly produce an activation GO.
+  params.push(limit + 1)
   try {
     const result = await db.query<QueueWorkCanaryResidueRow>(
       `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.created_at,
@@ -1138,6 +1148,14 @@ export async function validateQueueWorkCanaryResiduePreflight(
       params,
     )
     const residues = result.rows ?? []
+    if (residues.length > limit) {
+      const sentinel = residues[limit]
+      errors.push({
+        code: 'queue_work_canary_residue_preflight_truncated',
+        message: `Queue-work scheduler canary residue preflight found more than ${limit} non-fenced non-terminal row(s); validation is not exhaustive (first unvalidated row ${sentinel?.id ?? '(unknown)'}:${sentinel?.status ?? '(unknown)'}:${sentinel?.message_id ?? '(no-message-id)'}). Refusing activation.`,
+      })
+      return { ok: false, errors, warnings, residues }
+    }
     if (residues.length > 0) {
       if (exactSerial) {
         const governedQueueIds = new Set<number>()

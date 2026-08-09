@@ -21,7 +21,8 @@ class FakeDb implements DbAdapter {
   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
     this.calls.push({ sql, params })
     if (sql.includes('FROM message_queue mq') && sql.includes("status IN ('pending', 'received', 'in_progress')")) {
-      return this.residueRows as T[]
+      const limit = Number(params?.at(-1))
+      return (Number.isSafeInteger(limit) ? this.residueRows.slice(0, limit) : this.residueRows) as T[]
     }
     if (sql.includes('WHERE id = $1')) {
       return (this.rowsById[String(params?.[0])] ?? []) as T[]
@@ -820,6 +821,40 @@ describe('queue-work activation planner', () => {
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_defer_newer_pending_unsafe_residue')
     expect(report.dry_run_command).toEqual([])
     expect(report.execute_command).toEqual([])
+  })
+
+  test('fails closed when an unsafe 21st residue would be hidden beyond the bounded serial scan', async () => {
+    const safeRows = Array.from({ length: 20 }, (_, index) => row({
+      id: 121878 + index,
+      message_id: `newer-safe-${index + 1}`,
+      created_at: `2026-06-17T01:${String(index + 1).padStart(2, '0')}:00.000Z`,
+      payload: '{}',
+    }))
+    const hiddenUnsafe = row({
+      id: 121999,
+      message_id: 'hidden-unsafe-21',
+      status: 'received',
+      created_at: '2026-06-17T01:59:00.000Z',
+      claimed_by: 'aun',
+      claimed_at: '2026-06-17T01:59:01.000Z',
+      claim_expires_at: '2026-06-17T02:00:01.000Z',
+      payload: JSON.stringify({ receive_claim: { source: 'state-daemon-queue-work-scheduler' } }),
+    })
+    const db = new FakeDb({ 121877: [row()] }, {}, [...safeRows, hiddenUnsafe])
+
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'aun',
+      queueId: '121877',
+      commit: '42d2c0a',
+      residuePolicyFile: null,
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_canary_residue_preflight_truncated')
+    expect(report.dry_run_command).toEqual([])
+    expect(report.execute_command).toEqual([])
+    const residueQuery = db.calls.find((call) => call.sql.includes('FROM message_queue mq'))
+    expect(residueQuery?.params?.at(-1)).toBe(21)
   })
 
   test('returns NO_GO instead of throwing when residue policy cannot be loaded', async () => {
