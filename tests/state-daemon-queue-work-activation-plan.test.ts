@@ -327,6 +327,69 @@ describe('queue-work activation planner', () => {
     expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_expired_claim_recovery_newer_pending_deferred')
   })
 
+  test('continues a reclaimed successor after a newer execution superseded its prior runner error', async () => {
+    const target = reclaimedSchedulerClaimRow()
+    const payload = JSON.parse(String(target.payload))
+    target.payload = JSON.stringify({
+      ...payload,
+      queue_work_execution: {
+        ...payload.queue_work_execution,
+        claimed_at: '2026-08-08T08:05:01.000Z',
+        started_at: '2026-08-08T08:05:02.000Z',
+      },
+      runner_error: {
+        ...payload.runner_error,
+        failed_at: '2026-08-08T08:04:00.000Z',
+      },
+      queue_work_runner_error_recovery: {
+        ...payload.queue_work_runner_error_recovery,
+        last_at: '2026-08-08T08:06:00.000Z',
+      },
+    })
+    const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [target] }), {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'aac05f3',
+      recoverExpiredSchedulerClaim: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.go_no_go).toBe('GO')
+  })
+
+  test('blocks a reclaimed successor when prior runner-error chronology is not exact', async () => {
+    const target = reclaimedSchedulerClaimRow()
+    const payload = JSON.parse(String(target.payload))
+    target.payload = JSON.stringify({
+      ...payload,
+      queue_work_execution: {
+        ...payload.queue_work_execution,
+        claimed_at: '2026-08-08T08:05:01.000Z',
+        started_at: '2026-08-08T08:05:02.000Z',
+      },
+      runner_error: {
+        ...payload.runner_error,
+        failed_at: '2026-08-08T08:06:00.000Z',
+      },
+      queue_work_runner_error_recovery: {
+        ...payload.queue_work_runner_error_recovery,
+        last_at: '2026-08-08T08:06:30.000Z',
+      },
+    })
+    const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [target] }), {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'aac05f3',
+      recoverExpiredSchedulerClaim: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(false)
+    const blocker = report.blockers.find((item) => item.code === 'queue_work_expired_scheduler_claim_recovery_identity_mismatch')
+    expect(blocker?.evidence?.mismatches).toContain('runner_error.claim_fence.claimed_at')
+  })
+
   test('expired scheduler claim recovery fails closed on live leases and provenance drift', async () => {
     const cases = [
       {

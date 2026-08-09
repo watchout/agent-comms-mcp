@@ -548,6 +548,69 @@ describe('runReceivedQueueWork', () => {
     expect(payload.runner_result.completed_at).toBe(db.row.done_at)
   })
 
+  test('a new fenced execution archives and clears the prior runner error before invocation', async () => {
+    const priorError = {
+      code: 'ADAPTER_RESULT_NOT_OK',
+      detail: 'prior attempt failed',
+      runtime_id: 'fenced-runtime',
+      invocation_source: 'state-daemon-queue-work-scheduler',
+      failed_at: '2026-05-21T00:10:00.000Z',
+      claim_fence: {
+        claimed_by: 'codex-audit',
+        claimed_at: '2026-05-21T00:00:01.000Z',
+      },
+    }
+    const row = receivedRow({
+      payload: JSON.stringify({
+        content: 'retry exact work',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+        runner_error: priorError,
+      }),
+      claimed_at: '2026-05-21T00:30:01.000Z',
+      claim_expires_at: '2026-05-21T02:00:00.000Z',
+    })
+    const db = new FakeQueueDb(row)
+    let invocationPayload: Record<string, unknown> | null = null
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() {
+        invocationPayload = JSON.parse(db.row.payload)
+        return okResult()
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:30:01.000Z',
+      },
+      requireClaimFence: true,
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: true, code: 'DONE' })
+    expect(invocationPayload?.runner_error).toBeUndefined()
+    expect(invocationPayload?.queue_work_runner_error_history).toEqual([
+      expect.objectContaining({
+        ...priorError,
+        archived_at: '2026-05-21T01:00:00.000Z',
+        replaced_by_claim_fence: {
+          claimed_by: 'codex-audit',
+          claimed_at: '2026-05-21T00:30:01.000Z',
+        },
+      }),
+    ])
+  })
+
   test('exact claim fence prevents stale runner_error persistence after ownership changes', async () => {
     const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
     const db = new FakeQueueDb(row)

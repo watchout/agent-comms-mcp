@@ -226,6 +226,9 @@ function expiredSchedulerClaimRecoveryBlockers(input: {
   const recovery = recordValue(payload.queue_work_runner_error_recovery)
   const executionClaimedAtMs = instantMs(execution.claimed_at)
   const executionStartedAtMs = instantMs(execution.started_at)
+  const runnerErrorClaimedAtMs = instantMs(recordValue(runnerError.claim_fence).claimed_at)
+  const runnerErrorFailedAtMs = instantMs(runnerError.failed_at)
+  const recoveryLastAtMs = instantMs(recovery.last_at)
   const recoveryAttempts = Number(recovery.attempts)
   const recoveryMaxReclaims = Number(recovery.max_reclaims)
   const isExpiredInProgress = candidate.status === 'in_progress'
@@ -246,7 +249,19 @@ function expiredSchedulerClaimRecoveryBlockers(input: {
     if (runnerError.invocation_source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('runner_error.invocation_source')
     if (runnerError.runtime_id !== execution.runtime_id) mismatches.push('runner_error.runtime_id')
     if (recordValue(runnerError.claim_fence).claimed_by !== candidate.agent_id) mismatches.push('runner_error.claim_fence.claimed_by')
-    if (instantMs(recordValue(runnerError.claim_fence).claimed_at) !== executionClaimedAtMs) {
+    const runnerErrorMatchesCurrentExecution = runnerErrorClaimedAtMs === executionClaimedAtMs
+    const runnerErrorPrecedesReclaimedExecution = (
+      runnerErrorClaimedAtMs !== null
+      && executionClaimedAtMs !== null
+      && executionStartedAtMs !== null
+      && runnerErrorFailedAtMs !== null
+      && recoveryLastAtMs !== null
+      && runnerErrorClaimedAtMs < executionClaimedAtMs
+      && runnerErrorFailedAtMs <= executionStartedAtMs
+      && recoveryLastAtMs >= executionStartedAtMs
+      && recoveryAttempts >= 2
+    )
+    if (!runnerErrorMatchesCurrentExecution && !runnerErrorPrecedesReclaimedExecution) {
       mismatches.push('runner_error.claim_fence.claimed_at')
     }
     if (recovery.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_runner_error_recovery.source')

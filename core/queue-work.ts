@@ -778,9 +778,34 @@ export async function runReceivedQueueWork(
       }
     }
 
+    const priorPayload = parsePayload(row.payload)
+    const priorRunnerError = recordValue(priorPayload.runner_error)
+    const priorRunnerErrorHistory = Array.isArray(priorPayload.queue_work_runner_error_history)
+      ? priorPayload.queue_work_runner_error_history.filter((entry) => (
+          entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+        ))
+      : []
+    const executionBasePayload = { ...priorPayload }
+    delete executionBasePayload.runner_error
+    const runnerErrorHistory = Object.keys(priorRunnerError).length > 0
+      ? [
+          ...priorRunnerErrorHistory,
+          {
+            ...priorRunnerError,
+            archived_at: now.toISOString(),
+            replaced_by_claim_fence: claimFence ? {
+              claimed_by: claimFence.claimedBy,
+              claimed_at: claimFence.claimedAt,
+            } : null,
+          },
+        ].slice(-16)
+      : priorRunnerErrorHistory
     const executionPayload = claimFence
       ? JSON.stringify({
-          ...parsePayload(row.payload),
+          ...executionBasePayload,
+          ...(runnerErrorHistory.length > 0
+            ? { queue_work_runner_error_history: runnerErrorHistory }
+            : {}),
           queue_work_execution: {
             source: opts.invocationSource ?? null,
             agent_id: row.agent_id,
