@@ -1879,7 +1879,28 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(loadQueueWorkResidueExcludedQueueIds({
       STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS: '42',
       STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
-    } as NodeJS.ProcessEnv)).toEqual([42, 120138, 120245, 121744, 121839, 121873, 121876, 121919, 121924, 121938, 123851, 123940, 123945, 154254])
+    } as NodeJS.ProcessEnv)).toEqual([
+      42,
+      120138,
+      120245,
+      121744,
+      121839,
+      121873,
+      121876,
+      121919,
+      121924,
+      121938,
+      123851,
+      123940,
+      123945,
+      152953,
+      153868,
+      153903,
+      154250,
+      154252,
+      154254,
+      154258,
+    ])
   })
 
   test('state-daemon fails closed on invalid manual residue exclusion ids', () => {

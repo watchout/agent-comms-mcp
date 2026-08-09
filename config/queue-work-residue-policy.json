@@ -152,6 +152,66 @@
       "notes": "CP80 exact-row AUN instruction residue, now terminal skipped by external bulk cleanup. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
     },
     {
+      "queue_id": 152953,
+      "agent_id": "adf-lead",
+      "message_id": "425a14e9-8270-4e0f-be4c-db56b3745005",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA start work requires the adf-lead native agent lifecycle. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
+    },
+    {
+      "queue_id": 153868,
+      "agent_id": "adf-lead",
+      "message_id": "9898333f-d809-4342-ac82-f06629c5d8c3",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA end work requires the adf-lead native agent lifecycle and local check-in. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
+    },
+    {
+      "queue_id": 153903,
+      "agent_id": "adf-lead",
+      "message_id": "a1abb4cc-88b5-4666-9bb2-39a5937a3f37",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA start work requires the adf-lead native agent lifecycle. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
+    },
+    {
+      "queue_id": 154250,
+      "agent_id": "adf-lead",
+      "message_id": "5ed91721-06d9-4032-8ade-28718ea1a18e",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA end work requires the adf-lead native agent lifecycle and local check-in. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
+    },
+    {
+      "queue_id": 154252,
+      "agent_id": "aun",
+      "message_id": "4bd91c16-f107-4bf7-9c23-7b139ebc290c",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA end work requires the aun native agent lifecycle and local check-in. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
+    },
+    {
       "queue_id": 154254,
       "agent_id": "codex-audit",
       "message_id": "60ea96f6-bdab-4db2-95cb-e9287885f7b3",
@@ -162,6 +222,18 @@
       "expected_status": ["pending"],
       "expected_payload_source": "cli-notify",
       "notes": "Daily Onisoku PDCA work requires the codex-audit native agent lifecycle and a local check-in after CHECK/ADJUST. Preserve it as pending native work; the read-only generic queue-work scheduler must not auto-complete, skip, or execute it."
+    },
+    {
+      "queue_id": 154258,
+      "agent_id": "devauditor",
+      "message_id": "e1ba7a02-ca7b-4c5a-8459-ae0b2cc9d37c",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5230994827",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA end work requires the devauditor native evidence-audit lifecycle and local check-in. Preserve pending; the read-only generic queue-work scheduler must not auto-complete it."
     }
   ]
 }
