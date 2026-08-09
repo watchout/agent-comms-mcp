@@ -135,6 +135,26 @@ class RecordingDb implements DBClient {
   }
 }
 
+class DoneFinalizationDb implements DBClient {
+  constructor(private readonly row: any) {}
+
+  async query<T = any>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
+    if (
+      sql.includes('FROM message_queue mq')
+      && sql.includes("mq.status='done'")
+      && sql.includes('runner_result')
+    ) {
+      return this.row.status === 'done'
+        ? { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
+        : { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
 class PendingLlmDb implements DBClient {
   constructor(
     private readonly agentId: string,
@@ -752,6 +772,99 @@ describe('state_daemon queue work scheduler boundary', () => {
     })).toBe(1)
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+  })
+
+  test('done generic queue events resume only the stored-result finalizer', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runReceived() {
+        throw new Error('runReceived must not replay done work')
+      },
+      async runDone(input) {
+        calls.push(input)
+      },
+    }
+    const daemon = new StateDaemon({
+      db: new SingleRowDb({
+        id: 497,
+        agent_id: 'codex-audit',
+        status: 'done',
+        message_id: 'msg-497',
+        payload: JSON.stringify({ runner_result: { schema_version: 'queue_work_result_v1' } }),
+        claim_expires_at: null,
+        created_at: new Date('2026-05-21T00:00:00.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: 497,
+        agent_id: 'codex-audit',
+        status: 'done',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 497, agentId: 'codex-audit' }])
+  })
+
+  test('sweep resumes a stored-result finalizer after a writeback failure or restart', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 498,
+      agent_id: 'codex-audit',
+      status: 'done',
+      message_id: 'msg-498',
+      payload: JSON.stringify({
+        runner_result: { schema_version: 'queue_work_result_v1' },
+        finalizer_error: { code: 'WRITEBACK_FAILED' },
+      }),
+      claim_expires_at: null,
+      claimed_at: new Date('2026-05-21T00:00:01.000Z'),
+      created_at: new Date('2026-05-21T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new DoneFinalizationDb(row),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {
+          throw new Error('runReceived must not replay done work')
+        },
+        async runDone(input) {
+          calls.push(input)
+        },
+      },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(result.rewoken).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 498, agentId: 'codex-audit' }])
   })
 
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {

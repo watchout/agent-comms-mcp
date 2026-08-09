@@ -1482,10 +1482,10 @@ describe('F3 — agent-com send (SQLite)', () => {
     }
   })
 
-  test('queue-work finalizer rejects an expired exact lease with zero outbound and zero close', () => {
+  test('queue-work finalizer resumes an exact locked done row after lease expiry', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('expired claim/result fence')
-    const reply = 'expired result must not escape'
+    const reply = 'expired done result resumes safely'
     authorizeQueueWorkDone(queueId, reply)
     const db = new Database(dbPath)
     try {
@@ -1495,28 +1495,22 @@ describe('F3 — agent-com send (SQLite)', () => {
       db.close()
     }
 
-    const rejected = runCli([
+    const resumed = runCli([
       'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
       '--message-id', messageId, '--queue-work-finalizer', '--close',
     ])
-    expect(rejected.status).toBe(1)
-    expect(JSON.parse(rejected.stdout.trim()).mismatches).toContain('claim_expires_at')
+    expect(resumed.status).toBe(0)
     expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
-      .toEqual([{ status: 'done', replied_with: null }])
+      .toEqual([{ status: 'replied', replied_with: JSON.parse(resumed.stdout.trim()).message_id }])
     expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
-      .toHaveLength(0)
+      .toHaveLength(1)
   })
 
-  test('queue-work finalizer rolls back reply, fanout, outbound, and close when the lease is lost at mutation time', () => {
+  test('queue-work finalizer is not invalidated when only the terminal done-row lease expires mid-transaction', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('mutation-time lease race')
-    const reply = 'mutation-time lease race must not escape'
+    const reply = 'terminal done result remains exact'
     authorizeQueueWorkDone(queueId, reply)
-    const originalQueue = dbRead(
-      `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
-      [queueId],
-    )
-
     const db = new Database(dbPath)
     try {
       const connectorId = randomUUID()
@@ -1538,11 +1532,9 @@ describe('F3 — agent-com send (SQLite)', () => {
         VALUES (?, 'discord', 'probe-f-external', ?, 'cto', '{"message_create":true}', 'active', 'local', '{}')`)
         .run(randomUUID(), connectorId)
 
-      // The outbound insert proves initial validation already passed and the
-      // reply transaction reached projection. Expire the exact claim inside
-      // that same transaction so only the mutation-time close fence can stop
-      // it. The expected CLI failure must roll this trigger update and every
-      // reply/fanout/outbound write back together.
+      // Expire only the lease after outbound projection. The exact done-row
+      // claim identity remains unchanged and the row cannot be reassigned as
+      // executable work, so finalization must still commit atomically.
       db.exec(`CREATE TRIGGER expire_queue_work_claim_after_outbound
         AFTER INSERT ON outbound_queue
         WHEN NEW.message_id IN (
@@ -1557,26 +1549,24 @@ describe('F3 — agent-com send (SQLite)', () => {
       db.close()
     }
 
-    const rejected = runCli([
+    const resumed = runCli([
       'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
       '--message-id', messageId, '--queue-work-finalizer', '--close',
     ], { AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: 'codex-exec' })
 
-    expect(rejected.status).toBe(1)
-    expect(JSON.parse(rejected.stdout.trim())).toMatchObject({
-      ok: false,
-      code: 'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
-      queue_id: queueId,
-      mismatches: ['mutation_time_claim_fence'],
-    })
+    expect(resumed.status).toBe(0)
     expect(dbRead(
       `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
       [queueId],
-    )).toEqual(originalQueue)
+    )).toEqual([{
+      status: 'replied',
+      replied_with: JSON.parse(resumed.stdout.trim()).message_id,
+      claim_expires_at: null,
+    }])
     expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
-      .toHaveLength(0)
-    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(0)
-    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
+      .toHaveLength(1)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(1)
   })
 
   test('D1 reserved internal reply writes once from done and replays the same durable message id', () => {

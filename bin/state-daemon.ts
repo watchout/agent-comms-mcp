@@ -325,6 +325,21 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     await this.runReceivedWithFence(input)
   }
 
+  async runDone(input: { queueId: number; agentId: string }): Promise<void> {
+    const env = this.envFor(input.agentId)
+    const result = await runQueueWork({
+      agentId: input.agentId,
+      queueId: String(input.queueId),
+      runtime: this.runtime(),
+      requireClaimFence: true,
+      finalize: true,
+      finalizeOnly: true,
+      env,
+      cwd: this.cwd,
+    })
+    if (!result.ok) throw new Error(describeQueueWorkFailure(result))
+  }
+
   private async runReceivedWithFence(
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,

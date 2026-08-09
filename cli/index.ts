@@ -3193,6 +3193,7 @@ async function sendMessage(args: string[]) {
             payload: queuePayload,
             expectedClaimSource: expectedSource,
             expectedRuntimeId: process.env.AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID?.trim() || undefined,
+            requireLiveLease: false,
           })
           if (runnerResult.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
           if (runnerResult.ok !== true) mismatches.push('runner_result.ok')
@@ -3756,16 +3757,10 @@ async function sendMessage(args: string[]) {
         // compatibility; ACK/progress callers opt out with --no-close.
         // ─────────────────────────────────────────────────────────────────
         if (queueWorkFinalizerCloseFence) {
-          // The initial authorization read is necessary but not sufficient:
-          // a lease can expire while the reply/fanout/projection writes are
-          // being prepared. Recheck the exact claim against a non-transaction-
-          // frozen database clock at the mutation itself. RETURNING gives the
-          // unified PG/SQLite adapter an exact affected-row count; throwing on
-          // anything other than one rolls back every earlier write in this
-          // transaction.
-          const mutationClockSql = isSqliteMode()
-            ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-            : 'clock_timestamp()'
+          // The row is already terminal-done and locked by this transaction.
+          // Recheck the exact immutable claim/result identity at mutation;
+          // lease expiry cannot reassign executable ownership from done, and
+          // must not make crash-safe finalization impossible.
           const closed = await db.query<{ id: string | number }>(
             `UPDATE message_queue
                 SET status = 'replied',
@@ -3779,7 +3774,6 @@ async function sendMessage(args: string[]) {
                AND agent_id = $3
                AND claimed_by = $4
                AND claimed_at = $5
-               AND claim_expires_at > ${mutationClockSql}
              RETURNING id`,
             [
               id,
@@ -3792,7 +3786,7 @@ async function sendMessage(args: string[]) {
           if (closed.rows.length !== 1) {
             writeFailureJson(
               'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
-              'queue-work finalizer exact claim or live lease was lost before direct close',
+              'queue-work finalizer exact claim was lost before direct close',
               {
                 queue_id: target.queue_id,
                 message_id: target.reply_to,

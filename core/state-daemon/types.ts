@@ -381,6 +381,7 @@ export interface HostRuntimeInvoker {
 export interface QueueWorkScheduler {
   runPending?(input: { queueId: number; agentId: string }): Promise<void>
   runReceived(input: { queueId: number; agentId: string }): Promise<void>
+  runDone?(input: { queueId: number; agentId: string }): Promise<void>
 }
 
 /**

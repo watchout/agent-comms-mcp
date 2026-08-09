@@ -4,11 +4,79 @@ import {
   buildCodexExecQueueWorkCommand,
   buildRunQueueWorkPlan,
   describeCodexExecFailure,
+  frameMediatedGithubWriteback,
   resolveQueueWorkBunExecutable,
   runQueueWork,
 } from '../bin/aun/run-queue-work'
+import { validateMediatedPostingRequest } from '../scripts/queue-work-github-writeback'
 
 describe('buildRunQueueWorkPlan expected_claim_source', () => {
+  test('trusted mediator frames an unmarked audit body with exact provenance headers', () => {
+    const framed = frameMediatedGithubWriteback({
+      queueId: '154244',
+      agentId: 'codex-audit',
+      messageId: 'msg-154244',
+      writeback: {
+        mode: 'github_issue_comment',
+        repo: 'watchout/agent-comms-mcp',
+        issue_number: 917,
+        body: '## Audit finding\n\nOne blocking finding.',
+        idempotency_key: 'audit-154244',
+        body_sha256: null,
+      },
+    })
+
+    expect(framed.body).toStartWith('<!-- aun:l2-audit/v1 -->\n')
+    expect(framed.body).toContain('repo: watchout/agent-comms-mcp\n')
+    expect(framed.body).toContain('issue: 917\n')
+    expect(framed.body).toContain('role: codex-audit\n')
+    expect(framed.body).toContain('source_queue_id: 154244\n')
+    expect(framed.body).toContain('source_message_id: msg-154244\n')
+    expect(framed.body).toContain('status: completed\n')
+    expect(framed.body).toContain('idempotency_key: audit-154244\n')
+    expect(framed.body).toEndWith('## Audit finding\n\nOne blocking finding.')
+    expect(framed.body_sha256).toBeNull()
+    expect(validateMediatedPostingRequest({
+      schema_version: 'queue_work_mediated_posting_request_v1',
+      queue_id: '154244',
+      agent_id: 'codex-audit',
+      message_id: 'msg-154244',
+      handoff_contract: {
+        kind: 'github_backed_role_handoff',
+        github_backed: true,
+        required_writebacks: ['github_issue_comment'],
+        posting_mode: 'mediated',
+        detected_from: ['github_url'],
+      },
+      writeback: framed,
+      runtime_result_summary: {
+        ok: true,
+        summary: 'blocking finding completed',
+        next_action: 'reply',
+        evidence: [],
+      },
+    }, { allowRepos: ['watchout/agent-comms-mcp'] }).ok).toBe(true)
+  })
+
+  test('trusted mediator does not rewrite an existing or misplaced authority marker', () => {
+    const base = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 917,
+    }
+    const existing = frameMediatedGithubWriteback({
+      queueId: '1', agentId: 'codex-audit', messageId: null,
+      writeback: { ...base, body: '<!-- aun:l2-audit/v1 -->\nrepo: watchout/agent-comms-mcp' },
+    })
+    const misplaced = frameMediatedGithubWriteback({
+      queueId: '1', agentId: 'codex-audit', messageId: null,
+      writeback: { ...base, body: 'text\n<!-- aun:l2-audit/v1 -->' },
+    })
+
+    expect(existing.body).toBe('<!-- aun:l2-audit/v1 -->\nrepo: watchout/agent-comms-mcp')
+    expect(misplaced.body).toBe('text\n<!-- aun:l2-audit/v1 -->')
+  })
+
   test('resolves from explicit option first', () => {
     const plan = buildRunQueueWorkPlan({
       queueId: '42',

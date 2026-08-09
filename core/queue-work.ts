@@ -335,7 +335,9 @@ function exactInstantText(value: unknown): string | null {
  * Shared authorization readback for the trusted core finalizer and the CLI
  * sender.  The runner result is not authority by itself: it must match the
  * receive identity, the pre-invocation execution record, the current exact
- * claim incarnation, the durable done timestamp, and a live database lease.
+ * claim incarnation and durable done timestamp. A live lease is required
+ * while work executes, but an exact locked done row may resume finalization
+ * after expiry because it is no longer reclaimable as executable work.
  */
 export function queueWorkClaimResultFenceMismatches(input: {
   row: Pick<QueueWorkRow,
@@ -350,6 +352,7 @@ export function queueWorkClaimResultFenceMismatches(input: {
   payload: Record<string, unknown>
   expectedClaimSource: string
   expectedRuntimeId?: string
+  requireLiveLease?: boolean
 }): string[] {
   const { row, payload } = input
   const receiveClaim = recordValue(payload.receive_claim)
@@ -368,7 +371,7 @@ export function queueWorkClaimResultFenceMismatches(input: {
 
   if (row.claimed_by !== row.agent_id) mismatches.push('claimed_by')
   if (claimedAtMs === null) mismatches.push('claimed_at')
-  if (leaseMs === null || databaseNowMs === null || leaseMs <= databaseNowMs) {
+  if (input.requireLiveLease !== false && (leaseMs === null || databaseNowMs === null || leaseMs <= databaseNowMs)) {
     mismatches.push('claim_expires_at')
   }
   if (receiveClaim.source !== input.expectedClaimSource) mismatches.push('receive_claim.source')
@@ -1115,8 +1118,7 @@ export async function finalizeDoneQueueWork(
         const ownerParam = closeParams.push(resultClaimFence.claimed_by)
         const claimedAtParam = closeParams.push(resultClaimFence.claimed_at)
         claimGuard = `AND claimed_by = $${ownerParam}
-            AND claimed_at = $${claimedAtParam}
-            AND claim_expires_at > ${databaseClockSql(db)}`
+            AND claimed_at = $${claimedAtParam}`
       }
       const updated = await db.query<{ id: string | number }>(
         `UPDATE message_queue
@@ -1176,12 +1178,18 @@ export async function finalizeDoneQueueWork(
       detail?: string,
     ): Promise<QueueWorkFinalizeOutcome> => {
       const failedAt = opts.now?.() ?? new Date()
+      const previousFinalizerError = recordValue(payload.finalizer_error)
+      const previousAttempts = Number(previousFinalizerError.attempts)
+      const attempts = Number.isInteger(previousAttempts) && previousAttempts > 0
+        ? previousAttempts + 1
+        : 1
       const nextPayload = JSON.stringify({
         ...payload,
         finalizer_error: {
           code,
           detail: detail ?? null,
           failed_at: failedAt.toISOString(),
+          attempts,
         },
       })
       await db.query(
@@ -1203,6 +1211,7 @@ export async function finalizeDoneQueueWork(
         payload,
         expectedClaimSource: opts.claimResultFence.expectedClaimSource,
         expectedRuntimeId: opts.claimResultFence.expectedRuntimeId,
+        requireLiveLease: false,
       })
       if (mismatches.length > 0) {
         return failClosed(
@@ -1345,6 +1354,7 @@ export async function finalizeDoneQueueWork(
         if (!opts.writebackSender) {
           return failClosed('MISSING_WRITEBACK_SENDER')
         }
+        let writebackFailure: string | null = null
         const sent = await opts.writebackSender.sendWriteback({
           queue_id: queueIdOf(row),
           agent_id: row.agent_id,
@@ -1357,9 +1367,15 @@ export async function finalizeDoneQueueWork(
             next_action: result.next_action,
             evidence: result.evidence ?? [],
           },
-        }).catch((err) => null)
+        }).catch((err) => {
+          writebackFailure = (err as Error).message ?? String(err)
+          return null
+        })
         if (!sent) {
-          return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
+          return failClosed(
+            'WRITEBACK_FAILED',
+            `mediated writeback sender failed${writebackFailure ? `: ${writebackFailure.slice(0, 1000)}` : ''}`,
+          )
         }
         const postedWith = typeof sent.posted_with === 'string' && sent.posted_with.trim().length > 0
           ? sent.posted_with.trim()

@@ -1195,7 +1195,15 @@ describe('finalizeDoneQueueWork', () => {
     expect(payload.finalizer_error).toMatchObject({
       code: 'WRITEBACK_FAILED',
       detail: 'mediated writeback sender did not return posted_with',
+      attempts: 1,
     })
+
+    await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      now: () => new Date('2026-05-21T01:06:00.000Z'),
+    })
+    expect(JSON.parse(db.row.payload).finalizer_error.attempts).toBe(2)
   })
 
   test('does not terminal-close retry results until retry semantics exist', async () => {

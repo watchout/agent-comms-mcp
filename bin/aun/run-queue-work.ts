@@ -27,6 +27,7 @@ export interface RunQueueWorkOptions {
   claimFence?: QueueWorkClaimFence
   requireClaimFence?: boolean
   finalize?: boolean
+  finalizeOnly?: boolean
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
   cwd?: string
@@ -68,6 +69,10 @@ function parseArgs(argv: string[]): RunQueueWorkOptions {
     else if (tok === '--runtime') out.runtime = argv[++i]
     else if (tok === '--expected-claim-source') out.expectedClaimSource = argv[++i]
     else if (tok === '--finalize') out.finalize = true
+    else if (tok === '--finalize-only') {
+      out.finalize = true
+      out.finalizeOnly = true
+    }
     else if (tok === '--dry-run') out.dryRun = true
   }
   return out
@@ -507,6 +512,48 @@ interface MediatedPostingRequest {
   runtime_result_summary: QueueWorkRuntimeResultSummary
 }
 
+function mediatedMarkerForAgent(agentId: string): string {
+  if (/^(l1auditor|l2auditor|auditor|codex-audit)$/i.test(agentId)) return 'aun:l2-audit/v1'
+  if (/^qa$/i.test(agentId)) return 'aun:qa-check/v1'
+  if (/^check$/i.test(agentId)) return 'aun:technical-check/v1'
+  if (/^arc$/i.test(agentId)) return 'aun:arc-technical-design/v1'
+  if (/^(cto|codex-cto)$/i.test(agentId)) return 'aun:cto-go-no-go/v1'
+  return 'aun:state-transition-request/v1'
+}
+
+export function frameMediatedGithubWriteback(input: {
+  queueId: string
+  agentId: string
+  messageId: string | null
+  writeback: QueueWorkGithubIssueCommentWriteback
+}): QueueWorkGithubIssueCommentWriteback {
+  const body = input.writeback.body
+  if (/^<!--\s*aun:[a-z0-9-]+\/v\d+\s*-->/i.test(body)) return input.writeback
+  // A marker anywhere except the first line is invalid and must remain invalid
+  // for the trusted wrapper to reject; do not conceal conflicting authority.
+  if (/<!--\s*aun:[a-z0-9-]+\/v\d+\s*-->/i.test(body)) return input.writeback
+  const headers = [
+    `<!-- ${mediatedMarkerForAgent(input.agentId)} -->`,
+    `repo: ${input.writeback.repo}`,
+    `issue: ${input.writeback.issue_number}`,
+    `role: ${input.agentId}`,
+    `source_queue_id: ${input.queueId}`,
+    ...(input.messageId ? [`source_message_id: ${input.messageId}`] : []),
+    'status: completed',
+    ...(input.writeback.idempotency_key
+      ? [`idempotency_key: ${input.writeback.idempotency_key}`]
+      : []),
+    '',
+    body,
+  ]
+  return {
+    ...input.writeback,
+    body: headers.join('\n'),
+    // The wrapper returns the digest of the trusted framed body.
+    body_sha256: null,
+  }
+}
+
 class MediatedPostingCommandSender implements QueueWorkWritebackSender {
   constructor(
     private readonly command: string,
@@ -530,7 +577,12 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
       agent_id: input.agent_id,
       message_id: input.message_id,
       handoff_contract: input.handoff_contract,
-      writeback: input.writeback,
+      writeback: frameMediatedGithubWriteback({
+        queueId: input.queue_id,
+        agentId: input.agent_id,
+        messageId: input.message_id,
+        writeback: input.writeback,
+      }),
       runtime_result_summary: input.runtime_result_summary,
     }
     const child = await execFileAsync(this.command, this.args, {
@@ -610,8 +662,35 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
   }
 
   try {
-    const writebackSender = createWritebackSender(plan, env)
     const adapter = createRuntimeAdapter(plan, env)
+    const writebackSender = createWritebackSender(plan, env)
+    if (opts.finalizeOnly) {
+      if (!plan.queue_id || !plan.finalize) {
+        return {
+          ok: false,
+          dry_run: false,
+          plan,
+          error: 'finalize-only requires queue_id and finalize=true',
+        }
+      }
+      const finalizer = await finalizeDoneQueueWork(legacyDb, {
+        queueId: plan.queue_id,
+        replySender: new AgentComCliReplySender(plan.repoRoot, env, adapter.runtime_id),
+        writebackSender,
+        ...(plan.expected_claim_source ? {
+          claimResultFence: {
+            expectedClaimSource: plan.expected_claim_source,
+            expectedRuntimeId: adapter.runtime_id,
+          },
+        } : {}),
+      })
+      return {
+        ok: finalizer.ok,
+        dry_run: false,
+        plan,
+        finalizer,
+      }
+    }
     const runner = await runReceivedQueueWork(legacyDb, {
       queueId: plan.queue_id ?? undefined,
       agentId: plan.agent_id ?? undefined,

@@ -410,7 +410,11 @@ export class StateDaemon {
     row = row ?? await this.fetchQueueRowById(event.id)
     if (!row) return // row may have been deleted
 
-    if (row.status === 'pending' || row.status === 'received' || (row.status === 'done' && this.shirubeD1AutoReceive)) {
+    if (
+      row.status === 'pending'
+      || row.status === 'received'
+      || (row.status === 'done' && (this.shirubeD1AutoReceive || this.queueWorkScheduler?.runDone))
+    ) {
       await this.runWakeIfNotSuppressed(row)
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
@@ -430,6 +434,15 @@ export class StateDaemon {
     if (this.shirubeD1AutoReceive) {
       const recoverableD1 = await this.fetchShirubeD1RecoveryRows()
       for (const row of recoverableD1) {
+        result.scanned++
+        const acted = await this.runWakeIfNotSuppressed(row)
+        if (acted) result.rewoken++
+      }
+    }
+
+    if (this.queueWorkScheduler?.runDone) {
+      const resumableDone = await this.fetchQueueWorkDoneFinalizationRows()
+      for (const row of resumableDone) {
         result.scanned++
         const acted = await this.runWakeIfNotSuppressed(row)
         if (acted) result.rewoken++
@@ -697,6 +710,13 @@ export class StateDaemon {
     }
     const d1Handled = await this.tryShirubeD1AutoReceive(row)
     if (d1Handled !== null) return d1Handled
+    if (row.status === 'done' && this.queueWorkScheduler?.runDone) {
+      this.scheduleQueueWorkRunner('done', row, () => this.queueWorkScheduler!.runDone!({
+        queueId: row.id,
+        agentId: row.agent_id,
+      }))
+      return true
+    }
     const manifestAdmission = await this.checkAllAgentCommunicationManifestAdmission(row)
     if (manifestAdmission.outcome !== 'admit') {
       this.metrics.inc('state_daemon_all_agent_manifest_admission_total', {
@@ -1163,7 +1183,7 @@ export class StateDaemon {
   }
 
   private scheduleQueueWorkRunner(
-    phase: 'pending' | 'received',
+    phase: 'pending' | 'received' | 'done',
     row: QueueRow,
     run: () => Promise<void>,
   ): void {
@@ -1841,6 +1861,28 @@ export class StateDaemon {
     sql += this.queueWorkFenceClause(params, 'mq')
     sql += this.queueWorkResidueExclusionClause(params, 'mq')
     sql += ` ORDER BY COALESCE(mq.claim_expires_at, mq.created_at), mq.created_at LIMIT $1`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
+    return rows
+  }
+
+  private async fetchQueueWorkDoneFinalizationRows(): Promise<QueueRow[]> {
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.claimed_at,
+              mq.created_at, mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type, am.channel_id
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status='done'
+          AND mq.payload LIKE '%"runner_result"%'
+          AND CASE
+                WHEN (mq.payload::jsonb #>> '{finalizer_error,attempts}') ~ '^[0-9]+$'
+                  THEN (mq.payload::jsonb #>> '{finalizer_error,attempts}')::int
+                ELSE 0
+              END < 3`
+    const params: unknown[] = [this.config.batchLimit]
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
+    sql += ` ORDER BY mq.done_at NULLS FIRST, mq.created_at LIMIT $1`
     const { rows } = await this.dbQuery<QueueRow>(sql, params)
     return rows
   }
