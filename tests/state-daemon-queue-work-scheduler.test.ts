@@ -1463,6 +1463,76 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
   })
 
+  test('exact fenced canary recovery grants one control-ref-bound reclaim beyond the normal cap', async () => {
+    const controlRef = 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-control'
+    const db = new RunnerErrorSweepDb({
+      id: 496,
+      agent_id: 'qa',
+      status: 'in_progress',
+      message_id: 'msg-496',
+      payload: JSON.stringify({
+        content: 'exact canary retry',
+        runner_error: {
+          invocation_source: 'state-daemon-queue-work-scheduler',
+          message: 'control-plane precondition failed',
+        },
+        queue_work_runner_error_recovery: {
+          attempts: 3,
+          max_reclaims: 3,
+          last_action: 'reclaimed',
+        },
+      }),
+      claim_expires_at: new Date('2026-05-08T00:05:00.000Z'),
+      claimed_by: 'qa',
+      claimed_at: new Date('2026-05-08T00:00:00.000Z'),
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: new Date('2026-05-08T00:00:10.000Z'),
+    })
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-05-08T00:01:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: { async runReceived() {} },
+      config: {
+        agentAllowlist: ['qa'],
+        queueWorkFenceMessageIds: ['msg-496'],
+        queueWorkRecoveryControlRef: controlRef,
+      },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+
+      expect(result.reclaimed).toBe(1)
+      expect(result.permanentlyFailed).toBe(0)
+      expect(db.row.status).toBe('pending')
+      const recovery = JSON.parse(db.row.payload).queue_work_runner_error_recovery
+      expect(recovery).toMatchObject({
+        attempts: 4,
+        max_reclaims: 4,
+        base_max_reclaims: 3,
+        bounded_extension_control_ref: controlRef,
+        bounded_extension_reason: 'exact_canary_recovery_after_control_plane_fix',
+      })
+
+      db.row.status = 'in_progress'
+      db.row.claimed_by = 'qa'
+      db.row.claimed_at = new Date('2026-05-08T00:01:01.000Z')
+      db.row.claim_expires_at = new Date('2026-05-08T00:01:02.000Z')
+      const second = await daemon.sweepStale()
+      expect(second.reclaimed).toBe(0)
+      expect(second.permanentlyFailed).toBe(1)
+      expect(db.row.status).toBe('failed')
+    } finally {
+      await daemon.stop()
+    }
+  })
+
   test('runner_error recovery is inert when queue-work scheduler is not configured', async () => {
     const db = new RunnerErrorSweepDb({
       id: 495,

@@ -141,6 +141,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       '--output-last-message', '/tmp/final-message.json',
       '--sandbox', 'read-only',
       '--cd', '/agent-workspace',
+      '--skip-git-repo-check',
       '--ephemeral',
       '--ignore-rules',
       '-',

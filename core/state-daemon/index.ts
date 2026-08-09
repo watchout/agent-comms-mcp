@@ -948,8 +948,19 @@ export class StateDaemon {
       : 0
     const maxReclaims = Math.max(0, this.config.queueWorkRunnerErrorMaxReclaims)
     const now = this.clock.now()
+    const configuredExtensionRef = this.config.queueWorkRecoveryControlRef?.trim() || null
+    const priorExtensionRef = typeof recovery === 'object' && recovery !== null
+      ? String((recovery as { bounded_extension_control_ref?: unknown }).bounded_extension_control_ref ?? '').trim() || null
+      : null
+    const boundedExtensionAllowed = !!(
+      configuredExtensionRef
+      && attempts === maxReclaims
+      && priorExtensionRef !== configuredExtensionRef
+      && this.queueWorkFenceConfigured()
+      && this.isQueueWorkFenceInScope(row)
+    )
 
-    if (attempts >= maxReclaims) {
+    if (attempts >= maxReclaims && !boundedExtensionAllowed) {
       const failedPayload = JSON.stringify({
         ...payload,
         [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
@@ -985,14 +996,20 @@ export class StateDaemon {
     }
 
     const nextAttempts = attempts + 1
+    const effectiveMaxReclaims = boundedExtensionAllowed ? nextAttempts : maxReclaims
     const reclaimedPayload = JSON.stringify({
       ...payload,
       [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
         attempts: nextAttempts,
-        max_reclaims: maxReclaims,
+        max_reclaims: effectiveMaxReclaims,
         last_action: 'reclaimed',
         last_at: now.toISOString(),
         source: QUEUE_WORK_SCHEDULER_SOURCE,
+        ...(boundedExtensionAllowed ? {
+          base_max_reclaims: maxReclaims,
+          bounded_extension_control_ref: configuredExtensionRef,
+          bounded_extension_reason: 'exact_canary_recovery_after_control_plane_fix',
+        } : {}),
       },
     })
     const updated = await this.dbQuery(

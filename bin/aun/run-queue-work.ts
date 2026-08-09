@@ -290,6 +290,10 @@ export function buildCodexExecQueueWorkCommand(input: {
     '--output-last-message', input.outputLastMessagePath,
     '--sandbox', sandbox,
     '--cd', input.cwd,
+    // Runtime workspaces are DB-authorized agent roots and need not be Git
+    // repositories. The immutable subject, read-only sandbox, and queue fence
+    // remain separate authority boundaries.
+    '--skip-git-repo-check',
   ]
   const profile = input.env.AUN_QUEUE_WORK_CODEX_PROFILE
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE

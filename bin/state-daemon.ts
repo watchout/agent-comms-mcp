@@ -489,6 +489,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
+  if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
+    set('queueWorkRecoveryControlRef', str('STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF') ?? null)
+  }
   set('wakePoolMinCapacity', num('STATE_DAEMON_WAKE_POOL_MIN_CAPACITY'))
   set('wakePoolMaxCapacity', num('STATE_DAEMON_WAKE_POOL_MAX_CAPACITY'))
   set('wakePoolGrowStep', num('STATE_DAEMON_WAKE_POOL_GROW_STEP'))
