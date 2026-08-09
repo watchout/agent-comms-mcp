@@ -388,6 +388,9 @@ function buildActivationEnv(
   if (options.resumeDoneFinalization) {
     env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
   }
+  if (candidate.status === 'pending' && !options.recoverExpiredSchedulerClaim && !options.resumeDoneFinalization) {
+    env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING = '1'
+  }
   env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
   if (handoffContract.github_backed) {
     env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = handoffContract.posting_mode
@@ -449,6 +452,9 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION === '1') {
     command.push('--resume-done-finalization')
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING === '1') {
+    command.push('--defer-newer-pending')
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE) {
     command.push('--queue-work-residue-policy-file', env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE)
@@ -715,6 +721,12 @@ export async function buildQueueWorkActivationPlan(
     blockers.push({
       code: 'queue_row_not_pending',
       message: `message_queue row ${candidate.queue_id} is ${candidate.status}; activation canary requires a pending row.`,
+      evidence: { queue_id: candidate.queue_id, status: candidate.status },
+    })
+  } else if (candidate) {
+    warnings.push({
+      code: 'queue_work_exact_serial_pending',
+      message: `Activation is restricted to exact pending row ${candidate.queue_id}; only newer untouched pending work may remain deferred behind the fence.`,
       evidence: { queue_id: candidate.queue_id, status: candidate.status },
     })
   }

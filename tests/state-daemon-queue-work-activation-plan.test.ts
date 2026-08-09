@@ -294,6 +294,67 @@ describe('queue-work activation planner', () => {
     expect(report.execute_command).toEqual([])
   })
 
+  test('serial exact pending activation defers only newer untouched pending work', async () => {
+    const target = row({
+      id: 154249,
+      message_id: 'msg-154249',
+      created_at: '2026-08-08T08:10:00.000Z',
+      payload: JSON.stringify({ content: 'current exact work' }),
+    })
+    const newer = row({
+      id: 154254,
+      message_id: 'msg-154254',
+      created_at: '2026-08-08T08:20:00.000Z',
+      payload: JSON.stringify({ content: 'newer untouched work' }),
+    })
+    const report = await buildQueueWorkActivationPlan(
+      new FakeDb({ 154249: [target] }, {}, [newer]),
+      {
+        agentId: 'aun',
+        queueId: '154249',
+        commit: '40b5a37',
+      },
+    )
+
+    expect(report.ok).toBe(true)
+    expect(report.go_no_go).toBe('GO')
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING).toBe('1')
+    expect(report.execute_command).toContain('--defer-newer-pending')
+    expect(report.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining([
+      'queue_work_exact_serial_pending',
+      'queue_work_serial_pending_newer_pending_deferred',
+    ]))
+  })
+
+  test('serial exact pending activation blocks claimed or previously executed residue', async () => {
+    const target = row({
+      id: 154249,
+      message_id: 'msg-154249',
+      created_at: '2026-08-08T08:10:00.000Z',
+      payload: JSON.stringify({ content: 'current exact work' }),
+    })
+    const unsafe = row({
+      id: 154254,
+      message_id: 'msg-154254',
+      created_at: '2026-08-08T08:20:00.000Z',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+      }),
+    })
+    const report = await buildQueueWorkActivationPlan(
+      new FakeDb({ 154249: [target] }, {}, [unsafe]),
+      {
+        agentId: 'aun',
+        queueId: '154249',
+        commit: '40b5a37',
+      },
+    )
+
+    expect(report.ok).toBe(false)
+    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_defer_newer_pending_unsafe_residue')
+    expect(report.execute_command).toEqual([])
+  })
+
   test('blocks exact rows that are not pending', async () => {
     const db = new FakeDb({ 121877: [row({ status: 'in_progress' })] })
     const report = await buildQueueWorkActivationPlan(db, {
@@ -711,7 +772,7 @@ describe('queue-work activation planner', () => {
     }
   })
 
-  test('uses the existing residue preflight before producing executable commands', async () => {
+  test('uses the exact serial residue preflight before producing executable commands', async () => {
     const db = new FakeDb({ 121877: [row()] }, {}, [
       row({
         id: 121800,
@@ -727,7 +788,7 @@ describe('queue-work activation planner', () => {
     })
 
     expect(report.ok).toBe(false)
-    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_residue_policy_missing')
+    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_defer_newer_pending_unsafe_residue')
     expect(report.dry_run_command).toEqual([])
     expect(report.execute_command).toEqual([])
   })

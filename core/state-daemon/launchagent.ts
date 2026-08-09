@@ -796,6 +796,7 @@ export function validateStateDaemonLaunchAgentConfig(
   const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
   const expiredClaimRecoveryValue = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim()
   const doneFinalizationResumeValue = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim()
+  const deferNewerPendingValue = env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING?.trim()
   if (expiredClaimRecoveryValue && expiredClaimRecoveryValue !== '1') {
     errors.push({
       code: 'queue_work_expired_claim_recovery_flag_invalid',
@@ -820,10 +821,27 @@ export function validateStateDaemonLaunchAgentConfig(
       message: 'Done queue-work finalization resume requires the queue-work scheduler to be enabled.',
     })
   }
-  if (expiredClaimRecoveryValue === '1' && doneFinalizationResumeValue === '1') {
+  if (deferNewerPendingValue && deferNewerPendingValue !== '1') {
+    errors.push({
+      code: 'queue_work_defer_newer_pending_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING must be 1 when present.',
+    })
+  }
+  if (deferNewerPendingValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_defer_newer_pending_requires_scheduler',
+      message: 'Serial pending deferral requires the queue-work scheduler to be enabled.',
+    })
+  }
+  const activationModes = [
+    expiredClaimRecoveryValue === '1',
+    doneFinalizationResumeValue === '1',
+    deferNewerPendingValue === '1',
+  ].filter(Boolean).length
+  if (activationModes > 1) {
     errors.push({
       code: 'queue_work_activation_mode_conflict',
-      message: 'Expired scheduler claim recovery and done finalization resume are mutually exclusive.',
+      message: 'Expired-claim recovery, done finalization resume, and serial pending deferral are mutually exclusive.',
     })
   }
   if (queueWorkSchedulerEnabled) {
@@ -1063,9 +1081,11 @@ export async function validateQueueWorkCanaryResiduePreflight(
   const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
   const expiredClaimRecovery = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim() === '1'
   const doneFinalizationResume = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim() === '1'
+  const deferNewerPending = env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING?.trim() === '1'
   const exactResume = expiredClaimRecovery || doneFinalizationResume
+  const exactSerial = exactResume || deferNewerPending
   if (
-    exactResume
+    exactSerial
     && (
       allowlist.length !== 1
       || fenceQueueIds.length !== 1
@@ -1077,8 +1097,14 @@ export async function validateQueueWorkCanaryResiduePreflight(
     errors.push({
       code: doneFinalizationResume
         ? 'queue_work_done_finalization_resume_requires_exact_fence'
-        : 'queue_work_expired_claim_recovery_requires_exact_fence',
-      message: `${doneFinalizationResume ? 'Done finalization resume' : 'Expired scheduler claim recovery'} residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.`,
+        : expiredClaimRecovery
+          ? 'queue_work_expired_claim_recovery_requires_exact_fence'
+          : 'queue_work_defer_newer_pending_requires_exact_fence',
+      message: `${doneFinalizationResume
+        ? 'Done finalization resume'
+        : expiredClaimRecovery
+          ? 'Expired scheduler claim recovery'
+          : 'Serial pending deferral'} residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.`,
     })
     return { ok: false, errors, warnings, residues: [] }
   }
@@ -1112,7 +1138,7 @@ export async function validateQueueWorkCanaryResiduePreflight(
     )
     const residues = result.rows ?? []
     if (residues.length > 0) {
-      if (exactResume) {
+      if (exactSerial) {
         const targetCreatedAtMs = Date.parse(fenceCreatedAfter!)
         const unsafeResidues = residues.filter((row) => {
           const createdAtMs = row.created_at instanceof Date
@@ -1142,8 +1168,14 @@ export async function validateQueueWorkCanaryResiduePreflight(
           errors.push({
             code: doneFinalizationResume
               ? 'queue_work_done_finalization_resume_unsafe_residue'
-              : 'queue_work_expired_claim_recovery_unsafe_residue',
-            message: `${doneFinalizationResume ? 'Done finalization resume' : 'Expired scheduler claim recovery'} found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
+              : expiredClaimRecovery
+                ? 'queue_work_expired_claim_recovery_unsafe_residue'
+                : 'queue_work_defer_newer_pending_unsafe_residue',
+            message: `${doneFinalizationResume
+              ? 'Done finalization resume'
+              : expiredClaimRecovery
+                ? 'Expired scheduler claim recovery'
+                : 'Serial pending deferral'} found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
               unsafeResidues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
             }. Refusing activation.`,
           })
@@ -1151,8 +1183,10 @@ export async function validateQueueWorkCanaryResiduePreflight(
           warnings.push({
             code: doneFinalizationResume
               ? 'queue_work_done_finalization_resume_newer_pending_deferred'
-              : 'queue_work_expired_claim_recovery_newer_pending_deferred',
-            message: `${residues.length} newer untouched pending row(s) remain deferred behind the exact recovery fence.`,
+              : expiredClaimRecovery
+                ? 'queue_work_expired_claim_recovery_newer_pending_deferred'
+                : 'queue_work_serial_pending_newer_pending_deferred',
+            message: `${residues.length} newer untouched pending row(s) remain deferred behind the exact queue fence.`,
           })
         }
       } else if (!options.residuePolicy) {
