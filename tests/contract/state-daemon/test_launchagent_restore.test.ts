@@ -956,6 +956,39 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(out.plan.extraEnv).toMatchObject(out.extraEnv)
   })
 
+  test('restore helper binds repository-relative runtime policy paths to the durable checkout', () => {
+    const commit = '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9'
+    const restoreRoot = '/Users/yuji/.agent-comms/state-daemon/checkouts'
+    const proc = Bun.spawnSync([
+      'bun',
+      'scripts/state-daemon-launchagent.ts',
+      'restore',
+      '--commit',
+      commit,
+      '--restore-root',
+      restoreRoot,
+      '--queue-work-residue-policy-file',
+      'config/queue-work-residue-policy.json',
+      '--queue-work-mediated-posting-command',
+      'scripts/queue-work-mediated-posting.ts',
+    ], {
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0)
+    const out = JSON.parse(proc.stdout.toString())
+    const checkoutPath = join(restoreRoot, commit)
+    expect(out.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE).toBe(
+      join(checkoutPath, 'config', 'queue-work-residue-policy.json'),
+    )
+    expect(out.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND).toBe(
+      join(checkoutPath, 'scripts', 'queue-work-mediated-posting.ts'),
+    )
+    expect(out.plan.extraEnv).toEqual(out.extraEnv)
+  })
+
   test('restore helper dry-run can render bounded queue-work rollback env', () => {
     const { STATE_DAEMON_AGENT_ALLOWLIST: _, ...overlayMetadata } = canaryOverlayEnv('codex-audit')
     const proc = Bun.spawnSync([

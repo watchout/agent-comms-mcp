@@ -77,6 +77,23 @@ const CANARY_OVERLAY_RESTORE_ENV_KEYS = new Set([
   'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST',
 ])
 
+const CHECKOUT_BOUND_RESTORE_PATH_ENV_KEYS = [
+  'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND',
+  'STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE',
+] as const
+
+function bindRestorePathsToCheckout(
+  extraEnv: Record<string, string>,
+  checkoutPath: string,
+): Record<string, string> {
+  const bound = { ...extraEnv }
+  for (const key of CHECKOUT_BOUND_RESTORE_PATH_ENV_KEYS) {
+    const value = bound[key]?.trim()
+    if (value) bound[key] = resolve(checkoutPath, value)
+  }
+  return bound
+}
+
 function parseCanaryOverlayRestoreEnv(raw: string): Record<string, string> {
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch { throw new Error('--canary-overlay-env-json requires a valid JSON object') }
@@ -251,13 +268,13 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
     else if (arg === '--queue-work-handoff-contract') args.extraEnv.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = next()
     else if (arg === '--queue-work-github-writeback-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = next()
-    else if (arg === '--queue-work-mediated-posting-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = resolve(next())
+    else if (arg === '--queue-work-mediated-posting-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = next()
     else if (arg === '--queue-work-mediated-posting-args-json') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = next()
     else if (arg === '--queue-work-mediated-posting-timeout-ms') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS = next()
     else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
-    else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = resolve(next())
+    else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = next()
     else if (arg === '--queue-work-fleet-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_MODE = '1'
     else if (arg === '--queue-work-fleet-decision-ref') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF = next()
     else if (arg === '--keep') {
@@ -375,16 +392,25 @@ async function runQueueWorkCanaryResiduePreflight(
 
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
-  const extraEnv = {
+  const requestedExtraEnv = {
     ...args.extraEnv,
     ...(args.sqlitePath ? { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: args.sqlitePath } : {}),
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
   }
-  const overlayValidation = validateStateDaemonCanaryOverlayEnv(extraEnv)
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv(requestedExtraEnv)
   if (overlayValidation.issues.length > 0) {
     throw new Error(`state-daemon canary overlay failed preflight: ${overlayValidation.issues.map(issue => issue.code).join(',')}`)
   }
+  const requestedPlan = buildStateDaemonRestorePlan({
+    commit: args.commit,
+    restoreRoot: args.restoreRoot,
+    launchAgentsDir: args.launchAgentsDir,
+    bunPath: args.bunPath,
+    databaseUrl: args.databaseUrl,
+    extraEnv: requestedExtraEnv,
+  })
+  const extraEnv = bindRestorePathsToCheckout(requestedExtraEnv, requestedPlan.checkoutPath)
   if (args.bootstrapSafeDefaults) {
     const expected = {
       SHIRUBE_D1_ENABLED: '0',
