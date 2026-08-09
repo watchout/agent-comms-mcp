@@ -61,6 +61,17 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(plan.runtime).toBe('codex-exec')
   })
 
+  test('keeps the immutable subject root separate from the target agent runtime workspace', () => {
+    const plan = buildRunQueueWorkPlan({
+      cwd: '/subject-checkout',
+      runtimeCwd: '/agent-workspace',
+      env: {} as NodeJS.ProcessEnv,
+    })
+
+    expect(plan.repoRoot).toBe('/subject-checkout')
+    expect(plan.runtime_cwd).toBe('/agent-workspace')
+  })
+
   test('nested finalizers do not rely on bare bun under launchd PATH', () => {
     const launchdEnv = {
       PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
@@ -84,7 +95,8 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
 
   test('codex-exec queue-work command uses schema, output-last-message, sandbox, cd, and stdin prompt', () => {
     const command = buildCodexExecQueueWorkCommand({
-      cwd: '/repo',
+      cwd: '/agent-workspace',
+      subjectRoot: '/repo',
       outputLastMessagePath: '/tmp/final-message.json',
       env: {
         AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA: '/repo/schemas/queue-work-result-v1.schema.json',
@@ -128,7 +140,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       '--output-schema', '/repo/schemas/queue-work-result-v1.schema.json',
       '--output-last-message', '/tmp/final-message.json',
       '--sandbox', 'read-only',
-      '--cd', '/repo',
+      '--cd', '/agent-workspace',
       '--ephemeral',
       '--ignore-rules',
       '-',
@@ -136,6 +148,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(command.stdin).toContain('Return only JSON matching queue_work_result_v1')
     expect(command.stdin).toContain('A negative audit, gate, or domain finding is still successfully completed work')
     expect(command.stdin).toContain('Use ok=false only when the requested inspection or work itself could not be completed safely')
+    expect(command.stdin).toContain('immutable implementation subject is available read-only at /repo')
     expect(command.stdin).toContain('"queue_id":"42"')
     expect(command.stdin).toContain('Do not call next, inbox')
   })

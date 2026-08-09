@@ -24,9 +24,9 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import { PgAdapter } from '../core/db/pg-adapter'
@@ -255,10 +255,56 @@ export function describeQueueWorkFailure(result: RunQueueWorkCliResult): string 
   return 'queue work runner returned ok=false'
 }
 
+export type QueueWorkRuntimeWorkspaceDb = {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[]; rowCount?: number | null }>
+}
+
+export async function resolveQueueWorkRuntimeWorkspace(
+  db: QueueWorkRuntimeWorkspaceDb,
+  agentId: string,
+): Promise<string> {
+  const result = await db.query<{
+    agent_id: string
+    runtime_workspace: string | null
+  }>(
+    `SELECT a.agent_id,
+            COALESCE(workspace.local_path, NULLIF(a.canonical_workspace, ''), NULLIF(a.home_directory, '')) AS runtime_workspace
+       FROM agents a
+       LEFT JOIN LATERAL (
+         SELECT w.local_path
+           FROM agent_workspace_bindings b
+           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+          WHERE b.agent_id = a.agent_id
+            AND b.active = true
+          ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+          LIMIT 1
+       ) workspace ON true
+      WHERE a.agent_id = $1
+        AND a.profile_enabled = true
+        AND a.disabled_at IS NULL`,
+    [agentId],
+  )
+  if (result.rows.length !== 1) {
+    throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  }
+  const configured = result.rows[0]?.runtime_workspace?.trim() ?? ''
+  if (!configured || !isAbsolute(configured)) {
+    throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
+  }
+  if (!existsSync(configured) || !statSync(configured).isDirectory()) {
+    throw new Error(`queue-work runtime workspace does not exist as a directory for ${agentId}: ${configured}`)
+  }
+  return realpathSync(configured)
+}
+
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
+    private readonly resolveRuntimeWorkspace: (agentId: string) => Promise<string> = async () => cwd,
   ) {}
 
   async runPending(input: { queueId: number; agentId: string }): Promise<void> {
@@ -283,7 +329,11 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
   ): Promise<void> {
-    const env = this.envFor(input.agentId)
+    const runtimeCwd = await this.resolveRuntimeWorkspace(input.agentId)
+    const env = {
+      ...this.envFor(input.agentId),
+      AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
+    }
     const result = await runQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -293,6 +343,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       finalize: env.STATE_DAEMON_QUEUE_WORK_FINALIZE === '1',
       env,
       cwd: this.cwd,
+      runtimeCwd,
     })
     if (!result.ok) {
       // Rows claimed by another path (e.g. a live TUI session that called
@@ -869,7 +920,11 @@ export async function main(): Promise<void> {
     tmux: new TmuxShellAdapter(),
     codexRunner: new ExecFileCodexRunnerInvoker(process.cwd()),
     queueWorkScheduler: queueWorkSchedulerEnabled()
-      ? new QueueWorkRunnerScheduler(process.env, process.cwd())
+      ? new QueueWorkRunnerScheduler(
+          process.env,
+          process.cwd(),
+          (agentId) => resolveQueueWorkRuntimeWorkspace(queryClient, agentId),
+        )
       : undefined,
     shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
     githubWorkPuller: githubWorkPullerEnabled(process.env)

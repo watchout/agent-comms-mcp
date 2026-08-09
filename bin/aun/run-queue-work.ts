@@ -30,10 +30,12 @@ export interface RunQueueWorkOptions {
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
   cwd?: string
+  runtimeCwd?: string
 }
 
 export interface RunQueueWorkPlan {
   repoRoot: string
+  runtime_cwd: string
   agent_id: string | null
   queue_id: string | null
   runtime: string
@@ -75,8 +77,13 @@ export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueW
   const env = opts.env ?? process.env
   const envRuntime = env.AUN_QUEUE_WORK_RUNTIME ?? env.STATE_DAEMON_QUEUE_WORK_RUNTIME
   const envCommand = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
+  const subjectRoot = opts.cwd ?? repoRoot()
   return {
-    repoRoot: opts.cwd ?? repoRoot(),
+    repoRoot: subjectRoot,
+    runtime_cwd: opts.runtimeCwd
+      ?? env.AUN_QUEUE_WORK_RUNTIME_CWD
+      ?? env.STATE_DAEMON_QUEUE_WORK_RUNTIME_CWD
+      ?? subjectRoot,
     agent_id: opts.agentId ?? env.AGENT_ID ?? null,
     queue_id: opts.queueId ?? null,
     runtime: opts.runtime ?? envRuntime ?? (envCommand ? 'command-json' : 'unconfigured'),
@@ -192,13 +199,14 @@ function defaultQueueWorkResultSchemaPath(cwd: string): string {
   return resolve(cwd, 'schemas', 'queue-work-result-v1.schema.json')
 }
 
-function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
+function queueWorkPrompt(envelope: QueueWorkEnvelope, subjectRoot: string): string {
   return [
     'You are the AUN queue-work runtime adapter for one exact queue row.',
     'Return only JSON matching queue_work_result_v1.',
     'Do not call next, inbox, processing, done, send, repair commands, tmux, or Discord.',
     'Do not post to GitHub directly.',
     'Do not inspect unrelated queue rows.',
+    `The immutable implementation subject is available read-only at ${subjectRoot}. Inspect that path for repository evidence; do not treat the execution workspace as the implementation subject.`,
     'For terminal completion, evidence must include machine-readable entries semantic_outcome=<reply|handoff|no_reply|close|fail> and outcome_reason=<stable_reason>.',
     'If handoff_contract.github_backed is true, include writeback.mode="github_issue_comment" with repo, issue_number, body, and evidence. The trusted wrapper will post it.',
     'If handoff_contract.github_backed is false, omit writeback or set it to null.',
@@ -259,13 +267,15 @@ export function describeCodexExecFailure(input: {
 export function buildCodexExecQueueWorkCommand(input: {
   envelope: QueueWorkEnvelope
   cwd: string
+  subjectRoot?: string
   env: NodeJS.ProcessEnv
   outputLastMessagePath: string
 }): CodexExecQueueWorkCommand {
   const schemaPath = resolve(
+    input.subjectRoot ?? input.cwd,
     input.env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
       ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
-      ?? defaultQueueWorkResultSchemaPath(input.cwd),
+      ?? defaultQueueWorkResultSchemaPath(input.subjectRoot ?? input.cwd),
   )
   const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
@@ -298,7 +308,7 @@ export function buildCodexExecQueueWorkCommand(input: {
   return {
     command,
     args,
-    stdin: queueWorkPrompt(input.envelope),
+    stdin: queueWorkPrompt(input.envelope, input.subjectRoot ?? input.cwd),
     outputLastMessagePath: input.outputLastMessagePath,
     schemaPath,
   }
@@ -318,6 +328,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
 
   constructor(
     private readonly cwd: string,
+    private readonly subjectRoot: string,
     private readonly env: NodeJS.ProcessEnv,
   ) {}
 
@@ -328,6 +339,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
       const plan = buildCodexExecQueueWorkCommand({
         envelope,
         cwd: this.cwd,
+        subjectRoot: this.subjectRoot,
         env: this.env,
         outputLastMessagePath,
       })
@@ -409,7 +421,7 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
 
 function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
-  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.repoRoot, env)
+  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
   if (plan.runtime === 'command-json') {
     const command = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
     if (!command) {

@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
@@ -6,6 +8,7 @@ import {
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
+  resolveQueueWorkRuntimeWorkspace,
 } from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
 import type {
@@ -60,6 +63,45 @@ test('queue-work failure reporting surfaces the failed finalizer instead of the 
   expect(detail).toContain('REPLY_SEND_FAILED')
   expect(detail).toContain('spawn bun ENOENT')
   expect(detail).not.toContain('"code":"DONE"')
+})
+
+test('queue-work runtime workspace resolves from the enabled agent DB binding', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'queue-work-agent-workspace-'))
+  const calls: Array<{ sql: string; params?: unknown[] }> = []
+  try {
+    const resolved = await resolveQueueWorkRuntimeWorkspace({
+      async query<T>(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        return {
+          rows: [{ agent_id: 'codex-audit', runtime_workspace: workspace }] as T[],
+          rowCount: 1,
+        }
+      },
+    }, 'codex-audit')
+
+    expect(resolved).toBe(realpathSync(workspace))
+    expect(calls[0]?.params).toEqual(['codex-audit'])
+    expect(calls[0]?.sql).toContain('agent_workspace_bindings')
+    expect(calls[0]?.sql).toContain('a.profile_enabled = true')
+    expect(calls[0]?.sql).toContain('a.disabled_at IS NULL')
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('queue-work runtime workspace fails closed on missing, relative, or absent DB paths', async () => {
+  const cases = [
+    { rows: [], message: 'requires one enabled DB agent row' },
+    { rows: [{ agent_id: 'codex-audit', runtime_workspace: 'relative/path' }], message: 'must be an absolute DB path' },
+    { rows: [{ agent_id: 'codex-audit', runtime_workspace: '/definitely/missing/aun-workspace' }], message: 'does not exist as a directory' },
+  ]
+  for (const fixture of cases) {
+    await expect(resolveQueueWorkRuntimeWorkspace({
+      async query<T>() {
+        return { rows: fixture.rows as T[], rowCount: fixture.rows.length }
+      },
+    }, 'codex-audit')).rejects.toThrow(fixture.message)
+  }
 })
 
 class SingleRowDb implements DBClient {
