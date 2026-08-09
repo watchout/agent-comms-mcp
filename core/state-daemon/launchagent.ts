@@ -9,6 +9,7 @@ import {
 import {
   classifyQueueWorkResidueRows,
   loadQueueWorkResiduePolicyFile,
+  matchQueueWorkResiduePolicyEntry,
   type QueueWorkResiduePolicy,
   type QueueWorkResidueRow,
 } from './queue-work-residue-policy'
@@ -1139,8 +1140,26 @@ export async function validateQueueWorkCanaryResiduePreflight(
     const residues = result.rows ?? []
     if (residues.length > 0) {
       if (exactSerial) {
+        const governedQueueIds = new Set<number>()
+        if (options.residuePolicy) {
+          for (const row of residues) {
+            const queueId = Number(row.id)
+            const entry = options.residuePolicy.entries.find((item) => item.queue_id === queueId)
+            if (!entry) continue
+            const classification = matchQueueWorkResiduePolicyEntry(entry, row)
+            if (classification.matched) {
+              governedQueueIds.add(queueId)
+            } else {
+              errors.push({
+                code: 'queue_work_residue_policy_mismatch',
+                message: `queue ${queueId} does not match governed residue policy: ${classification.mismatches.join('; ')}`,
+              })
+            }
+          }
+        }
+        const serialResidues = residues.filter((row) => !governedQueueIds.has(Number(row.id)))
         const targetCreatedAtMs = Date.parse(fenceCreatedAfter!)
-        const unsafeResidues = residues.filter((row) => {
+        const unsafeResidues = serialResidues.filter((row) => {
           const createdAtMs = row.created_at instanceof Date
             ? row.created_at.getTime()
             : Date.parse(row.created_at)
@@ -1179,14 +1198,20 @@ export async function validateQueueWorkCanaryResiduePreflight(
               unsafeResidues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
             }. Refusing activation.`,
           })
-        } else {
+        } else if (serialResidues.length > 0) {
           warnings.push({
             code: doneFinalizationResume
               ? 'queue_work_done_finalization_resume_newer_pending_deferred'
               : expiredClaimRecovery
                 ? 'queue_work_expired_claim_recovery_newer_pending_deferred'
                 : 'queue_work_serial_pending_newer_pending_deferred',
-            message: `${residues.length} newer untouched pending row(s) remain deferred behind the exact queue fence.`,
+            message: `${serialResidues.length} newer untouched pending row(s) remain deferred behind the exact queue fence.`,
+          })
+        }
+        if (governedQueueIds.size > 0) {
+          warnings.push({
+            code: 'queue_work_governed_residue_deferred',
+            message: `${governedQueueIds.size} policy-classified non-fenced row(s) remain deferred to their authorized lifecycle.`,
           })
         }
       } else if (!options.residuePolicy) {

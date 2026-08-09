@@ -926,6 +926,65 @@ describe('state_daemon queue work scheduler boundary', () => {
     })).toBe(1)
   })
 
+  test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {
+    const agentId = 'codex-audit'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 154254,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-154254',
+      payload: JSON.stringify({
+        author_id: 'pdca-ops',
+        content: 'Complete CHECK and ADJUST, then check in.',
+        message_type: 'instruction',
+        no_reply_required: true,
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-09T10:03:42.480Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const db = new PendingLlmDb(agentId, row)
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-09T10:04:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending(input) {
+          calls.push(input)
+        },
+      },
+      config: { codexRunnerEnabled: true },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 154254,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 154254, agentId }])
+    expect(metrics.countInc('state_daemon_wake_actions_total', {
+      result: 'state_daemon_no_reply_completed',
+    })).toBe(0)
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'pending_runner_invoked',
+    })).toBe(1)
+  })
+
   test('exact-fenced phase handoff canaries bypass routing hold and use pending scheduler', async () => {
     const agentId = 'l2auditor'
     const calls: Array<{ queueId: number; agentId: string }> = []
@@ -1820,7 +1879,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(loadQueueWorkResidueExcludedQueueIds({
       STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS: '42',
       STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
-    } as NodeJS.ProcessEnv)).toEqual([42, 120138, 120245, 121744, 121839, 121873, 121876, 121919, 121924, 121938, 123851, 123940, 123945])
+    } as NodeJS.ProcessEnv)).toEqual([42, 120138, 120245, 121744, 121839, 121873, 121876, 121919, 121924, 121938, 123851, 123940, 123945, 154254])
   })
 
   test('state-daemon fails closed on invalid manual residue exclusion ids', () => {

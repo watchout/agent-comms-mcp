@@ -1484,6 +1484,10 @@ export class StateDaemon {
   private async completeNoReplyIfRequired(row: QueueRow): Promise<boolean> {
     if (this.isQueueWorkResidueExcluded(row)) return false
     if (!this.config.codexRunnerAutoCompleteNoReply) return false
+    // no_reply_required controls the outbound response after substantive work;
+    // it is not authority to skip that work. A configured queue-work scheduler
+    // must execute the row and let the typed result close it without a reply.
+    if (this.queueWorkScheduler) return false
     if (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress') return false
     const decision = this.noReplyDecisionForRow(row)
     if (!decision.no_reply_required) return false

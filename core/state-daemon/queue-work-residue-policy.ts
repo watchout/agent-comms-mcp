@@ -6,6 +6,7 @@ export type QueueWorkResidueClassification =
   | 'preserve_immutable_evidence'
   | 'preserve_failed_scheduler_evidence'
   | 'preserve_incomplete_scheduler_evidence'
+  | 'preserve_native_agent_work'
 
 export type QueueWorkResidueSchedulerAction = 'exclude'
 export type QueueWorkResidueAuthorizedAction = 'preserve_only'
@@ -93,6 +94,7 @@ const CLASSIFICATIONS = new Set<QueueWorkResidueClassification>([
   'preserve_immutable_evidence',
   'preserve_failed_scheduler_evidence',
   'preserve_incomplete_scheduler_evidence',
+  'preserve_native_agent_work',
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {

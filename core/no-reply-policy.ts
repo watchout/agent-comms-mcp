@@ -124,6 +124,7 @@ export function detectNoReplyIntent(input: {
   }
 
   const explicitPatterns: Array<[RegExp, string]> = [
+    [/\bno_reply_required\s*:\s*true\b/i, 'explicit_no_reply_required'],
     [/\bno\s+(reply|response)\s+(is\s+)?required\b/i, 'explicit_no_reply_required'],
     [/\bdo\s+not\s+reply\b/i, 'explicit_do_not_reply'],
     [/\bno\s+further\s+action\s+(is\s+)?required\b/i, 'explicit_no_further_action_required'],

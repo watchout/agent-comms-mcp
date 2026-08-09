@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { detectNoReplyIntent } from './no-reply-policy'
 
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
@@ -433,6 +434,15 @@ function looksLikeRoleHandoff(content: string, agentId: string): boolean {
   )
 }
 
+function hasExplicitGithubHandoffIntent(content: string): boolean {
+  return (
+    /\bGitHub\s+SSOT\b/i.test(content)
+    || /(?:^|\n)\s*(?:pr|issue):\s*https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+/i.test(content)
+    || /schema_version:\s*shirube-v3\/(?:evidence_audit_request|control_handoff|gate_request)\/v\d+/i.test(content)
+    || /(?:^|\n)\s*(?:required_)?writeback:\s*(?:github|issue|pr)/i.test(content)
+  )
+}
+
 export function detectQueueWorkHandoffContract(input: {
   agentId: string
   payload: string
@@ -441,14 +451,19 @@ export function detectQueueWorkHandoffContract(input: {
   const payload = parsePayload(input.payload)
   const content = typeof payload.content === 'string' ? payload.content : input.payload
   const messageType = payloadMessageType(payload)
+  const explicitGithubHandoff = hasExplicitGithubHandoffIntent(content)
   const detectedFrom: string[] = []
   if (messageType === 'phase_handoff') detectedFrom.push('message_type:phase_handoff')
   if (containsGithubIssueOrPullUrl(content)) detectedFrom.push('github_url')
   if (looksLikeRoleHandoff(content, input.agentId)) detectedFrom.push('role_handoff_text')
+  if (explicitGithubHandoff) detectedFrom.push('explicit_github_handoff')
 
   const githubBacked = (
     (messageType === 'phase_handoff' && containsGithubIssueOrPullUrl(content)) ||
-    (containsGithubIssueOrPullUrl(content) && looksLikeRoleHandoff(content, input.agentId))
+    (
+      containsGithubIssueOrPullUrl(content)
+      && explicitGithubHandoff
+    )
   )
   return {
     kind: githubBacked ? 'github_backed_role_handoff' : 'plain_queue_work',
@@ -509,6 +524,7 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
   const payload = parsePayload(row.payload)
   const messageId = row.message_id ?? payload.message_id ?? null
   const requester = payload.author_id ?? payload.from ?? null
+  const noReply = detectNoReplyIntent({ payload, content: payload.content })
   return {
     schema_version: QUEUE_WORK_ENVELOPE_VERSION,
     queue_id: queueIdOf(row),
@@ -519,7 +535,7 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
     requester: requester === null ? null : String(requester),
     content: typeof payload.content === 'string' ? payload.content : row.payload,
     reply_contract: {
-      required: payload.reply_contract?.required === false ? false : true,
+      required: payload.reply_contract?.required === false || noReply.no_reply_required ? false : true,
       reply_to: messageId === null ? null : String(messageId),
       mention: requester === null ? null : String(requester),
     },

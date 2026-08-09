@@ -233,6 +233,49 @@ describe('queue work envelope', () => {
       'github_url',
     ]))
   })
+
+  test('keeps reference-heavy no-reply control work plain while preserving its execution', () => {
+    const envelope = buildQueueWorkEnvelope(receivedRow({
+      payload: JSON.stringify({
+        author_id: 'pdca-ops',
+        message_type: 'instruction',
+        content: [
+          'execution_context.active_function: evidence_audit_gate',
+          'registry_control_source: https://github.com/watchout/iyasaka/issues/171',
+          'exact audit handoff wins over assigned work',
+          'Run the local check-in after CHECK and ADJUST exist.',
+          'no_reply_required: true',
+        ].join('\n'),
+      }),
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'plain_queue_work',
+      github_backed: false,
+      required_writebacks: [],
+    })
+    expect(envelope.reply_contract.required).toBe(false)
+  })
+
+  test('detects an instruction-form evidence audit request as GitHub-backed', () => {
+    const envelope = buildQueueWorkEnvelope(receivedRow({
+      payload: JSON.stringify({
+        author_id: 'aun',
+        message_type: 'instruction',
+        content: [
+          'schema_version: shirube-v3/evidence_audit_request/v1',
+          'pr: https://github.com/watchout/agent-comms-mcp/pull/918',
+          'exact_head: abc1234',
+        ].join('\n'),
+      }),
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      required_writebacks: ['github_issue_comment'],
+    })
+  })
 })
 
 describe('runReceivedQueueWork', () => {

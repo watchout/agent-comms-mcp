@@ -296,22 +296,22 @@ describe('queue-work activation planner', () => {
 
   test('serial exact pending activation defers only newer untouched pending work', async () => {
     const target = row({
-      id: 154249,
-      message_id: 'msg-154249',
+      id: 164249,
+      message_id: 'msg-164249',
       created_at: '2026-08-08T08:10:00.000Z',
       payload: JSON.stringify({ content: 'current exact work' }),
     })
     const newer = row({
-      id: 154254,
-      message_id: 'msg-154254',
+      id: 164254,
+      message_id: 'msg-164254',
       created_at: '2026-08-08T08:20:00.000Z',
       payload: JSON.stringify({ content: 'newer untouched work' }),
     })
     const report = await buildQueueWorkActivationPlan(
-      new FakeDb({ 154249: [target] }, {}, [newer]),
+      new FakeDb({ 164249: [target] }, {}, [newer]),
       {
         agentId: 'aun',
-        queueId: '154249',
+        queueId: '164249',
         commit: '40b5a37',
       },
     )
@@ -353,6 +353,35 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_defer_newer_pending_unsafe_residue')
     expect(report.execute_command).toEqual([])
+  })
+
+  test('serial exact pending activation defers governed native-agent work to its own lifecycle', async () => {
+    const target = row({
+      id: 154300,
+      agent_id: 'codex-audit',
+      message_id: 'msg-154300',
+      created_at: '2026-08-09T12:00:00.000Z',
+      payload: JSON.stringify({ content: 'fresh exact audit' }),
+    })
+    const nativeWork = row({
+      id: 154254,
+      agent_id: 'codex-audit',
+      message_id: '60ea96f6-bdab-4db2-95cb-e9287885f7b3',
+      created_at: '2026-08-09T10:03:42.480Z',
+      payload: JSON.stringify({ source: 'cli-notify', content: 'daily PDCA native work' }),
+    })
+    const report = await buildQueueWorkActivationPlan(
+      new FakeDb({ 154300: [target] }, {}, [nativeWork]),
+      {
+        agentId: 'codex-audit',
+        queueId: '154300',
+        commit: '40b5a37',
+      },
+    )
+
+    expect(report.ok).toBe(true)
+    expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_governed_residue_deferred')
+    expect(report.execute_command).toContain('--defer-newer-pending')
   })
 
   test('blocks exact rows that are not pending', async () => {

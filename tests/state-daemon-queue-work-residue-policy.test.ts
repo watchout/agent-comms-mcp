@@ -164,6 +164,20 @@ function rowCp80ExactResidue(
   }
 }
 
+function row154254(patch: Partial<QueueWorkResidueRow> = {}): QueueWorkResidueRow {
+  return {
+    id: 154254,
+    agent_id: 'codex-audit',
+    message_id: '60ea96f6-bdab-4db2-95cb-e9287885f7b3',
+    status: 'pending',
+    payload: JSON.stringify({
+      source: 'cli-notify',
+      message_type: 'instruction',
+    }),
+    ...patch,
+  }
+}
+
 describe('#758 queue-work residue policy model', () => {
   test('repo policy validates and exposes exact excluded queue ids', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
@@ -182,6 +196,7 @@ describe('#758 queue-work residue policy model', () => {
       123851,
       123940,
       123945,
+      154254,
     ])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
       Array.from({ length: policy.entries.length }, () => 'preserve_only'),
@@ -320,11 +335,24 @@ describe('#758 queue-work residue policy model', () => {
     }
   })
 
+  test('154254 remains pending native-agent work and rejects scheduler provenance drift', () => {
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+    const entry = policy.entries.find((candidate) => candidate.queue_id === 154254)!
+
+    expect(entry.classification).toBe('preserve_native_agent_work')
+    expect(matchQueueWorkResiduePolicyEntry(entry, row154254()).matched).toBe(true)
+    const drifted = matchQueueWorkResiduePolicyEntry(entry, row154254({
+      payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
+    }))
+    expect(drifted.matched).toBe(false)
+    expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const l2Rows = L2AUDITOR_OBSOLETE_ROWS.map((item) => rowL2AuditorObsolete(item))
     const cp80Rows = CP80_EXACT_ROW_RESIDUE_ROWS.map((item) => rowCp80ExactResidue(item))
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, ...cp80Rows], {
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, ...cp80Rows, row154254()], {
       requirePolicyRows: true,
     })
 
@@ -342,6 +370,7 @@ describe('#758 queue-work residue policy model', () => {
       123851,
       123940,
       123945,
+      154254,
     ])
 
     const failing = classifyQueueWorkResidueRows(policy, [

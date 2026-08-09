@@ -150,6 +150,18 @@
       "expected_payload_source": "agent-comms",
       "payload_md5": "979de68a28e0b0a79fd6708467d14751",
       "notes": "CP80 exact-row AUN instruction residue, now terminal skipped by external bulk cleanup. Preserve as immutable/superseded evidence and exclude from queue-work scheduler selection; no payload content is required for policy evidence."
+    },
+    {
+      "queue_id": 154254,
+      "agent_id": "codex-audit",
+      "message_id": "60ea96f6-bdab-4db2-95cb-e9287885f7b3",
+      "classification": "preserve_native_agent_work",
+      "scheduler_action": "exclude",
+      "authorized_action": "preserve_only",
+      "evidence_ref": "https://github.com/watchout/iyasaka/issues/171#issuecomment-5114609991",
+      "expected_status": ["pending"],
+      "expected_payload_source": "cli-notify",
+      "notes": "Daily Onisoku PDCA work requires the codex-audit native agent lifecycle and a local check-in after CHECK/ADJUST. Preserve it as pending native work; the read-only generic queue-work scheduler must not auto-complete, skip, or execute it."
     }
   ]
 }

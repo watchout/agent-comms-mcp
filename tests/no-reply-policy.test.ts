@@ -37,6 +37,20 @@ describe('deterministic no-reply policy', () => {
     })
   })
 
+  test('structured no-reply YAML inside an instruction controls only the response', () => {
+    const decision = detectNoReplyIntent({
+      payload: {
+        content: 'Complete CHECK and ADJUST first.\nno_reply_required: true',
+        message_type: 'instruction',
+      },
+    })
+
+    expect(decision).toMatchObject({
+      no_reply_required: true,
+      reason: 'explicit_no_reply_required',
+    })
+  })
+
   test('no-further-action acknowledgement is terminal without gate-classifier ambiguity', () => {
     const decision = detectNoReplyIntent({
       payload: {
