@@ -222,26 +222,57 @@ function expiredSchedulerClaimRecoveryBlockers(input: {
   }
   const receiveClaim = recordValue(payload.receive_claim)
   const execution = recordValue(payload.queue_work_execution)
+  const runnerError = recordValue(payload.runner_error)
+  const recovery = recordValue(payload.queue_work_runner_error_recovery)
   const executionClaimedAtMs = instantMs(execution.claimed_at)
   const executionStartedAtMs = instantMs(execution.started_at)
+  const recoveryAttempts = Number(recovery.attempts)
+  const recoveryMaxReclaims = Number(recovery.max_reclaims)
+  const isExpiredInProgress = candidate.status === 'in_progress'
+  const isReclaimedPending = candidate.status === 'pending'
 
-  if (candidate.status !== 'in_progress') mismatches.push('status')
+  if (!isExpiredInProgress && !isReclaimedPending) mismatches.push('status')
   if (candidate.agent_id !== requestedAgentId) mismatches.push('agent_id')
-  if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
-  if (claimedAtMs === null) mismatches.push('claimed_at')
-  if (claimExpiresAtMs === null || claimExpiresAtMs > now.getTime()) mismatches.push('claim_expires_at')
+  if (isExpiredInProgress) {
+    if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
+    if (claimedAtMs === null) mismatches.push('claimed_at')
+    if (claimExpiresAtMs === null || claimExpiresAtMs > now.getTime()) mismatches.push('claim_expires_at')
+  }
+  if (isReclaimedPending) {
+    if (candidate.claimed_by !== null) mismatches.push('claimed_by')
+    if (candidate.claimed_at !== null) mismatches.push('claimed_at')
+    if (candidate.claim_expires_at !== null) mismatches.push('claim_expires_at')
+    if (typeof runnerError.code !== 'string' || !runnerError.code) mismatches.push('runner_error.code')
+    if (runnerError.invocation_source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('runner_error.invocation_source')
+    if (runnerError.runtime_id !== execution.runtime_id) mismatches.push('runner_error.runtime_id')
+    if (recordValue(runnerError.claim_fence).claimed_by !== candidate.agent_id) mismatches.push('runner_error.claim_fence.claimed_by')
+    if (instantMs(recordValue(runnerError.claim_fence).claimed_at) !== executionClaimedAtMs) {
+      mismatches.push('runner_error.claim_fence.claimed_at')
+    }
+    if (recovery.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_runner_error_recovery.source')
+    if (recovery.last_action !== 'reclaimed') mismatches.push('queue_work_runner_error_recovery.last_action')
+    if (
+      !Number.isInteger(recoveryAttempts)
+      || recoveryAttempts < 1
+      || !Number.isInteger(recoveryMaxReclaims)
+      || recoveryMaxReclaims < recoveryAttempts
+    ) {
+      mismatches.push('queue_work_runner_error_recovery.attempts')
+    }
+  }
   if (receiveClaim.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('receive_claim.source')
   if (receiveClaim.agent_id !== candidate.agent_id) mismatches.push('receive_claim.agent_id')
   if (String(receiveClaim.queue_id ?? '') !== candidate.queue_id) mismatches.push('receive_claim.queue_id')
   if (execution.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_execution.source')
   if (execution.agent_id !== candidate.agent_id) mismatches.push('queue_work_execution.agent_id')
   if (String(execution.queue_id ?? '') !== candidate.queue_id) mismatches.push('queue_work_execution.queue_id')
-  if (execution.claimed_by !== candidate.claimed_by) mismatches.push('queue_work_execution.claimed_by')
-  if (claimedAtMs === null || executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
+  if (execution.claimed_by !== candidate.agent_id) mismatches.push('queue_work_execution.claimed_by')
+  if (executionClaimedAtMs === null) mismatches.push('queue_work_execution.claimed_at')
+  if (isExpiredInProgress && executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
   if (
-    claimedAtMs === null
+    executionClaimedAtMs === null
     || executionStartedAtMs === null
-    || executionStartedAtMs < claimedAtMs
+    || executionStartedAtMs < executionClaimedAtMs
   ) mismatches.push('queue_work_execution.started_at')
   if (typeof execution.runtime_id !== 'string' || !execution.runtime_id.trim()) {
     mismatches.push('queue_work_execution.runtime_id')
@@ -249,7 +280,7 @@ function expiredSchedulerClaimRecoveryBlockers(input: {
 
   return mismatches.length === 0 ? [] : [{
     code: 'queue_work_expired_scheduler_claim_recovery_identity_mismatch',
-    message: `message_queue row ${candidate.queue_id} is not an exact expired scheduler-owned claim recovery target.`,
+    message: `message_queue row ${candidate.queue_id} is not an exact expired scheduler-claim recovery target or its exact reclaimed pending successor.`,
     evidence: { queue_id: candidate.queue_id, mismatches: Array.from(new Set(mismatches)) },
   }]
 }
@@ -573,8 +604,8 @@ export async function buildQueueWorkActivationPlan(
     if (recoveryBlockers.length === 0) {
       warnings.push({
         code: 'queue_work_exact_expired_scheduler_claim_recovery',
-        message: `Activation is restricted to exact expired scheduler claim ${candidate.queue_id}; newer untouched pending work remains deferred behind the exact fence.`,
-        evidence: { queue_id: candidate.queue_id, claim_expires_at: candidate.claim_expires_at },
+        message: `Activation is restricted to exact scheduler claim recovery row ${candidate.queue_id}; newer untouched pending work remains deferred behind the exact fence.`,
+        evidence: { queue_id: candidate.queue_id, status: candidate.status, claim_expires_at: candidate.claim_expires_at },
       })
     }
   } else if (candidate && candidate.status !== 'pending') {

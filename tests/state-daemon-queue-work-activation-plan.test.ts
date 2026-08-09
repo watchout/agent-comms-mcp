@@ -102,6 +102,39 @@ function expiredSchedulerClaimRow(patch: Partial<Record<string, unknown>> = {}) 
   })
 }
 
+function reclaimedSchedulerClaimRow(patch: Partial<Record<string, unknown>> = {}) {
+  const base = expiredSchedulerClaimRow()
+  const payload = JSON.parse(String(base.payload))
+  return {
+    ...base,
+    status: 'pending',
+    claimed_by: null,
+    claimed_at: null,
+    claim_expires_at: null,
+    payload: JSON.stringify({
+      ...payload,
+      runner_error: {
+        code: 'ADAPTER_RESULT_NOT_OK',
+        detail: 'prior runtime binding mismatch',
+        runtime_id: 'codex-exec',
+        invocation_source: 'state-daemon-queue-work-scheduler',
+        claim_fence: {
+          claimed_by: 'aun',
+          claimed_at: '2026-08-08T08:00:01.000Z',
+        },
+      },
+      queue_work_runner_error_recovery: {
+        source: 'state-daemon-queue-work-scheduler',
+        attempts: 2,
+        max_reclaims: 3,
+        last_action: 'reclaimed',
+        last_at: '2026-08-08T08:10:00.000Z',
+      },
+    }),
+    ...patch,
+  }
+}
+
 function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
   return row({
     id: 121926,
@@ -269,6 +302,29 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_id_required_for_expired_claim_recovery')
     expect(report.execute_command).toEqual([])
+  })
+
+  test('continues the exact recovery chain from its provenance-bound reclaimed pending successor', async () => {
+    const db = new FakeDb({ 154244: [reclaimedSchedulerClaimRow()] }, {}, [
+      row({
+        id: 154249,
+        message_id: 'msg-154249',
+        created_at: '2026-08-08T08:10:00.000Z',
+        payload: JSON.stringify({ content: 'newer work' }),
+      }),
+    ])
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: '568694b',
+      recoverExpiredSchedulerClaim: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.candidate?.status).toBe('pending')
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM).toBe('1')
+    expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_expired_claim_recovery_newer_pending_deferred')
   })
 
   test('expired scheduler claim recovery fails closed on live leases and provenance drift', async () => {
