@@ -1101,6 +1101,7 @@ describe('state_daemon queue work scheduler boundary', () => {
       const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
       const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
       expect(update?.sql).toContain('OR mq.id = ANY($4::bigint[])')
+      expect(update?.sql).toContain("a.status IN ('online', 'busy')\n                 OR mq.id = ANY($4::bigint[])")
       expect(update?.params?.[3]).toEqual([496])
       expect(skipped?.sql).toContain('AND NOT (mq.id = ANY($3::bigint[]))')
       expect(skipped?.params?.[2]).toEqual([496])

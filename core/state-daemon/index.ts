@@ -592,7 +592,10 @@ export class StateDaemon {
           AND EXISTS (
             SELECT 1 FROM agents a
              WHERE a.agent_id = mq.agent_id
-               AND a.status IN ('online', 'busy')
+               AND (
+                 a.status IN ('online', 'busy')
+                 OR mq.id = ANY($4::bigint[])
+               )
                AND a.profile_enabled IS TRUE
                AND a.disabled_at IS NULL
                AND COALESCE(NULLIF(BTRIM(a.runtime_engine_preference), ''), NULLIF(BTRIM(a.runtime), '')) IS NOT NULL
