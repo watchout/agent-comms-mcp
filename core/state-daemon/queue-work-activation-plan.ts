@@ -34,6 +34,7 @@ export interface QueueWorkActivationPlanOptions {
   canaryObservedStateDestination?: string | null
   canarySubjectDigest?: string | null
   recoverExpiredSchedulerClaim?: boolean
+  resumeDoneFinalization?: boolean
   now?: () => Date
 }
 
@@ -300,6 +301,61 @@ function expiredSchedulerClaimRecoveryBlockers(input: {
   }]
 }
 
+function doneFinalizationResumeBlockers(input: {
+  candidate: QueueWorkActivationCandidate
+  payload: string | null
+  requestedAgentId: string
+}): QueueWorkActivationFinding[] {
+  const { candidate, requestedAgentId } = input
+  const mismatches: string[] = []
+  let payload: Record<string, unknown> = {}
+  try {
+    payload = recordValue(JSON.parse(input.payload ?? '{}'))
+  } catch {
+    mismatches.push('payload_json')
+  }
+  const receiveClaim = recordValue(payload.receive_claim)
+  const execution = recordValue(payload.queue_work_execution)
+  const result = recordValue(payload.runner_result)
+  const resultFence = recordValue(result.claim_fence)
+  const finalizerError = recordValue(payload.finalizer_error)
+  const claimedAtMs = instantMs(candidate.claimed_at)
+  const executionClaimedAtMs = instantMs(execution.claimed_at)
+  const resultClaimedAtMs = instantMs(resultFence.claimed_at)
+  const startedAtMs = instantMs(execution.started_at)
+  const completedAtMs = instantMs(result.completed_at)
+  const finalizerAttempts = Number(finalizerError.attempts ?? 0)
+
+  if (candidate.status !== 'done') mismatches.push('status')
+  if (candidate.agent_id !== requestedAgentId) mismatches.push('agent_id')
+  if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
+  if (claimedAtMs === null) mismatches.push('claimed_at')
+  if (receiveClaim.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('receive_claim.source')
+  if (receiveClaim.agent_id !== candidate.agent_id) mismatches.push('receive_claim.agent_id')
+  if (String(receiveClaim.queue_id ?? '') !== candidate.queue_id) mismatches.push('receive_claim.queue_id')
+  if (execution.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_execution.source')
+  if (execution.agent_id !== candidate.agent_id) mismatches.push('queue_work_execution.agent_id')
+  if (String(execution.queue_id ?? '') !== candidate.queue_id) mismatches.push('queue_work_execution.queue_id')
+  if (execution.claimed_by !== candidate.claimed_by) mismatches.push('queue_work_execution.claimed_by')
+  if (executionClaimedAtMs === null || executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
+  if (typeof execution.runtime_id !== 'string' || !execution.runtime_id.trim()) mismatches.push('queue_work_execution.runtime_id')
+  if (result.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
+  if (result.ok !== true) mismatches.push('runner_result.ok')
+  if (!['reply', 'close', 'none'].includes(String(result.next_action ?? ''))) mismatches.push('runner_result.next_action')
+  if (result.invocation_source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('runner_result.invocation_source')
+  if (result.runtime_id !== execution.runtime_id) mismatches.push('runner_result.runtime_id')
+  if (resultFence.claimed_by !== candidate.claimed_by) mismatches.push('runner_result.claim_fence.claimed_by')
+  if (resultClaimedAtMs === null || resultClaimedAtMs !== claimedAtMs) mismatches.push('runner_result.claim_fence.claimed_at')
+  if (startedAtMs === null || completedAtMs === null || completedAtMs < startedAtMs) mismatches.push('runner_result.completed_at')
+  if (Number.isInteger(finalizerAttempts) && finalizerAttempts >= 3) mismatches.push('finalizer_error.attempts')
+
+  return mismatches.length === 0 ? [] : [{
+    code: 'queue_work_done_finalization_resume_identity_mismatch',
+    message: `message_queue row ${candidate.queue_id} is not an exact resumable stored-result finalization target.`,
+    evidence: { queue_id: candidate.queue_id, mismatches: Array.from(new Set(mismatches)) },
+  }]
+}
+
 function defaultResiduePolicyFile(): string | null {
   return existsSync(DEFAULT_RESIDUE_POLICY_FILE) ? DEFAULT_RESIDUE_POLICY_FILE : null
 }
@@ -504,6 +560,18 @@ export async function buildQueueWorkActivationPlan(
       message: 'Expired scheduler claim recovery requires one explicit --queue-id.',
     })
   }
+  if (options.resumeDoneFinalization && !queueId) {
+    blockers.push({
+      code: 'queue_id_required_for_done_finalization_resume',
+      message: 'Done finalization resume requires one explicit --queue-id.',
+    })
+  }
+  if (options.recoverExpiredSchedulerClaim && options.resumeDoneFinalization) {
+    blockers.push({
+      code: 'queue_work_activation_mode_conflict',
+      message: 'Expired-claim recovery and done-finalization resume are mutually exclusive.',
+    })
+  }
   if (!SUPPORTED_RUNTIMES.has(runtime)) {
     blockers.push({
       code: 'queue_work_runtime_unsupported',
@@ -621,6 +689,20 @@ export async function buildQueueWorkActivationPlan(
         code: 'queue_work_exact_expired_scheduler_claim_recovery',
         message: `Activation is restricted to exact scheduler claim recovery row ${candidate.queue_id}; newer untouched pending work remains deferred behind the exact fence.`,
         evidence: { queue_id: candidate.queue_id, status: candidate.status, claim_expires_at: candidate.claim_expires_at },
+      })
+    }
+  } else if (candidate && options.resumeDoneFinalization) {
+    const resumeBlockers = doneFinalizationResumeBlockers({
+      candidate,
+      payload: candidatePayload,
+      requestedAgentId: agentId,
+    })
+    blockers.push(...resumeBlockers)
+    if (resumeBlockers.length === 0) {
+      warnings.push({
+        code: 'queue_work_exact_done_finalization_resume',
+        message: `Activation is restricted to stored-result finalization for exact done row ${candidate.queue_id}; the runtime adapter will not be invoked again.`,
+        evidence: { queue_id: candidate.queue_id, status: candidate.status },
       })
     }
   } else if (candidate && candidate.status !== 'pending') {

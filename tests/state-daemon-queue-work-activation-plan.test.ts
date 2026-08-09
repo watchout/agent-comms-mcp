@@ -135,6 +135,49 @@ function reclaimedSchedulerClaimRow(patch: Partial<Record<string, unknown>> = {}
   }
 }
 
+function doneFinalizationRow(patch: Partial<Record<string, unknown>> = {}) {
+  const claimedAt = '2026-08-08T08:00:01.000Z'
+  return row({
+    id: 154244,
+    message_id: 'msg-154244',
+    status: 'done',
+    created_at: '2026-08-08T08:00:00.000Z',
+    claimed_by: 'aun',
+    claimed_at: claimedAt,
+    claim_expires_at: '2026-08-08T08:01:01.000Z',
+    payload: JSON.stringify({
+      content: 'inspect one exact subject',
+      receive_claim: {
+        source: 'state-daemon-queue-work-scheduler',
+        agent_id: 'aun',
+        queue_id: '154244',
+      },
+      queue_work_execution: {
+        source: 'state-daemon-queue-work-scheduler',
+        agent_id: 'aun',
+        queue_id: '154244',
+        runtime_id: 'codex-exec',
+        claimed_by: 'aun',
+        claimed_at: claimedAt,
+        started_at: '2026-08-08T08:00:02.000Z',
+      },
+      runner_result: {
+        schema_version: 'queue_work_result_v1',
+        ok: true,
+        summary: 'audit completed',
+        reply: 'audit result',
+        next_action: 'reply',
+        runtime_id: 'codex-exec',
+        invocation_source: 'state-daemon-queue-work-scheduler',
+        completed_at: '2026-08-08T08:05:00.000Z',
+        claim_fence: { claimed_by: 'aun', claimed_at: claimedAt },
+      },
+      finalizer_error: { code: 'WRITEBACK_FAILED', attempts: 1 },
+    }),
+    ...patch,
+  })
+}
+
 function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
   return row({
     id: 121926,
@@ -302,6 +345,42 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_id_required_for_expired_claim_recovery')
     expect(report.execute_command).toEqual([])
+  })
+
+  test('plans exact done-row stored-result finalization without replaying the runtime', async () => {
+    const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [doneFinalizationRow()] }), {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'ee98ade',
+      resumeDoneFinalization: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.candidate?.status).toBe('done')
+    expect(report.warnings.map((warning) => warning.code)).toContain('queue_work_exact_done_finalization_resume')
+  })
+
+  test('done-row finalization resume fails closed on result-fence drift or retry exhaustion', async () => {
+    const target = doneFinalizationRow()
+    const payload = JSON.parse(String(target.payload))
+    payload.runner_result.claim_fence.claimed_at = '2026-08-08T08:00:03.000Z'
+    payload.finalizer_error.attempts = 3
+    target.payload = JSON.stringify(payload)
+    const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [target] }), {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'ee98ade',
+      resumeDoneFinalization: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(false)
+    const blocker = report.blockers.find((item) => item.code === 'queue_work_done_finalization_resume_identity_mismatch')
+    expect(blocker?.evidence?.mismatches).toEqual(expect.arrayContaining([
+      'runner_result.claim_fence.claimed_at',
+      'finalizer_error.attempts',
+    ]))
   })
 
   test('continues the exact recovery chain from its provenance-bound reclaimed pending successor', async () => {

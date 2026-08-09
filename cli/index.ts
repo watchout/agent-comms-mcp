@@ -4828,7 +4828,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     const agentId = flags['agent-id']
     const commit = flags.commit
     if (!agentId || !commit) {
-      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--recover-expired-scheduler-claim] [--runtime codex-exec|echo|command-json] --canary-control-ref <url> --canary-owner-decision-ref <url> --canary-expires-at <timestamp> --canary-prior-plist-sha256 <sha256> --canary-rollback-command <command> --canary-observed-state-destination <path-or-url> --canary-subject-digest <sha256> [--format json|text]')
+      console.error('Usage: agent-com state-daemon queue-work-activation-plan --agent-id <id> --commit <sha> [--queue-id <id>] [--recover-expired-scheduler-claim|--resume-done-finalization] [--runtime codex-exec|echo|command-json] --canary-control-ref <url> --canary-owner-decision-ref <url> --canary-expires-at <timestamp> --canary-prior-plist-sha256 <sha256> --canary-rollback-command <command> --canary-observed-state-destination <path-or-url> --canary-subject-digest <sha256> [--format json|text]')
       process.exit(2)
     }
     const db = await getDb()
@@ -4852,6 +4852,7 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
         canaryObservedStateDestination: flags['canary-observed-state-destination'],
         canarySubjectDigest: flags['canary-subject-digest'],
         recoverExpiredSchedulerClaim: flagEnabled(flags['recover-expired-scheduler-claim']),
+        resumeDoneFinalization: flagEnabled(flags['resume-done-finalization']),
       })
       if (format === 'text') {
         process.stdout.write(formatQueueWorkActivationPlanText(report))
