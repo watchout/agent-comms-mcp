@@ -186,6 +186,48 @@ class PendingLlmDb implements DBClient {
   }
 }
 
+class MultiPendingLlmDb implements DBClient {
+  private readonly delegatesById = new Map<string, PendingLlmDb>()
+  private readonly delegatesByAgent = new Map<string, PendingLlmDb>()
+  private readonly members: string[]
+  private readonly first: PendingLlmDb
+
+  constructor(rows: any[]) {
+    if (rows.length === 0) throw new Error('MultiPendingLlmDb requires at least one row')
+    this.members = [...new Set(rows.map((row) => String(row.agent_id)))]
+    this.first = new PendingLlmDb(rows[0].agent_id, rows[0])
+    for (const row of rows) {
+      const delegate = new PendingLlmDb(row.agent_id, row)
+      this.delegatesById.set(String(row.id), delegate)
+      if (!this.delegatesByAgent.has(row.agent_id)) this.delegatesByAgent.set(row.agent_id, delegate)
+    }
+  }
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('SELECT members FROM channels WHERE id=$1')) {
+      return { rows: [{ members: this.members }] as T[], rowCount: 1 }
+    }
+    if (
+      sql.includes('FROM message_queue mq')
+      && sql.includes('WHERE mq.id = $1')
+    ) {
+      const delegate = this.delegatesById.get(String(params?.[0]))
+      return delegate ? delegate.query<T>(sql, params) : { rows: [], rowCount: 0 }
+    }
+    const delegate = this.delegatesByAgent.get(String(params?.[0])) ?? this.first
+    return delegate.query<T>(sql, params)
+  }
+}
+
+class RecordingMultiPendingLlmDb extends MultiPendingLlmDb {
+  queries: Array<{ sql: string; params?: unknown[] }> = []
+
+  override async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    this.queries.push({ sql, params })
+    return super.query<T>(sql, params)
+  }
+}
+
 class ExpiredSchedulerClaimDb implements DBClient {
   updates: Array<{ sql: string; params?: unknown[] }> = []
 
@@ -925,6 +967,145 @@ describe('state_daemon queue work scheduler boundary', () => {
       })).toBe(1)
     } finally {
       releasePending()
+      await daemon.stop()
+    }
+  })
+
+  test('different queue rows for one agent are serialized until the active runner completes', async () => {
+    const agentId = 'codex-audit'
+    const calls: number[] = []
+    let releaseFirst!: () => void
+    let firstStartedResolve!: () => void
+    const firstStarted = new Promise<void>((resolve) => { firstStartedResolve = resolve })
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input.queueId)
+        if (input.queueId === 492) {
+          firstStartedResolve()
+          await new Promise<void>((resolve) => { releaseFirst = resolve })
+        }
+      },
+    }
+    const rows = [492, 493].map((id) => ({
+      id,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: `msg-${id}`,
+      payload: JSON.stringify({ author_id: 'aun', content: `work ${id}`, message_type: 'instruction' }),
+      claim_expires_at: null,
+      created_at: new Date(`2026-05-08T00:00:0${id - 492}.000Z`),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }))
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new MultiPendingLlmDb(rows),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 492, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await firstStarted
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 493, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      expect(calls).toEqual([492])
+      expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+        result: 'pending_runner_agent_busy_deferred',
+      })).toBe(1)
+
+      releaseFirst()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 493, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(calls).toEqual([492, 493])
+    } finally {
+      releaseFirst?.()
+      await daemon.stop()
+    }
+  })
+
+  test('different agents retain parallel queue-work capacity', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input)
+        await blocked
+      },
+    }
+    const rows = [
+      { id: 494, agent_id: 'codex-audit' },
+      { id: 495, agent_id: 'adf-lead' },
+    ].map(({ id, agent_id }) => ({
+      id, agent_id, status: 'pending', message_id: `msg-${id}`,
+      payload: JSON.stringify({ author_id: 'aun', content: `work ${id}`, message_type: 'instruction' }),
+      claim_expires_at: null, created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }))
+    const daemon = new StateDaemon({
+      db: new MultiPendingLlmDb(rows),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await Promise.all(rows.map((row) => daemon.__testHandleEvent({
+        op: 'INSERT' as const, id: row.id, agent_id: row.agent_id,
+        status: 'pending', claim_expires_at: null,
+      })))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(calls).toEqual([
+        { queueId: 494, agentId: 'codex-audit' },
+        { queueId: 495, agentId: 'adf-lead' },
+      ])
+    } finally {
+      release()
+      await daemon.stop()
+    }
+  })
+
+  test('live queue-work ids remain heartbeat-renewable past the generic claim max age', async () => {
+    const agentId = 'adf-lead'
+    let release!: () => void
+    let startedResolve!: () => void
+    const started = new Promise<void>((resolve) => { startedResolve = resolve })
+    const row = {
+      id: 496, agent_id: agentId, status: 'pending', message_id: 'msg-496',
+      payload: JSON.stringify({ author_id: 'aun', content: 'long work', message_type: 'instruction' }),
+      claim_expires_at: null, created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }
+    const db = new RecordingMultiPendingLlmDb([row])
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending() {
+          startedResolve()
+          await new Promise<void>((resolve) => { release = resolve })
+        },
+      },
+      config: { activeClaimMaxAgeSec: 300 },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 496, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await started
+      await daemon.refreshClaims()
+      const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+      const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+      expect(update?.sql).toContain('OR mq.id = ANY($4::bigint[])')
+      expect(update?.params?.[3]).toEqual([496])
+      expect(skipped?.sql).toContain('AND NOT (mq.id = ANY($3::bigint[]))')
+      expect(skipped?.params?.[2]).toEqual([496])
+    } finally {
+      release?.()
       await daemon.stop()
     }
   })

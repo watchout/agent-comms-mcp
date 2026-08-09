@@ -224,6 +224,7 @@ export class StateDaemon {
   private dbErrorStreak = 0
   private readonly inflightWakes = new Set<Promise<boolean>>()
   private readonly inflightQueueWork = new Map<string, Promise<void>>()
+  private readonly inflightQueueWorkIds = new Set<string>()
   private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
@@ -572,6 +573,9 @@ export class StateDaemon {
 
   async refreshClaims(): Promise<RefreshResult> {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
+    const inflightQueueWorkIds = Array.from(this.inflightQueueWorkIds)
+      .filter((id) => /^[1-9]\d*$/.test(id))
+      .map((id) => Number.parseInt(id, 10))
     let sql = `UPDATE message_queue mq
           SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
               last_heartbeat_at = $1::timestamptz
@@ -581,7 +585,10 @@ export class StateDaemon {
           AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
           AND mq.claimed_by = mq.agent_id
           AND mq.claimed_at IS NOT NULL
-          AND mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
+          AND (
+            mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
+            OR mq.id = ANY($4::bigint[])
+          )
           AND EXISTS (
             SELECT 1 FROM agents a
              WHERE a.agent_id = mq.agent_id
@@ -598,14 +605,14 @@ export class StateDaemon {
                )
           )`
     const now = this.clock.now()
-    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec]
+    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
     sql += this.queueWorkResidueExclusionClause(params, 'mq')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
 
-    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec]
+    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
     let skippedSql = `SELECT count(*)::int AS n
         FROM message_queue mq
        WHERE mq.status IN ('received', 'in_progress')
@@ -614,7 +621,10 @@ export class StateDaemon {
          AND (
            mq.claimed_by IS DISTINCT FROM mq.agent_id
            OR mq.claimed_at IS NULL
-           OR mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
+           OR (
+             mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
+             AND NOT (mq.id = ANY($3::bigint[]))
+           )
          )`
     skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
     skippedSql += this.queueWorkFenceClause(skippedParams, 'mq')
@@ -1145,19 +1155,27 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: phase })
       return
     }
-    const key = String(row.id)
+    const key = row.agent_id
+    const queueId = String(row.id)
     if (this.inflightQueueWork.has(key)) {
-      this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_dedup_skipped` })
+      this.metrics.inc('state_daemon_queue_work_actions_total', {
+        result: this.inflightQueueWorkIds.has(queueId)
+          ? `${phase}_runner_dedup_skipped`
+          : `${phase}_runner_agent_busy_deferred`,
+      })
       return
     }
     this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_invoked` })
-    const promise = run()
+    this.inflightQueueWorkIds.add(queueId)
+    const promise = Promise.resolve()
+      .then(run)
       .catch((err) => {
         const message = (err as Error).message ?? String(err)
         this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_error` })
         void this.alert.alert(`queue work ${phase} runner failed for ${row.agent_id} queue_id=${row.id}: ${message}`)
       })
       .finally(() => {
+        this.inflightQueueWorkIds.delete(queueId)
         this.inflightQueueWork.delete(key)
       })
     this.inflightQueueWork.set(key, promise)
