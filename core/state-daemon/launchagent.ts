@@ -794,6 +794,19 @@ export function validateStateDaemonLaunchAgentConfig(
   }
 
   const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
+  const expiredClaimRecoveryValue = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim()
+  if (expiredClaimRecoveryValue && expiredClaimRecoveryValue !== '1') {
+    errors.push({
+      code: 'queue_work_expired_claim_recovery_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM must be 1 when present.',
+    })
+  }
+  if (expiredClaimRecoveryValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_expired_claim_recovery_requires_scheduler',
+      message: 'Expired scheduler claim recovery requires the queue-work scheduler to be enabled.',
+    })
+  }
   if (queueWorkSchedulerEnabled) {
     // Fleet mode (owner ruling 6 amended, iyasaka-arc#24 comment 4921804733):
     // after the fenced single-seat canary has a terminal PASS + audit PASS,
@@ -838,6 +851,22 @@ export function validateStateDaemonLaunchAgentConfig(
       .map((item) => item.trim())
       .filter(Boolean)
     const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+    if (
+      expiredClaimRecoveryValue === '1'
+      && (
+        fleetMode
+        || allowlist.length !== 1
+        || fenceQueueIds.length !== 1
+        || fenceMessageIds.length > 1
+        || !fenceCreatedAfter
+        || !Number.isFinite(Date.parse(fenceCreatedAfter))
+      )
+    ) {
+      errors.push({
+        code: 'queue_work_expired_claim_recovery_requires_exact_fence',
+        message: 'Expired scheduler claim recovery requires single-agent, single-queue, non-fleet fencing with a valid created-after timestamp.',
+      })
+    }
     if (!fleetMode && fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
       errors.push({
         code: 'queue_work_scheduler_requires_canary_fence',
@@ -1013,6 +1042,23 @@ export async function validateQueueWorkCanaryResiduePreflight(
   const fenceQueueIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS)
   const fenceMessageIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
   const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+  const expiredClaimRecovery = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim() === '1'
+  if (
+    expiredClaimRecovery
+    && (
+      allowlist.length !== 1
+      || fenceQueueIds.length !== 1
+      || fenceMessageIds.length > 1
+      || !fenceCreatedAfter
+      || !Number.isFinite(Date.parse(fenceCreatedAfter))
+    )
+  ) {
+    errors.push({
+      code: 'queue_work_expired_claim_recovery_requires_exact_fence',
+      message: 'Expired scheduler claim recovery residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.',
+    })
+    return { ok: false, errors, warnings, residues: [] }
+  }
   if (
     allowlist.length !== 1
     || (fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter)
@@ -1043,7 +1089,46 @@ export async function validateQueueWorkCanaryResiduePreflight(
     )
     const residues = result.rows ?? []
     if (residues.length > 0) {
-      if (!options.residuePolicy) {
+      if (expiredClaimRecovery) {
+        const targetCreatedAtMs = Date.parse(fenceCreatedAfter!)
+        const unsafeResidues = residues.filter((row) => {
+          const createdAtMs = row.created_at instanceof Date
+            ? row.created_at.getTime()
+            : Date.parse(row.created_at)
+          let payload: Record<string, unknown> = {}
+          try {
+            const parsed = typeof row.payload === 'string' ? JSON.parse(row.payload) : {}
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return true
+            payload = parsed as Record<string, unknown>
+          } catch {
+            return true
+          }
+          const untouched = payload.receive_claim == null
+            && payload.queue_work_execution == null
+            && payload.runner_error == null
+          return row.agent_id !== allowlist[0]
+            || row.status !== 'pending'
+            || !Number.isFinite(createdAtMs)
+            || createdAtMs <= targetCreatedAtMs
+            || row.claimed_by !== null
+            || row.claimed_at !== null
+            || row.claim_expires_at !== null
+            || !untouched
+        })
+        if (unsafeResidues.length > 0) {
+          errors.push({
+            code: 'queue_work_expired_claim_recovery_unsafe_residue',
+            message: `Expired scheduler claim recovery found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
+              unsafeResidues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
+            }. Refusing activation.`,
+          })
+        } else {
+          warnings.push({
+            code: 'queue_work_expired_claim_recovery_newer_pending_deferred',
+            message: `${residues.length} newer untouched pending row(s) remain deferred behind the exact recovery fence.`,
+          })
+        }
+      } else if (!options.residuePolicy) {
         errors.push({
           code: 'queue_work_residue_policy_missing',
           message: `Queue-work scheduler activation found ${residues.length} non-fenced non-terminal row(s) for ${allowlist[0]} but no STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE was provided: ${

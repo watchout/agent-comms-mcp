@@ -134,6 +134,8 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       '-',
     ])
     expect(command.stdin).toContain('Return only JSON matching queue_work_result_v1')
+    expect(command.stdin).toContain('A negative audit, gate, or domain finding is still successfully completed work')
+    expect(command.stdin).toContain('Use ok=false only when the requested inspection or work itself could not be completed safely')
     expect(command.stdin).toContain('"queue_id":"42"')
     expect(command.stdin).toContain('Do not call next, inbox')
   })

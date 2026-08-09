@@ -622,6 +622,7 @@ async function persistRunnerError(
         AND claimed_at = $5
         AND claim_expires_at > ${databaseClockSql(db)}`
   }
+  sql += '\n        RETURNING id'
   if (!claimFence) {
     const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
     return rowCount(persisted) === 1

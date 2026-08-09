@@ -32,6 +32,7 @@ export interface QueueWorkActivationPlanOptions {
   canaryRollbackCommand?: string | null
   canaryObservedStateDestination?: string | null
   canarySubjectDigest?: string | null
+  recoverExpiredSchedulerClaim?: boolean
   now?: () => Date
 }
 
@@ -42,6 +43,9 @@ export interface QueueWorkActivationCandidate {
   status: string
   created_at: string | null
   priority: number | null
+  claimed_by: string | null
+  claimed_at: string | null
+  claim_expires_at: string | null
 }
 
 export interface QueueWorkActivationFinding {
@@ -98,11 +102,15 @@ type QueueRow = {
   created_at?: string | Date | null
   priority?: string | number | null
   payload?: string | null
+  claimed_by?: string | null
+  claimed_at?: string | Date | null
+  claim_expires_at?: string | Date | null
 }
 
 const DEFAULT_RESIDUE_POLICY_FILE = 'config/queue-work-residue-policy.json'
 const DEFAULT_CODEX_OUTPUT_SCHEMA = 'schemas/queue-work-result-v1.schema.json'
 const SUPPORTED_RUNTIMES = new Set(['codex-exec', 'echo', 'command-json'])
+const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 const CANARY_OVERLAY_OPTION_ENV = [
   ['canaryControlRef', 'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF'],
   ['canaryOwnerDecisionRef', 'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF'],
@@ -175,7 +183,72 @@ function normalizeQueueRow(row: QueueRow): QueueWorkActivationCandidate {
     status: row.status,
     created_at: normalizeDate(row.created_at),
     priority: normalizePriority(row.priority),
+    claimed_by: normalizeText(row.claimed_by ?? null),
+    claimed_at: normalizeDate(row.claimed_at),
+    claim_expires_at: normalizeDate(row.claim_expires_at),
   }
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function instantMs(value: unknown): number | null {
+  if (!(typeof value === 'string' || value instanceof Date)) return null
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function expiredSchedulerClaimRecoveryBlockers(input: {
+  candidate: QueueWorkActivationCandidate
+  payload: string | null
+  requestedAgentId: string
+  now: Date
+}): QueueWorkActivationFinding[] {
+  const { candidate, requestedAgentId, now } = input
+  const mismatches: string[] = []
+  const claimedAtMs = instantMs(candidate.claimed_at)
+  const claimExpiresAtMs = instantMs(candidate.claim_expires_at)
+  let payload: Record<string, unknown> = {}
+  try {
+    payload = recordValue(JSON.parse(input.payload ?? '{}'))
+  } catch {
+    mismatches.push('payload_json')
+  }
+  const receiveClaim = recordValue(payload.receive_claim)
+  const execution = recordValue(payload.queue_work_execution)
+  const executionClaimedAtMs = instantMs(execution.claimed_at)
+  const executionStartedAtMs = instantMs(execution.started_at)
+
+  if (candidate.status !== 'in_progress') mismatches.push('status')
+  if (candidate.agent_id !== requestedAgentId) mismatches.push('agent_id')
+  if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
+  if (claimedAtMs === null) mismatches.push('claimed_at')
+  if (claimExpiresAtMs === null || claimExpiresAtMs > now.getTime()) mismatches.push('claim_expires_at')
+  if (receiveClaim.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('receive_claim.source')
+  if (receiveClaim.agent_id !== candidate.agent_id) mismatches.push('receive_claim.agent_id')
+  if (String(receiveClaim.queue_id ?? '') !== candidate.queue_id) mismatches.push('receive_claim.queue_id')
+  if (execution.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_execution.source')
+  if (execution.agent_id !== candidate.agent_id) mismatches.push('queue_work_execution.agent_id')
+  if (String(execution.queue_id ?? '') !== candidate.queue_id) mismatches.push('queue_work_execution.queue_id')
+  if (execution.claimed_by !== candidate.claimed_by) mismatches.push('queue_work_execution.claimed_by')
+  if (claimedAtMs === null || executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
+  if (
+    claimedAtMs === null
+    || executionStartedAtMs === null
+    || executionStartedAtMs < claimedAtMs
+  ) mismatches.push('queue_work_execution.started_at')
+  if (typeof execution.runtime_id !== 'string' || !execution.runtime_id.trim()) {
+    mismatches.push('queue_work_execution.runtime_id')
+  }
+
+  return mismatches.length === 0 ? [] : [{
+    code: 'queue_work_expired_scheduler_claim_recovery_identity_mismatch',
+    message: `message_queue row ${candidate.queue_id} is not an exact expired scheduler-owned claim recovery target.`,
+    evidence: { queue_id: candidate.queue_id, mismatches: Array.from(new Set(mismatches)) },
+  }]
 }
 
 function defaultResiduePolicyFile(): string | null {
@@ -203,6 +276,9 @@ function buildActivationEnv(
   if (candidate.message_id) env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = candidate.message_id
   if (candidate.created_at) env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = candidate.created_at
   if (residuePolicyFile) env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = residuePolicyFile
+  if (options.recoverExpiredSchedulerClaim) {
+    env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
+  }
   env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
   if (handoffContract.github_backed) {
     env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = handoffContract.posting_mode
@@ -257,6 +333,9 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER) {
     command.push('--queue-work-fence-created-after', env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER)
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM === '1') {
+    command.push('--recover-expired-scheduler-claim')
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE) {
     command.push('--queue-work-residue-policy-file', env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE)
@@ -339,7 +418,8 @@ export async function buildQueueWorkActivationPlan(
   db: DbAdapter,
   options: QueueWorkActivationPlanOptions = {},
 ): Promise<QueueWorkActivationPlanReport> {
-  const generatedAt = (options.now ?? (() => new Date()))().toISOString()
+  const planningNow = (options.now ?? (() => new Date()))()
+  const generatedAt = planningNow.toISOString()
   const agentId = normalizeText(options.agentId ?? null)
   const queueId = normalizeText(options.queueId ?? null)
   const commit = normalizeText(options.commit ?? null)
@@ -362,6 +442,12 @@ export async function buildQueueWorkActivationPlan(
   }
   if (!commit || !/^[0-9a-f]{7,40}$/i.test(commit)) {
     blockers.push({ code: 'commit_required', message: 'Queue-work activation planning requires a 7-40 character git commit SHA.' })
+  }
+  if (options.recoverExpiredSchedulerClaim && !queueId) {
+    blockers.push({
+      code: 'queue_id_required_for_expired_claim_recovery',
+      message: 'Expired scheduler claim recovery requires one explicit --queue-id.',
+    })
   }
   if (!SUPPORTED_RUNTIMES.has(runtime)) {
     blockers.push({
@@ -402,7 +488,8 @@ export async function buildQueueWorkActivationPlan(
   let candidatePayload: string | null = null
   if (queueId) {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority, payload
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload,
+              claimed_by, claimed_at, claim_expires_at
          FROM message_queue
         WHERE id = $1
         LIMIT 1`,
@@ -420,7 +507,8 @@ export async function buildQueueWorkActivationPlan(
     }
   } else {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority, payload
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload,
+              claimed_by, claimed_at, claim_expires_at
          FROM message_queue
         WHERE agent_id = $1
           AND status = 'pending'
@@ -458,7 +546,22 @@ export async function buildQueueWorkActivationPlan(
       evidence: { queue_id: candidate.queue_id, row_agent_id: candidate.agent_id, requested_agent_id: agentId },
     })
   }
-  if (candidate && candidate.status !== 'pending') {
+  if (candidate && options.recoverExpiredSchedulerClaim) {
+    const recoveryBlockers = expiredSchedulerClaimRecoveryBlockers({
+      candidate,
+      payload: candidatePayload,
+      requestedAgentId: agentId,
+      now: planningNow,
+    })
+    blockers.push(...recoveryBlockers)
+    if (recoveryBlockers.length === 0) {
+      warnings.push({
+        code: 'queue_work_exact_expired_scheduler_claim_recovery',
+        message: `Activation is restricted to exact expired scheduler claim ${candidate.queue_id}; newer untouched pending work remains deferred behind the exact fence.`,
+        evidence: { queue_id: candidate.queue_id, claim_expires_at: candidate.claim_expires_at },
+      })
+    }
+  } else if (candidate && candidate.status !== 'pending') {
     blockers.push({
       code: 'queue_row_not_pending',
       message: `message_queue row ${candidate.queue_id} is ${candidate.status}; activation canary requires a pending row.`,

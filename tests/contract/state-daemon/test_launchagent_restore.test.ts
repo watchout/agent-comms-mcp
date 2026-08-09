@@ -610,6 +610,89 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(db.queries[0]?.sql).toContain('mq.created_at >=')
   })
 
+  test('exact expired scheduler claim recovery defers only newer untouched pending residue', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        ...canaryOverlayEnv('codex-audit'),
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS: '154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-08-08T08:00:00.000Z',
+        STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM: '1',
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const schemaPath = join(plan.checkoutPath, 'schemas', 'queue-work-result-v1.schema.json')
+    const validation = validateStateDaemonLaunchAgentConfig(config, {
+      probe: probe([plan.bunPath, plan.entryPath, schemaPath], [plan.checkoutPath]),
+    })
+    const db = new RecordingResidueDb([{
+      id: 154249,
+      agent_id: 'codex-audit',
+      message_id: 'msg-154249',
+      payload: JSON.stringify({ content: 'newer untouched work' }),
+      status: 'pending',
+      created_at: '2026-08-08T08:10:00.000Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(validation.ok).toBe(true)
+    expect(result.ok).toBe(true)
+    expect(result.errors).toEqual([])
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_expired_claim_recovery_newer_pending_deferred' }),
+    ]))
+    expect(result.residues.map((item) => item.id)).toEqual([154249])
+  })
+
+  test('exact expired scheduler claim recovery rejects claimed or previously executed residue', async () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: {
+        STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '1',
+        STATE_DAEMON_AGENT_ALLOWLIST: 'codex-audit',
+        STATE_DAEMON_QUEUE_WORK_RUNTIME: 'codex-exec',
+        STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
+        STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS: '154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS: 'msg-154244',
+        STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER: '2026-08-08T08:00:00.000Z',
+        STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM: '1',
+      },
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan))
+    const db = new RecordingResidueDb([{
+      id: 154249,
+      agent_id: 'codex-audit',
+      message_id: 'msg-154249',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+      }),
+      status: 'pending',
+      created_at: '2026-08-08T08:10:00.000Z',
+      claimed_by: null,
+      claimed_at: null,
+      claim_expires_at: null,
+    }])
+
+    const result = await validateQueueWorkCanaryResiduePreflight(db, config.environmentVariables)
+
+    expect(result.ok).toBe(false)
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'queue_work_expired_claim_recovery_unsafe_residue' }),
+    ]))
+  })
+
   test('queue-work scheduler canary residue preflight passes for exact policy-classified residue', async () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',

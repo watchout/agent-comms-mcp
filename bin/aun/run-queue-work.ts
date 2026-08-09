@@ -204,6 +204,8 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
     'If handoff_contract.github_backed is false, omit writeback or set it to null.',
     'If reply_contract.required is false, use next_action "close" and omit reply.',
     'If reply_contract.required is true and you can answer, use next_action "reply" with reply text.',
+    'A negative audit, gate, or domain finding is still successfully completed work: return ok=true and put the finding in summary, evidence, writeback, and reply as applicable.',
+    'Use ok=false only when the requested inspection or work itself could not be completed safely.',
     'If you cannot safely complete the work, return ok=false with next_action "retry" and a concise summary.',
     '',
     JSON.stringify(envelope),

@@ -369,6 +369,40 @@ describe('runReceivedQueueWork', () => {
       runtime_id: 'fake-runtime',
       invocation_source: 'state-daemon-queue-work-scheduler',
     })
+    expect(db.calls.find((call) => call.sql.includes('last_heartbeat_at = $3'))?.sql).toContain('RETURNING id')
+  })
+
+  test('non-ok result persistence returns its row for rows-length database adapters', async () => {
+    class RowsLengthAdapterDb extends FakeQueueDb {
+      override async query<T = any>(sql: string, params?: unknown[]) {
+        const result = await super.query<T>(sql, params)
+        return { rows: result.rows, rowCount: result.rows.length }
+      }
+    }
+    const db = new RowsLengthAdapterDb(receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' }))
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'rows-length-runtime',
+      capabilities,
+      async invoke() {
+        return { ...okResult(), ok: false, summary: 'audit found a blocker', next_action: 'retry' }
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'ADAPTER_RESULT_NOT_OK' })
+    expect(JSON.parse(db.row.payload).runner_error).toMatchObject({
+      code: 'ADAPTER_RESULT_NOT_OK',
+      detail: 'audit found a blocker',
+    })
   })
 
   test('exact claim fence prevents a stale runner from persisting done after ownership changes', async () => {

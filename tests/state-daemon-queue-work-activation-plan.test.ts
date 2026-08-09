@@ -64,8 +64,42 @@ function row(patch: Partial<Record<string, unknown>> = {}) {
     created_at: '2026-06-17T01:00:00.000Z',
     priority: 100,
     payload: '{"secret":"must-not-print"}',
+    claimed_by: null,
+    claimed_at: null,
+    claim_expires_at: null,
     ...patch,
   }
+}
+
+function expiredSchedulerClaimRow(patch: Partial<Record<string, unknown>> = {}) {
+  const claimedAt = '2026-08-08T08:00:01.000Z'
+  return row({
+    id: 154244,
+    message_id: 'msg-154244',
+    status: 'in_progress',
+    created_at: '2026-08-08T08:00:00.000Z',
+    claimed_by: 'aun',
+    claimed_at: claimedAt,
+    claim_expires_at: '2026-08-08T08:01:01.000Z',
+    payload: JSON.stringify({
+      content: 'inspect one exact subject',
+      receive_claim: {
+        source: 'state-daemon-queue-work-scheduler',
+        agent_id: 'aun',
+        queue_id: '154244',
+      },
+      queue_work_execution: {
+        source: 'state-daemon-queue-work-scheduler',
+        agent_id: 'aun',
+        queue_id: '154244',
+        runtime_id: 'codex-exec',
+        claimed_by: 'aun',
+        claimed_at: claimedAt,
+        started_at: '2026-08-08T08:00:02.000Z',
+      },
+    }),
+    ...patch,
+  })
 }
 
 function githubHandoffRow(patch: Partial<Record<string, unknown>> = {}) {
@@ -195,6 +229,108 @@ describe('queue-work activation planner', () => {
     expect(report.ok).toBe(false)
     expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_row_not_pending')
     expect(report.candidate?.status).toBe('in_progress')
+  })
+
+  test('plans exact expired scheduler claim recovery while deferring newer untouched pending work', async () => {
+    const db = new FakeDb({ 154244: [expiredSchedulerClaimRow()] }, {}, [
+      row({
+        id: 154249,
+        message_id: 'msg-154249',
+        created_at: '2026-08-08T08:10:00.000Z',
+        payload: JSON.stringify({ content: 'newer work' }),
+      }),
+    ])
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'a829d9e',
+      recoverExpiredSchedulerClaim: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(true)
+    expect(report.go_no_go).toBe('GO')
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM).toBe('1')
+    expect(report.execute_command).toContain('--recover-expired-scheduler-claim')
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS).toBe('154244')
+    expect(report.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining([
+      'queue_work_exact_expired_scheduler_claim_recovery',
+      'queue_work_expired_claim_recovery_newer_pending_deferred',
+    ]))
+  })
+
+  test('expired scheduler claim recovery requires one explicit queue id', async () => {
+    const report = await buildQueueWorkActivationPlan(new FakeDb(), {
+      agentId: 'aun',
+      commit: 'a829d9e',
+      recoverExpiredSchedulerClaim: true,
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_id_required_for_expired_claim_recovery')
+    expect(report.execute_command).toEqual([])
+  })
+
+  test('expired scheduler claim recovery fails closed on live leases and provenance drift', async () => {
+    const cases = [
+      {
+        name: 'live lease',
+        target: expiredSchedulerClaimRow({ claim_expires_at: '2026-08-08T09:00:00.000Z' }),
+        mismatch: 'claim_expires_at',
+      },
+      {
+        name: 'foreign owner',
+        target: expiredSchedulerClaimRow({ claimed_by: 'other-agent' }),
+        mismatch: 'claimed_by',
+      },
+      {
+        name: 'provenance drift',
+        target: expiredSchedulerClaimRow({
+          payload: JSON.stringify({
+            receive_claim: { source: 'manual-next', agent_id: 'aun', queue_id: '154244' },
+            queue_work_execution: {},
+          }),
+        }),
+        mismatch: 'receive_claim.source',
+      },
+    ]
+
+    for (const fixture of cases) {
+      const report = await buildQueueWorkActivationPlan(new FakeDb({ 154244: [fixture.target] }), {
+        agentId: 'aun',
+        queueId: '154244',
+        commit: 'a829d9e',
+        recoverExpiredSchedulerClaim: true,
+        now: () => new Date('2026-08-08T08:20:00.000Z'),
+      })
+      expect(report.ok, fixture.name).toBe(false)
+      const blocker = report.blockers.find((item) => item.code === 'queue_work_expired_scheduler_claim_recovery_identity_mismatch')
+      expect(blocker, fixture.name).toBeDefined()
+      expect(blocker?.evidence?.mismatches, fixture.name).toContain(fixture.mismatch)
+    }
+  })
+
+  test('expired scheduler claim recovery blocks claimed or non-newer residue', async () => {
+    const db = new FakeDb({ 154244: [expiredSchedulerClaimRow()] }, {}, [
+      row({
+        id: 154249,
+        message_id: 'msg-154249',
+        created_at: '2026-08-08T08:00:00.000Z',
+        claimed_by: 'aun',
+        claimed_at: '2026-08-08T08:00:00.000Z',
+        claim_expires_at: '2026-08-08T08:02:00.000Z',
+      }),
+    ])
+    const report = await buildQueueWorkActivationPlan(db, {
+      agentId: 'aun',
+      queueId: '154244',
+      commit: 'a829d9e',
+      recoverExpiredSchedulerClaim: true,
+      now: () => new Date('2026-08-08T08:20:00.000Z'),
+    })
+
+    expect(report.ok).toBe(false)
+    expect(report.blockers.map((blocker) => blocker.code)).toContain('queue_work_expired_claim_recovery_unsafe_residue')
   })
 
   test('blocks GitHub-backed role handoffs when codex-exec has no mediated posting contract', async () => {
