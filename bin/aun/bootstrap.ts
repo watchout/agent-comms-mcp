@@ -39,6 +39,7 @@ import {
   type BootstrapStateStore,
 } from '../../core/aun-bootstrap-state'
 import {
+  DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   defaultStateDaemonRestoreRoot,
   parseStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
@@ -108,6 +109,13 @@ function cleanEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 
 function nowIso(): string {
   return new Date().toISOString()
+}
+
+function stateDaemonReadinessArgs(): string[] {
+  return [
+    'cli/index.ts', 'state-daemon', 'readiness', '--require-running',
+    '--expected-agent-id', DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID, '--format', 'json',
+  ]
 }
 
 function sqliteFileDigest(path: string): string {
@@ -2839,10 +2847,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             readbackDigest: beforeDigest,
           }
         }
-        const existing = await run(bunPath, [
-          'cli/index.ts', 'state-daemon', 'readiness', '--require-running',
-          '--expected-agent-id', context.agentId, '--format', 'json',
-        ], commandOptions(context, 30_000))
+        const existing = await run(bunPath, stateDaemonReadinessArgs(), commandOptions(context, 30_000))
         const existingJson = parseJsonOutput(existing)
         return existing.exitCode === 0 && existingJson?.ok
           ? {
@@ -3008,7 +3013,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         adapter.readbackMcpRegistration(context),
         adapter.verifyRuntimeIdentity(context),
         memoryReadback(context),
-        run(bunPath, ['cli/index.ts', 'state-daemon', 'readiness', '--require-running', '--expected-agent-id', context.agentId, '--format', 'json'], commandOptions(context, 30_000)),
+        run(bunPath, stateDaemonReadinessArgs(), commandOptions(context, 30_000)),
         readDaemonNativeState(context),
       ])
       const safeD1 = safeD1FromPlist(home)
@@ -3198,7 +3203,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       if (stage === 'B6_ORDINARY_DAEMON_INSTALL_START') {
         const native = await readDaemonNativeState(context)
         const nativeDigest = bootstrapDigest(native)
-        const daemon = await run(bunPath, ['cli/index.ts', 'state-daemon', 'readiness', '--require-running', '--expected-agent-id', context.agentId, '--format', 'json'], commandOptions(context, 30_000))
+        const daemon = await run(bunPath, stateDaemonReadinessArgs(), commandOptions(context, 30_000))
         return daemon.exitCode === 0 && parseJsonOutput(daemon)?.ok && Boolean(safeD1FromPlist(home)) && native.launch_loaded
           ? { ok: true, evidenceRefs: [`resume-daemon-readback:${nativeDigest}`], readbackDigest: nativeDigest }
           : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }

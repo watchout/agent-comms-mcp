@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import {
   buildGithubWorkPullerLaunchAgentEnv,
   buildStateDaemonRestorePlan,
+  DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   parseStateDaemonLaunchAgentPlist,
   planStateDaemonRestorePrune,
   protectedPathsFromLaunchAgentPlists,
@@ -112,9 +113,25 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(plan.checkoutPath).toBe('/Users/yuji/.agent-comms/state-daemon/checkouts/316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9')
     expect(config.programArguments[1]).toBe(join(plan.checkoutPath, 'bin', 'state-daemon.ts'))
     expect(config.workingDirectory).toBe(plan.checkoutPath)
+    expect(config.environmentVariables.AGENT_ID).toBe(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID)
     expect(plist).not.toContain('/private/tmp/agent-comms-state-daemon')
     expect(plist).not.toContain('<key>STATE_DAEMON_AGENT_ALLOWLIST</key>')
     expect(plist).not.toContain('STATE_DAEMON_CANARY_OVERLAY_')
+  })
+
+  test('restore renderer preserves a safe explicit global listener identity without adding an allowlist', () => {
+    const plan = buildStateDaemonRestorePlan({
+      commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
+      restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
+      launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+    })
+    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan, {
+      AGENT_ID: 'state-daemon',
+    }))
+
+    expect(config.environmentVariables.AGENT_ID).toBe('state-daemon')
+    expect(config.environmentVariables.AGENT_ID).not.toBe('aun')
+    expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
   })
 
   test('Issue #917 typed canary overlay accepts one exact cohort target with complete rollback evidence', () => {

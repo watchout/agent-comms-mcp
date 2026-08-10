@@ -9,6 +9,7 @@ import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
+  DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   renderStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
   type StateDaemonRestorePlan,
@@ -724,6 +725,7 @@ describe('aun bootstrap clean-host journal', () => {
     let daemonLoaded = false
     let queueReceiveCount = 0
     let syntheticPid = 50_000
+    const stateDaemonReadinessCalls: string[][] = []
     const nativeTuple = () => JSON.stringify({
       name: 'aun', enabled: true,
       transport: {
@@ -792,7 +794,8 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: JSON.stringify({ ok: true }), stderr: '', pid: ++syntheticPid }
       }
       if (command === process.execPath && joined.includes('state-daemon readiness')) {
-        return { exitCode: 0, stdout: JSON.stringify({ ok: true, expected_agent_id: 'clean-default' }), stderr: '', pid: ++syntheticPid }
+        stateDaemonReadinessCalls.push([...args])
+        return { exitCode: 0, stdout: JSON.stringify({ ok: true, expected_agent_id: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID }), stderr: '', pid: ++syntheticPid }
       }
       const useRealCli = command === process.execPath && (
         args[0] === 'db/migrate.ts'
@@ -813,6 +816,9 @@ describe('aun bootstrap clean-host journal', () => {
     expect(first.status).toBe('READY')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(1)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
 
     const contentionMessageId = randomUUID()
     const contentionDb = backend === 'postgres' ? new PgAdapter(databaseUrl!) : new SqliteAdapter(dbPath)
@@ -865,6 +871,9 @@ describe('aun bootstrap clean-host journal', () => {
     const second = await bootstrap(input, { run })
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(2)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
     let activeOwnedQueueId: string | null = null
     let invalidPayloadQueueId: string | null = null
     const invalidPayload = 'step one legacy queue payload'
@@ -947,13 +956,14 @@ describe('aun bootstrap clean-host journal', () => {
       databaseUrl: 'postgresql:///disposable?host=/tmp', agentDenylist: '', extraEnv: {},
     }
     const original = renderStateDaemonLaunchAgentPlist(plan, {
-      AGENT_ID: 'state_daemon', SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
+      SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]', STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
     })
     let loaded = false
     let pid = 9001
     let restoreCalls = 0
     let bootoutCalls = 0
+    const stateDaemonReadinessCalls: string[][] = []
     const run = async (command: string, args: string[]) => {
       if (command === 'launchctl' && args[0] === 'print') return loaded
         ? { exitCode: 0, stdout: launchctlSafePrint(pid), stderr: '' }
@@ -976,6 +986,7 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
       }
       if (command === process.execPath && args.join(' ').includes('state-daemon readiness')) {
+        stateDaemonReadinessCalls.push([...args])
         return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
       }
       return { exitCode: 0, stdout: '', stderr: '' }
@@ -1060,6 +1071,11 @@ describe('aun bootstrap clean-host journal', () => {
     expect(restoreCalls).toBe(restoreCallsBeforeLoaded)
     expect(readFileSync(plistPath).equals(exactLoadedBytes)).toBe(true)
     expect(statSync(plistPath).mode & 0o777).toBe(exactLoadedMode)
+    const resumeReadback = await ports.revalidateStage?.(context, 'B6_ORDINARY_DAEMON_INSTALL_START')
+    expect(resumeReadback?.ok).toBe(true)
+    expect(stateDaemonReadinessCalls).toHaveLength(2)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain(context.agentId)
   })
 
   test('profile, SQLite DB, and daemon mutations returned after nonzero are read back and exactly recoverable', async () => {

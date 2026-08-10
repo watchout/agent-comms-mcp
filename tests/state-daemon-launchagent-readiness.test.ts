@@ -192,6 +192,27 @@ describe('#603 state-daemon LaunchAgent readiness diagnostic', () => {
     expect(formatStateDaemonLaunchAgentReadinessText(report)).toContain('Result: GO')
   })
 
+  test('safe global listener identities remain GO without an exact identity request', () => {
+    for (const agentId of ['state-daemon', 'state_daemon', 'com.agent-comms.state-daemon']) {
+      const report = build({ plistText: plist({ agentId }) })
+
+      expect(report.go_no_go, agentId).toBe('GO')
+      expect(report.identity.agent_id).toBe(agentId)
+      expect(report.identity.expected_agent_id).toBeNull()
+    }
+  })
+
+  test('canonical state_daemon identity satisfies an exact global listener expectation', () => {
+    const report = build({
+      plistText: plist({ agentId: 'state_daemon' }),
+      expectedAgentId: 'state_daemon',
+    })
+
+    expect(report.go_no_go).toBe('GO')
+    expect(report.identity.agent_id).toBe('state_daemon')
+    expect(report.identity.expected_agent_id).toBe('state_daemon')
+  })
+
   test('persistent or loaded allowlist without a typed Issue #917 overlay is a blocker', () => {
     const report = build({
       plistText: plist({ extraEnv: { STATE_DAEMON_AGENT_ALLOWLIST: 'aun' } }),
@@ -307,14 +328,14 @@ describe('#603 state-daemon LaunchAgent readiness diagnostic', () => {
 
   test('wrong AGENT_ID/listener identity is a blocker', () => {
     const report = build({
-      plistText: plist({ agentId: 'codex-cto' }),
-      expectedAgentId: 'state-daemon',
+      plistText: plist({ agentId: 'aun' }),
+      expectedAgentId: 'state_daemon',
     })
 
     expect(report.ok).toBe(false)
     expect(report.blockers.map((item) => item.code)).toContain('AGENT_ID_MISMATCH')
-    expect(report.identity.agent_id).toBe('codex-cto')
-	  expect(report.identity.expected_agent_id).toBe('state-daemon')
+    expect(report.identity.agent_id).toBe('aun')
+	  expect(report.identity.expected_agent_id).toBe('state_daemon')
 	})
 
   test('expected commit drift is a blocker without changing LaunchAgent state', () => {

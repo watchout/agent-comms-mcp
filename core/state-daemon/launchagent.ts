@@ -19,6 +19,7 @@ import {
 
 export const STATE_DAEMON_LAUNCH_AGENT_LABEL = 'com.agent-comms.state-daemon'
 export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist`
+export const DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID = 'state_daemon'
 export const DEFAULT_STATE_DAEMON_BUN_PATH = '/Users/yuji/.bun/bin/bun'
 export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 export const DEFAULT_STATE_DAEMON_DENYLIST = 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
@@ -376,6 +377,7 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
   const mergedExtraEnv = { ...plan.extraEnv, ...extraEnv }
   const env: Record<string, string> = {
     NODE_ENV: 'production',
+    AGENT_ID: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
     DATABASE_URL: plan.databaseUrl,
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '1',
     STATE_DAEMON_CODEX_RUNNER_DATABASE_URL: plan.databaseUrl,
