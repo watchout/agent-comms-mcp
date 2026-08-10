@@ -377,7 +377,6 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
   const mergedExtraEnv = { ...plan.extraEnv, ...extraEnv }
   const env: Record<string, string> = {
     NODE_ENV: 'production',
-    AGENT_ID: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
     DATABASE_URL: plan.databaseUrl,
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '1',
     STATE_DAEMON_CODEX_RUNNER_DATABASE_URL: plan.databaseUrl,
@@ -390,6 +389,9 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
     USER: process.env.USER ?? 'yuji',
     PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     ...mergedExtraEnv,
+    // The shared listener is never a bot-scoped runtime. Keep the canonical
+    // identity last so restore inputs cannot accidentally turn it into one.
+    AGENT_ID: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   }
   if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) {
     delete env.STATE_DAEMON_AGENT_ALLOWLIST

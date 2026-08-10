@@ -2871,8 +2871,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
       const args = [
         'scripts/state-daemon-launchagent.ts', 'restore', '--commit', context.repoHead ?? '',
-        '--agent-allowlist', context.agentId, '--bootstrap-safe-defaults',
-        ...(env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite' ? [] : ['--configuration-reconciler-enabled']),
+        '--bootstrap-safe-defaults',
         ...(env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite'
           ? ['--sqlite-path', realpathOrResolve(env.AGENT_COM_SQLITE_PATH || join(repoRoot, 'agent-com.db'))]
           : ['--database-url', env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp']),

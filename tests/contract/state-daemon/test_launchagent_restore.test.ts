@@ -119,19 +119,23 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(plist).not.toContain('STATE_DAEMON_CANARY_OVERLAY_')
   })
 
-  test('restore renderer preserves a safe explicit global listener identity without adding an allowlist', () => {
-    const plan = buildStateDaemonRestorePlan({
+  test('restore renderer pins the canonical global listener identity against bot-scoped overrides', () => {
+    const planOverride = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',
       restoreRoot: '/Users/yuji/.agent-comms/state-daemon/checkouts',
       launchAgentsDir: '/Users/yuji/Library/LaunchAgents',
+      extraEnv: { AGENT_ID: 'aun' },
     })
-    const config = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan, {
-      AGENT_ID: 'state-daemon',
+    const planConfig = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(planOverride))
+    const renderConfig = parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(planOverride, {
+      AGENT_ID: 'aun',
     }))
 
-    expect(config.environmentVariables.AGENT_ID).toBe('state-daemon')
-    expect(config.environmentVariables.AGENT_ID).not.toBe('aun')
-    expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
+    for (const config of [planConfig, renderConfig]) {
+      expect(config.environmentVariables.AGENT_ID).toBe(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID)
+      expect(config.environmentVariables.AGENT_ID).not.toBe('aun')
+      expect(config.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
+    }
   })
 
   test('Issue #917 typed canary overlay accepts one exact cohort target with complete rollback evidence', () => {

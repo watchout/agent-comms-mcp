@@ -10,6 +10,7 @@ import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
   DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
+  parseStateDaemonLaunchAgentPlist,
   renderStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
   type StateDaemonRestorePlan,
@@ -725,6 +726,7 @@ describe('aun bootstrap clean-host journal', () => {
     let daemonLoaded = false
     let queueReceiveCount = 0
     let syntheticPid = 50_000
+    const stateDaemonRestoreCalls: string[][] = []
     const stateDaemonReadinessCalls: string[][] = []
     const nativeTuple = () => JSON.stringify({
       name: 'aun', enabled: true,
@@ -777,6 +779,7 @@ describe('aun bootstrap clean-host journal', () => {
       }
       if (command === process.execPath && args[0] === '--version') return { exitCode: 0, stdout: '1.3.11\n', stderr: '', pid: ++syntheticPid }
       if (command === process.execPath && args[0] === 'scripts/state-daemon-launchagent.ts') {
+        stateDaemonRestoreCalls.push([...args])
         const plistPath = join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
         mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
         const plan: StateDaemonRestorePlan = {
@@ -816,6 +819,18 @@ describe('aun bootstrap clean-host journal', () => {
     expect(first.status).toBe('READY')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonRestoreCalls).toHaveLength(1)
+    expect(stateDaemonRestoreCalls[0]).toContain('--bootstrap-safe-defaults')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('--agent-allowlist')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('--configuration-reconciler-enabled')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('clean-default')
+    const restoredDaemon = parseStateDaemonLaunchAgentPlist(readFileSync(
+      join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME),
+      'utf8',
+    ))
+    expect(restoredDaemon.environmentVariables.AGENT_ID).toBe(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID)
+    expect(restoredDaemon.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
+    expect(restoredDaemon.environmentVariables.STATE_DAEMON_CONFIGURATION_RECONCILER_ENABLED).toBeUndefined()
     expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(1)
     expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
     expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
@@ -871,6 +886,7 @@ describe('aun bootstrap clean-host journal', () => {
     const second = await bootstrap(input, { run })
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonRestoreCalls).toHaveLength(1)
     expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(2)
     expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
     expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
