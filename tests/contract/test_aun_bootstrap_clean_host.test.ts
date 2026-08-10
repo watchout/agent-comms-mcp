@@ -306,7 +306,7 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  test('B5-CONCURRENCY-001 and B5-FINAL-TUPLE-READBACK-001 bind readback and reject every authoritative tuple drift', async () => {
+  test('B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -360,6 +360,7 @@ describe('aun bootstrap clean-host journal', () => {
       });
     `
     let ordinaryHeartbeatAdvances = 0
+    let providerTransportDrift = false
     const run = async (command: string, args: string[]) => {
       const joined = args.join(' ')
       if (command === process.execPath && joined.includes('agent profile get')) {
@@ -384,7 +385,10 @@ describe('aun bootstrap clean-host journal', () => {
           exitCode: 0,
           stdout: JSON.stringify({
             enabled: true,
-            transport: { type: 'stdio', command: process.execPath, args: ['-e', recoveryFixture], env: {} },
+            transport: {
+              type: 'stdio', command: process.execPath,
+              args: ['-e', providerTransportDrift ? `${recoveryFixture}\n// drift` : recoveryFixture], env: {},
+            },
           }),
           stderr: '',
         }
@@ -465,6 +469,121 @@ describe('aun bootstrap clean-host journal', () => {
         'B5_MEMORY_READINESS',
       )
       expect(restoredReadback.ok).toBe(true)
+
+      const unboundSameHeadReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          priorState: { mutations: [] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(unboundSameHeadReadback.ok).toBe(true)
+
+      const successorRepoRoot = join(home, 'successor-release')
+      mkdirSync(successorRepoRoot)
+      const incrementalReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(incrementalReadback.ok).toBe(true)
+      expect(incrementalReadback.evidenceRefs).toContain(
+        `memory-runtime-binding:bound_runtime_receipt:${reuseRun.outcome.mutation?.rollback_payload?.runtime_tuple_digest}`,
+      )
+
+      const unboundIncrementalReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(unboundIncrementalReadback.ok).toBe(false)
+
+      const wrongDigestMutation = structuredClone(reuseRun.outcome.mutation!)
+      wrongDigestMutation.rollback_payload = {
+        ...wrongDigestMutation.rollback_payload,
+        runtime_tuple_digest: '0'.repeat(64),
+      }
+      const wrongDigestReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [wrongDigestMutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongDigestReadback.ok).toBe(false)
+      expect(wrongDigestReadback.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
+
+      const wrongAgentReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          agentId: 'b5-concurrency-foreign',
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongAgentReadback.ok).toBe(false)
+
+      const wrongEvidenceMutation = structuredClone(reuseRun.outcome.mutation!)
+      wrongEvidenceMutation.rollback_payload = {
+        ...wrongEvidenceMutation.rollback_payload,
+        evidence_id: '999999999',
+      }
+      const wrongEvidenceReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [wrongEvidenceMutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongEvidenceReadback.ok).toBe(false)
+
+      await driftDb.execute(
+        `UPDATE agent_runtime_instances SET status = 'stopped'
+          WHERE runtime_instance_id = $1`,
+        [createdReceipts[0].runtime_instance_id],
+      )
+      const inactiveReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(inactiveReadback.ok).toBe(false)
+      await driftDb.execute(
+        `UPDATE agent_runtime_instances SET status = 'running'
+          WHERE runtime_instance_id = $1`,
+        [createdReceipts[0].runtime_instance_id],
+      )
+
+      providerTransportDrift = true
+      const transportMismatchReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(transportMismatchReadback.ok).toBe(false)
+      providerTransportDrift = false
     } finally {
       await driftDb.close()
     }
@@ -487,7 +606,7 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBe(4)
+    expect(ordinaryHeartbeatAdvances).toBe(7)
     await readback.close()
   })
 

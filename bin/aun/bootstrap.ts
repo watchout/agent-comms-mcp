@@ -2344,16 +2344,60 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         mutationPayload.runtime_instance_id ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? '',
       ).trim()
       const readbackProfile = selectedRuntimeInstanceId ? await profileGet(context.agentId) : null
-      const expectedTuple = selectedRuntimeInstanceId
+      const releaseContextTuple = selectedRuntimeInstanceId
         ? expectedRuntimeReceiptTuple(context, env, readbackProfile)
         : null
-      const expectedTupleDigest = expectedTuple ? bootstrapDigest(expectedTuple) : null
       const boundTupleDigest = typeof mutationPayload.runtime_tuple_digest === 'string'
         ? mutationPayload.runtime_tuple_digest
         : null
-      const tupleBindingMatches = !mutation
-        || (Boolean(boundTupleDigest) && expectedTupleDigest === boundTupleDigest)
-      if (selectedRuntimeInstanceId && (!expectedTuple || !tupleBindingMatches)) {
+      let expectedTuple = releaseContextTuple
+      let selectedRuntimeRowPresent = false
+      let selectedRuntimeTupleDigest: string | null = null
+      let currentProviderIdentityMatches = false
+      let tupleBindingMatches = !mutation
+      let tupleBindingSource: 'release_context' | 'bound_runtime_receipt' = 'release_context'
+      if (mutation && selectedRuntimeInstanceId && releaseContextTuple && boundTupleDigest) {
+        const selected = await withBootstrapDb(env, (db) => db.queryOne<any>(
+          `SELECT agent_id, runtime_engine, runtime_kind, session_name, process_id,
+                  port, checkout_path, commit_sha, status, metadata
+             FROM agent_runtime_instances
+            WHERE runtime_instance_id = $1 AND agent_id = $2`,
+          [selectedRuntimeInstanceId, context.agentId],
+        ), { readonly: true })
+        selectedRuntimeRowPresent = Boolean(selected)
+        const metadata = parseJsonRecord(selected?.metadata)
+        const selectedTuple: RuntimeReceiptTuple | null = selected
+          && selected.runtime_kind === 'bootstrap_bound_provider'
+          && (selected.status === 'running' || selected.status === 'active')
+          && typeof selected.checkout_path === 'string' && selected.checkout_path.trim()
+          && typeof selected.commit_sha === 'string' && /^[0-9a-f]{40}$/.test(selected.commit_sha)
+          ? {
+              agent_id: String(selected.agent_id),
+              runtime_engine: String(selected.runtime_engine) as BootstrapResolvedRuntime,
+              session_name: String(selected.session_name),
+              process_id: Number(selected.process_id),
+              port: Number(selected.port),
+              checkout_path: realpathOrResolve(selected.checkout_path),
+              commit_sha: selected.commit_sha,
+            }
+          : null
+        selectedRuntimeTupleDigest = selectedTuple ? bootstrapDigest(selectedTuple) : null
+        currentProviderIdentityMatches = Boolean(selectedTuple)
+          && selectedTuple!.agent_id === releaseContextTuple.agent_id
+          && selectedTuple!.runtime_engine === releaseContextTuple.runtime_engine
+          && selectedTuple!.session_name === releaseContextTuple.session_name
+          && selectedTuple!.process_id === releaseContextTuple.process_id
+          && selectedTuple!.port === releaseContextTuple.port
+        tupleBindingMatches = currentProviderIdentityMatches
+          && selectedRuntimeTupleDigest === boundTupleDigest
+          && metadata.tuple_digest === boundTupleDigest
+        if (tupleBindingMatches) {
+          expectedTuple = selectedTuple
+          tupleBindingSource = 'bound_runtime_receipt'
+        }
+      }
+      if ((mutation && !selectedRuntimeInstanceId)
+        || (selectedRuntimeInstanceId && (!expectedTuple || !tupleBindingMatches))) {
         return {
           ok: false,
           reasonCodes: [mutation ? 'NO_GO_POST_MUTATION_READBACK' : 'NO_GO_RUNTIME_RECEIPT'],
@@ -2369,6 +2413,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             commit_present: Boolean(context.repoHead),
             tuple_binding_present: Boolean(boundTupleDigest),
             tuple_binding_matches: tupleBindingMatches,
+            tuple_binding_source: tupleBindingSource,
+            selected_runtime_row_present: selectedRuntimeRowPresent,
+            selected_runtime_tuple_digest: selectedRuntimeTupleDigest,
+            current_provider_identity_matches: currentProviderIdentityMatches,
           })}`],
         }
       }
@@ -2422,7 +2470,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       return gate.ok && runtimeMatches && mutationMatches
         ? {
             ok: true,
-            evidenceRefs: [`memory-readback:${bootstrapDigest(gate)}`],
+            evidenceRefs: [
+              `memory-readback:${bootstrapDigest(gate)}`,
+              `memory-runtime-binding:${tupleBindingSource}:${selectedRuntimeTupleDigest ?? bootstrapDigest(expectedTuple ?? {})}`,
+            ],
             readinessPredicates: { memory_recovery_ready: true, runtime_receipt_present: true },
             readbackDigest: mutation?.actual_after_digest ?? bootstrapDigest(gate),
           }
