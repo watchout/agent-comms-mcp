@@ -87,6 +87,62 @@ export const SHIRUBE_D1_AUTO_RECEIVE_SOURCE = 'state-daemon-d1-auto-receive' as 
 
 type RuntimeV2Invoker = (options: RuntimeV2CliOptions) => Promise<RuntimeV2CliResult>
 
+export const STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR = 'STATE_DAEMON_DIRECT_ENTRY_ARGS_UNSUPPORTED' as const
+export const STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS = [
+  'bun cli/index.ts state-daemon readiness --format json',
+  'bun cli/index.ts state-daemon queue-readiness --agent-id <id> --format json',
+] as const
+
+export type StateDaemonDirectEntryArgvValidation =
+  | {
+      ok: true
+      code: null
+      argv: []
+    }
+  | {
+      ok: false
+      code: typeof STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR
+      argv: string[]
+      diagnosticCommands: typeof STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS
+    }
+
+/**
+ * This file is the daemon-only entry point. Diagnostics belong to cli/index.ts;
+ * accepting their arguments here would silently start another LISTEN process.
+ */
+export function validateStateDaemonDirectEntryArgv(
+  argv: readonly string[] = process.argv.slice(2),
+): StateDaemonDirectEntryArgvValidation {
+  if (argv.length === 0) return { ok: true, code: null, argv: [] }
+  return {
+    ok: false,
+    code: STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR,
+    argv: [...argv],
+    diagnosticCommands: STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS,
+  }
+}
+
+export class StateDaemonDirectEntryArgsError extends Error {
+  readonly code = STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR
+  readonly argv: string[]
+
+  constructor(validation: Extract<StateDaemonDirectEntryArgvValidation, { ok: false }>) {
+    super(
+      `${validation.code}: bin/state-daemon.ts accepts no arguments; use `
+      + validation.diagnosticCommands.join(' or '),
+    )
+    this.name = 'StateDaemonDirectEntryArgsError'
+    this.argv = validation.argv
+  }
+}
+
+export function assertStateDaemonDirectEntryArgv(
+  argv: readonly string[] = process.argv.slice(2),
+): void {
+  const validation = validateStateDaemonDirectEntryArgv(argv)
+  if (!validation.ok) throw new StateDaemonDirectEntryArgsError(validation)
+}
+
 /** Production bridge from queue arrival to the canonical runtime-v2 D1 path. */
 export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoReceiveDispatcher {
   constructor(
@@ -900,6 +956,7 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
 }
 
 export async function main(): Promise<void> {
+  assertStateDaemonDirectEntryArgv(process.argv.slice(2))
   // Fail before DB connection, daemon construction, LISTEN, or any runtime
   // effect when a host allowlist lacks the complete Issue #917 overlay.
   assertStateDaemonDirectEntryEnv(process.env)

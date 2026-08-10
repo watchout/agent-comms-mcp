@@ -14,7 +14,10 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  assertStateDaemonDirectEntryArgv,
   assertStateDaemonDirectEntryEnv,
+  STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR,
+  validateStateDaemonDirectEntryArgv,
   validateStateDaemonDirectEntryEnv,
 } from '../../../bin/state-daemon'
 import { STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST } from '../../../core/state-daemon/launchagent'
@@ -96,10 +99,32 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
   test('direct entry validates a temporary allowlist overlay before opening PostgreSQL', () => {
     const mainIdx = SRC.indexOf('export async function main()')
     const mainBody = SRC.slice(mainIdx, mainIdx + 1200)
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryArgv(process.argv.slice(2))')).toBeGreaterThan(-1)
     expect(mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)')).toBeGreaterThan(-1)
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryArgv(process.argv.slice(2))')).toBeLessThan(
+      mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)'),
+    )
     expect(mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)')).toBeLessThan(
       mainBody.indexOf('new Client({ connectionString: connStr })'),
     )
+  })
+})
+
+describe('m4 — daemon-only direct-entry argv fail-closed', () => {
+  test('empty argv is the only accepted daemon launch shape', () => {
+    expect(validateStateDaemonDirectEntryArgv([])).toEqual({ ok: true, code: null, argv: [] })
+    expect(() => assertStateDaemonDirectEntryArgv([])).not.toThrow()
+  })
+
+  test.each([
+    ['status', '--json'],
+    ['queue-readiness', '--agent-id', 'codex-audit', '--json'],
+    ['--json'],
+  ])('rejects every non-empty direct-entry argv tuple: %p', (...argv) => {
+    const result = validateStateDaemonDirectEntryArgv(argv)
+    expect(result.ok).toBe(false)
+    expect(result.code).toBe(STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR)
+    expect(() => assertStateDaemonDirectEntryArgv(argv)).toThrow(STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR)
   })
 })
 
