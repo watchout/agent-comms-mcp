@@ -27,9 +27,16 @@
  *   - docs/agent-com-message-queue-spec.md §3.3 / §7
  *   - github.com/watchout/agent-comms-mcp/issues/129
  */
-import { describe, test, expect } from 'bun:test'
+import { afterEach, beforeEach, describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  consumeOneOutboundRow,
+  OUTBOUND_QUEUE_EXACT_FENCE_ENV,
+  parseOutboundQueueExactFence,
+  reclaimOrphanOutboundRows,
+  setDbGetter,
+} from '../../adapters/outbound-consumer'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
@@ -193,6 +200,117 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
   })
   test('consumer can be disabled via OUTBOUND_QUEUE_CONSUMER=0', () => {
     expect(SERVER_SRC).toMatch(/OUTBOUND_QUEUE_CONSUMER\s*===\s*'0'/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2b: bounded internal-canary correlation fence (Issue #602)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T2b — exact outbound correlation fence', () => {
+  const ROOT_MESSAGE_ID = '10000000-0000-4000-8000-000000000001'
+  const priorFence = process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+
+  type QueryCall = { sql: string; params?: any[] }
+
+  function activeFence(rootMessageIds = [ROOT_MESSAGE_ID]): string {
+    return JSON.stringify({
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+      root_message_ids: rootMessageIds,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  }
+
+  function installRecordingDb(calls: QueryCall[]): void {
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        return { rows: [], rowCount: 0 }
+      },
+    }), 'aun')
+  }
+
+  beforeEach(() => {
+    delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+  })
+
+  afterEach(() => {
+    if (priorFence === undefined) delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+    else process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = priorFence
+  })
+
+  test('unset fence preserves the legacy unfiltered claim and parameter shape', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+
+    await consumeOneOutboundRow()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).not.toContain('correlated_message')
+    expect(calls[0].params).toEqual(['aun'])
+  })
+
+  test('active fence limits atomic claim to exact roots and their direct replies', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFence()
+
+    await consumeOneOutboundRow()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toContain('outbound_queue.message_id = ANY($2::text[])')
+    expect(calls[0].sql).toContain('correlated_message.id::text = outbound_queue.message_id')
+    expect(calls[0].sql).toContain('correlated_message.reply_to::text = ANY($2::text[])')
+    expect(calls[0].sql).toContain('correlated_message.author_id = $1')
+    expect(calls[0].params).toEqual(['aun', [ROOT_MESSAGE_ID]])
+  })
+
+  test('active fence limits both orphan-reclaim mutations to the same exact correlation set', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFence()
+
+    await reclaimOrphanOutboundRows()
+
+    expect(calls).toHaveLength(2)
+    for (const call of calls) {
+      expect(call.sql).toContain('outbound_queue.message_id = ANY($3::text[])')
+      expect(call.sql).toContain('correlated_message.reply_to::text = ANY($3::text[])')
+      expect(call.sql).toContain('correlated_message.author_id = $1')
+      expect(call.params?.[0]).toBe('aun')
+      expect(call.params?.[2]).toEqual([ROOT_MESSAGE_ID])
+    }
+  })
+
+  test('invalid, missing-field, expired, and duplicate fence values fail closed before DB access', async () => {
+    const fixedNow = Date.parse('2026-08-12T00:00:00.000Z')
+    const cases: Array<[string, string, string]> = [
+      ['invalid JSON', '{', 'invalid_json'],
+      ['missing roots', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        expires_at: '2026-08-12T00:01:00.000Z',
+      }), 'unexpected_or_missing_fields'],
+      ['expired', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        root_message_ids: [ROOT_MESSAGE_ID],
+        expires_at: '2026-08-11T23:59:59.000Z',
+      }), 'expired_fence'],
+      ['duplicate roots', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        root_message_ids: [ROOT_MESSAGE_ID, ROOT_MESSAGE_ID.toUpperCase()],
+        expires_at: '2026-08-12T00:01:00.000Z',
+      }), 'duplicate_root_message_id'],
+    ]
+
+    for (const [label, raw, reason] of cases) {
+      expect(parseOutboundQueueExactFence(raw, fixedNow), label).toEqual({ kind: 'invalid', reason })
+    }
+
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = '{'
+    await consumeOneOutboundRow()
+    await reclaimOrphanOutboundRows()
+    expect(calls).toHaveLength(0)
   })
 })
 

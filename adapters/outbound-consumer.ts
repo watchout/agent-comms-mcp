@@ -66,6 +66,102 @@ export function setDbGetter(fn: DbGetter, agentId: string): void {
 export const OUTBOUND_POLL_INTERVAL_MS = 1000
 export const OUTBOUND_ORPHAN_TICK_MS = 60_000
 export const OUTBOUND_BACKOFF_MAX_MS = 30_000
+export const OUTBOUND_QUEUE_EXACT_FENCE_ENV = 'OUTBOUND_QUEUE_EXACT_FENCE'
+
+const OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA = 'agent-comms/outbound-exact-correlation-fence/v1'
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MAX_FENCE_ROOT_MESSAGE_IDS = 32
+
+export type OutboundQueueExactFence =
+  | { kind: 'unfenced' }
+  | { kind: 'active'; rootMessageIds: string[]; expiresAt: string }
+  | { kind: 'invalid'; reason: string }
+
+/**
+ * Parse the optional exact-correlation fence used by bounded internal
+ * canaries. An absent value preserves the legacy unbounded-by-correlation
+ * consumer behavior. Once the variable is present, every malformed,
+ * incomplete, duplicate, or expired value fails closed.
+ */
+export function parseOutboundQueueExactFence(
+  raw: string | undefined,
+  nowMs = Date.now(),
+): OutboundQueueExactFence {
+  if (raw === undefined) return { kind: 'unfenced' }
+  if (raw.trim() === '') return { kind: 'invalid', reason: 'empty_fence' }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { kind: 'invalid', reason: 'invalid_json' }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { kind: 'invalid', reason: 'invalid_shape' }
+  }
+
+  const value = parsed as Record<string, unknown>
+  const allowedKeys = ['expires_at', 'root_message_ids', 'schema_version']
+  const actualKeys = Object.keys(value).sort()
+  if (actualKeys.length !== allowedKeys.length || actualKeys.some((key, index) => key !== allowedKeys[index])) {
+    return { kind: 'invalid', reason: 'unexpected_or_missing_fields' }
+  }
+  if (value.schema_version !== OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA) {
+    return { kind: 'invalid', reason: 'unsupported_schema' }
+  }
+  if (!Array.isArray(value.root_message_ids)
+      || value.root_message_ids.length === 0
+      || value.root_message_ids.length > MAX_FENCE_ROOT_MESSAGE_IDS) {
+    return { kind: 'invalid', reason: 'invalid_root_message_ids' }
+  }
+
+  const rootMessageIds: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of value.root_message_ids) {
+    if (typeof candidate !== 'string' || !UUID_PATTERN.test(candidate)) {
+      return { kind: 'invalid', reason: 'invalid_root_message_id' }
+    }
+    const canonical = candidate.toLowerCase()
+    if (seen.has(canonical)) return { kind: 'invalid', reason: 'duplicate_root_message_id' }
+    seen.add(canonical)
+    rootMessageIds.push(canonical)
+  }
+
+  if (typeof value.expires_at !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/.test(value.expires_at)) {
+    return { kind: 'invalid', reason: 'invalid_expires_at' }
+  }
+  const expiresAtMs = Date.parse(value.expires_at)
+  if (!Number.isFinite(expiresAtMs)) return { kind: 'invalid', reason: 'invalid_expires_at' }
+  if (expiresAtMs <= nowMs) return { kind: 'invalid', reason: 'expired_fence' }
+
+  return { kind: 'active', rootMessageIds, expiresAt: value.expires_at }
+}
+
+function readOutboundQueueExactFence(): OutboundQueueExactFence {
+  return parseOutboundQueueExactFence(process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV])
+}
+
+function correlationFenceSql(fence: OutboundQueueExactFence, parameter: number): string {
+  if (fence.kind !== 'active') return ''
+  return `
+          AND (
+            outbound_queue.message_id = ANY($${parameter}::text[])
+            OR EXISTS (
+              SELECT 1
+                FROM agent_messages AS correlated_message
+               WHERE correlated_message.id::text = outbound_queue.message_id
+                 AND correlated_message.reply_to::text = ANY($${parameter}::text[])
+                 AND correlated_message.author_id = $1
+            )
+          )`
+}
+
+function logInvalidExactFence(operation: string, fence: Extract<OutboundQueueExactFence, { kind: 'invalid' }>): void {
+  process.stderr.write(
+    `agent-comms: outbound ${operation} disabled — ${OUTBOUND_QUEUE_EXACT_FENCE_ENV} failed closed (${fence.reason})\n`,
+  )
+}
 
 // Force-release the re-entrancy guard if a single tick runs longer than this.
 // Observed 2026-04-13: CTO consumer wedged ~2h with rows stuck at
@@ -265,8 +361,17 @@ export async function consumeOneOutboundRow(): Promise<void> {
     )
   }, OUTBOUND_TICK_TIMEOUT_MS)
   try {
+    const fence = readOutboundQueueExactFence()
+    if (fence.kind === 'invalid') {
+      logInvalidExactFence('consumer', fence)
+      return
+    }
     const client = getDb ? await getDb() : null
     if (!client) return
+    const fenceSql = correlationFenceSql(fence, 2)
+    const claimParams = fence.kind === 'active'
+      ? [AGENT_ID, fence.rootMessageIds]
+      : [AGENT_ID]
 
     // §3.3 Atomic claim: flip status 'pending' → 'claimed' + set claimed_at
     // + filter by adapter owner so Codex-only authors can still project via
@@ -283,6 +388,7 @@ export async function consumeOneOutboundRow(): Promise<void> {
            WHERE status = 'pending'
              AND COALESCE(consumer_agent_id, agent_id) = $1
              AND (next_retry_at IS NULL OR next_retry_at <= now())
+             ${fenceSql}
            ORDER BY created_at ASC
            LIMIT 1
            FOR UPDATE SKIP LOCKED
@@ -290,7 +396,7 @@ export async function consumeOneOutboundRow(): Promise<void> {
         RETURNING id, message_id, channel_external_id, content,
                   mentions_display, attachments, reply_to_discord_id,
                   attempts, max_attempts, discord_message_id`,
-      [AGENT_ID],
+      claimParams,
     ).catch(err => {
       process.stderr.write(`agent-comms: outbound consumer claim failed: ${err}\n`)
       return null
@@ -449,9 +555,18 @@ export async function consumeOneOutboundRow(): Promise<void> {
 // the adversarial loop where an exhausted row could be reclaimed
 // indefinitely without ever hitting the failure path.
 export async function reclaimOrphanOutboundRows(): Promise<void> {
+  const fence = readOutboundQueueExactFence()
+  if (fence.kind === 'invalid') {
+    logInvalidExactFence('orphan reclaim', fence)
+    return
+  }
   const client = getDb ? await getDb() : null
   if (!client) return
   const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
+  const fenceSql = correlationFenceSql(fence, 3)
+  const reclaimParams = fence.kind === 'active'
+    ? [AGENT_ID, timeoutSec, fence.rootMessageIds]
+    : [AGENT_ID, timeoutSec]
   try {
     // Stage A: rows under the attempts cap return to 'pending'.
     // Inline SQL mirrors computeOutboundRetryDelayMs():
@@ -471,8 +586,9 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
           AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts < max_attempts
+          ${fenceSql}
         RETURNING id, attempts`,
-      [AGENT_ID, timeoutSec],
+      reclaimParams,
     )
     if (reclaimed.rowCount && reclaimed.rowCount > 0) {
       process.stderr.write(
@@ -492,8 +608,9 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
           AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts >= max_attempts
+          ${fenceSql}
         RETURNING id, attempts, max_attempts`,
-      [AGENT_ID, timeoutSec],
+      reclaimParams,
     )
     if (exhausted.rowCount && exhausted.rowCount > 0) {
       process.stderr.write(
@@ -508,6 +625,11 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
 export function startOutboundConsumer(): void {
   if (process.env.OUTBOUND_QUEUE_CONSUMER === '0') {
     process.stderr.write('agent-comms: outbound queue consumer disabled via env\n')
+    return
+  }
+  const fence = readOutboundQueueExactFence()
+  if (fence.kind === 'invalid') {
+    logInvalidExactFence('consumer start', fence)
     return
   }
   if (outboundConsumerInterval !== null) return
