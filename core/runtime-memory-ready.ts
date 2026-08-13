@@ -1,3 +1,4 @@
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import { basename, isAbsolute } from 'node:path'
 
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
@@ -22,6 +23,11 @@ export type RuntimeMemoryReadyProjectResolutionErrorCode =
   | 'primary_workspace_ambiguous'
   | 'workspace_path_missing'
   | 'workspace_path_invalid'
+  | 'workspace_path_not_found'
+  | 'workspace_path_not_directory'
+  | 'workspace_path_realpath_failed'
+  | 'workspace_resolution_drift'
+  | 'workspace_resolution_token_invalid'
   | 'project_override_ambiguous'
   | 'project_override_mismatch'
 
@@ -36,11 +42,14 @@ export class RuntimeMemoryReadyProjectResolutionError extends Error {
 }
 
 export interface RuntimeMemoryReadyProjectResolution {
-  agent_id: string
-  project: string
-  workspace_path: string
-  source: RuntimeMemoryReadyProjectSource
-  explicit_project: string | null
+  readonly agent_id: string
+  readonly project: string
+  /** Canonical realpath retained under the established field name. */
+  readonly workspace_path: string
+  readonly canonical_workspace_path: string
+  readonly workspace_id: string | null
+  readonly source: RuntimeMemoryReadyProjectSource
+  readonly explicit_project: string | null
 }
 
 interface RuntimeMemoryReadyProjectAgentRow {
@@ -56,6 +65,157 @@ interface RuntimeMemoryReadyPrimaryWorkspaceRow {
 
 function normalizedProjectOverride(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function canonicalWorkspacePath(
+  agentId: string,
+  workspacePath: string,
+  source: RuntimeMemoryReadyProjectSource,
+): string {
+  if (!isAbsolute(workspacePath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_invalid', {
+      agent_id: agentId,
+      workspace_path: workspacePath,
+      source,
+    })
+  }
+  if (!existsSync(workspacePath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_not_found', {
+      agent_id: agentId,
+      workspace_path: workspacePath,
+      source,
+    })
+  }
+  let canonicalPath: string
+  try {
+    canonicalPath = realpathSync(workspacePath)
+  } catch (error) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_realpath_failed', {
+      agent_id: agentId,
+      workspace_path: workspacePath,
+      source,
+      error: (error as Error)?.message ?? String(error),
+    })
+  }
+  if (!isAbsolute(canonicalPath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_invalid', {
+      agent_id: agentId,
+      workspace_path: workspacePath,
+      canonical_workspace_path: canonicalPath,
+      source,
+    })
+  }
+  try {
+    if (!statSync(canonicalPath).isDirectory()) {
+      throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_not_directory', {
+        agent_id: agentId,
+        workspace_path: workspacePath,
+        canonical_workspace_path: canonicalPath,
+        source,
+      })
+    }
+  } catch (error) {
+    if (error instanceof RuntimeMemoryReadyProjectResolutionError) throw error
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_realpath_failed', {
+      agent_id: agentId,
+      workspace_path: workspacePath,
+      canonical_workspace_path: canonicalPath,
+      source,
+      error: (error as Error)?.message ?? String(error),
+    })
+  }
+  return canonicalPath
+}
+
+const RUNTIME_MEMORY_READY_RESOLUTION_IDENTITY_FIELDS = [
+  'agent_id',
+  'project',
+  'source',
+  'workspace_id',
+  'canonical_workspace_path',
+] as const
+
+/** Fail closed when the authoritative workspace changes after the pre-gate. */
+export function assertRuntimeMemoryReadyProjectResolutionCurrent(
+  expected: RuntimeMemoryReadyProjectResolution,
+  current: RuntimeMemoryReadyProjectResolution,
+): void {
+  const changed_fields = RUNTIME_MEMORY_READY_RESOLUTION_IDENTITY_FIELDS.filter(
+    (field) => expected[field] !== current[field],
+  )
+  if (changed_fields.length === 0) return
+  throw new RuntimeMemoryReadyProjectResolutionError('workspace_resolution_drift', {
+    agent_id: expected.agent_id,
+    changed_fields,
+    expected: Object.fromEntries(
+      RUNTIME_MEMORY_READY_RESOLUTION_IDENTITY_FIELDS.map((field) => [field, expected[field]]),
+    ),
+    current: Object.fromEntries(
+      RUNTIME_MEMORY_READY_RESOLUTION_IDENTITY_FIELDS.map((field) => [field, current[field]]),
+    ),
+  })
+}
+
+/** Parse the immutable pre-gate token propagated to a runner child. */
+export function runtimeMemoryReadyProjectResolutionFromEnv(
+  env: Record<string, string | undefined>,
+): RuntimeMemoryReadyProjectResolution | null {
+  const raw = env.AUN_MEMORY_READY_RESOLUTION_JSON?.trim()
+  if (!raw) return null
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch (error) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_resolution_token_invalid', {
+      reason: 'invalid_json',
+      error: (error as Error)?.message ?? String(error),
+    })
+  }
+  const token = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+  const agentId = normalizedProjectOverride(token?.agent_id)
+  const project = normalizedProjectOverride(token?.project)
+  const workspacePath = normalizedProjectOverride(token?.workspace_path)
+  const canonicalPath = normalizedProjectOverride(token?.canonical_workspace_path)
+  const source = normalizedProjectOverride(token?.source)
+  const workspaceId = token?.workspace_id === null
+    ? null
+    : normalizedProjectOverride(token?.workspace_id)
+  const explicitProject = token?.explicit_project === null
+    ? null
+    : normalizedProjectOverride(token?.explicit_project)
+  if (
+    !agentId
+    || !project
+    || !workspacePath
+    || !canonicalPath
+    || workspacePath !== canonicalPath
+    || !isAbsolute(canonicalPath)
+    || basename(canonicalPath) !== project
+    || !source
+    || (token?.workspace_id !== null && !workspaceId)
+    || (token?.explicit_project !== null && token?.explicit_project !== undefined && !explicitProject)
+  ) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_resolution_token_invalid', {
+      reason: 'invalid_shape',
+      agent_id: agentId,
+      project,
+      workspace_path: workspacePath,
+      canonical_workspace_path: canonicalPath,
+      workspace_id: workspaceId,
+      source,
+    })
+  }
+  return Object.freeze({
+    agent_id: agentId,
+    project,
+    workspace_path: workspacePath,
+    canonical_workspace_path: canonicalPath,
+    workspace_id: workspaceId,
+    source,
+    explicit_project: explicitProject,
+  })
 }
 
 export function runtimeMemoryReadyProjectOverrideFromEnv(
@@ -145,11 +305,13 @@ export async function resolveRuntimeMemoryReadyProject(
       home_directory_present: legacyHomePath !== null,
     })
   }
-  const project = basename(workspacePath)
-  if (!isAbsolute(workspacePath) || !project || project === '.' || project === '..') {
+  const resolvedWorkspacePath = canonicalWorkspacePath(input.agent_id, workspacePath, source)
+  const project = basename(resolvedWorkspacePath)
+  if (!project || project === '.' || project === '..') {
     throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_invalid', {
       agent_id: input.agent_id,
       workspace_path: workspacePath,
+      canonical_workspace_path: resolvedWorkspacePath,
       source,
     })
   }
@@ -160,17 +322,19 @@ export async function resolveRuntimeMemoryReadyProject(
       agent_id: input.agent_id,
       configured_project: explicitProject,
       derived_project: project,
-      workspace_path: workspacePath,
+      workspace_path: resolvedWorkspacePath,
       source,
     })
   }
-  return {
+  return Object.freeze({
     agent_id: input.agent_id,
     project,
-    workspace_path: workspacePath,
+    workspace_path: resolvedWorkspacePath,
+    canonical_workspace_path: resolvedWorkspacePath,
+    workspace_id: primaryRows[0]?.workspace_id ?? null,
     source,
     explicit_project: explicitProject,
-  }
+  })
 }
 
 export interface RuntimeMemoryReadyEvidenceInput {
@@ -256,6 +420,8 @@ export interface RuntimeMemoryReadyGateResult {
   valid_until: string | null
   current_runtime: RuntimeMemoryReadyCurrentRuntime | null
   details: Record<string, unknown>
+  /** Immutable authoritative workspace token captured by the pre-gate. */
+  project_resolution?: RuntimeMemoryReadyProjectResolution | null
 }
 
 interface AgentProfileRow {

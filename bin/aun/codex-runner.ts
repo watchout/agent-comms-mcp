@@ -371,7 +371,7 @@ function runCodexForFinalReply(item: RetainedWorkItem, opts: CodexRunnerOptions)
   args.push('-')
   try {
     const result = spawnSync(resolveCodexExecutable(), args, {
-      cwd: process.cwd(),
+      cwd: process.env.AUN_QUEUE_WORK_RUNTIME_CWD?.trim() || process.cwd(),
       env: process.env,
       input: buildAutoFinalPrompt(item, opts),
       encoding: 'utf-8',

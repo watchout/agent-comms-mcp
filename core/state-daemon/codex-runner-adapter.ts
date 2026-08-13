@@ -34,6 +34,7 @@ function toRuntimeInvocation(input: CodexRunnerInvocation): RuntimeRunnerInvocat
 
 export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunnerCommand {
   const runtimeInput = toRuntimeInvocation(input)
+  const memoryReadyResolution = input.memoryReadyResolution ?? null
   const args = [
     'bin/aun.ts',
     'codex-runner',
@@ -61,9 +62,11 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
       AGENT_ID: runtimeInput.agent_id,
       AGENT_COM_EXPECTED_AGENT_ID: runtimeInput.agent_id,
       DATABASE_URL: runtimeInput.database_url,
-      ...(input.memoryReadyProject?.trim() ? {
-        AGENT_MEMORY_PROJECT: input.memoryReadyProject.trim(),
-        AGENT_COMMS_MEMORY_READY_PROJECT: input.memoryReadyProject.trim(),
+      ...(memoryReadyResolution ? {
+        AGENT_MEMORY_PROJECT: memoryReadyResolution.project,
+        AGENT_COMMS_MEMORY_READY_PROJECT: memoryReadyResolution.project,
+        AUN_MEMORY_READY_RESOLUTION_JSON: JSON.stringify(memoryReadyResolution),
+        AUN_QUEUE_WORK_RUNTIME_CWD: memoryReadyResolution.canonical_workspace_path,
       } : {}),
     },
   }

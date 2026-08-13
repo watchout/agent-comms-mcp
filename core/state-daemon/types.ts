@@ -17,6 +17,9 @@ import type {
 import type {
   AllAgentCommunicationAdmissionGate,
 } from '../all-agent-communication-manifest'
+import type {
+  RuntimeMemoryReadyProjectResolution,
+} from '../runtime-memory-ready'
 
 /** spec §9 — full daemon configuration. Defaults match v0.6 §13.2. */
 export interface StateDaemonConfig {
@@ -354,8 +357,8 @@ export interface CodexRunnerInvocation {
   completionReason?: string | null
   autoFinalReply?: boolean
   payload?: unknown
-  /** Exact project derived by the state-daemon memory-readiness pre-gate. */
-  memoryReadyProject?: string | null
+  /** Immutable authoritative workspace token captured by the pre-gate. */
+  memoryReadyResolution?: RuntimeMemoryReadyProjectResolution | null
 }
 
 export interface CodexRunnerResult {
@@ -384,11 +387,11 @@ export interface HostRuntimeInvoker {
 export interface QueueWorkScheduler {
   runPending?(
     input: { queueId: number; agentId: string },
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void>
   runReceived(
     input: { queueId: number; agentId: string },
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void>
   runDone?(input: { queueId: number; agentId: string }): Promise<void>
 }

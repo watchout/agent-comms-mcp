@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
@@ -290,10 +290,13 @@ describe('runtime memory-ready evidence gate', () => {
 
 describe('runtime memory-ready target project resolution', () => {
   test('derives codex project from the exact active primary workspace binding', async () => {
+    const codexWorkspace = join(tmp, 'codex')
+    mkdirSync(codexWorkspace)
     await seedRuntime('codex-cto', 39130)
     await db.execute(
       `INSERT INTO agent_workspaces (workspace_id, name, local_path)
-       VALUES ('codex-primary', 'codex', '/Users/yuji/Developer/codex')`,
+       VALUES ('codex-primary', 'codex', $1)`,
+      [codexWorkspace],
     )
     await db.execute(
       `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
@@ -308,17 +311,22 @@ describe('runtime memory-ready target project resolution', () => {
     expect(resolved).toEqual({
       agent_id: 'codex-cto',
       project: 'codex',
-      workspace_path: '/Users/yuji/Developer/codex',
+      workspace_path: realpathSync(codexWorkspace),
+      canonical_workspace_path: realpathSync(codexWorkspace),
+      workspace_id: 'codex-primary',
       source: 'active_primary_workspace',
       explicit_project: 'codex',
     })
   })
 
   test('uses canonical workspace when no primary binding exists', async () => {
+    const codexWorkspace = join(tmp, 'codex')
+    mkdirSync(codexWorkspace)
     await seedRuntime('codex-cto', 39130)
     await db.execute(`ALTER TABLE agents ADD COLUMN canonical_workspace TEXT`)
     await db.execute(
-      `UPDATE agents SET canonical_workspace='/Users/yuji/Developer/codex' WHERE agent_id='codex-cto'`,
+      `UPDATE agents SET canonical_workspace=$1 WHERE agent_id='codex-cto'`,
+      [codexWorkspace],
     )
 
     const resolved = await resolveRuntimeMemoryReadyProject(db as any, { agent_id: 'codex-cto' })
@@ -328,11 +336,14 @@ describe('runtime memory-ready target project resolution', () => {
   })
 
   test('fails closed on ambiguous primary bindings and mismatched explicit override', async () => {
+    const codexWorkspace = join(tmp, 'codex')
+    mkdirSync(codexWorkspace)
     await seedRuntime('codex-cto', 39130)
     await db.execute(
       `INSERT INTO agent_workspaces (workspace_id, name, local_path)
-       VALUES ('codex-primary-a', 'codex-a', '/Users/yuji/Developer/codex'),
-              ('codex-primary-b', 'codex-b', '/Users/yuji/Developer/codex-shadow')`,
+       VALUES ('codex-primary-a', 'codex-a', $1),
+              ('codex-primary-b', 'codex-b', $2)`,
+      [codexWorkspace, join(tmp, 'codex-shadow')],
     )
     await db.execute(
       `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
@@ -351,6 +362,53 @@ describe('runtime memory-ready target project resolution', () => {
       agent_id: 'codex-cto',
       explicit_project: 'agent-comms-mcp',
     })).rejects.toMatchObject({ code: 'project_override_mismatch' })
+  })
+
+  test('canonicalizes a symlink workspace before deriving the project', async () => {
+    const canonicalWorkspace = join(tmp, 'canonical-project')
+    const lexicalWorkspace = join(tmp, 'lexical-project')
+    mkdirSync(canonicalWorkspace)
+    symlinkSync(canonicalWorkspace, lexicalWorkspace)
+    await seedRuntime('codex-cto', 39130)
+    await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+       VALUES ('codex-primary', 'lexical-project', $1)`,
+      [lexicalWorkspace],
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('codex-cto', 'codex-primary', 'primary', true)`,
+    )
+
+    const resolved = await resolveRuntimeMemoryReadyProject(db as any, { agent_id: 'codex-cto' })
+
+    expect(resolved.project).toBe('canonical-project')
+    expect(resolved.workspace_path).toBe(realpathSync(canonicalWorkspace))
+    expect(resolved.canonical_workspace_path).toBe(realpathSync(canonicalWorkspace))
+    expect(resolved.workspace_id).toBe('codex-primary')
+  })
+
+  test('fails closed when the authoritative workspace is missing or not a directory', async () => {
+    const regularFile = join(tmp, 'workspace-file')
+    writeFileSync(regularFile, 'not a directory')
+    await seedRuntime('codex-cto', 39130)
+    await db.execute(`ALTER TABLE agents ADD COLUMN canonical_workspace TEXT`)
+
+    await db.execute(
+      `UPDATE agents SET canonical_workspace=$1 WHERE agent_id='codex-cto'`,
+      [join(tmp, 'missing-workspace')],
+    )
+    await expect(resolveRuntimeMemoryReadyProject(db as any, {
+      agent_id: 'codex-cto',
+    })).rejects.toMatchObject({ code: 'workspace_path_not_found' })
+
+    await db.execute(
+      `UPDATE agents SET canonical_workspace=$1 WHERE agent_id='codex-cto'`,
+      [regularFile],
+    )
+    await expect(resolveRuntimeMemoryReadyProject(db as any, {
+      agent_id: 'codex-cto',
+    })).rejects.toMatchObject({ code: 'workspace_path_not_directory' })
   })
 
   test('rejects conflicting explicit project variables', () => {

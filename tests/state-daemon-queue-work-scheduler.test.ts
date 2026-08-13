@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
+  QueueWorkRunnerScheduler,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
@@ -25,6 +26,8 @@ import {
 } from './contract/state-daemon/fakes'
 
 const REPO = join(import.meta.dir, '..')
+const REPO_REALPATH = realpathSync(REPO)
+const REPO_PROJECT = basename(REPO_REALPATH)
 const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
 
 function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; rowCount: number } | null {
@@ -34,8 +37,8 @@ function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; r
         agent_id: agentId,
         profile_enabled: true,
         disabled_at: null,
-        canonical_workspace: '/repo/agent-comms-mcp',
-        home_directory: '/repo/agent-comms-mcp',
+        canonical_workspace: REPO_REALPATH,
+        home_directory: REPO_REALPATH,
       }] as T[],
       rowCount: 1,
     }
@@ -114,7 +117,7 @@ test('queue-work runtime workspace fails closed on missing, relative, or absent 
   const cases = [
     { rows: [], message: 'agent_mapping_missing' },
     { rows: [{ agent_id: 'codex-audit', canonical_workspace: 'relative/path' }], message: 'workspace_path_invalid' },
-    { rows: [{ agent_id: 'codex-audit', canonical_workspace: '/definitely/missing/aun-workspace' }], message: 'does not exist as a directory' },
+    { rows: [{ agent_id: 'codex-audit', canonical_workspace: '/definitely/missing/aun-workspace' }], message: 'workspace_path_not_found' },
   ]
   for (const fixture of cases) {
     await expect(resolveQueueWorkRuntimeWorkspace({
@@ -125,6 +128,118 @@ test('queue-work runtime workspace fails closed on missing, relative, or absent 
         return { rows: [] as T[], rowCount: 0 }
       },
     }, 'codex-audit')).rejects.toThrow(fixture.message)
+  }
+})
+
+test('same-basename workspace binding drift blocks both claim and dispatch', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'queue-work-binding-drift-'))
+  const workspaceA = join(root, 'binding-a', 'project')
+  const workspaceB = join(root, 'binding-b', 'project')
+  mkdirSync(workspaceA, { recursive: true })
+  mkdirSync(workspaceB, { recursive: true })
+  const expected = Object.freeze({
+    agent_id: 'codex-audit',
+    project: 'project',
+    workspace_path: realpathSync(workspaceA),
+    canonical_workspace_path: realpathSync(workspaceA),
+    workspace_id: 'workspace-a',
+    source: 'active_primary_workspace' as const,
+    explicit_project: null,
+  })
+  const drifted = Object.freeze({
+    ...expected,
+    workspace_path: realpathSync(workspaceB),
+    canonical_workspace_path: realpathSync(workspaceB),
+    workspace_id: 'workspace-b',
+  })
+  let claimCalls = 0
+  let dispatchCalls = 0
+  try {
+    const scheduler = new QueueWorkRunnerScheduler(
+      {},
+      REPO_REALPATH,
+      async () => drifted,
+      async () => {
+        claimCalls++
+        throw new Error('claim must not run after workspace drift')
+      },
+      async () => {
+        dispatchCalls++
+        throw new Error('dispatch must not run after workspace drift')
+      },
+    )
+
+    await expect(scheduler.runPending(
+      { queueId: 155900, agentId: 'codex-audit' },
+      expected,
+    )).rejects.toMatchObject({ code: 'workspace_resolution_drift' })
+    expect(claimCalls).toBe(0)
+    expect(dispatchCalls).toBe(0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('workspace binding drift after claim blocks runtime dispatch', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'queue-work-post-claim-drift-'))
+  const workspaceA = join(root, 'binding-a', 'project')
+  const workspaceB = join(root, 'binding-b', 'project')
+  mkdirSync(workspaceA, { recursive: true })
+  mkdirSync(workspaceB, { recursive: true })
+  const expected = Object.freeze({
+    agent_id: 'codex-audit',
+    project: 'project',
+    workspace_path: realpathSync(workspaceA),
+    canonical_workspace_path: realpathSync(workspaceA),
+    workspace_id: 'workspace-a',
+    source: 'active_primary_workspace' as const,
+    explicit_project: null,
+  })
+  const drifted = Object.freeze({
+    ...expected,
+    workspace_path: realpathSync(workspaceB),
+    canonical_workspace_path: realpathSync(workspaceB),
+    workspace_id: 'workspace-b',
+  })
+  let resolutionCalls = 0
+  let claimCalls = 0
+  let dispatchCalls = 0
+  try {
+    const scheduler = new QueueWorkRunnerScheduler(
+      {},
+      REPO_REALPATH,
+      async () => ++resolutionCalls === 1 ? expected : drifted,
+      async () => {
+        claimCalls++
+        return {
+          ok: true,
+          code: 0,
+          stdout: '',
+          stderr: '',
+          summary: {
+            claimed: {
+              queue_id: 155901,
+              claimed_by: 'codex-audit',
+              claimed_at: '2026-08-13T00:00:00.000000Z',
+              claim_expires_at: '2026-08-13T00:01:00.000000Z',
+            },
+          },
+        } as any
+      },
+      async () => {
+        dispatchCalls++
+        return { ok: true } as any
+      },
+    )
+
+    await expect(scheduler.runPending(
+      { queueId: 155901, agentId: 'codex-audit' },
+      expected,
+    )).rejects.toMatchObject({ code: 'workspace_resolution_drift' })
+    expect(claimCalls).toBe(1)
+    expect(dispatchCalls).toBe(0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
@@ -246,7 +361,7 @@ class PendingLlmDb implements DBClient {
         rows: [{
           id: 1,
           agent_id: this.agentId,
-          project: 'agent-comms-mcp',
+          project: REPO_PROJECT,
           runtime_instance_id: 'rt-queue-scheduler',
           profile_revision: null,
           profile_source: null,
@@ -269,6 +384,47 @@ class PendingLlmDb implements DBClient {
       }
     }
     return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
+class SameBasenameDispatchDriftDb implements DBClient {
+  private resolutionReads = 0
+
+  constructor(
+    private readonly delegate: PendingLlmDb,
+    private readonly agentId: string,
+    private readonly row: any,
+    private readonly workspaceBeforeGate: string,
+    private readonly workspaceBeforeDispatch: string,
+  ) {}
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('SELECT a.*') && sql.includes('FROM agents a')) {
+      this.resolutionReads++
+      const workspace = this.resolutionReads === 1
+        ? this.workspaceBeforeGate
+        : this.workspaceBeforeDispatch
+      return {
+        rows: [{
+          agent_id: this.agentId,
+          profile_enabled: true,
+          disabled_at: null,
+          canonical_workspace: workspace,
+          home_directory: workspace,
+        }] as T[],
+        rowCount: 1,
+      }
+    }
+    if (sql.includes('FROM agent_workspace_bindings')) {
+      return { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.includes('UPDATE agents') && sql.includes('last_wake_attempt_at=$1')) {
+      return { rows: [] as T[], rowCount: 1 }
+    }
+    if (sql.includes('SELECT status FROM message_queue WHERE id=$1')) {
+      return { rows: [{ status: this.row.status }] as T[], rowCount: 1 }
+    }
+    return this.delegate.query<T>(sql, params)
   }
 }
 
@@ -968,9 +1124,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const calls: Array<{ queueId: number; agentId: string }> = []
     const projects: Array<string | undefined> = []
     const scheduler: QueueWorkScheduler = {
-      async runPending(input, memoryReadyProject) {
+      async runPending(input, memoryReadyResolution) {
         calls.push(input)
-        projects.push(memoryReadyProject)
+        projects.push(memoryReadyResolution?.project)
       },
       async runReceived() {
         throw new Error('runReceived should not be called for pending events')
@@ -1018,11 +1174,82 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
 
     expect(calls).toEqual([{ queueId: 490, agentId }])
-    expect(projects).toEqual(['agent-comms-mcp'])
+    expect(projects).toEqual([REPO_PROJECT])
     expect(tmux.sentKeys).toEqual([])
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'pending_runner_invoked',
     })).toBe(1)
+  })
+
+  test('same-basename workspace drift after the pre-gate blocks direct Codex child dispatch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'state-daemon-direct-drift-'))
+    const workspaceA = join(root, 'binding-a', REPO_PROJECT)
+    const workspaceB = join(root, 'binding-b', REPO_PROJECT)
+    mkdirSync(workspaceA, { recursive: true })
+    mkdirSync(workspaceB, { recursive: true })
+    const agentId = 'codex-audit'
+    const row = {
+      id: 155902,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-155902',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'Audit exact workspace fence',
+        message_type: 'instruction',
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const delegate = new PendingLlmDb(agentId, row)
+    const db = new SameBasenameDispatchDriftDb(
+      delegate,
+      agentId,
+      row,
+      workspaceA,
+      workspaceB,
+    )
+    const invocations: unknown[] = []
+    const metrics = new FakeMetrics()
+    const alert = new FakeAlertSink()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics,
+      alert,
+      codexRunner: {
+        async invoke(input) {
+          invocations.push(input)
+          return { ok: true, code: 0 }
+        },
+      },
+      config: { codexRunnerEnabled: true },
+    })
+
+    try {
+      await daemon.start()
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: row.id,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+    } finally {
+      await daemon.stop()
+      rmSync(root, { recursive: true, force: true })
+    }
+
+    expect(invocations).toHaveLength(0)
+    expect(metrics.countInc('state_daemon_wake_actions_total', {
+      result: 'memory_ready_resolution_drift_blocked',
+      reason: 'workspace_resolution_drift',
+    })).toBe(1)
+    expect(alert.alerts.join('\n')).toContain('workspace_resolution_drift')
   })
 
   test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {

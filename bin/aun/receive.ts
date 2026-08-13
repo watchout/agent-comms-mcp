@@ -18,8 +18,10 @@ import {
   classifyQueueMessageType,
 } from '../../core/queue-message-classification'
 import {
+  assertRuntimeMemoryReadyProjectResolutionCurrent,
   evaluateRuntimeMemoryReadyGate,
   resolveRuntimeMemoryReadyProject,
+  runtimeMemoryReadyProjectResolutionFromEnv,
   runtimeMemoryReadyProjectOverrideFromEnv,
   RuntimeMemoryReadyProjectResolutionError,
   type RuntimeMemoryReadyGateResult,
@@ -1654,6 +1656,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
   }
 
   try {
+    const preGatedResolution = runtimeMemoryReadyProjectResolutionFromEnv(plan.env)
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
         let memoryReady: RuntimeMemoryReadyGateResult
@@ -1663,6 +1666,9 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
             require_enabled: false,
           })
+          if (preGatedResolution) {
+            assertRuntimeMemoryReadyProjectResolutionCurrent(preGatedResolution, project)
+          }
           memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
             agent_id: plan.env.AGENT_ID,
             expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
@@ -1672,8 +1678,11 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             ...memoryReady.details,
             project_source: project.source,
             workspace_path: project.workspace_path,
+            canonical_workspace_path: project.canonical_workspace_path,
+            workspace_id: project.workspace_id,
             explicit_project: project.explicit_project,
           }
+          memoryReady.project_resolution = project
         } catch (error) {
           memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
         }
@@ -1828,6 +1837,15 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
         }
 
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
+          const beforeClaim = await resolveRuntimeMemoryReadyProject(tx as any, {
+            agent_id: plan.env.AGENT_ID,
+            explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
+            require_enabled: false,
+          })
+          assertRuntimeMemoryReadyProjectResolutionCurrent(
+            preGatedResolution ?? memoryReady.project_resolution!,
+            beforeClaim,
+          )
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
           const update = await tx.execute(

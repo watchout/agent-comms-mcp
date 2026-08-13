@@ -58,13 +58,28 @@ describe('state_daemon Codex runner adapter command contract', () => {
       requester: 'misell',
       databaseUrl: 'postgresql:///agent_comms?host=/tmp',
       ackContent: 'ACK',
-      memoryReadyProject: 'codex',
+      memoryReadyResolution: {
+        agent_id: 'codex-cto',
+        project: 'codex',
+        workspace_path: '/workspace/codex',
+        canonical_workspace_path: '/workspace/codex',
+        workspace_id: 'codex-primary',
+        source: 'active_primary_workspace',
+        explicit_project: 'codex',
+      },
     })
 
     expect(plan.env).toMatchObject({
       AGENT_ID: 'codex-cto',
       AGENT_MEMORY_PROJECT: 'codex',
       AGENT_COMMS_MEMORY_READY_PROJECT: 'codex',
+      AUN_QUEUE_WORK_RUNTIME_CWD: '/workspace/codex',
+    })
+    expect(JSON.parse(plan.env.AUN_MEMORY_READY_RESOLUTION_JSON)).toMatchObject({
+      agent_id: 'codex-cto',
+      project: 'codex',
+      workspace_id: 'codex-primary',
+      canonical_workspace_path: '/workspace/codex',
     })
   })
 

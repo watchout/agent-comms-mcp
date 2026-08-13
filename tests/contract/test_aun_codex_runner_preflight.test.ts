@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -59,6 +59,8 @@ function seedPending(content = 'codex runner preflight request'): { messageId: s
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-codex-runner-preflight-'))
+  const workspaceDir = join(tmpDir, 'agent-comms-mcp')
+  mkdirSync(workspaceDir)
   dbPath = join(tmpDir, 'test.db')
   env = {
     ...process.env,
@@ -80,7 +82,7 @@ beforeEach(() => {
              ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}');
     UPDATE agents
        SET channel_port = 39002,
-           home_directory = '/tmp/agent-comms-mcp'
+           home_directory = '${workspaceDir}'
      WHERE agent_id = 'codex-aun';
     INSERT INTO agent_runtime_instances
       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)

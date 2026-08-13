@@ -24,12 +24,16 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { basename, isAbsolute, join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
-import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
+import {
+  assertRuntimeMemoryReadyProjectResolutionCurrent,
+  resolveRuntimeMemoryReadyProject,
+  type RuntimeMemoryReadyProjectResolution,
+} from '../core/runtime-memory-ready'
 import { PgAdapter } from '../core/db/pg-adapter'
 import {
   AunConfigurationReconciler,
@@ -328,39 +332,47 @@ export async function resolveQueueWorkRuntimeWorkspace(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
 ): Promise<string> {
-  const project = await resolveRuntimeMemoryReadyProject(db as any, { agent_id: agentId })
-  const configured = project.workspace_path.trim()
-  if (!configured || !isAbsolute(configured)) {
-    throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
-  }
-  if (!existsSync(configured) || !statSync(configured).isDirectory()) {
-    throw new Error(`queue-work runtime workspace does not exist as a directory for ${agentId}: ${configured}`)
-  }
-  return realpathSync(configured)
+  return (await resolveQueueWorkRuntimeResolution(db, agentId)).canonical_workspace_path
+}
+
+export async function resolveQueueWorkRuntimeResolution(
+  db: QueueWorkRuntimeWorkspaceDb,
+  agentId: string,
+): Promise<RuntimeMemoryReadyProjectResolution> {
+  return resolveRuntimeMemoryReadyProject(db as any, { agent_id: agentId })
 }
 
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
-    private readonly resolveRuntimeWorkspace: (agentId: string) => Promise<string> = async () => cwd,
+    private readonly resolveRuntimeResolution: (
+      agentId: string,
+    ) => Promise<RuntimeMemoryReadyProjectResolution> = async (agentId) => {
+      const canonicalWorkspacePath = realpathSync(cwd)
+      return Object.freeze({
+        agent_id: agentId,
+        project: basename(canonicalWorkspacePath),
+        workspace_path: canonicalWorkspacePath,
+        canonical_workspace_path: canonicalWorkspacePath,
+        workspace_id: null,
+        source: 'canonical_workspace' as const,
+        explicit_project: null,
+      })
+    },
+    private readonly receiveInvoker: typeof receiveTargeted = receiveTargeted,
+    private readonly queueWorkInvoker: typeof runQueueWork = runQueueWork,
   ) {}
 
   async runPending(
     input: { queueId: number; agentId: string },
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void> {
-    const runtimeCwd = await this.resolveRuntimeWorkspace(input.agentId)
-    const derivedProject = basename(runtimeCwd)
-    if (memoryReadyProject && memoryReadyProject !== derivedProject) {
-      throw new Error(
-        `queue-work memory-ready project changed after pre-gate for ${input.agentId}: `
-        + `expected ${memoryReadyProject}, resolved ${derivedProject}`,
-      )
-    }
-    const exactProject = memoryReadyProject ?? derivedProject
-    const env = this.envFor(input.agentId, exactProject)
-    const received = await receiveTargeted({
+    const expected = memoryReadyResolution ?? await this.resolveRuntimeResolution(input.agentId)
+    const beforeClaim = await this.resolveRuntimeResolution(input.agentId)
+    assertRuntimeMemoryReadyProjectResolutionCurrent(expected, beforeClaim)
+    const env = this.envFor(input.agentId, expected)
+    const received = await this.receiveInvoker({
       agentId: input.agentId,
       queueId: String(input.queueId),
       env,
@@ -372,21 +384,21 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     await this.runReceivedWithFence(
       input,
       exactClaimFenceFromTargetedReceive(received, input),
-      runtimeCwd,
-      exactProject,
+      expected,
     )
   }
 
   async runReceived(
     input: { queueId: number; agentId: string },
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void> {
-    await this.runReceivedWithFence(input, undefined, undefined, memoryReadyProject)
+    const expected = memoryReadyResolution ?? await this.resolveRuntimeResolution(input.agentId)
+    await this.runReceivedWithFence(input, undefined, expected)
   }
 
   async runDone(input: { queueId: number; agentId: string }): Promise<void> {
     const env = this.envFor(input.agentId)
-    const result = await runQueueWork({
+    const result = await this.queueWorkInvoker({
       agentId: input.agentId,
       queueId: String(input.queueId),
       runtime: this.runtime(),
@@ -402,22 +414,17 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   private async runReceivedWithFence(
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
-    resolvedRuntimeCwd?: string,
-    memoryReadyProject?: string,
+    expected?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void> {
-    const runtimeCwd = resolvedRuntimeCwd ?? await this.resolveRuntimeWorkspace(input.agentId)
-    const derivedProject = basename(runtimeCwd)
-    if (memoryReadyProject && memoryReadyProject !== derivedProject) {
-      throw new Error(
-        `queue-work memory-ready project changed after pre-gate for ${input.agentId}: `
-        + `expected ${memoryReadyProject}, resolved ${derivedProject}`,
-      )
-    }
+    const baseline = expected ?? await this.resolveRuntimeResolution(input.agentId)
+    const beforeDispatch = await this.resolveRuntimeResolution(input.agentId)
+    assertRuntimeMemoryReadyProjectResolutionCurrent(baseline, beforeDispatch)
+    const runtimeCwd = baseline.canonical_workspace_path
     const env = {
-      ...this.envFor(input.agentId, memoryReadyProject ?? derivedProject),
+      ...this.envFor(input.agentId, baseline),
       AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
     }
-    const result = await runQueueWork({
+    const result = await this.queueWorkInvoker({
       agentId: input.agentId,
       queueId: String(input.queueId),
       runtime: this.runtime(),
@@ -436,7 +443,10 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     }
   }
 
-  private envFor(agentId: string, memoryReadyProject?: string): NodeJS.ProcessEnv {
+  private envFor(
+    agentId: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
+  ): NodeJS.ProcessEnv {
     const env = {
       ...this.env,
       AGENT_ID: agentId,
@@ -449,9 +459,11 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
         this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
           ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
           ?? 'state-daemon-queue-work-scheduler',
-      ...(memoryReadyProject?.trim() ? {
-        AGENT_MEMORY_PROJECT: memoryReadyProject.trim(),
-        AGENT_COMMS_MEMORY_READY_PROJECT: memoryReadyProject.trim(),
+      ...(memoryReadyResolution ? {
+        AGENT_MEMORY_PROJECT: memoryReadyResolution.project,
+        AGENT_COMMS_MEMORY_READY_PROJECT: memoryReadyResolution.project,
+        AUN_MEMORY_READY_RESOLUTION_JSON: JSON.stringify(memoryReadyResolution),
+        AUN_QUEUE_WORK_RUNTIME_CWD: memoryReadyResolution.canonical_workspace_path,
       } : {}),
     }
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
@@ -1017,7 +1029,7 @@ export async function main(): Promise<void> {
       ? new QueueWorkRunnerScheduler(
           process.env,
           process.cwd(),
-          (agentId) => resolveQueueWorkRuntimeWorkspace(queryClient, agentId),
+          (agentId) => resolveQueueWorkRuntimeResolution(queryClient, agentId),
         )
       : undefined,
     shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),

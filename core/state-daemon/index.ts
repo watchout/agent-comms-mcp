@@ -81,10 +81,12 @@ import {
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import { selectAgentAdapter } from './adapter-registry'
 import {
+  assertRuntimeMemoryReadyProjectResolutionCurrent,
   evaluateRuntimeMemoryReadyGate,
   resolveRuntimeMemoryReadyProject,
   RuntimeMemoryReadyProjectResolutionError,
   type RuntimeMemoryReadyGateResult,
+  type RuntimeMemoryReadyProjectResolution,
 } from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
@@ -928,7 +930,7 @@ export class StateDaemon {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
-      return this.runObservedQueueAction(action, row, bot, memoryReady.project)
+      return this.runObservedQueueAction(action, row, bot, memoryReady.project_resolution ?? undefined)
     }
 
     this.metrics.inc('state_daemon_wake_actions_total', {
@@ -1125,8 +1127,11 @@ export class StateDaemon {
         ...gate.details,
         project_source: project.source,
         workspace_path: project.workspace_path,
+        canonical_workspace_path: project.canonical_workspace_path,
+        workspace_id: project.workspace_id,
         explicit_project: project.explicit_project,
       }
+      gate.project_resolution = project
       return gate
     } catch (error) {
       const resolutionError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
@@ -1172,7 +1177,7 @@ export class StateDaemon {
     action: PlannedQueueAction,
     row: QueueRow,
     agent?: AgentRow | null,
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
@@ -1180,10 +1185,10 @@ export class StateDaemon {
           this.scheduleQueueWorkRunner('pending', row, () => this.queueWorkScheduler!.runPending!({
             queueId: row.id,
             agentId: row.agent_id,
-          }, memoryReadyProject))
+          }, memoryReadyResolution))
           return true
         }
-        return this.invokeCodexRunner(row, agent, memoryReadyProject)
+        return this.invokeCodexRunner(row, agent, memoryReadyResolution)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -1205,7 +1210,7 @@ export class StateDaemon {
           this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
             queueId: row.id,
             agentId: row.agent_id,
-          }, memoryReadyProject))
+          }, memoryReadyResolution))
           return true
         }
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
@@ -1644,7 +1649,7 @@ export class StateDaemon {
   private async invokeCodexRunner(
     row: QueueRow,
     agent?: AgentRow | null,
-    memoryReadyProject?: string,
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
@@ -1697,15 +1702,25 @@ export class StateDaemon {
         : null,
       autoFinalReply,
       payload: row.payload,
-      memoryReadyProject: memoryReadyProject?.trim() || null,
+      memoryReadyResolution: memoryReadyResolution ?? null,
     }
     // Per-agent adapter selection: if the agent has a runtime_engine_preference
     // that maps to a known LLM (claude-code, codex), use the per-agent profile.
     // This allows auditor/devauditor (claude-code) and codex-* bots to each get
     // the correct headless invocation without global config changes.
     const agentAdapter = selectAgentAdapter(agent?.runtime_engine_preference)
-    const effectiveProfile: RuntimeInvocationProfile | undefined =
+    const configuredProfile: RuntimeInvocationProfile | undefined =
       agentAdapter.profile ?? this.config.hostRuntimeInvocationProfile
+    const effectiveProfile: RuntimeInvocationProfile | undefined = configuredProfile && memoryReadyResolution
+      ? {
+          ...configuredProfile,
+          cwd: memoryReadyResolution.canonical_workspace_path,
+          allowed_dirs: Array.from(new Set([
+            memoryReadyResolution.canonical_workspace_path,
+            ...configuredProfile.allowed_dirs,
+          ])),
+        }
+      : configuredProfile
     const hostAdapterEnabled =
       this.config.hostRuntimeAdapterEnabled || agentAdapter.kind === 'claude-code'
     const hostSelection = selectHostRuntimeAdapter({
@@ -1750,6 +1765,7 @@ export class StateDaemon {
         )
         return false
       }
+      if (!await this.memoryReadyResolutionIsCurrent(row, memoryReadyResolution, now)) return false
       const result = await this.hostRuntimeInvoker.invoke({
         profile: hostSelection.profile,
         invocation: hostSelection.invocation,
@@ -1788,6 +1804,7 @@ export class StateDaemon {
       return false
     }
 
+    if (!await this.memoryReadyResolutionIsCurrent(row, memoryReadyResolution, now)) return false
     const result = await this.codexRunner.invoke(runnerInput)
     if (!result.ok) {
       await this.dbQuery(
@@ -1822,6 +1839,43 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })
     }
     return true
+  }
+
+  private async memoryReadyResolutionIsCurrent(
+    row: QueueRow,
+    expected: RuntimeMemoryReadyProjectResolution | undefined,
+    reservationTime: Date,
+  ): Promise<boolean> {
+    try {
+      if (!expected) {
+        throw new RuntimeMemoryReadyProjectResolutionError('workspace_resolution_drift', {
+          agent_id: row.agent_id,
+          reason: 'missing_pre_gate_resolution',
+        })
+      }
+      const current = await resolveRuntimeMemoryReadyProject(this.db, {
+        agent_id: row.agent_id,
+        explicit_project: expected.explicit_project,
+      })
+      assertRuntimeMemoryReadyProjectResolutionCurrent(expected, current)
+      return true
+    } catch (error) {
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, reservationTime],
+      )
+      const resolutionError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+      this.metrics.inc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_resolution_drift_blocked',
+        reason: resolutionError?.code ?? 'project_resolution_read_error',
+      })
+      await this.alert.alert(
+        `memory_ready workspace resolution changed before dispatch for ${row.agent_id} queue_id=${row.id}: `
+        + `${resolutionError?.code ?? (error as Error)?.message ?? String(error)}`,
+      )
+      return false
+    }
   }
 
   private planAction(

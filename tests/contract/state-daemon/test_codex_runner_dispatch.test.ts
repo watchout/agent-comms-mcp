@@ -11,7 +11,15 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import {
+  cleanAll,
+  makeAgentId,
+  openClient,
+  seedAgent,
+  seedQueueRow,
+  TEST_MEMORY_READY_PROJECT,
+  TEST_MEMORY_READY_WORKSPACE,
+} from './seed'
 
 let pg: Client
 
@@ -216,7 +224,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
         completeNoReply: false,
         completionReason: null,
-        memoryReadyProject: 'agent-comms-mcp',
+        memoryReadyResolution: {
+          agent_id: agent,
+          project: TEST_MEMORY_READY_PROJECT,
+          canonical_workspace_path: TEST_MEMORY_READY_WORKSPACE,
+          workspace_id: null,
+          source: 'canonical_workspace',
+        },
       })
       expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
       expect(runner.invocations[0].ackContent).toContain('message_id={message_id}')
@@ -261,8 +275,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     await pg.query(
       `UPDATE runtime_memory_ready_evidence
           SET valid_until='2026-05-17T00:00:00.000Z'
-        WHERE agent_id=$1 AND project='agent-comms-mcp'`,
-      [agent],
+        WHERE agent_id=$1 AND project=$2`,
+      [agent, TEST_MEMORY_READY_PROJECT],
     )
     await pg.query(
       `INSERT INTO runtime_memory_ready_evidence
@@ -275,10 +289,10 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
               recovery_command, result_status, failure_reason, '2026-05-18T00:00:00.500Z',
               evidence_path, 'fixture-codex-project-current', '2099-01-01T00:00:00.000Z', source, metadata
          FROM runtime_memory_ready_evidence
-        WHERE agent_id=$1 AND project='agent-comms-mcp'
+        WHERE agent_id=$1 AND project=$2
         ORDER BY id DESC
         LIMIT 1`,
-      [agent],
+      [agent, TEST_MEMORY_READY_PROJECT],
     )
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -296,7 +310,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       })
 
       expect(runner.invocations).toHaveLength(1)
-      expect(runner.invocations[0]?.memoryReadyProject).toBe('codex')
+      expect(runner.invocations[0]?.memoryReadyResolution).toMatchObject({
+        agent_id: agent,
+        project: 'codex',
+        workspace_id: workspaceId,
+        canonical_workspace_path: '/Users/yuji/Developer/codex',
+      })
     } finally {
       await h.daemon.stop()
     }

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -15,11 +15,15 @@ const TEST_AGENT = 'actionable-dev'
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
+let workspaceDir: string
 
-function runAun(args: string[]): { status: number; stdout: string; stderr: string } {
+function runAun(
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): { status: number; stdout: string; stderr: string } {
   const r = spawnSync('bun', ['run', AUN, ...args], {
     cwd: '/tmp',
-    env,
+    env: { ...env, ...extraEnv },
     encoding: 'utf-8',
     timeout: 15_000,
   })
@@ -151,6 +155,8 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-actionable-'))
+  workspaceDir = join(tmpDir, 'agent-comms-mcp')
+  mkdirSync(workspaceDir)
   dbPath = join(tmpDir, 'test.db')
   env = {
     ...process.env,
@@ -174,7 +180,7 @@ beforeEach(() => {
                ('auditor', 'auditor', 'auditor', 'codex', 'idle', '{}');
       UPDATE agents
          SET channel_port = 39001,
-             home_directory = '/tmp/agent-comms-mcp'
+             home_directory = '${workspaceDir}'
        WHERE agent_id = '${TEST_AGENT}';
       INSERT INTO agent_runtime_instances
         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
@@ -235,6 +241,44 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === requestId)).toMatchObject({ status: 'pending', claimed_by: null })
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+  })
+
+  test('immutable pre-gate token blocks a same-basename workspace swap before claim', () => {
+    const staleWorkspace = join(tmpDir, 'stale-binding', 'agent-comms-mcp')
+    mkdirSync(staleWorkspace, { recursive: true })
+    const instructionId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'must remain pending after workspace drift',
+    })
+    const staleToken = {
+      agent_id: TEST_AGENT,
+      project: 'agent-comms-mcp',
+      workspace_path: realpathSync(staleWorkspace),
+      canonical_workspace_path: realpathSync(staleWorkspace),
+      workspace_id: null,
+      source: 'home_directory',
+      explicit_project: 'agent-comms-mcp',
+    }
+
+    const r = runAun([
+      'receive-actionable',
+      '--agent-id', TEST_AGENT,
+      '--queue-id', String(instructionId),
+    ], {
+      AUN_MEMORY_READY_RESOLUTION_JSON: JSON.stringify(staleToken),
+    })
+
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('project_resolution_failed')
+    expect(JSON.parse(r.stdout).memory_ready.details).toMatchObject({
+      resolution_code: 'workspace_resolution_drift',
+    })
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({
+      status: 'pending',
+      claimed_by: null,
+    })
+    expect(realpathSync(workspaceDir)).not.toBe(staleToken.canonical_workspace_path)
   })
 
   test('missing/stale/mismatched memory-ready evidence blocks receive-actionable and next-actionable before claim', () => {

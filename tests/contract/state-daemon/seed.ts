@@ -8,8 +8,8 @@
  */
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { basename, join } from 'node:path'
 
 export const TEST_PREFIX = 'sd-test-'
 
@@ -18,6 +18,8 @@ export function makeAgentId(suffix: string): string {
 }
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
+export const TEST_MEMORY_READY_WORKSPACE = realpathSync(REPO_ROOT)
+export const TEST_MEMORY_READY_PROJECT = basename(TEST_MEMORY_READY_WORKSPACE)
 const MIGRATION_FILES = [
   'db/migrations/2026-05-08-state-daemon-323.up.sql',
   'db/migrations/2026-05-14-agent-wake-suppression-ssot.up.sql',
@@ -106,7 +108,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
         last_wake_attempt_at, channel_port, metadata, runtime_engine_preference,
         profile_enabled, disabled_at, home_directory)
      VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL,
-             '/tmp/agent-comms-mcp')
+             $8)
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
        runtime_engine_preference = EXCLUDED.runtime_engine_preference,
@@ -125,6 +127,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
       a.last_seen_at ?? new Date(),
       JSON.stringify(metadata),
       a.runtime_engine_preference ?? null,
+      TEST_MEMORY_READY_WORKSPACE,
     ],
   )
   await c.query(`UPDATE agents SET channel_port=$2 WHERE agent_id=$1`, [a.agent_id, port])
@@ -165,13 +168,13 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
         recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
         valid_until, source, metadata)
      VALUES
-       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
+       ($1, $6, $2, 1, 'legacy',
         $3, $4, $1, '/tmp/state-daemon-test-checkout', 'state-daemon-test-head',
         'fixture:mcp__wasurezu__recover_context', 'ready', $5,
         '/tmp/state-daemon-memory-ready-fixture.json', 'fixture-memory-ready-log',
         '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
         '{"fixture":true}'::jsonb)`,
-    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt],
+    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt, TEST_MEMORY_READY_PROJECT],
   )
   const fixtureChannelId = `${TEST_PREFIX}channel-${a.agent_id}`
   await c.query(
