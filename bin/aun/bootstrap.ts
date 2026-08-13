@@ -1498,13 +1498,94 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     return parseJsonOutput(result)?.profile ?? null
   }
 
+  type WorkspaceAuthorityRuntimeLink = {
+    runtime_instance_id: string
+    agent_id: string
+    workspace_id: string | null
+  }
+  type WorkspaceAuthorityBinding = {
+    agent_id: string
+    workspace_id: string
+    binding_role: string
+    active: boolean
+    created_at: string | null
+    updated_at: string | null
+  }
+  const normalizedTimestamp = (value: unknown): string | null => {
+    if (value === null || value === undefined) return null
+    if (value instanceof Date) return value.toISOString()
+    return String(value)
+  }
+  const normalizedWorkspaceRow = (row: any): Record<string, unknown> | null => row ? {
+    workspace_id: String(row.workspace_id),
+    org_id: String(row.org_id),
+    name: String(row.name),
+    workspace_type: String(row.workspace_type),
+    local_path: row.local_path === null ? null : String(row.local_path),
+    repo_url: row.repo_url === null ? null : String(row.repo_url),
+    default_branch: row.default_branch === null ? null : String(row.default_branch),
+    metadata: parseJsonRecord(row.metadata),
+    created_at: normalizedTimestamp(row.created_at),
+    updated_at: normalizedTimestamp(row.updated_at),
+  } : null
+  const normalizedWorkspaceBinding = (row: any): WorkspaceAuthorityBinding | null => row ? {
+    agent_id: String(row.agent_id),
+    workspace_id: String(row.workspace_id),
+    binding_role: String(row.binding_role),
+    active: row.active === true || row.active === 1 || row.active === '1',
+    created_at: normalizedTimestamp(row.created_at),
+    updated_at: normalizedTimestamp(row.updated_at),
+  } : null
+  const normalizedRuntimeLink = (row: any): WorkspaceAuthorityRuntimeLink => ({
+    runtime_instance_id: String(row.runtime_instance_id),
+    agent_id: String(row.agent_id),
+    workspace_id: row.workspace_id === null || row.workspace_id === undefined ? null : String(row.workspace_id),
+  })
+  const workspaceAuthorityProjection = (input: {
+    workspaceId: string
+    canonicalPath: string
+    workspaceCreated: boolean
+    workspaceRowDigest: string | null
+    binding: Pick<WorkspaceAuthorityBinding, 'agent_id' | 'workspace_id' | 'binding_role' | 'active'> | null
+    runtimeLinks: WorkspaceAuthorityRuntimeLink[]
+    preservedReferenceDigest: string
+    bootstrapRunId: string
+    project: string
+  }) => ({
+    workspace: input.workspaceCreated ? {
+      workspace_id: input.workspaceId,
+      org_id: 'default',
+      name: input.project,
+      workspace_type: 'local_path',
+      local_path: input.canonicalPath,
+      bootstrap_run_id: input.bootstrapRunId,
+    } : {
+      workspace_id: input.workspaceId,
+      row_digest: input.workspaceRowDigest,
+    },
+    binding: input.binding ? {
+      agent_id: input.binding.agent_id,
+      workspace_id: input.binding.workspace_id,
+      binding_role: input.binding.binding_role,
+      active: input.binding.active,
+    } : null,
+    runtime_links: [...input.runtimeLinks].sort((a, b) => a.runtime_instance_id.localeCompare(b.runtime_instance_id)),
+    preserved_reference_digest: input.preservedReferenceDigest,
+  })
+
   const ensureActivePrimaryWorkspace = async (context: BootstrapStageContext): Promise<{
     workspace_id: string
     canonical_path: string
+    mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
   }> => {
     const canonicalPath = realpathOrResolve(context.workspaceRoot)
     const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(canonicalPath)
     return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+      const agent = await tx.queryOne<{ agent_id: string }>(
+        'SELECT agent_id FROM agents WHERE agent_id = $1 FOR UPDATE',
+        [context.agentId],
+      )
+      if (!agent) throw new Error('workspace authority agent unavailable')
       const active = await tx.query<{ workspace_id: string; local_path: string | null }>(
         `SELECT w.workspace_id, w.local_path
            FROM agent_workspace_bindings b
@@ -1521,11 +1602,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         if (!boundPath || realpathOrResolve(boundPath) !== canonicalPath) {
           throw new Error('active primary workspace conflicts with bootstrap target')
         }
-        return { workspace_id: String(active[0]!.workspace_id), canonical_path: canonicalPath }
       }
 
-      const existing = await tx.query<{ workspace_id: string }>(
-        `SELECT workspace_id
+      const existing = await tx.query<any>(
+        `SELECT workspace_id, org_id, name, workspace_type, local_path, repo_url,
+                default_branch, metadata, created_at, updated_at
            FROM agent_workspaces
           WHERE org_id = 'default' AND local_path = $1
           ORDER BY workspace_id
@@ -1533,9 +1614,121 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         [canonicalPath],
       )
       if (existing.length > 1) throw new Error('bootstrap target workspace row is ambiguous')
-      const workspaceId = existing[0]?.workspace_id
+      const activeWorkspaceId = active.length === 1 ? String(active[0]!.workspace_id) : null
+      const existingWorkspaceId = existing[0]?.workspace_id ? String(existing[0].workspace_id) : null
+      if (activeWorkspaceId && existingWorkspaceId && activeWorkspaceId !== existingWorkspaceId) {
+        throw new Error('active primary workspace identity conflicts with canonical target')
+      }
+      const workspaceId = activeWorkspaceId ?? existingWorkspaceId
         ?? `aun-bootstrap-${bootstrapDigest({ org_id: 'default', local_path: canonicalPath }).slice(0, 32)}`
-      if (existing.length === 0) {
+      const workspaceBefore = normalizedWorkspaceRow(existing[0] ?? null)
+      const bindingBefore = normalizedWorkspaceBinding(await tx.queryOne<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings
+          WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary'
+          FOR UPDATE`,
+        [context.agentId, workspaceId],
+      ))
+      const activeRuntimes = (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id
+           FROM agent_runtime_instances
+          WHERE agent_id = $1 AND status IN ('running', 'active')
+          ORDER BY runtime_instance_id
+          FOR UPDATE`,
+        [context.agentId],
+      )).map(normalizedRuntimeLink)
+      const conflictingRuntime = activeRuntimes.find((row) => row.workspace_id !== null && row.workspace_id !== workspaceId)
+      if (conflictingRuntime) throw new Error('active runtime workspace conflicts with bootstrap target')
+      const runtimePreimages = activeRuntimes.filter((row) => row.workspace_id === null)
+      const preservedBindingsBefore = (await tx.query<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings
+          WHERE workspace_id = $1
+            AND NOT (agent_id = $2 AND binding_role = 'primary')
+          ORDER BY agent_id, binding_role`,
+        [workspaceId, context.agentId],
+      )).map(normalizedWorkspaceBinding)
+      const runtimePreimageIds = new Set(runtimePreimages.map((row) => row.runtime_instance_id))
+      const preservedRuntimesBefore = (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id
+           FROM agent_runtime_instances
+          WHERE workspace_id = $1
+          ORDER BY runtime_instance_id`,
+        [workspaceId],
+      )).map(normalizedRuntimeLink).filter((row) =>
+        row.agent_id !== context.agentId || !runtimePreimageIds.has(row.runtime_instance_id))
+      const preservedReferenceDigest = bootstrapDigest({
+        bindings: preservedBindingsBefore,
+        runtimes: preservedRuntimesBefore,
+      })
+      const workspaceCreated = workspaceBefore === null
+      const needsMutation = workspaceCreated || !bindingBefore?.active || runtimePreimages.length > 0
+      if (!needsMutation) return { workspace_id: workspaceId, canonical_path: canonicalPath }
+
+      const intendedBinding = {
+        agent_id: context.agentId,
+        workspace_id: workspaceId,
+        binding_role: 'primary',
+        active: true,
+      }
+      const intendedRuntimeLinks = runtimePreimages.map((row) => ({ ...row, workspace_id: workspaceId }))
+      const workspaceBeforeDigest = workspaceBefore ? bootstrapDigest(workspaceBefore) : null
+      const beforeProjection = workspaceAuthorityProjection({
+        workspaceId, canonicalPath, workspaceCreated: false,
+        workspaceRowDigest: workspaceBeforeDigest,
+        binding: bindingBefore,
+        runtimeLinks: runtimePreimages,
+        preservedReferenceDigest,
+        bootstrapRunId: context.runId,
+        project,
+      })
+      const intendedProjection = workspaceAuthorityProjection({
+        workspaceId, canonicalPath, workspaceCreated,
+        workspaceRowDigest: workspaceBeforeDigest,
+        binding: intendedBinding,
+        runtimeLinks: intendedRuntimeLinks,
+        preservedReferenceDigest,
+        bootstrapRunId: context.runId,
+        project,
+      })
+      const ownerKey = `workspace-authority:${context.runId}:${context.agentId}:${workspaceId}`
+      const rollbackPayload = {
+        schema_version: 'aun-bootstrap-workspace-authority-rollback/v1',
+        bootstrap_run_id: context.runId,
+        agent_id: context.agentId,
+        workspace_id: workspaceId,
+        canonical_path: canonicalPath,
+        project,
+        workspace_created: workspaceCreated,
+        workspace_preimage_digest: workspaceBeforeDigest,
+        binding_preimage: bindingBefore ? {
+          existed: true,
+          active: bindingBefore.active,
+          row_digest: bootstrapDigest(bindingBefore),
+        } : { existed: false, active: null, row_digest: null },
+        runtime_preimages: runtimePreimages,
+        preserved_bindings_preimage: preservedBindingsBefore,
+        preserved_runtimes_preimage: preservedRuntimesBefore,
+        preserved_reference_digest: preservedReferenceDigest,
+        before_projection_digest: bootstrapDigest(beforeProjection),
+        intended_projection_digest: bootstrapDigest(intendedProjection),
+      }
+      const admission = {
+        kind: 'workspace_authority' as const,
+        owner_key: ownerKey,
+        before_digest: bootstrapDigest(beforeProjection),
+        intended_after_digest: bootstrapDigest(intendedProjection),
+        actual_after_digest: null,
+        rollback_action: 'restore exact workspace, primary binding, and runtime-link preimages without mutating shared references',
+        rollback_payload: {
+          ...rollbackPayload,
+          recovery_admission: true,
+          recovery_admission_phase: 'B3_WORKSPACE_PRE_COMMIT',
+        },
+      }
+      context.admitRecoveryMutation?.(admission)
+
+      if (workspaceCreated) {
         await tx.execute(
           `INSERT INTO agent_workspaces
              (workspace_id, org_id, name, workspace_type, local_path, metadata)
@@ -1554,24 +1747,106 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
          ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET active = true`,
         [context.agentId, workspaceId],
       )
-      const conflictingRuntime = await tx.query<{ runtime_instance_id: string; workspace_id: string | null }>(
-        `SELECT runtime_instance_id, workspace_id
+      for (const runtime of runtimePreimages) {
+        const linked = await tx.execute(
+          `UPDATE agent_runtime_instances SET workspace_id = $3
+            WHERE runtime_instance_id = $1 AND agent_id = $2 AND workspace_id IS NULL`,
+          [runtime.runtime_instance_id, context.agentId, workspaceId],
+        )
+        if (linked.rowCount !== 1) throw new Error('active runtime workspace link lost its exact preimage')
+      }
+      const workspaceAfter = normalizedWorkspaceRow(await tx.queryOne<any>(
+        `SELECT workspace_id, org_id, name, workspace_type, local_path, repo_url,
+                default_branch, metadata, created_at, updated_at
+           FROM agent_workspaces WHERE workspace_id = $1`,
+        [workspaceId],
+      ))
+      const bindingAfter = normalizedWorkspaceBinding(await tx.queryOne<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings
+          WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary'`,
+        [context.agentId, workspaceId],
+      ))
+      const runtimeAfter = runtimePreimages.length === 0 ? [] : (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id
            FROM agent_runtime_instances
-          WHERE agent_id = $1 AND status IN ('running', 'active')
-            AND workspace_id IS NOT NULL AND workspace_id <> $2
-          ORDER BY runtime_instance_id
-          LIMIT 1`,
-        [context.agentId, workspaceId],
-      )
-      if (conflictingRuntime.length > 0) throw new Error('active runtime workspace conflicts with bootstrap target')
-      await tx.execute(
-        `UPDATE agent_runtime_instances SET workspace_id = $2
-          WHERE agent_id = $1 AND status IN ('running', 'active') AND workspace_id IS NULL`,
-        [context.agentId, workspaceId],
-      )
-      return { workspace_id: workspaceId, canonical_path: canonicalPath }
+          WHERE agent_id = $1
+          ORDER BY runtime_instance_id`,
+        [context.agentId],
+      )).map(normalizedRuntimeLink).filter((row) => runtimePreimageIds.has(row.runtime_instance_id))
+      const preservedBindingsAfter = (await tx.query<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings
+          WHERE workspace_id = $1
+            AND NOT (agent_id = $2 AND binding_role = 'primary')
+          ORDER BY agent_id, binding_role`,
+        [workspaceId, context.agentId],
+      )).map(normalizedWorkspaceBinding)
+      const preservedRuntimesAfter = (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id
+           FROM agent_runtime_instances
+          WHERE workspace_id = $1
+          ORDER BY runtime_instance_id`,
+        [workspaceId],
+      )).map(normalizedRuntimeLink).filter((row) =>
+        row.agent_id !== context.agentId || !runtimePreimageIds.has(row.runtime_instance_id))
+      if (!workspaceAfter || realpathOrResolve(String(workspaceAfter.local_path ?? '')) !== canonicalPath
+        || !bindingAfter?.active
+        || bootstrapDigest(runtimeAfter) !== bootstrapDigest(intendedRuntimeLinks)
+        || bootstrapDigest({ bindings: preservedBindingsAfter, runtimes: preservedRuntimesAfter }) !== preservedReferenceDigest) {
+        throw new Error('workspace authority post-mutation readback mismatch')
+      }
+      if (workspaceCreated) {
+        const metadata = parseJsonRecord(workspaceAfter.metadata)
+        if (metadata.bootstrap_run_id !== context.runId || metadata.agent_id !== context.agentId) {
+          throw new Error('workspace authority ownership readback mismatch')
+        }
+      } else if (bootstrapDigest(workspaceAfter) !== workspaceBeforeDigest) {
+        throw new Error('preexisting workspace changed during authority binding')
+      }
+      const mutation = {
+        ...admission,
+        actual_after_digest: bootstrapDigest(intendedProjection),
+        rollback_payload: {
+          ...rollbackPayload,
+          workspace_postimage_digest: bootstrapDigest(workspaceAfter),
+          binding_postimage_digest: bootstrapDigest(bindingAfter),
+          runtime_postimages: runtimeAfter,
+          post_projection_digest: bootstrapDigest(intendedProjection),
+        },
+      }
+      return { workspace_id: workspaceId, canonical_path: canonicalPath, mutation }
     }))
   }
+
+  const readActivePrimaryWorkspaceAuthority = async (context: BootstrapStageContext): Promise<{
+    workspace_id: string
+    canonical_path: string
+  } | null> => withBootstrapDb(env, async (db) => {
+    const canonicalPath = realpathOrResolve(context.workspaceRoot)
+    const active = await db.query<{ workspace_id: string; local_path: string | null }>(
+      `SELECT w.workspace_id, w.local_path
+         FROM agent_workspace_bindings b
+         JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+        WHERE b.agent_id = $1 AND b.active = true AND b.binding_role = 'primary'
+        ORDER BY w.workspace_id`,
+      [context.agentId],
+    )
+    if (active.length !== 1 || !active[0]!.local_path
+      || realpathOrResolve(String(active[0]!.local_path)) !== canonicalPath) return null
+    const runtimeConflicts = await db.query<{ runtime_instance_id: string }>(
+      `SELECT runtime_instance_id
+         FROM agent_runtime_instances
+        WHERE agent_id = $1 AND status IN ('running', 'active')
+          AND (workspace_id IS NULL OR workspace_id <> $2)
+        ORDER BY runtime_instance_id
+        LIMIT 1`,
+      [context.agentId, String(active[0]!.workspace_id)],
+    )
+    return runtimeConflicts.length === 0
+      ? { workspace_id: String(active[0]!.workspace_id), canonical_path: canonicalPath }
+      : null
+  }, { readonly: true }).catch(() => null)
 
   const profileGetReadOnly = async (agentId: string): Promise<any | null> => {
     if (!databaseAlreadyExists()) return null
@@ -2850,20 +3125,26 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }
         }
         const configurationReadback = configurationDesiredReadback(configuration)
+        const workspaceMutation = workspaceAuthority.mutation
+        const workspaceReadback = {
+          workspace_id: workspaceAuthority.workspace_id,
+          canonical_path: workspaceAuthority.canonical_path,
+        }
         return {
           ok: true,
           evidenceRefs: [
             tmuxAuthority.evidenceRef,
             `profile-existing:${bootstrapDigest(existing)}`,
-            `workspace-authority:${bootstrapDigest(workspaceAuthority)}`,
+            `workspace-authority:${bootstrapDigest(workspaceReadback)}`,
             ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
           ],
           readinessPredicates: {
             profile_readback_matches: true,
             configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
           },
-          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), workspace: workspaceAuthority, configuration: configurationReadback }),
-          mutation: configuration?.mutation,
+          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), workspace: workspaceReadback, configuration: configurationReadback }),
+          mutations: workspaceMutation && configuration?.mutation ? [workspaceMutation] : undefined,
+          mutation: configuration?.mutation ?? workspaceMutation,
         }
       }
       if (existing) {
@@ -2924,12 +3205,16 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       const configurationReadback = configurationDesiredReadback(configuration)
+      const workspaceReadback = {
+        workspace_id: workspaceAuthority.workspace_id,
+        canonical_path: workspaceAuthority.canonical_path,
+      }
       return {
         ok: true,
         evidenceRefs: [
           tmuxAuthority.evidenceRef,
           `profile-readback:${bootstrapDigest(readback)}`,
-          `workspace-authority:${bootstrapDigest(workspaceAuthority)}`,
+          `workspace-authority:${bootstrapDigest(workspaceReadback)}`,
           ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
         ],
         readinessPredicates: {
@@ -2937,10 +3222,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           endpoint_allocated: true,
           configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
         },
-        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), workspace: workspaceAuthority, configuration: configurationReadback }),
-        mutations: configuration?.mutation
-          ? [observedMutation!, configuration.mutation]
-          : observedMutation ? [observedMutation] : [],
+        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), workspace: workspaceReadback, configuration: configurationReadback }),
+        mutations: [observedMutation, workspaceAuthority.mutation, configuration?.mutation]
+          .filter((mutation): mutation is NonNullable<typeof mutation> => Boolean(mutation)),
       }
     },
 
@@ -3317,10 +3601,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
       if (stage === 'B3_AGENT_PROFILE') {
         const profile = await profileGet(context.agentId)
+        const workspace = await readActivePrimaryWorkspaceAuthority(context)
         const configuration = await configurationDesiredReadOnly(context.agentId)
         const mutation = context.priorState.mutations.find((item) => item.stage === stage && item.kind === 'profile')
         const digestMatches = !mutation || mutation.actual_after_digest === bootstrapDigest(managedProfile(profile))
-        const ok = Boolean(profile)
+        const ok = Boolean(profile) && Boolean(workspace)
           && profile.runtime_engine_preference === context.resolvedRuntime
           && resolve(profile.home_directory ?? '') === resolve(context.workspaceRoot)
           && profile.tmux_session === env.AUN_BOOTSTRAP_TMUX_SESSION
@@ -3330,7 +3615,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return ok ? {
           ok: true,
           evidenceRefs: [`resume-profile-readback:${bootstrapDigest(profile)}`],
-          readbackDigest: bootstrapDigest({ profile: managedProfile(profile), configuration }),
+          readbackDigest: bootstrapDigest({ profile: managedProfile(profile), workspace, configuration }),
         } : { ok: false, reasonCodes: ['NO_GO_RESUME_REVALIDATION'] }
       }
       if (stage === 'B4_MCP_REGISTRATION') {
@@ -3370,6 +3655,224 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     async rollbackMutation(context, mutation) {
       const adapter = adapterFor(context)
       if (mutation.kind === 'mcp_registration' && adapter) return adapter.rollbackRuntimeRegistration(context, mutation)
+      if (mutation.kind === 'workspace_authority') {
+        const payload = mutation.rollback_payload ?? {}
+        const workspaceId = String(payload.workspace_id ?? '')
+        const canonicalPath = String(payload.canonical_path ?? '')
+        const project = String(payload.project ?? '')
+        const workspaceCreated = payload.workspace_created === true
+        const workspacePreimageDigest = payload.workspace_preimage_digest === null
+          ? null
+          : String(payload.workspace_preimage_digest ?? '')
+        const bindingPreimage = payload.binding_preimage && typeof payload.binding_preimage === 'object'
+          ? payload.binding_preimage as Record<string, unknown>
+          : null
+        const runtimePreimages = Array.isArray(payload.runtime_preimages)
+          ? payload.runtime_preimages.map(normalizedRuntimeLink)
+          : []
+        const preservedBindingsPreimage = Array.isArray(payload.preserved_bindings_preimage)
+          ? payload.preserved_bindings_preimage.map(normalizedWorkspaceBinding)
+          : []
+        const preservedRuntimesPreimage = Array.isArray(payload.preserved_runtimes_preimage)
+          ? payload.preserved_runtimes_preimage.map(normalizedRuntimeLink)
+          : []
+        const preservedReferenceDigest = String(payload.preserved_reference_digest ?? '')
+        const beforeProjectionDigest = String(payload.before_projection_digest ?? '')
+        const intendedProjectionDigest = String(payload.intended_projection_digest ?? '')
+        const expectedOwner = `workspace-authority:${context.runId}:${context.agentId}:${workspaceId}`
+        if (payload.schema_version !== 'aun-bootstrap-workspace-authority-rollback/v1'
+          || payload.bootstrap_run_id !== context.runId || payload.agent_id !== context.agentId
+          || mutation.owner_key !== expectedOwner || !workspaceId || !canonicalPath || !project
+          || !bindingPreimage || typeof bindingPreimage.existed !== 'boolean'
+          || !/^[0-9a-f]{64}$/.test(preservedReferenceDigest)
+          || !/^[0-9a-f]{64}$/.test(beforeProjectionDigest)
+          || !/^[0-9a-f]{64}$/.test(intendedProjectionDigest)
+          || mutation.before_digest !== beforeProjectionDigest
+          || mutation.intended_after_digest !== intendedProjectionDigest
+          || (!workspaceCreated && !/^[0-9a-f]{64}$/.test(workspacePreimageDigest ?? ''))) {
+          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        }
+        const restored = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+          const agent = await tx.queryOne<{ agent_id: string }>(
+            'SELECT agent_id FROM agents WHERE agent_id = $1 FOR UPDATE', [context.agentId],
+          )
+          if (!agent) throw new Error('workspace rollback agent unavailable')
+          const readWorkspace = async () => normalizedWorkspaceRow(await tx.queryOne<any>(
+            `SELECT workspace_id, org_id, name, workspace_type, local_path, repo_url,
+                    default_branch, metadata, created_at, updated_at
+               FROM agent_workspaces WHERE workspace_id = $1 FOR UPDATE`,
+            [workspaceId],
+          ))
+          const readBinding = async () => normalizedWorkspaceBinding(await tx.queryOne<any>(
+            `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+               FROM agent_workspace_bindings
+              WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary'
+              FOR UPDATE`,
+            [context.agentId, workspaceId],
+          ))
+          const runtimeIds = new Set(runtimePreimages.map((row) => row.runtime_instance_id))
+          const readRuntimeLinks = async () => (runtimeIds.size === 0 ? [] : (await tx.query<any>(
+            `SELECT runtime_instance_id, agent_id, workspace_id
+               FROM agent_runtime_instances WHERE agent_id = $1 ORDER BY runtime_instance_id`,
+            [context.agentId],
+          )).map(normalizedRuntimeLink).filter((row) => runtimeIds.has(row.runtime_instance_id)))
+          const readPreservedReferences = async () => {
+            const bindings = (await tx.query<any>(
+              `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+                 FROM agent_workspace_bindings
+                WHERE workspace_id = $1
+                  AND NOT (agent_id = $2 AND binding_role = 'primary')
+                ORDER BY agent_id, binding_role`,
+              [workspaceId, context.agentId],
+            )).map(normalizedWorkspaceBinding)
+            const runtimes = (await tx.query<any>(
+              `SELECT runtime_instance_id, agent_id, workspace_id
+                 FROM agent_runtime_instances WHERE workspace_id = $1 ORDER BY runtime_instance_id`,
+              [workspaceId],
+            )).map(normalizedRuntimeLink).filter((row) =>
+              row.agent_id !== context.agentId || !runtimeIds.has(row.runtime_instance_id))
+            return { bindings, runtimes }
+          }
+          const currentWorkspace = await readWorkspace()
+          const currentBinding = await readBinding()
+          const currentRuntimeLinks = await readRuntimeLinks()
+          const currentPreserved = await readPreservedReferences()
+          const currentPreservedDigest = bootstrapDigest(currentPreserved)
+          const preBinding = bindingPreimage.existed === true ? {
+            agent_id: context.agentId,
+            workspace_id: workspaceId,
+            binding_role: 'primary',
+            active: bindingPreimage.active === true,
+          } : null
+          const beforeProjection = workspaceAuthorityProjection({
+            workspaceId, canonicalPath, workspaceCreated: false,
+            workspaceRowDigest: workspacePreimageDigest,
+            binding: preBinding,
+            runtimeLinks: runtimePreimages,
+            preservedReferenceDigest: currentPreservedDigest,
+            bootstrapRunId: context.runId,
+            project,
+          })
+          const currentIsPreimage = (workspaceCreated ? currentWorkspace === null
+            : bootstrapDigest(currentWorkspace) === workspacePreimageDigest)
+            && (bindingPreimage.existed === true
+              ? bootstrapDigest(currentBinding) === String(bindingPreimage.row_digest ?? '')
+              : currentBinding === null)
+            && bootstrapDigest(currentRuntimeLinks) === bootstrapDigest(runtimePreimages)
+            && currentPreservedDigest === preservedReferenceDigest
+            && bootstrapDigest(beforeProjection) === beforeProjectionDigest
+          if (currentIsPreimage) {
+            return { noEffect: true, digest: beforeProjectionDigest }
+          }
+
+          const intendedBinding = {
+            agent_id: context.agentId,
+            workspace_id: workspaceId,
+            binding_role: 'primary',
+            active: true,
+          }
+          const intendedRuntimeLinks = runtimePreimages.map((row) => ({ ...row, workspace_id: workspaceId }))
+          const currentProjection = workspaceAuthorityProjection({
+            workspaceId, canonicalPath, workspaceCreated,
+            workspaceRowDigest: workspacePreimageDigest,
+            binding: currentBinding,
+            runtimeLinks: currentRuntimeLinks,
+            preservedReferenceDigest: currentPreservedDigest,
+            bootstrapRunId: context.runId,
+            project,
+          })
+          if (!currentWorkspace || !currentBinding?.active
+            || bootstrapDigest(currentProjection) !== intendedProjectionDigest
+            || currentPreservedDigest !== preservedReferenceDigest
+            || bootstrapDigest(currentRuntimeLinks) !== bootstrapDigest(intendedRuntimeLinks)) {
+            throw new Error('workspace rollback postimage fence mismatch')
+          }
+          if (workspaceCreated) {
+            const metadata = parseJsonRecord(currentWorkspace.metadata)
+            if (metadata.bootstrap_run_id !== context.runId || metadata.agent_id !== context.agentId
+              || (payload.workspace_postimage_digest
+                && bootstrapDigest(currentWorkspace) !== String(payload.workspace_postimage_digest))) {
+              throw new Error('workspace rollback ownership fence mismatch')
+            }
+          } else if (bootstrapDigest(currentWorkspace) !== workspacePreimageDigest) {
+            throw new Error('workspace rollback shared row changed')
+          }
+          if (payload.binding_postimage_digest
+            && bootstrapDigest(currentBinding) !== String(payload.binding_postimage_digest)) {
+            throw new Error('workspace rollback binding postimage mismatch')
+          }
+
+          for (const runtime of runtimePreimages) {
+            const unlinked = await tx.execute(
+              `UPDATE agent_runtime_instances SET workspace_id = $3
+                WHERE runtime_instance_id = $1 AND agent_id = $2 AND workspace_id = $4`,
+              [runtime.runtime_instance_id, context.agentId, runtime.workspace_id, workspaceId],
+            )
+            if (unlinked.rowCount !== 1) throw new Error('workspace rollback runtime link fence rejected')
+          }
+          if (bindingPreimage.existed === true) {
+            if (bindingPreimage.active !== true) {
+              const restoredBinding = await tx.execute(
+                `UPDATE agent_workspace_bindings SET active = false
+                  WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary' AND active = true`,
+                [context.agentId, workspaceId],
+              )
+              if (restoredBinding.rowCount !== 1) throw new Error('workspace rollback binding restore rejected')
+            }
+          } else {
+            const removedBinding = await tx.execute(
+              `DELETE FROM agent_workspace_bindings
+                WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary' AND active = true`,
+              [context.agentId, workspaceId],
+            )
+            if (removedBinding.rowCount !== 1) throw new Error('workspace rollback binding removal rejected')
+          }
+          if (workspaceCreated) {
+            const removedWorkspace = await tx.execute(
+              `DELETE FROM agent_workspaces WHERE workspace_id = $1 AND org_id = 'default' AND local_path = $2`,
+              [workspaceId, canonicalPath],
+            )
+            if (removedWorkspace.rowCount !== 1) throw new Error('workspace rollback workspace removal rejected')
+          }
+          const finalWorkspace = await readWorkspace()
+          const finalBinding = await readBinding()
+          const finalRuntimeLinks = await readRuntimeLinks()
+          const finalPreserved = await readPreservedReferences()
+          const finalPreservedDigest = bootstrapDigest(finalPreserved)
+          const exact = (workspaceCreated ? finalWorkspace === null
+            : bootstrapDigest(finalWorkspace) === workspacePreimageDigest)
+            && (bindingPreimage.existed === true
+              ? bootstrapDigest(finalBinding) === String(bindingPreimage.row_digest ?? '')
+              : finalBinding === null)
+            && bootstrapDigest(finalRuntimeLinks) === bootstrapDigest(runtimePreimages)
+            && finalPreservedDigest === preservedReferenceDigest
+            && bootstrapDigest(finalPreserved.bindings) === bootstrapDigest(preservedBindingsPreimage)
+            && bootstrapDigest(finalPreserved.runtimes) === bootstrapDigest(preservedRuntimesPreimage)
+          if (!exact) throw new Error('workspace rollback exact preimage readback mismatch')
+          return { noEffect: false, digest: beforeProjectionDigest }
+        })).catch((error) => ({ error: bootstrapDigest(String(error)) }))
+        if ('error' in restored) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],
+            evidenceRefs: [`workspace-authority-rollback-failed:${restored.error}`],
+          }
+        }
+        return {
+          ok: true,
+          readinessPredicates: {
+            rollback_verified: true,
+            recovery_admission_no_effect: restored.noEffect,
+            foreign_shared_rows_unchanged: true,
+          },
+          evidenceRefs: [`workspace-authority-rollback:${bootstrapDigest({
+            workspace_id: workspaceId,
+            no_effect: restored.noEffect,
+            final_digest: restored.digest,
+          })}`],
+          readbackDigest: restored.digest,
+        }
+      }
       if (mutation.kind === 'daemon'
         && mutation.owner_key === `launchd:${context.runId}:${context.agentId}:${STATE_DAEMON_PLIST_NAME}`) {
         const plist = String(mutation.rollback_payload?.plist_path ?? '')
@@ -3804,18 +4307,26 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             }
           }
           if (payload.runtime_created === true) {
-            const row = await tx.queryOne<any>('SELECT status, metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2', [runtimeId, context.agentId])
+            const row = await tx.queryOne<any>('SELECT status, workspace_id, metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2', [runtimeId, context.agentId])
             const metadata = parseJsonRecord(row?.metadata)
             if (metadata.bootstrap_run_id !== context.runId) return false
             if (row?.status === 'running' || row?.status === 'active') {
               const stopped = await tx.execute(
-                `UPDATE agent_runtime_instances SET status = 'stopped', stopped_at = now(), last_seen_at = now()
+                `UPDATE agent_runtime_instances
+                    SET status = 'stopped', stopped_at = now(), last_seen_at = now(), workspace_id = NULL
                   WHERE runtime_instance_id = $1 AND agent_id = $2 AND status IN ('running', 'active')`,
                 [runtimeId, context.agentId],
               )
               if (stopped.rowCount !== 1) return false
             } else if (row?.status !== 'stopped') {
               return false
+            } else if (row.workspace_id !== null && row.workspace_id !== undefined) {
+              const unlinked = await tx.execute(
+                `UPDATE agent_runtime_instances SET workspace_id = NULL
+                  WHERE runtime_instance_id = $1 AND agent_id = $2 AND status = 'stopped' AND workspace_id = $3`,
+                [runtimeId, context.agentId, row.workspace_id],
+              )
+              if (unlinked.rowCount !== 1) return false
             }
           }
           const evidence = evidenceId === null || evidenceId === undefined
