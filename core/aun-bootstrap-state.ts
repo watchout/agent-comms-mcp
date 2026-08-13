@@ -135,6 +135,11 @@ type BootstrapLockTestHooks = {
     | 'after-archive-fsync'
     | 'after-agent-fsync'
     | 'after-strict-reread', path: string) => void
+  readyObserverDurability?: (event:
+    | 'after-marker-fsync'
+    | 'after-lock-fsync'
+    | 'after-agent-fsync'
+    | 'after-strict-reread', path: string) => void
   afterStageMkdir?: () => void
   afterStagePartialOwnerWrite?: () => void
   afterStageOwnerFsync?: () => void
@@ -401,6 +406,30 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     }
   }
 
+  private closeObservedReady(
+    dir: string,
+    path: string,
+    owner: BootstrapLockRecord,
+  ): void {
+    const phase = bootstrapLockPhase(path)
+    if (phase !== 'ready' && phase !== 'legacy_ready') {
+      throw new Error('observed ready lock is corrupt')
+    }
+    if (phase === 'ready') {
+      fsyncBootstrapDirectory(join(path, LOCK_ACQUIRE_READY_FILE))
+      this.testHooks.readyObserverDurability?.('after-marker-fsync', path)
+    }
+    fsyncBootstrapDirectory(path)
+    this.testHooks.readyObserverDurability?.('after-lock-fsync', path)
+    fsyncBootstrapDirectory(dir)
+    this.testHooks.readyObserverDurability?.('after-agent-fsync', path)
+    const reread = readBootstrapLockRecord(path, owner.agent_id)
+    if (!reread || !sameLockRecord(reread, owner) || bootstrapLockPhase(path) !== phase) {
+      throw new Error('observed ready lock durability readback mismatch')
+    }
+    this.testHooks.readyObserverDurability?.('after-strict-reread', path)
+  }
+
   private abortPublishedPending(
     dir: string,
     path: string,
@@ -429,7 +458,6 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     dir: string,
     path: string,
     owner: BootstrapLockRecord,
-    allowedPendingReclaims: ReadonlySet<string>,
   ): void {
     const current = readBootstrapLockRecord(path, owner.agent_id)
     if (!current || !sameLockRecord(current, owner) || bootstrapLockPhase(path) !== 'pending') {
@@ -465,10 +493,6 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
         const reclaimed = readBootstrapLockRecord(candidatePath, owner.agent_id)
         if (reclaimed && validCompletedReclaim(candidatePath, reclaimed)) {
           this.completeAndVerifyReclaim(candidatePath, reclaimed, false)
-          continue
-        }
-        if (reclaimed && allowedPendingReclaims.has(candidatePath)
-          && this.exactSameRunStale(reclaimed, owner.agent_id, owner.run_id)) {
           continue
         }
         throw new Error('pending reclaim generation blocks acquire admission')
@@ -513,6 +537,9 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
   }
 
   private completeAndVerifyReclaim(path: string, owner: BootstrapLockRecord, emitHooks = true): void {
+    if (existsSync(join(path, LOCK_ACQUIRE_READY_FILE))) {
+      fsyncBootstrapDirectory(join(path, LOCK_ACQUIRE_READY_FILE))
+    }
     const marker = join(path, LOCK_RECLAIM_COMPLETE_FILE)
     if (!existsSync(marker)) {
       mkdirSync(marker, { mode: 0o700 })
@@ -525,6 +552,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     if (emitHooks) this.testHooks.reclaimDurability?.('before-tomb-fsync', path)
     fsyncBootstrapDirectory(path)
     if (emitHooks) this.testHooks.reclaimDurability?.('after-tomb-fsync', path)
+    fsyncBootstrapDirectory(dirname(path))
     const reread = readBootstrapLockRecord(path, owner.agent_id)
     if (!reread || !sameLockRecord(reread, owner) || !validCompletedReclaim(path, reread)) {
       throw new Error('reclaim generation completion readback mismatch')
@@ -541,6 +569,9 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
   ): void {
     if (name !== `${LOCK_COMPLETED_RELEASE_PREFIX}${owner.nonce}`) {
       throw new Error('completed release archive is corrupt')
+    }
+    if (existsSync(join(path, LOCK_ACQUIRE_READY_FILE))) {
+      fsyncBootstrapDirectory(join(path, LOCK_ACQUIRE_READY_FILE))
     }
     fsyncBootstrapDirectory(path)
     if (emitHooks) this.testHooks.completedReleaseObserverDurability?.('after-archive-fsync', path)
@@ -680,7 +711,6 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
         }
         archiveCompletedRelease(dir, releasePath, released, this.testHooks.afterCompletedReleaseRename)
       }
-      const recoverableReclaims: string[] = []
       for (const name of reclaimNames) {
         const reclaimPath = join(dir, name)
         const reclaimed = readBootstrapLockRecord(reclaimPath, agentId)
@@ -693,7 +723,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           || !this.exactSameRunStale(reclaimed, agentId, runId)) {
           throw new Error('reclaim marker is live, foreign, or corrupt')
         }
-        recoverableReclaims.push(reclaimPath)
+        this.completeAndVerifyReclaim(reclaimPath, reclaimed)
       }
 
       if (existsSync(path)) {
@@ -706,12 +736,16 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           || !this.exactSameRunStale(owner, agentId, runId)) {
           throw new Error(`agent lock is ${owner ? `owned by run ${owner.run_id}` : 'corrupt'}`)
         } else {
+          // A visible ready marker is not itself a durability receipt. Close the
+          // creator's rename window before moving the generation to reclaim, or
+          // a power loss could restore `acquire.pending` inside the moved tomb.
+          this.closeObservedReady(dir, path, owner)
           const reclaimedPath = join(dir, `${LOCK_RECLAIM_PREFIX}${owner.nonce}`)
           this.testHooks.beforeReclaimRename?.()
           renameSync(path, reclaimedPath)
           fsyncBootstrapDirectory(dir)
           this.testHooks.afterReclaimRename?.()
-          recoverableReclaims.push(reclaimedPath)
+          this.completeAndVerifyReclaim(reclaimedPath, owner)
         }
       }
 
@@ -721,7 +755,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       publishedPending = true
       fsyncBootstrapDirectory(dir)
       this.testHooks.acquireDurability?.('after-pending-publish', path)
-      this.finalizePublishedPending(dir, path, record, new Set(recoverableReclaims))
+      this.finalizePublishedPending(dir, path, record)
       readyCommitted = true
       this.acquiredLocks.set(agentId, record)
     } catch (err) {

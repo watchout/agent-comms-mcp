@@ -56,6 +56,9 @@ const childFixture = process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'hold'
   || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'reclaim'
   || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'delayed-reclaim'
   || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'pending-hold'
+  || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'ready-hold'
+  || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'snapshot-racer'
+  || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'reclaim-hold'
   ? process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE
   : null
 
@@ -67,11 +70,26 @@ if (childFixture) {
           console.log('PAUSED')
           const wait = new Int32Array(new SharedArrayBuffer(4))
           while (!existsSync(process.env.AUN_BOOTSTRAP_LOCK_CHILD_GO!)) Atomics.wait(wait, 0, 0, 10)
-        } }
-      : childFixture === 'pending-hold'
+          } }
+      : childFixture === 'snapshot-racer'
+        ? { afterInitialReservedSnapshot: () => {
+            writeFileSync(process.env.AUN_BOOTSTRAP_LOCK_CHILD_READY!, 'snapshot\n', { mode: 0o600 })
+            console.log('SNAPSHOT')
+            const wait = new Int32Array(new SharedArrayBuffer(4))
+            while (!existsSync(process.env.AUN_BOOTSTRAP_LOCK_CHILD_GO!)) Atomics.wait(wait, 0, 0, 10)
+          } }
+      : childFixture === 'reclaim-hold'
+        ? { afterReclaimRename: () => {
+            writeFileSync(process.env.AUN_BOOTSTRAP_LOCK_CHILD_READY!, 'reclaimed\n', { mode: 0o600 })
+            console.log('RECLAIMED')
+            const wait = new Int32Array(new SharedArrayBuffer(4))
+            while (true) Atomics.wait(wait, 0, 0, 1000)
+          } }
+      : childFixture === 'pending-hold' || childFixture === 'ready-hold'
         ? { acquireDurability: (event: string) => {
-            if (event !== 'after-pending-publish') return
-            console.log('PENDING')
+            const awaited = childFixture === 'pending-hold' ? 'after-pending-publish' : 'after-ready-rename'
+            if (event !== awaited) return
+            console.log(childFixture === 'pending-hold' ? 'PENDING' : 'READY')
             const wait = new Int32Array(new SharedArrayBuffer(4))
             while (true) Atomics.wait(wait, 0, 0, 1000)
           } }
@@ -90,7 +108,9 @@ if (childFixture) {
     }
     if (childFixture === 'reclaim' && await readCommand() !== 'GO') throw new Error('missing GO barrier')
     try {
-      store.acquireLock(agentId, runId, { reclaimStaleSameRun: childFixture !== 'hold' })
+      store.acquireLock(agentId, runId, {
+        reclaimStaleSameRun: childFixture !== 'hold' && childFixture !== 'snapshot-racer',
+      })
       console.log(childFixture === 'hold' ? 'LOCKED' : 'WON')
     } catch {
       console.log('BUSY')
@@ -150,7 +170,31 @@ if (childFixture) {
     ])
   })
 
-  test('release retry closes every injected reclaim marker and tomb durability window', () => {
+  test('recovery durability-closes an observed ready generation before reclaim rename', () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000021')
+    seedDirectory(join(dir, '.lock'), record)
+    mkdirSync(join(dir, '.lock', 'acquire.ready'), { mode: 0o700 })
+    const trace: string[] = []
+    const store = new FileBootstrapStateStore(root, {
+      readyObserverDurability: (event) => trace.push(event),
+    })
+
+    store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(trace).toEqual([
+      'after-marker-fsync',
+      'after-lock-fsync',
+      'after-agent-fsync',
+      'after-strict-reread',
+    ])
+    expect(readdirSync(join(dir, `.lock.reclaim-${record.nonce}`)).sort()).toEqual([
+      'acquire.ready', 'owner.json', 'reclaim.complete',
+    ])
+    store.releaseLock(agentId, runId)
+  })
+
+  test('acquire retry closes every injected reclaim marker and tomb durability window before ready', () => {
     for (const boundary of ['after-marker-mkdir', 'before-marker-fsync', 'before-tomb-fsync'] as const) {
       const { root, agentId, runId } = fixture()
       const dir = join(root, agentId)
@@ -167,10 +211,11 @@ if (childFixture) {
           }
         },
       })
-      store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
-      expect(() => store.releaseLock(agentId, runId)).toThrow(`injected ${boundary}`)
-      expect(existsSync(join(dir, '.lock'))).toBe(true)
+      expect(() => store.acquireLock(agentId, runId, { reclaimStaleSameRun: true }))
+        .toThrow(`injected ${boundary}`)
+      expect(existsSync(join(dir, '.lock'))).toBe(false)
       expect(readdirSync(dir).some((name) => name.startsWith('.lock.release-'))).toBe(false)
+      store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
       store.releaseLock(agentId, runId)
       expect(trace).toContain(boundary)
       expect(trace.at(-1)).toBe('after-strict-reread')
@@ -563,6 +608,60 @@ if (childFixture) {
     expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
   })
 
+  test('real process barriers prevent a snapshotted ordinary acquire crossing an interrupted official reclaim', async () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const old = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000022')
+    seedDirectory(join(dir, '.lock'), old)
+    const snapshotReady = join(root, 'snapshot-ready')
+    const allowSnapshot = join(root, 'allow-snapshot')
+    const reclaimReady = join(root, 'reclaim-ready')
+
+    const ordinary = Bun.spawn([process.execPath, 'test', import.meta.path], {
+      cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      env: {
+        ...process.env,
+        AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE: 'snapshot-racer',
+        AUN_BOOTSTRAP_LOCK_CHILD_ROOT: root,
+        AUN_BOOTSTRAP_LOCK_CHILD_AGENT: agentId,
+        AUN_BOOTSTRAP_LOCK_CHILD_RUN: 'ordinary-snapshot-process',
+        AUN_BOOTSTRAP_LOCK_CHILD_READY: snapshotReady,
+        AUN_BOOTSTRAP_LOCK_CHILD_GO: allowSnapshot,
+      },
+    })
+    const ordinaryReader = ordinary.stdout.getReader()
+    expect(await readUntil(ordinaryReader, /SNAPSHOT/)).toContain('SNAPSHOT')
+
+    const recovery = Bun.spawn([process.execPath, 'test', import.meta.path], {
+      cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      env: {
+        ...process.env,
+        AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE: 'reclaim-hold',
+        AUN_BOOTSTRAP_LOCK_CHILD_ROOT: root,
+        AUN_BOOTSTRAP_LOCK_CHILD_AGENT: agentId,
+        AUN_BOOTSTRAP_LOCK_CHILD_RUN: runId,
+        AUN_BOOTSTRAP_LOCK_CHILD_READY: reclaimReady,
+      },
+    })
+    const recoveryReader = recovery.stdout.getReader()
+    expect(await readUntil(recoveryReader, /RECLAIMED/)).toContain('RECLAIMED')
+    recovery.kill('SIGKILL')
+    expect(await recovery.exited).not.toBe(0)
+
+    writeFileSync(allowSnapshot, 'go\n', { mode: 0o600 })
+    expect(await readUntil(ordinaryReader, /BUSY|WON/)).toContain('BUSY')
+    expect(await ordinary.exited).toBe(0)
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+    const reclaimPath = join(dir, `.lock.reclaim-${old.nonce}`)
+    expect(readFileSync(join(reclaimPath, 'owner.json'), 'utf8')).toBe(`${JSON.stringify(old)}\n`)
+    expect(readdirSync(dir).filter((name) => name.startsWith('.lock.aborted-acquire-'))).toHaveLength(1)
+
+    const retry = new FileBootstrapStateStore(root)
+    retry.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    retry.releaseLock(agentId, runId)
+  })
+
   test('pending publish failure archives exact no-effect ownership before fresh work', () => {
     const { root, agentId } = fixture()
     const dir = join(root, agentId)
@@ -604,5 +703,42 @@ if (childFixture) {
     expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
     expect(readdirSync(dir).filter((name) => name.startsWith('.lock.aborted-acquire-'))).toHaveLength(1)
     ordinary.releaseLock(agentId, 'ordinary-after-killed-pending')
+  })
+
+  test('a SIGKILL after ready rename is durability-closed before official recovery admission', async () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const child = Bun.spawn([process.execPath, 'test', import.meta.path], {
+      cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      env: {
+        ...process.env,
+        AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE: 'ready-hold',
+        AUN_BOOTSTRAP_LOCK_CHILD_ROOT: root,
+        AUN_BOOTSTRAP_LOCK_CHILD_AGENT: agentId,
+        AUN_BOOTSTRAP_LOCK_CHILD_RUN: runId,
+      },
+    })
+    const reader = child.stdout.getReader()
+    expect(await readUntil(reader, /READY/)).toContain('READY')
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    child.kill('SIGKILL')
+    expect(await child.exited).not.toBe(0)
+
+    const trace: string[] = []
+    const recovery = new FileBootstrapStateStore(root, {
+      readyObserverDurability: (event) => trace.push(event),
+    })
+    recovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(trace).toEqual([
+      'after-marker-fsync',
+      'after-lock-fsync',
+      'after-agent-fsync',
+      'after-strict-reread',
+    ])
+    const reclaim = readdirSync(dir).find((name) => name.startsWith('.lock.reclaim-'))!
+    expect(readdirSync(join(dir, reclaim)).sort()).toEqual([
+      'acquire.ready', 'owner.json', 'reclaim.complete',
+    ])
+    recovery.releaseLock(agentId, runId)
   })
 })
