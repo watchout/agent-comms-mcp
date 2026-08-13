@@ -55,6 +55,7 @@ async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, patter
 const childFixture = process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'hold'
   || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'reclaim'
   || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'delayed-reclaim'
+  || process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE === 'pending-hold'
   ? process.env.AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE
   : null
 
@@ -67,6 +68,13 @@ if (childFixture) {
           const wait = new Int32Array(new SharedArrayBuffer(4))
           while (!existsSync(process.env.AUN_BOOTSTRAP_LOCK_CHILD_GO!)) Atomics.wait(wait, 0, 0, 10)
         } }
+      : childFixture === 'pending-hold'
+        ? { acquireDurability: (event: string) => {
+            if (event !== 'after-pending-publish') return
+            console.log('PENDING')
+            const wait = new Int32Array(new SharedArrayBuffer(4))
+            while (true) Atomics.wait(wait, 0, 0, 1000)
+          } }
       : {})
     const agentId = process.env.AUN_BOOTSTRAP_LOCK_CHILD_AGENT!
     const runId = process.env.AUN_BOOTSTRAP_LOCK_CHILD_RUN!
@@ -515,5 +523,86 @@ if (childFixture) {
     expect(await delayed.exited).toBe(0)
     expect(readFileSync(join(dir, '.lock', 'owner.json'), 'utf8')).toBe(freshOwnerBefore)
     fresh.releaseLock(agentId, 'fresh-live-after-winner')
+  })
+
+  test('post-publish admission aborts across a reclaim introduced after the initial snapshot', () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const old = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000020')
+    const reclaimPath = join(dir, `.lock.reclaim-${old.nonce}`)
+    seedDirectory(join(dir, '.lock'), old)
+
+    let injected = false
+    const ordinary = new FileBootstrapStateStore(root, {
+      afterInitialReservedSnapshot: () => {
+        if (injected) return
+        injected = true
+        const interruptedRecovery = new FileBootstrapStateStore(root, {
+          afterReclaimRename: () => { throw new Error('injected durable reclaim pause') },
+        })
+        expect(() => interruptedRecovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true }))
+          .toThrow('injected durable reclaim pause')
+        expect(existsSync(reclaimPath)).toBe(true)
+        expect(existsSync(join(dir, '.lock'))).toBe(false)
+      },
+    })
+
+    expect(() => ordinary.acquireLock(agentId, 'ordinary-snapshot-racer')).toThrow('NO_GO_BOOTSTRAP_BUSY')
+    expect(existsSync(reclaimPath)).toBe(true)
+    expect(readFileSync(join(reclaimPath, 'owner.json'), 'utf8')).toBe(`${JSON.stringify(old)}\n`)
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+    expect(readdirSync(dir).filter((name) => name.startsWith('.lock.aborted-acquire-'))).toHaveLength(1)
+
+    const recovery = new FileBootstrapStateStore(root)
+    recovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    recovery.releaseLock(agentId, runId)
+    const fresh = new FileBootstrapStateStore(root)
+    fresh.acquireLock(agentId, 'fresh-after-snapshot-race')
+    fresh.releaseLock(agentId, 'fresh-after-snapshot-race')
+    expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
+  })
+
+  test('pending publish failure archives exact no-effect ownership before fresh work', () => {
+    const { root, agentId } = fixture()
+    const dir = join(root, agentId)
+    const crashing = new FileBootstrapStateStore(root, {
+      acquireDurability: (event) => {
+        if (event === 'after-pending-publish') throw new Error('injected pending publish crash')
+      },
+    })
+    expect(() => crashing.acquireLock(agentId, 'pending-crash')).toThrow('injected pending publish crash')
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+    expect(readdirSync(dir).filter((name) => name.startsWith('.lock.aborted-acquire-'))).toHaveLength(1)
+    const fresh = new FileBootstrapStateStore(root)
+    fresh.acquireLock(agentId, 'fresh-after-pending-crash')
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    fresh.releaseLock(agentId, 'fresh-after-pending-crash')
+  })
+
+  test('a SIGKILLed published pending lock is abort-only and ordinary work recovers it', async () => {
+    const { root, agentId } = fixture()
+    const dir = join(root, agentId)
+    const child = Bun.spawn([process.execPath, 'test', import.meta.path], {
+      cwd: process.cwd(), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+      env: {
+        ...process.env,
+        AUN_BOOTSTRAP_LOCK_CHILD_FIXTURE: 'pending-hold',
+        AUN_BOOTSTRAP_LOCK_CHILD_ROOT: root,
+        AUN_BOOTSTRAP_LOCK_CHILD_AGENT: agentId,
+        AUN_BOOTSTRAP_LOCK_CHILD_RUN: 'pending-killed-run',
+      },
+    })
+    const reader = child.stdout.getReader()
+    expect(await readUntil(reader, /PENDING/)).toContain('PENDING')
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.pending', 'owner.json'])
+    child.kill('SIGKILL')
+    expect(await child.exited).not.toBe(0)
+
+    const ordinary = new FileBootstrapStateStore(root)
+    ordinary.acquireLock(agentId, 'ordinary-after-killed-pending')
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    expect(readdirSync(dir).filter((name) => name.startsWith('.lock.aborted-acquire-'))).toHaveLength(1)
+    ordinary.releaseLock(agentId, 'ordinary-after-killed-pending')
   })
 })

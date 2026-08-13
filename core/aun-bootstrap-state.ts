@@ -112,11 +112,24 @@ const LOCK_RELEASE_PREFIX = '.lock.release-'
 const LOCK_COMPLETED_RELEASE_PREFIX = '.lock.completed-release-'
 const LOCK_STAGE_PREFIX = '.lock.stage-'
 const LOCK_COMPLETED_STAGE_PREFIX = '.lock.completed-stage-'
+const LOCK_ABORTED_ACQUIRE_PREFIX = '.lock.aborted-acquire-'
 const LOCK_RECLAIM_COMPLETE_FILE = 'reclaim.complete'
+const LOCK_ACQUIRE_PENDING_FILE = 'acquire.pending'
+const LOCK_ACQUIRE_READY_FILE = 'acquire.ready'
 const CANONICAL_LOCK_NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 type BootstrapLockTestHooks = {
   beforeReclaimRename?: () => void
+  afterReclaimRename?: () => void
+  afterInitialReservedSnapshot?: () => void
+  acquireDurability?: (event:
+    | 'after-pending-publish'
+    | 'before-ready-rename'
+    | 'after-ready-rename'
+    | 'after-ready-fsync'
+    | 'after-ready-reread'
+    | 'after-abort-rename'
+    | 'after-abort-fsync', path: string) => void
   afterCompletedReleaseRename?: () => void
   completedReleaseObserverDurability?: (event:
     | 'after-archive-fsync'
@@ -220,11 +233,34 @@ function readBootstrapLockRecord(path: string, agentId: string): BootstrapLockRe
     const base = basename(path)
     const layout = names.join(',')
     const ownerOnly = layout === LOCK_RECORD_FILE
-    const reclaimComplete = layout === [LOCK_RECORD_FILE, LOCK_RECLAIM_COMPLETE_FILE].sort().join(',')
+    const acquirePending = layout === [LOCK_RECORD_FILE, LOCK_ACQUIRE_PENDING_FILE].sort().join(',')
+      && validEmptyDirectory(join(path, LOCK_ACQUIRE_PENDING_FILE))
+    const acquireReady = layout === [LOCK_RECORD_FILE, LOCK_ACQUIRE_READY_FILE].sort().join(',')
+      && validEmptyDirectory(join(path, LOCK_ACQUIRE_READY_FILE))
+    const reclaimComplete = (layout === [LOCK_RECORD_FILE, LOCK_RECLAIM_COMPLETE_FILE].sort().join(',')
+      || layout === [LOCK_RECORD_FILE, LOCK_ACQUIRE_READY_FILE, LOCK_RECLAIM_COMPLETE_FILE].sort().join(','))
       && validEmptyDirectory(join(path, LOCK_RECLAIM_COMPLETE_FILE))
-    if (base === '.lock' || base.startsWith(LOCK_RELEASE_PREFIX)
-      || base.startsWith(LOCK_COMPLETED_RELEASE_PREFIX)) return ownerOnly ? record : null
-    if (base === `${LOCK_RECLAIM_PREFIX}${record.nonce}`) return ownerOnly || reclaimComplete ? record : null
+      && (!names.includes(LOCK_ACQUIRE_READY_FILE) || validEmptyDirectory(join(path, LOCK_ACQUIRE_READY_FILE)))
+    if (base === '.lock') return ownerOnly || acquirePending || acquireReady ? record : null
+    if (base.startsWith(LOCK_RELEASE_PREFIX) || base.startsWith(LOCK_COMPLETED_RELEASE_PREFIX)) {
+      return ownerOnly || acquireReady ? record : null
+    }
+    if (base === `${LOCK_ABORTED_ACQUIRE_PREFIX}${record.nonce}`) return acquirePending ? record : null
+    if (base === `${LOCK_RECLAIM_PREFIX}${record.nonce}`) return ownerOnly || acquireReady || reclaimComplete ? record : null
+    return null
+  } catch {
+    return null
+  }
+}
+
+function bootstrapLockPhase(path: string): 'legacy_ready' | 'pending' | 'ready' | null {
+  try {
+    const names = readdirSync(path).sort()
+    if (names.join(',') === LOCK_RECORD_FILE) return 'legacy_ready'
+    if (names.join(',') === [LOCK_RECORD_FILE, LOCK_ACQUIRE_PENDING_FILE].sort().join(',')
+      && validEmptyDirectory(join(path, LOCK_ACQUIRE_PENDING_FILE))) return 'pending'
+    if (names.join(',') === [LOCK_RECORD_FILE, LOCK_ACQUIRE_READY_FILE].sort().join(',')
+      && validEmptyDirectory(join(path, LOCK_ACQUIRE_READY_FILE))) return 'ready'
     return null
   } catch {
     return null
@@ -301,6 +337,9 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       closeSync(fd)
     }
     chmodSync(ownerPath, 0o600)
+    const pending = join(staged, LOCK_ACQUIRE_PENDING_FILE)
+    mkdirSync(pending, { mode: 0o700 })
+    fsyncBootstrapDirectory(pending)
     fsyncBootstrapDirectory(staged)
     this.testHooks.afterStageFsync?.()
     return staged
@@ -344,24 +383,153 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     }
   }
 
-  private completeAndVerifyReclaim(path: string, owner: BootstrapLockRecord): void {
+  private closeObservedAbortedAcquire(
+    dir: string,
+    path: string,
+    name: string,
+    owner: BootstrapLockRecord,
+  ): void {
+    if (name !== `${LOCK_ABORTED_ACQUIRE_PREFIX}${owner.nonce}` || bootstrapLockPhase(path) !== 'pending') {
+      throw new Error('aborted acquire archive is corrupt')
+    }
+    fsyncBootstrapDirectory(join(path, LOCK_ACQUIRE_PENDING_FILE))
+    fsyncBootstrapDirectory(path)
+    fsyncBootstrapDirectory(dir)
+    const reread = readBootstrapLockRecord(path, owner.agent_id)
+    if (!reread || !sameLockRecord(reread, owner) || bootstrapLockPhase(path) !== 'pending') {
+      throw new Error('aborted acquire archive durability readback mismatch')
+    }
+  }
+
+  private abortPublishedPending(
+    dir: string,
+    path: string,
+    owner: BootstrapLockRecord,
+  ): void {
+    const current = readBootstrapLockRecord(path, owner.agent_id)
+    if (!current || !sameLockRecord(current, owner) || bootstrapLockPhase(path) !== 'pending') {
+      throw new Error('refusing to abort acquire without exact pending ownership')
+    }
+    const aborted = join(dir, `${LOCK_ABORTED_ACQUIRE_PREFIX}${owner.nonce}`)
+    if (existsSync(aborted)) throw new Error('aborted acquire archive target exists')
+    renameSync(path, aborted)
+    this.testHooks.acquireDurability?.('after-abort-rename', aborted)
+    fsyncBootstrapDirectory(dir)
+    fsyncBootstrapDirectory(join(aborted, LOCK_ACQUIRE_PENDING_FILE))
+    fsyncBootstrapDirectory(aborted)
+    fsyncBootstrapDirectory(dir)
+    this.testHooks.acquireDurability?.('after-abort-fsync', aborted)
+    const reread = readBootstrapLockRecord(aborted, owner.agent_id)
+    if (!reread || !sameLockRecord(reread, owner) || bootstrapLockPhase(aborted) !== 'pending') {
+      throw new Error('aborted acquire archive readback mismatch')
+    }
+  }
+
+  private finalizePublishedPending(
+    dir: string,
+    path: string,
+    owner: BootstrapLockRecord,
+    allowedPendingReclaims: ReadonlySet<string>,
+  ): void {
+    const current = readBootstrapLockRecord(path, owner.agent_id)
+    if (!current || !sameLockRecord(current, owner) || bootstrapLockPhase(path) !== 'pending') {
+      throw new Error('published pending lock readback mismatch')
+    }
+
+    for (const name of readdirSync(dir).filter((entry) => entry.startsWith('.lock.')).sort()) {
+      const candidatePath = join(dir, name)
+      if (name === `${LOCK_ABORTED_ACQUIRE_PREFIX}${owner.nonce}`) {
+        throw new Error('own aborted acquire archive exists beside pending lock')
+      }
+      if (name.startsWith(LOCK_COMPLETED_RELEASE_PREFIX)) {
+        const archived = readBootstrapLockRecord(candidatePath, owner.agent_id)
+        if (!archived) throw new Error('completed release archive is corrupt')
+        this.closeObservedCompletedRelease(dir, candidatePath, name, archived, false)
+        continue
+      }
+      if (name.startsWith(LOCK_COMPLETED_STAGE_PREFIX)) {
+        if (!this.validCompletedStageQuarantine(candidatePath, name)) {
+          throw new Error('completed stage archive is corrupt')
+        }
+        fsyncBootstrapDirectory(candidatePath)
+        fsyncBootstrapDirectory(dir)
+        continue
+      }
+      if (name.startsWith(LOCK_ABORTED_ACQUIRE_PREFIX)) {
+        const aborted = readBootstrapLockRecord(candidatePath, owner.agent_id)
+        if (!aborted) throw new Error('aborted acquire archive is corrupt')
+        this.closeObservedAbortedAcquire(dir, candidatePath, name, aborted)
+        continue
+      }
+      if (name.startsWith(LOCK_RECLAIM_PREFIX)) {
+        const reclaimed = readBootstrapLockRecord(candidatePath, owner.agent_id)
+        if (reclaimed && validCompletedReclaim(candidatePath, reclaimed)) {
+          this.completeAndVerifyReclaim(candidatePath, reclaimed, false)
+          continue
+        }
+        if (reclaimed && allowedPendingReclaims.has(candidatePath)
+          && this.exactSameRunStale(reclaimed, owner.agent_id, owner.run_id)) {
+          continue
+        }
+        throw new Error('pending reclaim generation blocks acquire admission')
+      }
+      if (name.startsWith(LOCK_RELEASE_PREFIX)) {
+        throw new Error('release generation blocks acquire admission')
+      }
+      // A stage is never authoritative. Once this pending lock owns `.lock`, a
+      // concurrent stage cannot win publication. Leave it untouched so its
+      // creator observes the atomic destination loss and quarantines its own
+      // residue; a later acquire also quarantines crash residue.
+      if (name.startsWith(LOCK_STAGE_PREFIX)) {
+        const nonce = name.slice(LOCK_STAGE_PREFIX.length)
+        const identity = lstatSync(candidatePath)
+        if (!CANONICAL_LOCK_NONCE.test(nonce) || !identity.isDirectory() || identity.isSymbolicLink()) {
+          throw new Error('concurrent stage artifact is invalid')
+        }
+        continue
+      }
+      throw new Error('unknown reserved lock artifact blocks acquire admission')
+    }
+
+    const beforeReady = readBootstrapLockRecord(path, owner.agent_id)
+    if (!beforeReady || !sameLockRecord(beforeReady, owner) || bootstrapLockPhase(path) !== 'pending') {
+      throw new Error('pending lock changed before ready transition')
+    }
+    const pending = join(path, LOCK_ACQUIRE_PENDING_FILE)
+    const ready = join(path, LOCK_ACQUIRE_READY_FILE)
+    if (existsSync(ready)) throw new Error('ready marker target already exists')
+    this.testHooks.acquireDurability?.('before-ready-rename', path)
+    renameSync(pending, ready)
+    this.testHooks.acquireDurability?.('after-ready-rename', path)
+    fsyncBootstrapDirectory(ready)
+    fsyncBootstrapDirectory(path)
+    fsyncBootstrapDirectory(dir)
+    this.testHooks.acquireDurability?.('after-ready-fsync', path)
+    const installed = readBootstrapLockRecord(path, owner.agent_id)
+    if (!installed || !sameLockRecord(installed, owner) || bootstrapLockPhase(path) !== 'ready') {
+      throw new Error('installed ready lock readback mismatch')
+    }
+    this.testHooks.acquireDurability?.('after-ready-reread', path)
+  }
+
+  private completeAndVerifyReclaim(path: string, owner: BootstrapLockRecord, emitHooks = true): void {
     const marker = join(path, LOCK_RECLAIM_COMPLETE_FILE)
     if (!existsSync(marker)) {
       mkdirSync(marker, { mode: 0o700 })
-      this.testHooks.reclaimDurability?.('after-marker-mkdir', path)
+      if (emitHooks) this.testHooks.reclaimDurability?.('after-marker-mkdir', path)
     }
     if (!validEmptyDirectory(marker)) throw new Error('lock transition completion marker is corrupt')
-    this.testHooks.reclaimDurability?.('before-marker-fsync', path)
+    if (emitHooks) this.testHooks.reclaimDurability?.('before-marker-fsync', path)
     fsyncBootstrapDirectory(marker)
-    this.testHooks.reclaimDurability?.('after-marker-fsync', path)
-    this.testHooks.reclaimDurability?.('before-tomb-fsync', path)
+    if (emitHooks) this.testHooks.reclaimDurability?.('after-marker-fsync', path)
+    if (emitHooks) this.testHooks.reclaimDurability?.('before-tomb-fsync', path)
     fsyncBootstrapDirectory(path)
-    this.testHooks.reclaimDurability?.('after-tomb-fsync', path)
+    if (emitHooks) this.testHooks.reclaimDurability?.('after-tomb-fsync', path)
     const reread = readBootstrapLockRecord(path, owner.agent_id)
     if (!reread || !sameLockRecord(reread, owner) || !validCompletedReclaim(path, reread)) {
       throw new Error('reclaim generation completion readback mismatch')
     }
-    this.testHooks.reclaimDurability?.('after-strict-reread', path)
+    if (emitHooks) this.testHooks.reclaimDurability?.('after-strict-reread', path)
   }
 
   private closeObservedCompletedRelease(
@@ -369,23 +537,28 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     path: string,
     name: string,
     owner: BootstrapLockRecord,
+    emitHooks = true,
   ): void {
     if (name !== `${LOCK_COMPLETED_RELEASE_PREFIX}${owner.nonce}`) {
       throw new Error('completed release archive is corrupt')
     }
     fsyncBootstrapDirectory(path)
-    this.testHooks.completedReleaseObserverDurability?.('after-archive-fsync', path)
+    if (emitHooks) this.testHooks.completedReleaseObserverDurability?.('after-archive-fsync', path)
     fsyncBootstrapDirectory(dir)
-    this.testHooks.completedReleaseObserverDurability?.('after-agent-fsync', path)
+    if (emitHooks) this.testHooks.completedReleaseObserverDurability?.('after-agent-fsync', path)
     const reread = readBootstrapLockRecord(path, owner.agent_id)
     if (!reread || basename(path) !== name || !sameLockRecord(reread, owner)) {
       throw new Error('completed release archive durability readback mismatch')
     }
-    this.testHooks.completedReleaseObserverDurability?.('after-strict-reread', path)
+    if (emitHooks) this.testHooks.completedReleaseObserverDurability?.('after-strict-reread', path)
   }
 
   private exactSameRunStale(record: BootstrapLockRecord, agentId: string, runId: string): boolean {
     if (record.agent_id !== agentId || record.run_id !== runId) return false
+    return this.lockOwnerStale(record)
+  }
+
+  private lockOwnerStale(record: BootstrapLockRecord): boolean {
     const observed = processIdentityState(record.pid)
     return observed.status === 'dead'
       || (observed.status === 'alive' && observed.identity !== record.process_start_identity)
@@ -410,6 +583,8 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       nonce: randomUUID(),
     }
     let staged: string | null = null
+    let publishedPending = false
+    let readyCommitted = false
     try {
       for (const name of readdirSync(dir).filter((entry) => entry.startsWith('.lock.')).sort()) {
         const candidatePath = join(dir, name)
@@ -428,6 +603,12 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           }
           continue
         }
+        if (name.startsWith(LOCK_ABORTED_ACQUIRE_PREFIX)) {
+          const aborted = readBootstrapLockRecord(candidatePath, agentId)
+          if (!aborted) throw new Error('aborted acquire archive is corrupt')
+          this.closeObservedAbortedAcquire(dir, candidatePath, name, aborted)
+          continue
+        }
         if (name.startsWith(LOCK_STAGE_PREFIX)) {
           this.quarantineStagedLock(dir, candidatePath, name)
           continue
@@ -436,6 +617,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       }
       const reclaimNames = readdirSync(dir).filter((name) => name.startsWith(LOCK_RECLAIM_PREFIX)).sort()
       const releaseNames = readdirSync(dir).filter((name) => name.startsWith(LOCK_RELEASE_PREFIX)).sort()
+      this.testHooks.afterInitialReservedSnapshot?.()
       for (const name of releaseNames) {
         const releasePath = join(dir, name)
         const released = readBootstrapLockRecord(releasePath, agentId)
@@ -516,26 +698,36 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
 
       if (existsSync(path)) {
         const owner = readBootstrapLockRecord(path, agentId)
-        if (!options.reclaimStaleSameRun || !owner || !this.exactSameRunStale(owner, agentId, runId)) {
+        const phase = owner ? bootstrapLockPhase(path) : null
+        if (owner && phase === 'pending' && this.lockOwnerStale(owner)) {
+          this.abortPublishedPending(dir, path, owner)
+        } else if (!options.reclaimStaleSameRun || !owner
+          || (phase !== 'ready' && phase !== 'legacy_ready')
+          || !this.exactSameRunStale(owner, agentId, runId)) {
           throw new Error(`agent lock is ${owner ? `owned by run ${owner.run_id}` : 'corrupt'}`)
+        } else {
+          const reclaimedPath = join(dir, `${LOCK_RECLAIM_PREFIX}${owner.nonce}`)
+          this.testHooks.beforeReclaimRename?.()
+          renameSync(path, reclaimedPath)
+          fsyncBootstrapDirectory(dir)
+          this.testHooks.afterReclaimRename?.()
+          recoverableReclaims.push(reclaimedPath)
         }
-        const reclaimedPath = join(dir, `${LOCK_RECLAIM_PREFIX}${owner.nonce}`)
-        this.testHooks.beforeReclaimRename?.()
-        renameSync(path, reclaimedPath)
-        fsyncBootstrapDirectory(dir)
-        recoverableReclaims.push(reclaimedPath)
       }
 
       staged = this.writeStagedLock(dir, record)
       renameSync(staged, path)
       staged = null
+      publishedPending = true
       fsyncBootstrapDirectory(dir)
-      const installed = readBootstrapLockRecord(path, agentId)
-      if (!installed || !sameLockRecord(installed, record)) {
-        throw new Error('installed lock readback mismatch')
-      }
+      this.testHooks.acquireDurability?.('after-pending-publish', path)
+      this.finalizePublishedPending(dir, path, record, new Set(recoverableReclaims))
+      readyCommitted = true
       this.acquiredLocks.set(agentId, record)
     } catch (err) {
+      if (publishedPending && !readyCommitted && existsSync(path)) {
+        try { this.abortPublishedPending(dir, path, record) } catch { /* preserve fail-closed residue */ }
+      }
       if (staged && existsSync(staged)) {
         try { this.quarantineStagedLock(dir, staged, basename(staged)) } catch { /* preserve residue for recovery */ }
       }
@@ -552,7 +744,9 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     }
     const owner = readBootstrapLockRecord(path, agentId)
     const acquired = this.acquiredLocks.get(agentId)
-    if (!owner || !acquired || owner.run_id !== runId || !sameLockRecord(owner, acquired)) {
+    const phase = owner ? bootstrapLockPhase(path) : null
+    if (!owner || !acquired || owner.run_id !== runId || !sameLockRecord(owner, acquired)
+      || (phase !== 'ready' && phase !== 'legacy_ready')) {
       throw new Error('refusing to release bootstrap lock without exact process ownership')
     }
     for (const name of readdirSync(dir).filter((entry) => entry.startsWith(LOCK_RECLAIM_PREFIX)).sort()) {
