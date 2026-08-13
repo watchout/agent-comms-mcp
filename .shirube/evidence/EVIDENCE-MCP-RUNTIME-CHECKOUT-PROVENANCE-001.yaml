@@ -1,0 +1,29 @@
+schema_version: shirube-machine-evidence/v1
+evidence_id: EVIDENCE-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+cell_id: CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+scope: Focused DB-isolated validation only; no live runtime or persistent database evidence.
+evidence_refs:
+  - changed_files
+  - diff_scope_report
+  - "command_result:focused DB-isolated tests"
+  - "command_result:DB-free server build"
+  - "command_result:YAML parse with aliases disabled"
+  - "command_result:git diff --check origin/main...HEAD"
+commands:
+  - command: focused DB-isolated tests
+    result: PASS
+    detail: 127 passed, 0 failed with DATABASE_URL and AGENT_COM_DB explicitly unset.
+  - command: DB-free server build
+    result: PASS
+    detail: 868 modules bundled with database environment variables unset.
+  - command: YAML parse with aliases disabled
+    result: PASS
+    detail: All Shirube YAML files parsed without aliases.
+  - command: git diff --check origin/main...HEAD
+    result: PASS
+  - command: Cell allowed-path replay
+    result: PASS
+    detail: Every changed path is inside the exact control handoff allowed_paths and no forbidden path matches.
+excluded_evidence:
+  - The broad test run that inherited a remote DATABASE_URL is not validation evidence.
+  - No live database readback, repair, rollback, runtime restart, deploy, activation, or heartbeat readback was performed.

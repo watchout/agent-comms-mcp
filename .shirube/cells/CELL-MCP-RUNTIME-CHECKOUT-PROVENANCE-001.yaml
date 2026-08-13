@@ -15,6 +15,8 @@ implementation_boundary:
     - .shirube/cells/CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
     - .shirube/impls/IMPL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
     - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/control-handoffs/CH-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/evidence/EVIDENCE-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
     - core/git-checkout-evidence.ts
     - core/fleet-checkout-drift.ts
     - core/runtime-inventory.ts
