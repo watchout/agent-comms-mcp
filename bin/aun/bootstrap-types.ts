@@ -110,6 +110,7 @@ export type BootstrapRunState = {
   terminal_status: BootstrapTerminalStatus | null
   lock_release_authorized_at: string | null
   lock_released_at: string | null
+  lock_release_owner_nonce: string | null
   stages: BootstrapStageRecord[]
   mutations: BootstrapMutation[]
   mutation_manifest_digest: string

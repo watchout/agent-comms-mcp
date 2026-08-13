@@ -437,7 +437,8 @@ describe('aun bootstrap clean-host journal', () => {
       agent_id: 'workspace-owner', requested_runtime: 'codex', resolved_runtime: 'codex',
       input_digest: 'a'.repeat(64), repo_root: repoRoot, workspace_root: repoRoot, repo_head: 'b'.repeat(40),
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(), terminal_status: null,
-      lock_release_authorized_at: null, lock_released_at: null, stages: [], mutations: [persistedMutation],
+      lock_release_authorized_at: null, lock_released_at: null, lock_release_owner_nonce: null,
+      stages: [], mutations: [persistedMutation],
       mutation_manifest_digest: '', readback_bindings: null, evidence_refs: [], safe_D1_readback: {} as any,
     })
     const persistedBody = readFileSync(join(

@@ -321,6 +321,7 @@ function initialState(input: {
     terminal_status: null,
     lock_release_authorized_at: null,
     lock_released_at: null,
+    lock_release_owner_nonce: null,
     stages: BOOTSTRAP_STAGES.map((stage) => ({
       stage,
       status: 'pending',
@@ -5418,10 +5419,12 @@ export async function bootstrap(
     if (lockHeld) {
       state.lock_release_authorized_at = nowIso()
       state.lock_released_at = null
+      state.lock_release_owner_nonce = null
       state.updated_at = state.lock_release_authorized_at
       stateStore.save(state)
-      stateStore.releaseLock(agentId, runId, (releasedAt) => {
+      stateStore.releaseLock(agentId, runId, (releasedAt, ownerNonce) => {
         state.lock_released_at = releasedAt
+        state.lock_release_owner_nonce = ownerNonce
         state.updated_at = releasedAt
         stateStore.save(state)
       })

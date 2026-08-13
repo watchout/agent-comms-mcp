@@ -106,6 +106,95 @@ if (childFixture) {
     expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
   })
 
+  test('release re-fsyncs and strictly rereads an already completed reclaim generation', () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000014')
+    seedDirectory(join(dir, `.lock.reclaim-${record.nonce}`), record, true)
+    const trace: string[] = []
+    const store = new FileBootstrapStateStore(root, {
+      reclaimDurability: (event) => trace.push(event),
+    })
+    store.acquireLock(agentId, 'fresh-release-durability')
+    store.releaseLock(agentId, 'fresh-release-durability')
+    expect(trace).toEqual([
+      'before-marker-fsync',
+      'after-marker-fsync',
+      'before-tomb-fsync',
+      'after-tomb-fsync',
+      'after-strict-reread',
+    ])
+    expect(readdirSync(join(dir, `.lock.reclaim-${record.nonce}`)).sort()).toEqual([
+      'owner.json', 'reclaim.complete',
+    ])
+  })
+
+  test('release retry closes every injected reclaim marker and tomb durability window', () => {
+    for (const boundary of ['after-marker-mkdir', 'before-marker-fsync', 'before-tomb-fsync'] as const) {
+      const { root, agentId, runId } = fixture()
+      const dir = join(root, agentId)
+      const record = deadRecord(agentId, runId, `00000000-0000-4000-8000-0000000000${boundary.length}`)
+      seedDirectory(join(dir, '.lock'), record)
+      const trace: string[] = []
+      let injected = false
+      const store = new FileBootstrapStateStore(root, {
+        reclaimDurability: (event) => {
+          trace.push(event)
+          if (!injected && event === boundary) {
+            injected = true
+            throw new Error(`injected ${boundary}`)
+          }
+        },
+      })
+      store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+      expect(() => store.releaseLock(agentId, runId)).toThrow(`injected ${boundary}`)
+      expect(existsSync(join(dir, '.lock'))).toBe(true)
+      expect(readdirSync(dir).some((name) => name.startsWith('.lock.release-'))).toBe(false)
+      store.releaseLock(agentId, runId)
+      expect(trace).toContain(boundary)
+      expect(trace.at(-1)).toBe('after-strict-reread')
+      expect(readdirSync(join(dir, `.lock.reclaim-${record.nonce}`)).sort()).toEqual([
+        'owner.json', 'reclaim.complete',
+      ])
+    }
+  })
+
+  test('ordinary acquire permanently quarantines exact empty stage residue', () => {
+    const { root, store, agentId } = fixture()
+    const dir = join(root, agentId)
+    const nonce = '00000000-0000-4000-8000-000000000015'
+    mkdirSync(join(dir, `.lock.stage-${nonce}`), { recursive: true, mode: 0o700 })
+    store.acquireLock(agentId, 'fresh-after-empty-stage')
+    store.releaseLock(agentId, 'fresh-after-empty-stage')
+    expect(existsSync(join(dir, `.lock.stage-${nonce}`))).toBe(false)
+    expect(existsSync(join(dir, `.lock.completed-stage-${nonce}`))).toBe(true)
+    expect(readdirSync(join(dir, `.lock.completed-stage-${nonce}`))).toEqual([])
+  })
+
+  test('all staged-write fault boundaries recover to permanent quarantine without official reclaim', () => {
+    for (const boundary of [
+      'afterStageMkdir',
+      'afterStagePartialOwnerWrite',
+      'afterStageOwnerFsync',
+      'afterStageFsync',
+    ] as const) {
+      const { root, agentId } = fixture()
+      const crashing = new FileBootstrapStateStore(root, {
+        [boundary]: () => { throw new Error(`injected ${boundary}`) },
+      })
+      expect(() => crashing.acquireLock(agentId, `fault-${boundary}`)).toThrow(`injected ${boundary}`)
+      const dir = join(root, agentId)
+      const staged = readdirSync(dir).filter((name) => name.startsWith('.lock.stage-'))
+      expect(staged).toHaveLength(1)
+
+      const fresh = new FileBootstrapStateStore(root)
+      fresh.acquireLock(agentId, `fresh-${boundary}`)
+      fresh.releaseLock(agentId, `fresh-${boundary}`)
+      expect(readdirSync(dir).filter((name) => name.startsWith('.lock.stage-'))).toEqual([])
+      expect(readdirSync(dir).filter((name) => name.startsWith('.lock.completed-stage-'))).toHaveLength(1)
+    }
+  })
+
   test('a deterministic completed reclaim tombstone defeats an arbitrarily delayed ABA rename', () => {
     const { root, store, agentId, runId } = fixture()
     const dir = join(root, agentId)
@@ -169,6 +258,7 @@ if (childFixture) {
       requested_runtime: 'codex', resolved_runtime: null, input_digest: 'a'.repeat(64), repo_root: root,
       workspace_root: root, repo_head: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       terminal_status: null, lock_release_authorized_at: new Date().toISOString(), lock_released_at: null,
+      lock_release_owner_nonce: null,
       stages: [], mutations: [], mutation_manifest_digest: bootstrapDigest([]), readback_bindings: null,
       evidence_refs: [], safe_D1_readback: {},
     } as any
