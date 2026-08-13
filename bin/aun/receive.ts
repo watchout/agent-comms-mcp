@@ -1429,7 +1429,10 @@ function memoryReadyProject(env: Record<string, string>): string {
   const configured = env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim()
     || env.AGENT_MEMORY_PROJECT?.trim()
   if (configured) return configured
-  if (env.AUN_RECEIVE_CLAIM_SOURCE?.trim() === 'state-daemon-queue-work-scheduler') {
+  if (
+    env.AUN_RECEIVE_CLAIM_SOURCE?.trim() === 'state-daemon-queue-work-scheduler'
+    || env.AUN_RECEIVE_CLAIM_SOURCE?.trim() === 'state-daemon-codex-runner'
+  ) {
     throw new Error('STATE_DAEMON_TARGET_MEMORY_READY_PROJECT_REQUIRED')
   }
   return 'agent-comms-mcp'

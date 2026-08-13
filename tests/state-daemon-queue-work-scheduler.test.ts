@@ -20,6 +20,7 @@ import type {
 import {
   FakeAlertSink,
   FakeClock,
+  FakeCodexRunner,
   FakeMetrics,
   FakePgListen,
   FakeTmux,
@@ -268,6 +269,25 @@ class PendingLlmDb implements DBClient {
       }
     }
     return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
+class DirectCodexLlmDb extends PendingLlmDb {
+  constructor(agentId: string, private readonly directRow: any, memoryProject: string) {
+    super(agentId, directRow, memoryProject)
+  }
+
+  override async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('UPDATE agents') && sql.includes('SET last_wake_attempt_at=$1')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT status FROM message_queue WHERE id=$1')) {
+      return { rows: [{ status: this.directRow.status }] as T[], rowCount: 1 }
+    }
+    if (sql.includes('UPDATE message_queue SET last_wake_attempt_at=$1')) {
+      return { rows: [], rowCount: 1 }
+    }
+    return super.query<T>(sql, params)
   }
 }
 
@@ -1071,6 +1091,61 @@ describe('state_daemon queue work scheduler boundary', () => {
 
     expect(db.evidenceProjects).toEqual(['codex'])
     expect(calls).toEqual([{ queueId: 155889, agentId }])
+  })
+
+  test('daemon passes the same target project to the direct Codex runner child', async () => {
+    const agentId = 'codex-cto'
+    const row = {
+      id: 155891,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-155891',
+      payload: JSON.stringify({
+        author_id: 'owner',
+        content: 'direct runner project regression',
+        message_type: 'instruction',
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-13T11:41:19.210Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const db = new DirectCodexLlmDb(agentId, row, 'codex')
+    const runner = new FakeCodexRunner()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-13T11:41:20.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      codexRunner: runner,
+      config: {
+        codexRunnerEnabled: true,
+        memoryReadyProject: 'agent-comms-mcp',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: row.id,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(db.evidenceProjects).toEqual(['codex'])
+    expect(runner.invocations).toHaveLength(1)
+    expect(runner.invocations[0]).toMatchObject({
+      agentId,
+      queueId: row.id,
+      memoryReadyProject: 'codex',
+    })
   })
 
   test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {

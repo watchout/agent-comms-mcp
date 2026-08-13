@@ -181,10 +181,9 @@ function projectFromWorkspace(agentId: string, workspacePath: string): string {
  * Resolve the target agent's memory partition from DB-owned identity state.
  *
  * An explicit per-agent metadata override wins. Otherwise exactly one active
- * primary workspace is authoritative. `canonical_workspace` is the fallback
- * used by current PostgreSQL profiles; `home_directory` keeps the same
- * bootstrap-compatible fallback for older/SQLite schemas that do not yet
- * expose that column. No daemon-repository or latest-evidence fallback exists.
+ * primary workspace is authoritative. The agent profile's `home_directory`
+ * is the schema-stable canonical-workspace fallback. No daemon-repository or
+ * latest-evidence fallback exists.
  */
 export async function resolveRuntimeMemoryReadyProject(
   db: RuntimeMemoryReadyDb,
@@ -251,26 +250,7 @@ export async function resolveRuntimeMemoryReadyProject(
     }
   }
 
-  let canonicalWorkspace: string | null = null
-  try {
-    const canonicalRows = await queryRows<{ canonical_workspace: string | null }>(
-      db,
-      `SELECT canonical_workspace
-         FROM agents
-        WHERE agent_id = $1
-        LIMIT 1`,
-      [agentId],
-    )
-    canonicalWorkspace = normalizeText(canonicalRows[0]?.canonical_workspace)
-  } catch (error) {
-    // SQLite/older schemas use home_directory as the canonical workspace
-    // compatibility field. Any other resolver query error remains fail-closed.
-    const message = (error as Error).message ?? String(error)
-    if (!/no such column:\s*canonical_workspace|column\s+[^\n]*canonical_workspace[^\n]*does not exist/i.test(message)) {
-      throw error
-    }
-  }
-  canonicalWorkspace ??= normalizeText(agent.home_directory)
+  const canonicalWorkspace = normalizeText(agent.home_directory)
   if (!canonicalWorkspace) {
     throw new RuntimeMemoryReadyProjectResolutionError(
       'WORKSPACE_MISSING',

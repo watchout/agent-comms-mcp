@@ -348,6 +348,7 @@ export interface CodexRunnerInvocation {
   messageId: string | null
   requester: string | null
   databaseUrl: string
+  memoryReadyProject: string
   ackContent: string
   completeNoReply?: boolean
   completionReason?: string | null

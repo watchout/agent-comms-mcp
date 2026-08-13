@@ -9,6 +9,7 @@ describe('state_daemon Codex runner adapter command contract', () => {
       messageId: 'msg-123',
       requester: 'codex-cto',
       databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      memoryReadyProject: 'codex-aun',
       ackContent: 'ACK: received by codex-aun; queue_id=123; message_id=msg-123; final close requires explicit --close.',
     })
 
@@ -27,6 +28,25 @@ describe('state_daemon Codex runner adapter command contract', () => {
       AGENT_ID: 'codex-aun',
       AGENT_COM_EXPECTED_AGENT_ID: 'codex-aun',
       DATABASE_URL: 'postgresql:///agent_comms?host=/tmp',
+      AUN_RECEIVE_CLAIM_SOURCE: 'state-daemon-codex-runner',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'codex-aun',
+      AGENT_MEMORY_PROJECT: 'codex-aun',
+    })
+  })
+
+  test('runner invocation fails closed before spawn when the target project is absent', async () => {
+    const { ExecFileCodexRunnerInvoker } = await import('../../../core/state-daemon/codex-runner-adapter')
+    const invoker = new ExecFileCodexRunnerInvoker()
+    await expect(invoker.invoke({
+      agentId: 'codex-aun',
+      queueId: 123,
+      messageId: 'msg-123',
+      requester: null,
+      databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      ackContent: 'ACK',
+    } as any)).resolves.toMatchObject({
+      ok: false,
+      stderr: 'memory-ready project is required for Codex runner codex-aun',
     })
   })
 

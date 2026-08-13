@@ -169,6 +169,23 @@ describe('runtime memory-ready evidence gate', () => {
     })
   })
 
+  test('profile home directory is the schema-stable canonical workspace fallback', async () => {
+    const workspace = join(tmp, 'canonical-project')
+    mkdirSync(workspace)
+    await seedRuntime('canonical-fallback', 39136)
+    await db.execute(
+      `UPDATE agents SET home_directory=$1 WHERE agent_id='canonical-fallback'`,
+      [workspace],
+    )
+
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'canonical-fallback')).resolves.toEqual({
+      agent_id: 'canonical-fallback',
+      project: 'canonical-project',
+      workspace_path: workspace,
+      source: 'canonical_workspace',
+    })
+  })
+
   test('valid current-runtime-bound evidence passes', async () => {
     await seedRuntime()
     await recordReady()

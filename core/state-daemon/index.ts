@@ -928,7 +928,7 @@ export class StateDaemon {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
-      return this.runObservedQueueAction(action, row, bot)
+      return this.runObservedQueueAction(action, row, bot, memoryReady.project)
     }
 
     this.metrics.inc('state_daemon_wake_actions_total', {
@@ -1169,7 +1169,8 @@ export class StateDaemon {
   private async runObservedQueueAction(
     action: PlannedQueueAction,
     row: QueueRow,
-    agent?: AgentRow | null,
+    agent: AgentRow | null | undefined,
+    memoryReadyProject: string,
   ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
@@ -1180,7 +1181,7 @@ export class StateDaemon {
           }))
           return true
         }
-        return this.invokeCodexRunner(row, agent)
+        return this.invokeCodexRunner(row, agent, memoryReadyProject)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -1638,7 +1639,11 @@ export class StateDaemon {
     return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
   }
 
-  private async invokeCodexRunner(row: QueueRow, agent?: AgentRow | null): Promise<boolean> {
+  private async invokeCodexRunner(
+    row: QueueRow,
+    agent: AgentRow | null | undefined,
+    memoryReadyProject: string,
+  ): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
       return false
@@ -1683,6 +1688,7 @@ export class StateDaemon {
       messageId: row.message_id ?? null,
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
+      memoryReadyProject,
       ackContent: autoFinalReply ? '' : this.boundedAckContent(row, noReplyDecision),
       completeNoReply,
       completionReason: completeNoReply
