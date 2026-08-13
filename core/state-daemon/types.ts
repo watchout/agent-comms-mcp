@@ -409,6 +409,8 @@ export interface ShirubeD1AutoReceiveResult {
 }
 
 export interface ShirubeD1AutoReceiveDispatcher {
+  /** Whether completed D1 rows should be revisited during the stale sweep. */
+  readonly recoverDone?: boolean
   classify(input: ShirubeD1AutoReceiveInput): ShirubeD1AutoReceiveDecision | Promise<ShirubeD1AutoReceiveDecision>
   dispatch(input: ShirubeD1AutoReceiveInput): Promise<ShirubeD1AutoReceiveResult>
 }

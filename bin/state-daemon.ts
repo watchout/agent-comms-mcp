@@ -145,11 +145,16 @@ export function assertStateDaemonDirectEntryArgv(
 
 /** Production bridge from queue arrival to the canonical runtime-v2 D1 path. */
 export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoReceiveDispatcher {
+  readonly recoverDone: boolean
+
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
     private readonly invokeRuntimeV2: RuntimeV2Invoker = runtimeV2,
-  ) {}
+  ) {
+    this.recoverDone = env.SHIRUBE_D1_ENABLED?.trim() === '1'
+      && env.SHIRUBE_D1_KILL_SWITCH?.trim() === '0'
+  }
 
   classify(input: ShirubeD1AutoReceiveInput) {
     return classifyShirubeD1AutoReceive({ agent_id: input.agentId, payload: input.payload }, this.env)

@@ -431,7 +431,7 @@ export class StateDaemon {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
     }
 
-    if (this.shirubeD1AutoReceive) {
+    if (this.shirubeD1AutoReceive && this.shirubeD1AutoReceive.recoverDone !== false) {
       const recoverableD1 = await this.fetchShirubeD1RecoveryRows()
       for (const row of recoverableD1) {
         result.scanned++
@@ -1874,15 +1874,23 @@ export class StateDaemon {
               mq.created_at, mq.last_wake_attempt_at, mq.last_heartbeat_at,
               am.message_type, am.channel_id
          FROM message_queue mq
+         JOIN agents a
+           ON a.agent_id = mq.agent_id
+          AND a.profile_enabled = true
+          AND a.disabled_at IS NULL
+          AND a.status NOT IN ('disabled', 'offline', 'retired')
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status='done'
           AND mq.payload LIKE '%"runner_result"%'
+          AND mq.payload::jsonb #>> '{receive_claim,source}' = $2
+          AND mq.payload::jsonb #>> '{queue_work_execution,source}' = $2
+          AND mq.payload::jsonb #>> '{runner_result,invocation_source}' = $2
           AND CASE
                 WHEN (mq.payload::jsonb #>> '{finalizer_error,attempts}') ~ '^[0-9]+$'
                   THEN (mq.payload::jsonb #>> '{finalizer_error,attempts}')::int
                 ELSE 0
               END < 3`
-    const params: unknown[] = [this.config.batchLimit]
+    const params: unknown[] = [this.config.batchLimit, QUEUE_WORK_SCHEDULER_SOURCE]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
     sql += this.queueWorkResidueExclusionClause(params, 'mq')

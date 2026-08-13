@@ -606,6 +606,11 @@ describe('state_daemon queue work scheduler boundary', () => {
         outcome: { ok: true, dry_run: false, code: 'E2E_DONE', plan: {} as any, claimed: {} as any, runner: {} as any },
       }
     })
+    expect(dispatcher.recoverDone).toBe(false)
+    expect(new RuntimeV2ShirubeD1AutoReceiveDispatcher({
+      SHIRUBE_D1_ENABLED: '1',
+      SHIRUBE_D1_KILL_SWITCH: '0',
+    } as NodeJS.ProcessEnv, REPO).recoverDone).toBe(true)
     await expect(dispatcher.dispatch({
       queueId: 88704, agentId: 'dev-001', messageId: 'msg-d1-exact',
       createdAt: '2026-07-23T00:00:00.000Z', status: 'pending', payload: {},
@@ -678,6 +683,37 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     expect(dispatches).toBe(1)
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'resume_started' })).toBe(1)
+  })
+
+  test('post-restart sweep leaves historical done D1 rows untouched while D1 is disabled', async () => {
+    const agentId = 'dev-001'
+    let classifications = 0
+    let dispatches = 0
+    const daemon = new StateDaemon({
+      db: new D1DoneRecoveryDb({
+        id: 88708, agent_id: agentId, status: 'done', message_id: 'msg-d1-disabled-history',
+        payload: JSON.stringify({ shirube_v4_d1: {} }),
+        claim_expires_at: null, claimed_at: new Date('2026-07-23T00:00:00.000Z'),
+        created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null, last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(),
+      shirubeD1AutoReceive: {
+        recoverDone: false,
+        classify() { classifications += 1; return { outcome: 'reject', reason: 'D1_DISABLED' } },
+        async dispatch() { dispatches += 1; return { code: 'unexpected', replayed: true } },
+      },
+    })
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+    expect(classifications).toBe(0)
+    expect(dispatches).toBe(0)
   })
 
   test('post-restart sweep reclaims an expired D1 claim and dispatches it once', async () => {
@@ -829,7 +865,12 @@ describe('state_daemon queue work scheduler boundary', () => {
       status: 'done',
       message_id: 'msg-498',
       payload: JSON.stringify({
-        runner_result: { schema_version: 'queue_work_result_v1' },
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+        queue_work_execution: { source: 'state-daemon-queue-work-scheduler' },
+        runner_result: {
+          schema_version: 'queue_work_result_v1',
+          invocation_source: 'state-daemon-queue-work-scheduler',
+        },
         finalizer_error: { code: 'WRITEBACK_FAILED' },
       }),
       claim_expires_at: null,
@@ -865,6 +906,37 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
 
     expect(calls).toEqual([{ queueId: 498, agentId: 'codex-audit' }])
+  })
+
+  test('done finalizer sweep selects only enabled rows owned by the current scheduler', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: { async runDone() {} },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+    } finally {
+      await daemon.stop()
+    }
+
+    const query = db.queries.find(({ sql }) => sql.includes("mq.status='done'") && sql.includes('runner_result'))
+    expect(query).toBeDefined()
+    expect(query?.sql).toContain('JOIN agents a')
+    expect(query?.sql).toContain('a.profile_enabled = true')
+    expect(query?.sql).toContain('a.disabled_at IS NULL')
+    expect(query?.sql).toContain("a.status NOT IN ('disabled', 'offline', 'retired')")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{receive_claim,source}' = $2")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{queue_work_execution,source}' = $2")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{runner_result,invocation_source}' = $2")
+    expect(query?.params?.[1]).toBe('state-daemon-queue-work-scheduler')
   })
 
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {
