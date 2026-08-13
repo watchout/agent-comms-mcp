@@ -93,6 +93,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   // tmux_session lives in metadata JSONB per spec v0.6 §7.1 (既存 column 不要、
   // metadata key で abstract). status / last_seen_at / runtime はそれぞれ既存 column.
   const metadata: Record<string, unknown> = {}
+  metadata.memory_project = 'agent-comms-mcp'
   if (a.tmux_session !== null) {
     metadata.tmux_session = a.tmux_session ?? `${a.agent_id}-session`
   }
