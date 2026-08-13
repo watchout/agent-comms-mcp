@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -14,6 +14,7 @@ const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
+const WORKSPACE_ID = 'codex-aun-preflight-primary'
 
 function runAun(args: string[], extraEnv: Record<string, string> = {}): { status: number; stdout: string; stderr: string } {
   const r = spawnSync('bun', ['run', AUN, ...args], {
@@ -59,8 +60,35 @@ function seedPending(content = 'codex runner preflight request'): { messageId: s
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-codex-runner-preflight-'))
-  const workspaceDir = join(tmpDir, 'agent-comms-mcp')
+  let workspaceDir = join(tmpDir, 'agent-comms-mcp')
   mkdirSync(workspaceDir)
+  spawnSync('/usr/bin/git', ['init', '-q', workspaceDir])
+  writeFileSync(join(workspaceDir, 'tracked.txt'), 'preflight fixture\n')
+  spawnSync('/usr/bin/git', ['-C', workspaceDir, 'add', 'tracked.txt'])
+  spawnSync('/usr/bin/git', ['-C', workspaceDir, '-c', 'user.name=AUN Test', '-c', 'user.email=aun@example.invalid', 'commit', '-qm', 'fixture'])
+  workspaceDir = realpathSync(workspaceDir)
+  const workspaceHead = spawnSync('/usr/bin/git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const workspaceTree = spawnSync('/usr/bin/git', ['-C', workspaceDir, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim()
+  const owner = statSync(workspaceDir)
+  const transport = {
+    runtime_engine: 'codex', runtime_kind: 'local_process', host_id: null, endpoint_uri: null,
+    runtime_transport_token: 'preflight-transport',
+  }
+  const authorityWithoutDigest = {
+    schema: 'aun.runtime-memory-authority.v1', agent_id: 'codex-aun', project: 'agent-comms-mcp',
+    workspace_id: WORKSPACE_ID, workspace_realpath: workspaceDir,
+    workspace_owner_uid: owner.uid, workspace_owner_gid: owner.gid,
+    runtime_instance_id: 'runtime-codex-aun', profile_revision: 1, profile_source: 'legacy',
+    session_name: 'codex-aun-session', port: 39002, runtime_engine: 'codex', runtime_kind: 'local_process',
+    transport_digest: createHash('sha256').update(JSON.stringify(transport)).digest('hex'),
+    git_toplevel_realpath: workspaceDir, git_commit_sha: workspaceHead, git_tree_sha: workspaceTree, git_clean: true,
+  }
+  const authorityMetadata = JSON.stringify({
+    memory_ready_authority: {
+      ...authorityWithoutDigest,
+      tuple_digest: createHash('sha256').update(JSON.stringify(authorityWithoutDigest)).digest('hex'),
+    },
+  })
   dbPath = join(tmpDir, 'test.db')
   env = {
     ...process.env,
@@ -84,15 +112,19 @@ beforeEach(() => {
        SET channel_port = 39002,
            home_directory = '${workspaceDir}'
      WHERE agent_id = 'codex-aun';
+    INSERT INTO agent_workspaces (workspace_id, name, local_path)
+      VALUES ('${WORKSPACE_ID}', 'agent-comms-mcp', '${workspaceDir}');
+    INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+      VALUES ('codex-aun', '${WORKSPACE_ID}', 'primary', true);
     INSERT INTO agent_runtime_instances
-      (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-      VALUES ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'codex-aun-session', 39002, '/tmp/codex-aun', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');
+      (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+      VALUES ('runtime-codex-aun', 'codex-aun', '${WORKSPACE_ID}', 'codex', 'local_process', 'codex-aun-session', 39002, '${workspaceDir}', '${workspaceHead}', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z', '{"tuple_digest":"preflight-transport"}');
     INSERT INTO runtime_memory_ready_evidence
       (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
        checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
       VALUES ('codex-aun', 'agent-comms-mcp', 'runtime-codex-aun', 1, 'legacy', 'codex-aun-session', 39002, 'codex-aun',
-       '/tmp/codex-aun', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
-       '/tmp/codex-aun-memory-ready.json', 'sqlite-codex-aun-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+       '${workspaceDir}', '${workspaceHead}', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+       '/tmp/codex-aun-memory-ready.json', 'sqlite-codex-aun-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '${authorityMetadata}');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-preflight-ch', 'runner-preflight-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
@@ -157,10 +189,42 @@ describe('test_aun_codex_runner_preflight - read-only lifecycle readiness', () =
 
   test('uses codex-cto-like target workspace project instead of stale global evidence', () => {
     const { queueId } = seedPending('per-target memory project preflight')
+    let codexWorkspace = join(tmpDir, 'codex')
+    mkdirSync(codexWorkspace)
+    spawnSync('/usr/bin/git', ['init', '-q', codexWorkspace])
+    writeFileSync(join(codexWorkspace, 'tracked.txt'), 'codex target fixture\n')
+    spawnSync('/usr/bin/git', ['-C', codexWorkspace, 'add', 'tracked.txt'])
+    spawnSync('/usr/bin/git', ['-C', codexWorkspace, '-c', 'user.name=AUN Test', '-c', 'user.email=aun@example.invalid', 'commit', '-qm', 'fixture'])
+    codexWorkspace = realpathSync(codexWorkspace)
+    const codexHead = spawnSync('/usr/bin/git', ['-C', codexWorkspace, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+    const codexTree = spawnSync('/usr/bin/git', ['-C', codexWorkspace, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim()
+    const codexOwner = statSync(codexWorkspace)
+    const transport = {
+      runtime_engine: 'codex', runtime_kind: 'local_process', host_id: null, endpoint_uri: null,
+      runtime_transport_token: 'preflight-transport',
+    }
+    const codexAuthorityWithoutDigest = {
+      schema: 'aun.runtime-memory-authority.v1', agent_id: 'codex-aun', project: 'codex',
+      workspace_id: WORKSPACE_ID, workspace_realpath: codexWorkspace,
+      workspace_owner_uid: codexOwner.uid, workspace_owner_gid: codexOwner.gid,
+      runtime_instance_id: 'runtime-codex-aun', profile_revision: 1, profile_source: 'legacy',
+      session_name: 'codex-aun-session', port: 39002, runtime_engine: 'codex', runtime_kind: 'local_process',
+      transport_digest: createHash('sha256').update(JSON.stringify(transport)).digest('hex'),
+      git_toplevel_realpath: codexWorkspace, git_commit_sha: codexHead, git_tree_sha: codexTree, git_clean: true,
+    }
+    const codexAuthorityMetadata = JSON.stringify({
+      memory_ready_authority: {
+        ...codexAuthorityWithoutDigest,
+        tuple_digest: createHash('sha256').update(JSON.stringify(codexAuthorityWithoutDigest)).digest('hex'),
+      },
+    })
     dbExec(`
       UPDATE agents
-         SET home_directory = '/Users/yuji/Developer/codex'
+         SET home_directory = '${codexWorkspace}'
        WHERE agent_id = 'codex-aun';
+      UPDATE agent_workspaces SET name='codex', local_path='${codexWorkspace}' WHERE workspace_id='${WORKSPACE_ID}';
+      UPDATE agent_runtime_instances SET checkout_path='${codexWorkspace}', commit_sha='${codexHead}'
+       WHERE runtime_instance_id='runtime-codex-aun';
       UPDATE runtime_memory_ready_evidence
          SET valid_until = '2026-06-01T00:00:03.000Z'
        WHERE agent_id = 'codex-aun' AND project = 'agent-comms-mcp';
@@ -168,8 +232,8 @@ describe('test_aun_codex_runner_preflight - read-only lifecycle readiness', () =
         (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
          checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
         VALUES ('codex-aun', 'codex', 'runtime-codex-aun', 1, 'legacy', 'codex-aun-session', 39002, 'codex-aun',
-         '/tmp/codex-aun', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:04.000Z',
-         '/tmp/codex-aun-memory-ready-codex.json', 'sqlite-codex-aun-memory-ready-codex', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+         '${codexWorkspace}', '${codexHead}', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:04.000Z',
+         '/tmp/codex-aun-memory-ready-codex.json', 'sqlite-codex-aun-memory-ready-codex', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '${codexAuthorityMetadata}');
     `)
 
     const mismatched = runAun([

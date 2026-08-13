@@ -251,6 +251,29 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.reason).toBe('queue_scope_mismatch')
   })
 
+  test('queue-scoped ready evidence rejects missing or malformed creation fences', async () => {
+    await seedRuntime()
+    const current = {
+      queue_id: 42,
+      message_id: 'message-42',
+      created_at: '2026-06-01T00:00:01.000Z',
+    }
+    for (const queueScope of [
+      { queue_id: '42', message_id: 'message-42' },
+      { queue_id: '42', message_id: 'message-42', created_after: 'not-an-instant' },
+      { queue_id: ['42', '43'], message_id: 'message-42', created_after: '2026-06-01T00:00:00.000Z' },
+    ]) {
+      await db.execute('DELETE FROM runtime_memory_ready_evidence')
+      await recordReady('agent-com-dev', { metadata: { queue_scope: queueScope } })
+      const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+        agent_id: 'agent-com-dev', project: 'agent-comms-mcp',
+        now: new Date('2026-06-01T00:00:03.000Z'), queue_scope: current,
+      })
+      expect(gate.ok).toBe(false)
+      expect(gate.reason).toBe('queue_scope_mismatch')
+    }
+  })
+
   test('wrong identity on occupied expected port fails readiness', async () => {
     await db.execute(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
@@ -271,7 +294,72 @@ describe('runtime memory-ready evidence gate', () => {
 
     expect(gate.ok).toBe(false)
     expect(gate.reason).toBe('port_identity_mismatch')
-    expect(gate.details.occupant_agent_id).toBe('other-dev')
+    expect(gate.details.occupants).toEqual([{
+      agent_id: 'other-dev',
+      runtime_instance_id: 'runtime-other-dev',
+    }])
+  })
+
+  test('duplicate active runtimes on one expected port fail deterministically in every insertion order', async () => {
+    await seedRuntime()
+    await recordReady()
+    await db.execute(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
+       VALUES ('foreign-dev', 'foreign-dev', 'dev', 'codex', 'idle', 39100)`,
+    )
+    const insertions = [
+      [
+        ['runtime-z-target', 'agent-com-dev'],
+        ['runtime-a-foreign', 'foreign-dev'],
+      ],
+      [
+        ['runtime-a-foreign', 'foreign-dev'],
+        ['runtime-z-target', 'agent-com-dev'],
+      ],
+    ] as const
+    for (const order of insertions) {
+      for (const [runtimeId, agentId] of order) {
+        await db.execute(
+          `INSERT INTO agent_runtime_instances
+             (runtime_instance_id, agent_id, runtime_engine, session_name, port, status, started_at, last_seen_at)
+           VALUES ($1, $2, 'codex', $3, 39100, 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z')`,
+          [runtimeId, agentId, `${agentId}-duplicate-session`],
+        )
+      }
+      const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+        agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+      })
+      expect(gate.ok).toBe(false)
+      expect(gate.reason).toBe('port_identity_mismatch')
+      expect(gate.details.occupant_count).toBe(3)
+      expect(gate.details.occupants).toEqual([
+        { agent_id: 'agent-com-dev', runtime_instance_id: 'runtime-agent-com-dev' },
+        { agent_id: 'agent-com-dev', runtime_instance_id: 'runtime-z-target' },
+        { agent_id: 'foreign-dev', runtime_instance_id: 'runtime-a-foreign' },
+      ])
+      await db.execute(`DELETE FROM agent_runtime_instances WHERE runtime_instance_id IN ('runtime-z-target', 'runtime-a-foreign')`)
+    }
+  })
+
+  test('invalid port and profile revision authority values fail closed', async () => {
+    await seedRuntime()
+    await recordReady()
+    for (const sql of [
+      `UPDATE agents SET profile_revision=-1 WHERE agent_id='agent-com-dev'`,
+      `UPDATE agents SET profile_revision=1.5 WHERE agent_id='agent-com-dev'`,
+      `UPDATE agents SET channel_port=0 WHERE agent_id='agent-com-dev'`,
+      `UPDATE agents SET channel_port=65536 WHERE agent_id='agent-com-dev'`,
+      `UPDATE agent_runtime_instances SET port=1.5 WHERE agent_id='agent-com-dev'`,
+    ]) {
+      await db.execute(sql)
+      const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+        agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+      })
+      expect(gate.ok).toBe(false)
+      expect(['authority_tuple_invalid', 'port_identity_mismatch']).toContain(gate.reason)
+      await db.execute(`UPDATE agents SET profile_revision=1, channel_port=39100 WHERE agent_id='agent-com-dev'`)
+      await db.execute(`UPDATE agent_runtime_instances SET port=39100 WHERE agent_id='agent-com-dev'`)
+    }
   })
 
   test('same-basename checkout at a different root and null runtime identity fail closed', async () => {

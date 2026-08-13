@@ -54,11 +54,14 @@ export class SqliteAdapter implements DbAdapter {
       create: options.create ?? !options.readonly,
       readonly: options.readonly ?? false,
     })
+    // Configure this connection's busy handler before journal-mode readback.
+    // A different process can still briefly own the WAL cleanup/recovery lock
+    // after it exits, so even reaffirming WAL must not fail immediately.
+    this.db.exec('PRAGMA busy_timeout = 5000')
     if (!options.readonly) {
       this.db.exec('PRAGMA journal_mode = WAL')
     }
     this.db.exec('PRAGMA foreign_keys = ON')
-    this.db.exec('PRAGMA busy_timeout = 5000')
   }
 
   private prepare(sql: string, params?: any[]): { sql: string; params: any[] } {

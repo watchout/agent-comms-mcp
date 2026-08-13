@@ -32,6 +32,7 @@ import { StateDaemon } from '../core/state-daemon/index'
 import {
   assertRuntimeMemoryReadyProjectResolutionCurrent,
   captureRuntimeMemoryReadyAuthority,
+  evaluateRuntimeMemoryReadyGate,
   resolveRuntimeMemoryReadyProject,
   type RuntimeMemoryReadyProjectResolution,
 } from '../core/runtime-memory-ready'
@@ -300,6 +301,9 @@ export function exactClaimFenceFromTargetedReceive(
     || !Number.isFinite(claimedAtMs)
     || !Number.isFinite(claimExpiresAtMs)
     || claimExpiresAtMs <= claimedAtMs
+    || !claimed.authority_tuple_digest
+    || !claimed.message_id
+    || !claimed.created_at
   ) {
     throw new Error(`targeted receive returned no exact claim fence for ${input.agentId} queue_id=${input.queueId}`)
   }
@@ -308,6 +312,10 @@ export function exactClaimFenceFromTargetedReceive(
     // Preserve the database timestamp text verbatim. PostgreSQL `now()` can
     // contain microseconds that a JavaScript Date would silently truncate.
     claimedAt: claimed.claimed_at!.trim(),
+    authorityTupleDigest: claimed.authority_tuple_digest,
+    queueId: String(claimed.queue_id),
+    messageId: claimed.message_id,
+    createdAt: claimed.created_at,
   }
 }
 
@@ -346,10 +354,45 @@ export async function resolveQueueWorkRuntimeResolution(
 async function resolveQueueWorkRuntimeAuthorityResolution(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
+  queueId?: number,
+  actionKind = 'queue_work',
 ): Promise<RuntimeMemoryReadyProjectResolution> {
   const resolution = await resolveQueueWorkRuntimeResolution(db, agentId)
-  const authority = await captureRuntimeMemoryReadyAuthority(db as any, resolution)
-  return Object.freeze({ ...resolution, authority_tuple_digest: authority.tuple_digest })
+  if (queueId === undefined) {
+    const authority = await captureRuntimeMemoryReadyAuthority(db as any, resolution)
+    return Object.freeze({ ...resolution, authority_tuple_digest: authority.tuple_digest })
+  }
+  const queueResult = await db.query<{
+    id: string | number
+    message_id: string | null
+    created_at: string | Date | null
+    status: string
+  }>(
+    `SELECT id, message_id, created_at, status
+       FROM message_queue
+      WHERE id = $1 AND agent_id = $2
+      LIMIT 1`,
+    [queueId, agentId],
+  )
+  if (queueResult.rows.length !== 1) throw new Error(`queue authority row unavailable queue_id=${queueId}`)
+  const queue = queueResult.rows[0]!
+  const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+    agent_id: agentId,
+    expected_agent_id: agentId,
+    project: resolution.project,
+    project_resolution: resolution,
+    queue_scope: {
+      queue_id: queue.id,
+      message_id: queue.message_id,
+      created_at: queue.created_at,
+      status: queue.status,
+      action_kind: actionKind,
+    },
+  })
+  if (!gate.ok || !gate.project_resolution?.authority_tuple_digest) {
+    throw new Error(`memory-ready queue authority rejected queue_id=${queueId} reason=${gate.reason}`)
+  }
+  return gate.project_resolution
 }
 
 function assertQueueWorkAuthorityDigestCurrent(
@@ -357,7 +400,8 @@ function assertQueueWorkAuthorityDigestCurrent(
   current: RuntimeMemoryReadyProjectResolution,
 ): void {
   assertRuntimeMemoryReadyProjectResolutionCurrent(expected, current)
-  if (expected.authority_tuple_digest && expected.authority_tuple_digest !== current.authority_tuple_digest) {
+  if (!expected.authority_tuple_digest || !current.authority_tuple_digest
+    || expected.authority_tuple_digest !== current.authority_tuple_digest) {
     throw new Error(
       `runtime memory-ready authority tuple changed: expected=${expected.authority_tuple_digest ?? 'missing'} `
       + `current=${current.authority_tuple_digest ?? 'missing'}`,
@@ -371,6 +415,8 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     private readonly cwd: string,
     private readonly resolveRuntimeResolution: (
       agentId: string,
+      queueId?: number,
+      actionKind?: string,
     ) => Promise<RuntimeMemoryReadyProjectResolution> = async (agentId) => {
       const canonicalWorkspacePath = realpathSync(cwd)
       return Object.freeze({
@@ -392,7 +438,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void> {
     const expected = memoryReadyResolution ?? await this.resolveRuntimeResolution(input.agentId)
-    const beforeClaim = await this.resolveRuntimeResolution(input.agentId)
+    const beforeClaim = await this.resolveRuntimeResolution(input.agentId, input.queueId, 'targeted_receive')
     assertQueueWorkAuthorityDigestCurrent(expected, beforeClaim)
     const env = this.envFor(input.agentId, expected)
     const received = await this.receiveInvoker({
@@ -404,9 +450,13 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     if (!received.ok) {
       throw new Error(`targeted receive failed code=${received.code} stderr=${received.stderr.trim()}`)
     }
+    const claimFence = exactClaimFenceFromTargetedReceive(received, input)
+    if (claimFence.authorityTupleDigest !== expected.authority_tuple_digest) {
+      throw new Error(`targeted receive authority digest changed queue_id=${input.queueId}`)
+    }
     await this.runReceivedWithFence(
       input,
-      exactClaimFenceFromTargetedReceive(received, input),
+      claimFence,
       expected,
     )
   }
@@ -419,8 +469,18 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     await this.runReceivedWithFence(input, undefined, expected)
   }
 
-  async runDone(input: { queueId: number; agentId: string }): Promise<void> {
-    const env = this.envFor(input.agentId)
+  async runDone(
+    input: { queueId: number; agentId: string },
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
+  ): Promise<void> {
+    const expected = memoryReadyResolution ?? await this.resolveRuntimeResolution(
+      input.agentId,
+      input.queueId,
+      'finalize_done_queue_work',
+    )
+    const beforeFinalize = await this.resolveRuntimeResolution(input.agentId, input.queueId, 'finalize_done_queue_work')
+    assertQueueWorkAuthorityDigestCurrent(expected, beforeFinalize)
+    const env = this.envFor(input.agentId, expected)
     const result = await this.queueWorkInvoker({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -440,7 +500,11 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     expected?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void> {
     const baseline = expected ?? await this.resolveRuntimeResolution(input.agentId)
-    const beforeDispatch = await this.resolveRuntimeResolution(input.agentId)
+    const beforeDispatch = await this.resolveRuntimeResolution(
+      input.agentId,
+      input.queueId,
+      claimFence ? 'run_received_queue_work' : 'recover_received_queue_work',
+    )
     assertQueueWorkAuthorityDigestCurrent(baseline, beforeDispatch)
     const runtimeCwd = baseline.canonical_workspace_path
     const env = {
@@ -1052,7 +1116,12 @@ export async function main(): Promise<void> {
       ? new QueueWorkRunnerScheduler(
           process.env,
           process.cwd(),
-          (agentId) => resolveQueueWorkRuntimeAuthorityResolution(queryClient, agentId),
+          (agentId, queueId, actionKind) => resolveQueueWorkRuntimeAuthorityResolution(
+            queryClient,
+            agentId,
+            queueId,
+            actionKind,
+          ),
         )
       : undefined,
     shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),

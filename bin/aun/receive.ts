@@ -79,6 +79,7 @@ export interface ClaimedMessage {
   claimed_by?: string
   claimed_at?: string
   claim_expires_at?: string
+  authority_tuple_digest?: string
   reply_chain?: unknown[]
   presentation?: PresentationEvidence
   routing?: QueueRoutingDecisionEvidence
@@ -116,6 +117,7 @@ export interface TargetedReceiveSummary {
   waiting: number
   blocked_reason: TargetedReceiveBlockedReason | null
   observed_status: string | null
+  memory_ready: RuntimeMemoryReadyGateResult | null
 }
 
 export type TargetedReceiveBlockedReason =
@@ -125,6 +127,7 @@ export type TargetedReceiveBlockedReason =
   | 'PRESENTATION_GROUP_INCOMPLETE'
   | 'PRESENTATION_GROUP_CONFLICT'
   | 'FRAGMENT_NOT_CLAIMABLE'
+  | 'memory_not_ready'
 
 export interface TargetedReceiveResult extends ReceiveResult {
   summary?: TargetedReceiveSummary
@@ -482,6 +485,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
   }
 
   try {
+    const preGatedResolution = runtimeMemoryReadyProjectResolutionFromEnv(plan.env)
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<TargetedReceiveSummary>(async (tx) => {
         const row = await tx.queryOne<Record<string, unknown>>(
@@ -519,15 +523,46 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           ...(presentation ? { presentation: presentation.evidence } : {}),
         } : null
         const observedStatus = selected?.status ?? null
-        const blockedReason = !selected
+        let blockedReason: TargetedReceiveBlockedReason | null = !selected
           ? 'target_queue_not_found'
           : selected.status !== 'pending' ? 'target_queue_not_pending' : presentation?.blocked_reason ?? null
+        let memoryReady: RuntimeMemoryReadyGateResult | null = null
         let claimed: ClaimedMessage | null = null
         let claimIdentity: {
           claimed_by: string
           claimed_at: string
           claim_expires_at: string
         } | null = null
+
+        if (selected && !blockedReason) {
+          try {
+            const project = await resolveRuntimeMemoryReadyProject(tx as any, {
+              agent_id: plan.env.AGENT_ID,
+              explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
+              require_enabled: false,
+            })
+            if (preGatedResolution) {
+              assertRuntimeMemoryReadyProjectResolutionCurrent(preGatedResolution, project)
+              await assertRuntimeMemoryReadyAuthorityCurrent(tx as any, preGatedResolution)
+            }
+            memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
+              agent_id: plan.env.AGENT_ID,
+              expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+              project: project.project,
+              project_resolution: project,
+              queue_scope: {
+                queue_id: row!.id as string | number,
+                message_id: row!.message_id as string | number | null | undefined,
+                created_at: row!.created_at as string | Date | null | undefined,
+                status: String(row!.status ?? ''),
+                action_kind: 'targeted_receive',
+              },
+            })
+          } catch (error) {
+            memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
+          }
+          if (!memoryReady.ok) blockedReason = 'memory_not_ready'
+        }
 
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
@@ -537,6 +572,9 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
             source: claimSource,
             agentId: plan.env.AGENT_ID,
             queueId: targetQueueId,
+            messageId: selected.message_id,
+            createdAt: selected.created_at,
+            authorityTupleDigest: memoryReady!.project_resolution!.authority_tuple_digest!,
           })
           const update = await tx.execute(
             `UPDATE message_queue
@@ -589,7 +627,10 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
         )
         const waiting = Number(waitingRow?.n ?? 0)
         if (selected && !blockedReason) {
-          claimed = opts.dryRun ? null : claimedMessageFromRow(selected, payload, waiting, claimIdentity)
+          claimed = opts.dryRun ? null : {
+            ...claimedMessageFromRow(selected, payload, waiting, claimIdentity),
+            authority_tuple_digest: memoryReady?.project_resolution?.authority_tuple_digest ?? undefined,
+          }
         }
 
         return {
@@ -604,6 +645,7 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           waiting,
           blocked_reason: blockedReason,
           observed_status: observedStatus,
+          memory_ready: memoryReady,
         }
       })
     })
@@ -768,7 +810,14 @@ function parsePayload(payload: unknown): Record<string, unknown> {
 
 function queuePayloadWithReceiveClaim(
   payload: Record<string, unknown>,
-  input: { source: string | null; agentId: string; queueId: string },
+  input: {
+    source: string | null
+    agentId: string
+    queueId: string
+    messageId: string | null
+    createdAt: string | null
+    authorityTupleDigest: string
+  },
 ): string | null {
   if (!input.source) return null
   return JSON.stringify({
@@ -778,6 +827,9 @@ function queuePayloadWithReceiveClaim(
       source: input.source,
       agent_id: input.agentId,
       queue_id: input.queueId,
+      message_id: input.messageId,
+      created_at: input.createdAt,
+      authority_tuple_digest: input.authorityTupleDigest,
     },
   })
 }
@@ -1660,64 +1712,6 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
     const preGatedResolution = runtimeMemoryReadyProjectResolutionFromEnv(plan.env)
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
-        let memoryReady: RuntimeMemoryReadyGateResult
-        try {
-          const project = await resolveRuntimeMemoryReadyProject(tx as any, {
-            agent_id: plan.env.AGENT_ID,
-            explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
-            require_enabled: false,
-          })
-          if (preGatedResolution) {
-            assertRuntimeMemoryReadyProjectResolutionCurrent(preGatedResolution, project)
-          }
-          memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
-            agent_id: plan.env.AGENT_ID,
-            expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
-            project: project.project,
-            project_resolution: project,
-          })
-          memoryReady.details = {
-            ...memoryReady.details,
-            project_source: project.source,
-            workspace_path: project.workspace_path,
-            canonical_workspace_path: project.canonical_workspace_path,
-            workspace_id: project.workspace_id,
-            explicit_project: project.explicit_project,
-          }
-        } catch (error) {
-          memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
-        }
-        if (!memoryReady.ok) {
-          const waitingRow = await tx.queryOne<{ n: number | string }>(
-            `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
-            [plan.env.AGENT_ID],
-          ).catch(() => ({ n: 0 }))
-          return {
-            ok: false,
-            dry_run: !!opts.dryRun,
-            mode: 'receive-actionable',
-            agent_id: plan.env.AGENT_ID,
-            expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
-            max_inspect: maxInspect,
-            inspected_count: 0,
-            waiting: Number(waitingRow?.n ?? 0),
-            selected: null,
-            claimed: null,
-            blocked_reason: 'memory_not_ready',
-            active_claim: {
-              busy: false,
-              queue_id: null,
-              message_id: null,
-              status: null,
-              claimed_at: null,
-              claim_expires_at: null,
-            },
-            skipped_non_action_count: 0,
-            unknown_type_count: 0,
-            selection_reason: `memory_ready_${memoryReady.reason}`,
-            memory_ready: memoryReady,
-          }
-        }
         const rowsSql = targetQueueId
           ? `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
                   mq.created_at, mq.claimed_by, mq.claimed_at, mq.claim_expires_at,
@@ -1835,6 +1829,87 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           status: (activeClaimRow?.status as string | null | undefined) ?? null,
           claimed_at: normalizeDate(activeClaimRow?.claimed_at),
           claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
+        }
+
+        // Selection is intentionally read-only and precedes readiness. This is
+        // required so queue-scoped evidence can be checked against the exact
+        // queue incarnation without claiming it first.
+        let memoryReady: RuntimeMemoryReadyGateResult = {
+          ok: true,
+          gate: 'memory_ready',
+          reason: 'ready',
+          agent_id: plan.env.AGENT_ID,
+          project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env) ?? '',
+          checked_at: new Date().toISOString(),
+          runtime_instance_id: null,
+          evidence_id: null,
+          evidence_path: null,
+          evidence_log_id: null,
+          source: 'no_eligible_candidate',
+          valid_until: null,
+          current_runtime: null,
+          details: { gate_required: false, selection_reason: selected.reason },
+          project_resolution: null,
+        }
+        if (selected.row && selectedRaw && !activeClaim.busy) {
+          try {
+            const project = await resolveRuntimeMemoryReadyProject(tx as any, {
+              agent_id: plan.env.AGENT_ID,
+              explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
+              require_enabled: false,
+            })
+            if (preGatedResolution) {
+              assertRuntimeMemoryReadyProjectResolutionCurrent(preGatedResolution, project)
+              await assertRuntimeMemoryReadyAuthorityCurrent(tx as any, preGatedResolution)
+            }
+            memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
+              agent_id: plan.env.AGENT_ID,
+              expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+              project: project.project,
+              project_resolution: project,
+              queue_scope: {
+                queue_id: selectedRaw.id as string | number,
+                message_id: selectedRaw.message_id as string | number | null | undefined,
+                created_at: selectedRaw.created_at as string | Date | null | undefined,
+                status: String(selectedRaw.status ?? ''),
+                action_kind: 'receive_actionable',
+              },
+            })
+            memoryReady.details = {
+              ...memoryReady.details,
+              project_source: project.source,
+              workspace_path: project.workspace_path,
+              canonical_workspace_path: project.canonical_workspace_path,
+              workspace_id: project.workspace_id,
+              explicit_project: project.explicit_project,
+            }
+          } catch (error) {
+            memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
+          }
+          if (!memoryReady.ok) {
+            const waitingRow = await tx.queryOne<{ n: number | string }>(
+              `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
+              [plan.env.AGENT_ID],
+            ).catch(() => ({ n: 0 }))
+            return {
+              ok: false,
+              dry_run: !!opts.dryRun,
+              mode: 'receive-actionable',
+              agent_id: plan.env.AGENT_ID,
+              expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+              max_inspect: maxInspect,
+              inspected_count: inspected.length,
+              waiting: Number(waitingRow?.n ?? 0),
+              selected: selected.row,
+              claimed: null,
+              blocked_reason: 'memory_not_ready',
+              active_claim: activeClaim,
+              skipped_non_action_count: inspected.filter((row) => row.classification === 'non_action').length,
+              unknown_type_count: inspected.filter((row) => row.classification === 'unknown').length,
+              selection_reason: `memory_ready_${memoryReady.reason}`,
+              memory_ready: memoryReady,
+            }
+          }
         }
 
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {

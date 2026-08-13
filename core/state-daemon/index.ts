@@ -1853,6 +1853,29 @@ export class StateDaemon {
         })
       }
       await assertRuntimeMemoryReadyAuthorityCurrent(this.db, expected)
+      const freshGate = await evaluateRuntimeMemoryReadyGate(this.db, {
+        agent_id: row.agent_id,
+        expected_agent_id: row.agent_id,
+        project: expected.project,
+        project_resolution: expected,
+        now: this.clock.now(),
+        queue_scope: {
+          queue_id: row.id,
+          message_id: row.message_id,
+          created_at: row.created_at,
+          status: row.status,
+          action_kind: 'invoke_codex_runner',
+        },
+      })
+      if (!freshGate.ok || freshGate.project_resolution?.authority_tuple_digest !== expected.authority_tuple_digest) {
+        throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_drift', {
+          agent_id: row.agent_id,
+          reason: 'fresh_memory_ready_gate_failed',
+          gate_reason: freshGate.reason,
+          expected_authority_tuple_digest: expected.authority_tuple_digest ?? null,
+          observed_authority_tuple_digest: freshGate.project_resolution?.authority_tuple_digest ?? null,
+        })
+      }
       return true
     } catch (error) {
       await this.dbQuery(

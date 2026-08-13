@@ -164,6 +164,37 @@ function receivedRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
+const TEST_AUTHORITY_TUPLE_DIGEST = 'a'.repeat(64)
+
+function fencedReceivedRow(overrides: Record<string, unknown> = {}) {
+  const row = receivedRow(overrides)
+  const payload = JSON.parse(row.payload)
+  row.payload = JSON.stringify({
+    ...payload,
+    receive_claim: {
+      ...payload.receive_claim,
+      source: 'state-daemon-queue-work-scheduler',
+      agent_id: row.agent_id,
+      queue_id: String(row.id),
+      message_id: row.message_id,
+      created_at: row.created_at,
+      authority_tuple_digest: TEST_AUTHORITY_TUPLE_DIGEST,
+    },
+  })
+  return row
+}
+
+function claimFenceFor(row: ReturnType<typeof receivedRow>) {
+  return {
+    claimedBy: row.claimed_by,
+    claimedAt: row.claimed_at,
+    authorityTupleDigest: TEST_AUTHORITY_TUPLE_DIGEST,
+    queueId: String(row.id),
+    messageId: row.message_id,
+    createdAt: row.created_at,
+  }
+}
+
 function githubBackedHandoffRow(overrides: Record<string, unknown> = {}) {
   return receivedRow({
     agent_id: 'l2auditor',
@@ -422,7 +453,8 @@ describe('runReceivedQueueWork', () => {
         return { rows: result.rows, rowCount: result.rows.length }
       }
     }
-    const db = new RowsLengthAdapterDb(receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' }))
+    const row = fencedReceivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
+    const db = new RowsLengthAdapterDb(row)
     const adapter: LlmRuntimeAdapter = {
       runtime_id: 'rows-length-runtime',
       capabilities,
@@ -434,10 +466,7 @@ describe('runReceivedQueueWork', () => {
     const outcome = await runReceivedQueueWork(db, {
       queueId: 42,
       adapter,
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
 
@@ -449,7 +478,7 @@ describe('runReceivedQueueWork', () => {
   })
 
   test('exact claim fence prevents a stale runner from persisting done after ownership changes', async () => {
-    const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
+    const row = fencedReceivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
     const db = new FakeQueueDb(row)
     const adapter: LlmRuntimeAdapter = {
       runtime_id: 'fenced-runtime',
@@ -464,10 +493,7 @@ describe('runReceivedQueueWork', () => {
     const outcome = await runReceivedQueueWork(db, {
       queueId: 42,
       adapter,
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
 
@@ -486,7 +512,7 @@ describe('runReceivedQueueWork', () => {
   test('same-agent expiry, reclaim, and re-receive cannot persist or finalize the stale result', async () => {
     const oldClaimedAt = '2026-05-21T00:00:01.000Z'
     const newClaimedAt = '2026-05-21T01:00:30.000Z'
-    const row = receivedRow({
+    const row = fencedReceivedRow({
       payload: JSON.stringify({
         content: 'stale same-agent race',
         author_id: 'codex-cto',
@@ -519,7 +545,7 @@ describe('runReceivedQueueWork', () => {
       adapter,
       invocationSource: 'state-daemon-queue-work-scheduler',
       expectedClaimSource: 'state-daemon-queue-work-scheduler',
-      claimFence: { claimedBy: 'codex-audit', claimedAt: oldClaimedAt },
+      claimFence: claimFenceFor(row),
       requireClaimFence: true,
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
@@ -542,7 +568,7 @@ describe('runReceivedQueueWork', () => {
   })
 
   test('fenced runner persists pre-invocation runtime authority and exact result claim', async () => {
-    const row = receivedRow({
+    const row = fencedReceivedRow({
       payload: JSON.stringify({
         content: 'fenced success',
         receive_claim: {
@@ -565,10 +591,7 @@ describe('runReceivedQueueWork', () => {
       adapter,
       invocationSource: 'state-daemon-queue-work-scheduler',
       expectedClaimSource: 'state-daemon-queue-work-scheduler',
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       requireClaimFence: true,
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
@@ -603,7 +626,7 @@ describe('runReceivedQueueWork', () => {
         claimed_at: '2026-05-21T00:00:01.000Z',
       },
     }
-    const row = receivedRow({
+    const row = fencedReceivedRow({
       payload: JSON.stringify({
         content: 'retry exact work',
         receive_claim: {
@@ -632,10 +655,7 @@ describe('runReceivedQueueWork', () => {
       adapter,
       invocationSource: 'state-daemon-queue-work-scheduler',
       expectedClaimSource: 'state-daemon-queue-work-scheduler',
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:30:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       requireClaimFence: true,
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
@@ -655,7 +675,7 @@ describe('runReceivedQueueWork', () => {
   })
 
   test('exact claim fence prevents stale runner_error persistence after ownership changes', async () => {
-    const row = receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
+    const row = fencedReceivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' })
     const db = new FakeQueueDb(row)
     const adapter: LlmRuntimeAdapter = {
       runtime_id: 'fenced-runtime',
@@ -670,10 +690,7 @@ describe('runReceivedQueueWork', () => {
     const outcome = await runReceivedQueueWork(db, {
       queueId: 42,
       adapter,
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       now: () => new Date('2026-05-21T01:00:00.000Z'),
     })
 
@@ -684,7 +701,7 @@ describe('runReceivedQueueWork', () => {
   test('claim expiry during terminal persistence prevents a stale done write', async () => {
     const startedAt = new Date('2026-05-21T01:00:00.000Z')
     let databaseNow = startedAt
-    const row = receivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
+    const row = fencedReceivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
     class ExpiringDoneDb extends FakeQueueDb {
       override async query<T = any>(sql: string, params?: unknown[]) {
         if (sql.includes("SET status = 'done'")) {
@@ -703,10 +720,7 @@ describe('runReceivedQueueWork', () => {
     const outcome = await runReceivedQueueWork(db, {
       queueId: 42,
       adapter,
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       now: () => startedAt,
     })
 
@@ -724,7 +738,7 @@ describe('runReceivedQueueWork', () => {
   test('claim expiry during error persistence prevents a stale runner_error write', async () => {
     const startedAt = new Date('2026-05-21T01:00:00.000Z')
     let databaseNow = startedAt
-    const row = receivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
+    const row = fencedReceivedRow({ claim_expires_at: '2026-05-21T01:00:00.100Z' })
     class ExpiringErrorDb extends FakeQueueDb {
       override async query<T = any>(sql: string, params?: unknown[]) {
         if (sql.includes('last_heartbeat_at = $3')) {
@@ -743,10 +757,7 @@ describe('runReceivedQueueWork', () => {
     const outcome = await runReceivedQueueWork(db, {
       queueId: 42,
       adapter,
-      claimFence: {
-        claimedBy: 'codex-audit',
-        claimedAt: '2026-05-21T00:00:01.000Z',
-      },
+      claimFence: claimFenceFor(row),
       now: () => startedAt,
     })
 

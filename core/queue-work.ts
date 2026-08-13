@@ -167,6 +167,11 @@ export interface QueueWorkRow {
 export interface QueueWorkClaimFence {
   claimedBy: string
   claimedAt: string
+  /** Required for scheduler-owned execution (`requireClaimFence=true`). */
+  authorityTupleDigest?: string
+  queueId?: string
+  messageId?: string | null
+  createdAt?: string
 }
 
 export type QueueWorkRunOutcome =
@@ -730,8 +735,8 @@ export async function runReceivedQueueWork(
       }
     }
 
+    const receiveClaim = recordValue(parsePayload(row.payload).receive_claim)
     if (opts.expectedClaimSource) {
-      const receiveClaim = recordValue(parsePayload(row.payload).receive_claim)
       const claimSource = receiveClaim.source ?? null
       if (claimSource !== opts.expectedClaimSource) {
         await db.query('ROLLBACK')
@@ -761,7 +766,11 @@ export async function runReceivedQueueWork(
     if (!claimFence && opts.requireClaimFence) {
       const claimedBy = typeof row.claimed_by === 'string' ? row.claimed_by : ''
       const claimedAtMs = instantMs(row.claimed_at)
-      if (!claimedBy || claimedAtMs === null) {
+      const authorityTupleDigest = typeof receiveClaim.authority_tuple_digest === 'string'
+        ? receiveClaim.authority_tuple_digest.trim()
+        : ''
+      const createdAt = exactInstantText(row.created_at)
+      if (!claimedBy || claimedAtMs === null || !authorityTupleDigest || !createdAt) {
         await db.query('ROLLBACK')
         return {
           ok: false,
@@ -774,16 +783,33 @@ export async function runReceivedQueueWork(
       claimFence = {
         claimedBy,
         claimedAt: exactInstantText(row.claimed_at)!,
+        authorityTupleDigest,
+        queueId: String(receiveClaim.queue_id ?? ''),
+        messageId: typeof receiveClaim.message_id === 'string' ? receiveClaim.message_id : null,
+        createdAt: typeof receiveClaim.created_at === 'string' ? receiveClaim.created_at : '',
       }
     }
-    if (claimFence && claimFence.claimedBy !== row.agent_id) {
+    // The ordinary scheduler requires the expanded authority/incarnation
+    // receipt. Legacy D1 owns a separate authorization + completion fence and
+    // retains its historical claimed_by/claimed_at lease contract.
+    if (claimFence && opts.requireClaimFence && (
+      claimFence.claimedBy !== row.agent_id
+      || claimFence.queueId !== queueIdOf(row)
+      || claimFence.messageId !== row.message_id
+      || instantMs(claimFence.createdAt) === null
+      || instantMs(claimFence.createdAt) !== instantMs(row.created_at)
+      || receiveClaim.authority_tuple_digest !== claimFence.authorityTupleDigest
+      || String(receiveClaim.queue_id ?? '') !== claimFence.queueId
+      || (receiveClaim.message_id ?? null) !== claimFence.messageId
+      || instantMs(receiveClaim.created_at) !== instantMs(claimFence.createdAt)
+    )) {
       await db.query('ROLLBACK')
       return {
         ok: false,
         code: 'CLAIM_NOT_OWNED',
         queue_id: queueIdOf(row),
         status: row.status,
-        detail: `claim fence owner=${claimFence.claimedBy} expected=${row.agent_id}`,
+        detail: 'claim authority/queue incarnation fence does not match selected row',
       }
     }
 

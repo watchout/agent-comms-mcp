@@ -1060,6 +1060,18 @@ function classifyRuntimeReceiptRows(active: any[], tuple: RuntimeReceiptTuple): 
     compatible_bootstrap_count: matches.length,
     active_rows_digest: bootstrapDigest(active),
   })
+  // A memory-ready authority is exactly one active runtime. Creating a
+  // bootstrap receipt beside an ordinary active row makes the later gate
+  // ambiguous and is therefore rejected before mutation.
+  if (ordinaryActiveCount > 0) {
+    return {
+      ok: false,
+      discriminator: active.length > 1 ? 'runtime_receipt_ambiguous' : 'runtime_receipt_incompatible',
+      ordinaryActiveCount,
+      bootstrapActiveCount: bootstrapRows.length,
+      evidenceDigest,
+    }
+  }
   if (bootstrapRows.length === 0) {
     return { ok: true, action: 'create', runtimeInstanceId: null, ordinaryActiveCount, bootstrapActiveCount: 0, evidenceDigest }
   }
@@ -1145,46 +1157,13 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
     }
   }
 
-  const selectedDb = {
-    query: <T = any>(sql: string, params?: any[]): Promise<T[]> => {
-      if (isCurrentRuntimeSelection(sql)) {
-        return db.query<T>(
-          `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha,
-                  started_at, last_seen_at, status
-             FROM agent_runtime_instances
-            WHERE agent_id = $1
-              AND runtime_instance_id = $2
-              AND status IN ('running', 'active')
-            LIMIT 1`,
-          [input.agent_id, subject.runtimeInstanceId],
-        )
-      }
-      if (isCurrentMemoryEvidenceSelection(sql)) {
-        const evidenceIdClause = subject.evidenceId === undefined || subject.evidenceId === null
-          ? ''
-          : ' AND id = $4'
-        const evidenceParams = subject.evidenceId === undefined || subject.evidenceId === null
-          ? [input.agent_id, input.project, subject.runtimeInstanceId]
-          : [input.agent_id, input.project, subject.runtimeInstanceId, subject.evidenceId]
-        return db.query<T>(
-          `SELECT id, agent_id, project, runtime_instance_id, profile_revision, profile_source,
-                  session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
-                  recovery_command, result_status, failure_reason, completed_at,
-                  evidence_path, evidence_log_id, valid_until, source, metadata
-             FROM runtime_memory_ready_evidence
-            WHERE agent_id = $1
-              AND project = $2
-              AND runtime_instance_id = $3${evidenceIdClause}
-            ORDER BY completed_at DESC, id DESC
-            LIMIT 1`,
-          evidenceParams,
-        )
-      }
-      return db.query<T>(sql, params)
-    },
-  }
-  const gate = await evaluateRuntimeMemoryReadyGate(selectedDb, input)
-  if (gate.runtime_instance_id !== subject.runtimeInstanceId) {
+  const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+    ...input,
+    evidence_id: subject.evidenceId,
+  })
+  if (gate.runtime_instance_id !== subject.runtimeInstanceId
+    || (subject.evidenceId !== undefined && subject.evidenceId !== null
+      && String(gate.evidence_id) !== String(subject.evidenceId))) {
     return {
       ...gate,
       ok: false,
@@ -1193,6 +1172,8 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
         ...gate.details,
         selected_runtime_instance_id: subject.runtimeInstanceId,
         observed_runtime_instance_id: gate.runtime_instance_id,
+        selected_evidence_id: subject.evidenceId ?? null,
+        observed_evidence_id: gate.evidence_id,
       },
     }
   }
@@ -1515,6 +1496,81 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   const profileGet = async (agentId: string): Promise<any | null> => {
     const result = await run(bunPath, ['cli/index.ts', 'agent', 'profile', 'get', agentId], { cwd: repoRoot, env, timeoutMs: 30_000 })
     return parseJsonOutput(result)?.profile ?? null
+  }
+
+  const ensureActivePrimaryWorkspace = async (context: BootstrapStageContext): Promise<{
+    workspace_id: string
+    canonical_path: string
+  }> => {
+    const canonicalPath = realpathOrResolve(context.workspaceRoot)
+    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(canonicalPath)
+    return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+      const active = await tx.query<{ workspace_id: string; local_path: string | null }>(
+        `SELECT w.workspace_id, w.local_path
+           FROM agent_workspace_bindings b
+           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+          WHERE b.agent_id = $1
+            AND b.active = true
+            AND b.binding_role = 'primary'
+          ORDER BY w.workspace_id`,
+        [context.agentId],
+      )
+      if (active.length > 1) throw new Error('active primary workspace is ambiguous')
+      if (active.length === 1) {
+        const boundPath = String(active[0]!.local_path ?? '')
+        if (!boundPath || realpathOrResolve(boundPath) !== canonicalPath) {
+          throw new Error('active primary workspace conflicts with bootstrap target')
+        }
+        return { workspace_id: String(active[0]!.workspace_id), canonical_path: canonicalPath }
+      }
+
+      const existing = await tx.query<{ workspace_id: string }>(
+        `SELECT workspace_id
+           FROM agent_workspaces
+          WHERE org_id = 'default' AND local_path = $1
+          ORDER BY workspace_id
+          LIMIT 2`,
+        [canonicalPath],
+      )
+      if (existing.length > 1) throw new Error('bootstrap target workspace row is ambiguous')
+      const workspaceId = existing[0]?.workspace_id
+        ?? `aun-bootstrap-${bootstrapDigest({ org_id: 'default', local_path: canonicalPath }).slice(0, 32)}`
+      if (existing.length === 0) {
+        await tx.execute(
+          `INSERT INTO agent_workspaces
+             (workspace_id, org_id, name, workspace_type, local_path, metadata)
+           VALUES ($1, 'default', $2, 'local_path', $3, COALESCE($4::jsonb, '{}'::jsonb))`,
+          [workspaceId, project, canonicalPath, JSON.stringify({
+            source: 'aun-bootstrap',
+            agent_id: context.agentId,
+            bootstrap_run_id: context.runId,
+          })],
+        )
+      }
+      await tx.execute(
+        `INSERT INTO agent_workspace_bindings
+           (agent_id, workspace_id, binding_role, active)
+         VALUES ($1, $2, 'primary', true)
+         ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET active = true`,
+        [context.agentId, workspaceId],
+      )
+      const conflictingRuntime = await tx.query<{ runtime_instance_id: string; workspace_id: string | null }>(
+        `SELECT runtime_instance_id, workspace_id
+           FROM agent_runtime_instances
+          WHERE agent_id = $1 AND status IN ('running', 'active')
+            AND workspace_id IS NOT NULL AND workspace_id <> $2
+          ORDER BY runtime_instance_id
+          LIMIT 1`,
+        [context.agentId, workspaceId],
+      )
+      if (conflictingRuntime.length > 0) throw new Error('active runtime workspace conflicts with bootstrap target')
+      await tx.execute(
+        `UPDATE agent_runtime_instances SET workspace_id = $2
+          WHERE agent_id = $1 AND status IN ('running', 'active') AND workspace_id IS NULL`,
+        [context.agentId, workspaceId],
+      )
+      return { workspace_id: workspaceId, canonical_path: canonicalPath }
+    }))
   }
 
   const profileGetReadOnly = async (agentId: string): Promise<any | null> => {
@@ -2777,6 +2833,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       if (matches) {
+        let workspaceAuthority: Awaited<ReturnType<typeof ensureActivePrimaryWorkspace>>
+        try { workspaceAuthority = await ensureActivePrimaryWorkspace(context) } catch (error) {
+          return {
+            ok: false,
+            reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+            evidenceRefs: [`workspace-authority-error:${bootstrapDigest(String(error))}`],
+          }
+        }
         let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
         try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
           return {
@@ -2791,13 +2855,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           evidenceRefs: [
             tmuxAuthority.evidenceRef,
             `profile-existing:${bootstrapDigest(existing)}`,
+            `workspace-authority:${bootstrapDigest(workspaceAuthority)}`,
             ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
           ],
           readinessPredicates: {
             profile_readback_matches: true,
             configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
           },
-          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), configuration: configurationReadback }),
+          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), workspace: workspaceAuthority, configuration: configurationReadback }),
           mutation: configuration?.mutation,
         }
       }
@@ -2840,6 +2905,15 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           mutation: observedMutation,
         }
       }
+      let workspaceAuthority: Awaited<ReturnType<typeof ensureActivePrimaryWorkspace>>
+      try { workspaceAuthority = await ensureActivePrimaryWorkspace(context) } catch (error) {
+        return {
+          ok: false,
+          reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
+          evidenceRefs: [`workspace-authority-error:${bootstrapDigest(String(error))}`],
+          mutation: observedMutation,
+        }
+      }
       let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
       try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
         return {
@@ -2855,6 +2929,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         evidenceRefs: [
           tmuxAuthority.evidenceRef,
           `profile-readback:${bootstrapDigest(readback)}`,
+          `workspace-authority:${bootstrapDigest(workspaceAuthority)}`,
           ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
         ],
         readinessPredicates: {
@@ -2862,7 +2937,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           endpoint_allocated: true,
           configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
         },
-        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), configuration: configurationReadback }),
+        readbackDigest: bootstrapDigest({ profile: managedProfile(readback), workspace: workspaceAuthority, configuration: configurationReadback }),
         mutations: configuration?.mutation
           ? [observedMutation!, configuration.mutation]
           : observedMutation ? [observedMutation] : [],

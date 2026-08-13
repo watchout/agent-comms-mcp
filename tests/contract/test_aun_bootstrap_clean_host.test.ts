@@ -2,11 +2,12 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
 import type { BootstrapExecutionPorts, BootstrapStageContext } from '../../bin/aun/bootstrap-types'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
+import { migrateSqlite } from '../../db/migrate-sqlite'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
   DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
@@ -36,7 +37,17 @@ describe('aun bootstrap clean-host journal', () => {
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const dbPath = join(home, 'target.db')
-    writeFileSync(dbPath, 'profile-readback-fixture')
+    migrateSqlite(dbPath)
+    const fixtureDb = new SqliteAdapter(dbPath)
+    await fixtureDb.execute(
+      `INSERT INTO agents
+         (agent_id, display_name, agent_type, runtime, runtime_engine_preference, status,
+          profile_enabled, home_directory, channel_port, metadata)
+       VALUES
+         ('misell', 'misell', 'dev', 'TUI', 'codex', 'idle', true, $1, 8801, $2)`,
+      [repoRoot, JSON.stringify({ tmux_session: 'misell' })],
+    )
+    await fixtureDb.close()
     const env: Record<string, string> = {
       HOME: home,
       AGENT_COM_DB: 'sqlite',
@@ -310,6 +321,7 @@ describe('aun bootstrap clean-host journal', () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const repoHead = Bun.spawnSync(['/usr/bin/git', '-C', repoRoot, 'rev-parse', 'HEAD']).stdout.toString().trim()
     const databaseName = `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`
     const postgresDatabase = createPostgresTestDatabase(databaseName)
     postgresDatabases.push(postgresDatabase)
@@ -320,7 +332,7 @@ describe('aun bootstrap clean-host journal', () => {
       AUN_HOME: join(home, '.aun'),
       AGENT_COM_DB: 'postgres',
       DATABASE_URL: databaseUrl,
-      AGENT_MEMORY_PROJECT: 'b5-concurrency-project',
+      AGENT_MEMORY_PROJECT: basename(repoRoot),
       AUN_BOOTSTRAP_CHANNEL_PORT: '8812',
       AUN_BOOTSTRAP_PROVIDER_PID: '7312',
     } as Record<string, string>
@@ -333,11 +345,20 @@ describe('aun bootstrap clean-host journal', () => {
     expect(profileSet.exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
     await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+       VALUES ('b5-concurrency-primary', 'b5-concurrency-project', $1)`,
+      [repoRoot],
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('b5-concurrency', 'b5-concurrency-primary', 'primary', true)`,
+    )
+    await db.execute(
       `INSERT INTO agent_runtime_instances
          (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
           process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5::jsonb)`,
-      ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
+       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'stopped', now(), now(), $5::jsonb)`,
+      ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, repoHead, JSON.stringify({ owner: 'ordinary-runtime' })],
     )
     const storedProfile = await db.queryOne<any>(
       `SELECT profile_revision, profile_source FROM agents WHERE agent_id = $1`,
@@ -356,7 +377,7 @@ describe('aun bootstrap clean-host journal', () => {
         const m = JSON.parse(line);
         if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}));
         if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project b5-concurrency-project recovered'}],isError:false}}));
+        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project ${basename(repoRoot)} recovered'}],isError:false}}));
       });
     `
     let ordinaryHeartbeatAdvances = 0
@@ -400,7 +421,7 @@ describe('aun bootstrap clean-host journal', () => {
       const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
       const context = {
         runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
-        repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
+        repoRoot, workspaceRoot: repoRoot, repoHead, dryRun: false, env,
         priorState: { mutations: [] } as any,
       } as BootstrapStageContext
       const outcome = await ports.ensureMemoryReadiness(context)
@@ -424,7 +445,7 @@ describe('aun bootstrap clean-host journal', () => {
 
     const expectedReceipt = {
       runtime_kind: 'bootstrap_bound_provider', runtime_engine: 'codex', session_name: 'b5-session',
-      process_id: 7312, port: 8812, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
+      process_id: 7312, port: 8812, checkout_path: repoRoot, commit_sha: repoHead,
     }
     const driftCases = [
       { id: 'runtime_kind', values: { ...expectedReceipt, runtime_kind: 'local_process' } },
@@ -593,7 +614,7 @@ describe('aun bootstrap clean-host journal', () => {
       `SELECT runtime_instance_id, runtime_kind, session_name, process_id, port,
               checkout_path, commit_sha, status, metadata
          FROM agent_runtime_instances
-        WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
+        WHERE agent_id = $1 ORDER BY runtime_instance_id`,
       ['b5-concurrency'],
     )
     expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toEqual([
@@ -604,7 +625,7 @@ describe('aun bootstrap clean-host journal', () => {
       }),
     ])
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
-      { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
+      { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'stopped' },
     ].map((row) => expect.objectContaining(row)))
     expect(ordinaryHeartbeatAdvances).toBe(7)
     await readback.close()
@@ -803,6 +824,7 @@ describe('aun bootstrap clean-host journal', () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-'))
     roots.push(home)
     const repoRoot = join(import.meta.dir, '..', '..')
+    const repoHead = Bun.spawnSync(['/usr/bin/git', '-C', repoRoot, 'rev-parse', 'HEAD']).stdout.toString().trim()
     const dbPath = join(home, 'agent-com.db')
     let sqlitePrestate: Buffer | null = null
     if (fixture === 'sqlite-existing') {
@@ -824,7 +846,7 @@ describe('aun bootstrap clean-host journal', () => {
       AGENT_COM_DB: backend,
       AGENT_COM_SQLITE_PATH: dbPath,
       ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
-      AGENT_MEMORY_PROJECT: 'bootstrap-clean-project',
+      AGENT_MEMORY_PROJECT: basename(repoRoot),
       CODEX_SANDBOX: 'workspace-write',
     } as Record<string, string>
     if (databaseUrl) {
@@ -838,7 +860,7 @@ describe('aun bootstrap clean-host journal', () => {
         const m = JSON.parse(line);
         if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'wasurezu-fixture',version:'1'}}}));
         if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project bootstrap-clean-project recovered'}],isError:false}}));
+        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project ${basename(repoRoot)} recovered'}],isError:false}}));
       });
     `
     let aunRegistered = false
@@ -863,7 +885,7 @@ describe('aun bootstrap clean-host journal', () => {
     })
     const run = async (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => {
       const joined = args.join(' ')
-      if (command === 'git' && joined === 'rev-parse HEAD') return { exitCode: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '', pid: ++syntheticPid }
+      if (command === 'git' && joined === 'rev-parse HEAD') return { exitCode: 0, stdout: `${repoHead}\n`, stderr: '', pid: ++syntheticPid }
       if (command === 'git' && joined === 'status --porcelain') return { exitCode: 0, stdout: '', stderr: '', pid: ++syntheticPid }
       if (command === 'git' && joined === '--version') return { exitCode: 0, stdout: 'git version 2.50.0\n', stderr: '', pid: ++syntheticPid }
       if (command === 'node') return { exitCode: 0, stdout: 'v20.20.0\n', stderr: '', pid: ++syntheticPid }
@@ -902,7 +924,7 @@ describe('aun bootstrap clean-host journal', () => {
         const plistPath = join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
         mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
         const plan: StateDaemonRestorePlan = {
-          commit: 'a'.repeat(40), restoreRoot: join(home, '.agent-comms', 'state-daemon', 'checkouts'),
+          commit: repoHead, restoreRoot: join(home, '.agent-comms', 'state-daemon', 'checkouts'),
           checkoutPath: repoRoot, entryPath: join(repoRoot, 'core', 'state-daemon', 'index.ts'),
           logsDir: join(home, 'logs'), buildOutfile: join(home, 'state-daemon'), plistPath,
           tempPlistPath: `${plistPath}.tmp`, bunPath: process.execPath,
@@ -996,11 +1018,25 @@ describe('aun bootstrap clean-host journal', () => {
     expect(claimed?.claimed_by).toBe('clean-default')
     expect(JSON.parse(String(claimed?.payload)).receive_claim?.source).toBe(contentionEnv.AUN_RECEIVE_CLAIM_SOURCE)
     await contentionReadback.close()
-    expect((await invokeCli(['processing', '--agent-id', 'clean-default', '--queue-id', contentionQueueId])).exitCode).toBe(0)
-    expect((await invokeCli([
+    const processing = await invokeCli(['processing', '--agent-id', 'clean-default', '--queue-id', contentionQueueId])
+    expect(processing).toMatchObject({ exitCode: 0 })
+    expect(processing.stderr).not.toMatch(/database is (?:busy|locked)|SQLITE_BUSY/i)
+    const processingReadback = backend === 'postgres' ? new PgAdapter(databaseUrl!) : new SqliteAdapter(dbPath)
+    expect((await processingReadback.queryOne<any>(
+      'SELECT status FROM message_queue WHERE id = $1', [contentionQueueId],
+    ))?.status).toBe('in_progress')
+    await processingReadback.close()
+    const noReply = await invokeCli([
       'record-no-reply', '--agent-id', 'clean-default', '--queue-id', contentionQueueId,
       '--reason', `aun-bootstrap-no-effect:${first.run_id}:contention`,
-    ])).exitCode).toBe(0)
+    ])
+    expect(noReply).toMatchObject({ exitCode: 0 })
+    expect(noReply.stderr).not.toMatch(/database is (?:busy|locked)|SQLITE_BUSY/i)
+    const completedReadback = backend === 'postgres' ? new PgAdapter(databaseUrl!) : new SqliteAdapter(dbPath)
+    expect((await completedReadback.queryOne<any>(
+      'SELECT status FROM message_queue WHERE id = $1', [contentionQueueId],
+    ))?.status).toBe('done')
+    await completedReadback.close()
 
     const second = await bootstrap(input, { run })
     expect(second.status).toBe('IDEMPOTENT_READY')

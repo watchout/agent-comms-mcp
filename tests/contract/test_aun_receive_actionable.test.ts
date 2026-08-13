@@ -124,6 +124,7 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
   result_status: string
   completed_at: string
   valid_until: string
+  queue_scope: Record<string, unknown>
 }> = {}): void {
   const row = {
     runtime_instance_id: 'runtime-actionable-dev',
@@ -135,6 +136,8 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
     ...overrides,
   }
   withDb((db) => {
+    const metadata = JSON.parse(authorityMetadataJson)
+    if (overrides.queue_scope) metadata.queue_scope = overrides.queue_scope
     db.prepare(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = ?`).run(TEST_AGENT)
     db.prepare(
       `INSERT INTO runtime_memory_ready_evidence
@@ -154,7 +157,7 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
       row.result_status,
       row.completed_at,
       row.valid_until,
-      authorityMetadataJson,
+      JSON.stringify(metadata),
     )
   })
 }
@@ -280,6 +283,53 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(after.find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
   })
 
+  test('exact queue-scoped readiness passes only for the selected queue incarnation', () => {
+    const instructionId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'exact scoped instruction' })
+    const selected = withDb((db) => db.prepare(
+      `SELECT message_id, created_at FROM message_queue WHERE id = ?`,
+    ).get(instructionId) as { message_id: string; created_at: string })
+    replaceMemoryReadyEvidence({
+      queue_scope: {
+        queue_id: String(instructionId),
+        message_id: selected.message_id,
+        created_after: new Date(Date.parse(selected.created_at) - 1).toISOString(),
+      },
+    })
+
+    const accepted = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(instructionId)])
+    expect(accepted.status).toBe(0)
+    expect(JSON.parse(accepted.stdout)).toMatchObject({ queue_id: instructionId, message_id: selected.message_id })
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'received', claimed_by: TEST_AGENT })
+  })
+
+  test('queue-scoped readiness mismatch and missing/invalid created-after perform zero claim mutation', () => {
+    const instructionId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'scoped rejection instruction' })
+    const selected = withDb((db) => db.prepare(
+      `SELECT message_id, created_at FROM message_queue WHERE id = ?`,
+    ).get(instructionId) as { message_id: string; created_at: string })
+    const scopes = [
+      {
+        queue_id: String(instructionId + 1),
+        message_id: selected.message_id,
+        created_after: new Date(Date.parse(selected.created_at) - 1).toISOString(),
+      },
+      { queue_id: String(instructionId), message_id: selected.message_id },
+      { queue_id: String(instructionId), message_id: selected.message_id, created_after: 'invalid-instant' },
+    ]
+    for (const queueScope of scopes) {
+      replaceMemoryReadyEvidence({ queue_scope: queueScope })
+      const rejected = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(instructionId)])
+      expect(rejected.status).toBe(1)
+      expect(JSON.parse(rejected.stdout)).toMatchObject({
+        blocked_reason: 'memory_not_ready',
+        selection_reason: 'memory_ready_queue_scope_mismatch',
+        selected: { queue_id: instructionId },
+        claimed: null,
+      })
+      expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
+    }
+  })
+
   test('immutable pre-gate token blocks a same-basename workspace swap before claim', () => {
     const staleWorkspace = join(tmpDir, 'stale-binding', 'agent-comms-mcp')
     mkdirSync(staleWorkspace, { recursive: true })
@@ -364,8 +414,8 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(body).toMatchObject({
       ok: false,
       blocked_reason: 'memory_not_ready',
-      inspected_count: 0,
-      selected: null,
+      inspected_count: 1,
+      selected: { queue_id: instructionId },
       claimed: null,
       selection_reason: 'memory_ready_missing_evidence',
     })
@@ -377,7 +427,8 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     body = JSON.parse(r.stdout)
     expect(body).toMatchObject({
       blocked_reason: 'memory_not_ready',
-      inspected_count: 0,
+      inspected_count: 1,
+      selected: { queue_id: instructionId },
       selection_reason: 'memory_ready_expired',
     })
     expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
@@ -388,7 +439,8 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     body = JSON.parse(r.stdout)
     expect(body).toMatchObject({
       blocked_reason: 'memory_not_ready',
-      inspected_count: 0,
+      inspected_count: 1,
+      selected: { queue_id: instructionId },
       selection_reason: 'memory_ready_runtime_instance_mismatch',
     })
     expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
@@ -594,7 +646,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
-  test('disabled target profile fails the authority gate before direct mention wake', () => {
+  test('disabled target profile is rejected by non-mutating selection before the authority gate', () => {
     withDb((db) => db.exec(`UPDATE agents SET profile_enabled = 0 WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
@@ -606,7 +658,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
     expect(r.status).toBe(1)
     const body = JSON.parse(r.stdout)
-    expect(body.selection_reason).toBe('memory_ready_authority_tuple_invalid')
+    expect(body.selection_reason).toBe('disabled_agent')
     expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 

@@ -619,6 +619,23 @@ function requiredNumber(value: unknown, field: string): number {
   })
 }
 
+function requiredInteger(
+  value: unknown,
+  field: string,
+  input: { min: number; max?: number },
+): number {
+  const normalized = normalizeNumber(value)
+  if (normalized !== null && Number.isSafeInteger(normalized)
+    && normalized >= input.min && (input.max === undefined || normalized <= input.max)) return normalized
+  throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+    reason: 'required_integer_invalid',
+    field,
+    value: normalized,
+    min: input.min,
+    max: input.max ?? null,
+  })
+}
+
 /**
  * Capture the complete per-target authority tuple from authoritative DB, FS,
  * runtime and git sources. No caller-supplied path or nullable fallback is
@@ -749,10 +766,10 @@ export async function captureRuntimeMemoryReadyAuthority(
     workspace_owner_uid: owner.uid,
     workspace_owner_gid: owner.gid,
     runtime_instance_id: requiredText(runtime.runtime_instance_id, 'runtime.runtime_instance_id'),
-    profile_revision: requiredNumber(agent.profile_revision, 'agent.profile_revision'),
+    profile_revision: requiredInteger(agent.profile_revision, 'agent.profile_revision', { min: 0 }),
     profile_source: requiredText(agent.profile_source, 'agent.profile_source'),
     session_name: requiredText(runtime.session_name, 'runtime.session_name'),
-    port: requiredNumber(runtime.port, 'runtime.port'),
+    port: requiredInteger(runtime.port, 'runtime.port', { min: 1, max: 65_535 }),
     runtime_engine: transportTuple.runtime_engine,
     runtime_kind: transportTuple.runtime_kind,
     transport_digest: digestJson(transportTuple),
@@ -761,7 +778,7 @@ export async function captureRuntimeMemoryReadyAuthority(
     git_tree_sha: gitTree,
     git_clean: true as const,
   }
-  if (requiredNumber(agent.channel_port, 'agent.channel_port') !== tupleWithoutDigest.port) {
+  if (requiredInteger(agent.channel_port, 'agent.channel_port', { min: 1, max: 65_535 }) !== tupleWithoutDigest.port) {
     throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
       reason: 'agent_runtime_port_mismatch',
       agent_port: normalizeNumber(agent.channel_port),
@@ -843,14 +860,35 @@ function queueScopeMatches(
   current: RuntimeMemoryReadyQueueScopeInput | null | undefined,
 ): boolean {
   if (!current) return false
+  const hasCreatedAfter = Object.prototype.hasOwnProperty.call(scope, 'created_after')
+  const hasCreatedAt = Object.prototype.hasOwnProperty.call(scope, 'created_at')
   const createdAt = dateMs(current.created_at)
   const createdAfter = dateMs(scope.created_after)
+  if ((hasCreatedAfter && createdAfter === null) || (hasCreatedAt && dateMs(scope.created_at) === null)) return false
   if (createdAfter !== null && (createdAt === null || createdAt < createdAfter)) return false
   return scopeConstraintMatches(scopeValues(scope, 'queue_id', 'queue_ids'), normalizeIdentifier(current.queue_id)) &&
     scopeConstraintMatches(scopeValues(scope, 'message_id', 'message_ids'), normalizeIdentifier(current.message_id)) &&
     scopeConstraintMatches(textValues(scope.created_at), normalizeDateIso(current.created_at)) &&
     scopeConstraintMatches(scopeValues(scope, 'status', 'statuses'), normalizeText(current.status)) &&
     scopeConstraintMatches(scopeValues(scope, 'action_kind', 'action_kinds'), normalizeText(current.action_kind))
+}
+
+function exactReadyQueueScopeMatches(
+  scope: Record<string, unknown>,
+  current: RuntimeMemoryReadyQueueScopeInput | null | undefined,
+): boolean {
+  if (!current) return false
+  const queueIds = scopeValues(scope, 'queue_id', 'queue_ids')
+  const messageIds = scopeValues(scope, 'message_id', 'message_ids')
+  const currentMessageId = normalizeIdentifier(current.message_id)
+  // A queue-scoped ready receipt is an incarnation fence, not a broad
+  // allowlist. The creation lower bound is mandatory so a recycled/imported
+  // queue identity cannot inherit older evidence.
+  return queueIds.length === 1
+    && (currentMessageId === null ? messageIds.length === 0 : messageIds.length === 1)
+    && Object.prototype.hasOwnProperty.call(scope, 'created_after')
+    && dateMs(scope.created_after) !== null
+    && queueScopeMatches(scope, current)
 }
 
 function fail(
@@ -1129,6 +1167,8 @@ export async function evaluateRuntimeMemoryReadyGate(
     now?: Date
     queue_scope?: RuntimeMemoryReadyQueueScopeInput | null
     project_resolution?: RuntimeMemoryReadyProjectResolution | null
+    /** Select one durable receipt exactly when a caller owns its insert ID. */
+    evidence_id?: string | number | null
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -1168,24 +1208,34 @@ export async function evaluateRuntimeMemoryReadyGate(
 
   const expectedPort = normalizeNumber(agent.channel_port)
   if (expectedPort !== null) {
-    const occupants = await queryRows<RuntimeRow>(
-      db,
-      `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, host_id,
-              session_name, port, checkout_path, commit_sha, endpoint_uri,
-              started_at, last_seen_at, status, metadata
-         FROM agent_runtime_instances
-        WHERE port = $1
-          AND status IN ('running', 'active')
-        ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
-        LIMIT 1`,
-      [expectedPort],
-    ).catch(() => [])
-    const occupant = occupants[0]
-    if (occupant && occupant.agent_id !== input.agent_id) {
+    let occupants: RuntimeRow[]
+    try {
+      occupants = await queryRows<RuntimeRow>(
+        db,
+        `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, host_id,
+                session_name, port, checkout_path, commit_sha, endpoint_uri,
+                started_at, last_seen_at, status, metadata
+           FROM agent_runtime_instances
+          WHERE port = $1
+            AND status IN ('running', 'active')
+          ORDER BY agent_id, runtime_instance_id`,
+        [expectedPort],
+      )
+    } catch (error) {
+      return fail(base, 'read_error', {
+        reason: 'active_port_occupant_read_failed',
+        expected_port: expectedPort,
+        error: (error as Error)?.message ?? String(error),
+      })
+    }
+    if (occupants.length !== 1 || occupants[0]?.agent_id !== input.agent_id) {
       return fail(base, 'port_identity_mismatch', {
         expected_port: expectedPort,
-        occupant_agent_id: occupant.agent_id,
-        occupant_runtime_instance_id: occupant.runtime_instance_id,
+        occupant_count: occupants.length,
+        occupants: occupants.map((row) => ({
+          agent_id: row.agent_id,
+          runtime_instance_id: row.runtime_instance_id,
+        })),
       })
     }
   }
@@ -1260,6 +1310,9 @@ export async function evaluateRuntimeMemoryReadyGate(
 
   let evidenceRows: EvidenceRow[]
   try {
+    const evidenceIdClause = input.evidence_id === undefined || input.evidence_id === null
+      ? ''
+      : ' AND id = $3'
     evidenceRows = await queryRows<EvidenceRow>(
       db,
       `SELECT id, agent_id, project, runtime_instance_id, profile_revision, profile_source,
@@ -1268,10 +1321,12 @@ export async function evaluateRuntimeMemoryReadyGate(
               evidence_path, evidence_log_id, valid_until, source, metadata
          FROM runtime_memory_ready_evidence
         WHERE agent_id = $1
-          AND project = $2
+          AND project = $2${evidenceIdClause}
         ORDER BY completed_at DESC, id DESC
         LIMIT 1`,
-      [input.agent_id, input.project],
+      input.evidence_id === undefined || input.evidence_id === null
+        ? [input.agent_id, input.project]
+        : [input.agent_id, input.project, input.evidence_id],
     )
   } catch (err) {
     const msg = (err as Error).message ?? String(err)
@@ -1311,7 +1366,7 @@ export async function evaluateRuntimeMemoryReadyGate(
   }
   const evidenceMetadata = parseObject(evidence.metadata)
   const evidenceQueueScope = parseRequiredObject(evidenceMetadata.queue_scope)
-  if (evidence.result_status !== 'bypassed' && evidenceQueueScope && !queueScopeMatches(evidenceQueueScope, input.queue_scope)) {
+  if (evidence.result_status !== 'bypassed' && evidenceQueueScope && !exactReadyQueueScopeMatches(evidenceQueueScope, input.queue_scope)) {
     return fail(withEvidence, 'queue_scope_mismatch', {
       evidence_queue_scope: evidenceQueueScope,
       current_queue_scope: input.queue_scope ?? null,

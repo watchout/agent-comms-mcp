@@ -138,7 +138,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
     }
   })
 
-  test('B5-COEXIST-001 preserves ordinary active rows and creates a bootstrap receipt', () => {
+  test('B5-COEXIST-001 rejects an ordinary active row before creating an ambiguous bootstrap receipt', () => {
     const tuple = {
       agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
       process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
@@ -150,12 +150,12 @@ describe('aun bootstrap B0-B8 state machine', () => {
       metadata: { secret: 'must-not-escape' },
     }], tuple)
     expect(decision).toMatchObject({
-      ok: true, action: 'create', runtimeInstanceId: null, ordinaryActiveCount: 1, bootstrapActiveCount: 0,
+      ok: false, discriminator: 'runtime_receipt_incompatible', ordinaryActiveCount: 1, bootstrapActiveCount: 0,
     })
     expect(JSON.stringify(decision)).not.toContain('must-not-escape')
   })
 
-  test('B5-COEXIST-002 reuses exactly one compatible bootstrap receipt beside ordinary rows', () => {
+  test('B5-COEXIST-002 rejects ordinary plus bootstrap active coexistence deterministically', () => {
     const tuple = {
       agent_id: 'misell', runtime_engine: 'codex' as const, session_name: 'misell',
       process_id: 7312, port: 8812, checkout_path: realpathSync(process.cwd()), commit_sha: HEAD,
@@ -172,7 +172,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
       },
     ]
     expect(bootstrapInternal.classifyRuntimeReceiptRows(rows, tuple)).toMatchObject({
-      ok: true, action: 'reuse', runtimeInstanceId: 'bootstrap-1', ordinaryActiveCount: 1, bootstrapActiveCount: 1,
+      ok: false, discriminator: 'runtime_receipt_ambiguous', ordinaryActiveCount: 1, bootstrapActiveCount: 1,
     })
   })
 

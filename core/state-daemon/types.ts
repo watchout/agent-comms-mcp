@@ -393,7 +393,10 @@ export interface QueueWorkScheduler {
     input: { queueId: number; agentId: string },
     memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
   ): Promise<void>
-  runDone?(input: { queueId: number; agentId: string }): Promise<void>
+  runDone?(
+    input: { queueId: number; agentId: string },
+    memoryReadyResolution?: RuntimeMemoryReadyProjectResolution,
+  ): Promise<void>
 }
 
 /**

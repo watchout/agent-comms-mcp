@@ -199,6 +199,7 @@ test('same-basename workspace binding drift blocks both claim and dispatch', asy
     workspace_id: 'workspace-a',
     source: 'active_primary_workspace' as const,
     explicit_project: null,
+    authority_tuple_digest: 'a'.repeat(64),
   })
   const drifted = Object.freeze({
     ...expected,
@@ -248,6 +249,7 @@ test('workspace binding drift after claim blocks runtime dispatch', async () => 
     workspace_id: 'workspace-a',
     source: 'active_primary_workspace' as const,
     explicit_project: null,
+    authority_tuple_digest: 'a'.repeat(64),
   })
   const drifted = Object.freeze({
     ...expected,
@@ -273,9 +275,12 @@ test('workspace binding drift after claim blocks runtime dispatch', async () => 
           summary: {
             claimed: {
               queue_id: 155901,
+              message_id: 'message-155901',
+              created_at: '2026-08-12T23:59:00.000Z',
               claimed_by: 'codex-audit',
               claimed_at: '2026-08-13T00:00:00.000000Z',
               claim_expires_at: '2026-08-13T00:01:00.000000Z',
+              authority_tuple_digest: 'a'.repeat(64),
             },
           },
         } as any
@@ -667,9 +672,12 @@ describe('state_daemon queue work scheduler boundary', () => {
         claimed: {
           waiting: 0,
           queue_id: 42,
+          message_id: 'message-42',
+          created_at: '2026-08-02T00:59:00.000Z',
           claimed_by: 'qa',
           claimed_at: '2026-08-02T01:00:00.123Z',
           claim_expires_at: '2026-08-02T01:01:00.123Z',
+          authority_tuple_digest: 'b'.repeat(64),
         },
         waiting: 0,
         blocked_reason: null,
@@ -680,6 +688,10 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(fence).toEqual({
       claimedBy: 'qa',
       claimedAt: '2026-08-02T01:00:00.123Z',
+      authorityTupleDigest: 'b'.repeat(64),
+      queueId: '42',
+      messageId: 'message-42',
+      createdAt: '2026-08-02T00:59:00.000Z',
     })
   })
 

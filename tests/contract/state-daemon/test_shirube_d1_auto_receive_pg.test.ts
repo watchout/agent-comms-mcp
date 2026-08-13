@@ -85,8 +85,11 @@ function pgQueueDb(client: Client): QueueWorkDb {
 }
 
 async function insertReceivedLeaseRow(client: Client, suffix: string) {
+  const messageId = `lockwait-${suffix}-${randomUUID()}`
   const inserted = await client.query<{
     id: string
+    message_id: string
+    created_at: Date
     claimed_at: Date
     claim_expires_at: Date
   }>(
@@ -98,18 +101,32 @@ async function insertReceivedLeaseRow(client: Client, suffix: string) {
        'dev-001', date_trunc('milliseconds', clock_timestamp()),
        clock_timestamp() + INTERVAL '700 milliseconds', clock_timestamp()
      )
-     RETURNING id::text, claimed_at, claim_expires_at`,
+     RETURNING id::text, message_id, created_at, claimed_at, claim_expires_at`,
     [
-      `lockwait-${suffix}-${randomUUID()}`,
+      messageId,
       JSON.stringify({
         content: `lock wait ${suffix}`,
         author_id: 'lockwait-fixture',
         message_type: 'phase_handoff',
-        receive_claim: { source: 'aun-runtime-v2' },
       }),
     ],
   )
-  return inserted.rows[0]
+  const row = inserted.rows[0]!
+  const authorityTupleDigest = 'c'.repeat(64)
+  await client.query(
+    `UPDATE message_queue SET payload = payload || $2::jsonb WHERE id = $1`,
+    [row.id, JSON.stringify({
+      receive_claim: {
+        source: 'aun-runtime-v2',
+        agent_id: 'dev-001',
+        queue_id: row.id,
+        message_id: row.message_id,
+        created_at: row.created_at.toISOString(),
+        authority_tuple_digest: authorityTupleDigest,
+      },
+    })],
+  )
+  return { ...row, authority_tuple_digest: authorityTupleDigest }
 }
 
 const directCapabilities = {
@@ -527,6 +544,10 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
           claimFence: {
             claimedBy: 'dev-001',
             claimedAt: row.claimed_at.toISOString(),
+            authorityTupleDigest: row.authority_tuple_digest,
+            queueId: row.id,
+            messageId: row.message_id,
+            createdAt: row.created_at.toISOString(),
           },
         })
         const entered = await Promise.race([
