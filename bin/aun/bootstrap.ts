@@ -2171,6 +2171,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           [context.agentId],
         )
         if (!agent) throw new Error('runtime receipt agent unavailable')
+        const workspaceRows = await tx.query<{ workspace_id: string }>(
+          `SELECT w.workspace_id
+             FROM agent_workspace_bindings b
+             JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+            WHERE b.agent_id = $1
+              AND b.active = true
+              AND b.binding_role = 'primary'
+            ORDER BY w.workspace_id
+            LIMIT 2`,
+          [context.agentId],
+        )
+        if (workspaceRows.length !== 1) throw new Error('runtime receipt active primary workspace unavailable or ambiguous')
+        const workspaceId = String(workspaceRows[0]!.workspace_id)
         const readActive = () => tx.query<any>(
           `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
                   port, checkout_path, commit_sha, status, metadata
@@ -2193,13 +2206,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const id = randomUUID()
         const inserted = await tx.query<{ runtime_instance_id: string }>(
           `INSERT INTO agent_runtime_instances
-             (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
+             (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, session_name,
               process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
            VALUES
-             ($1, $2, $3, 'bootstrap_bound_provider', $4,
-              $5, $6, $7, $8, 'running', now(), now(), COALESCE($9::jsonb, '{}'::jsonb))
+             ($1, $2, $3, $4, 'bootstrap_bound_provider', $5,
+              $6, $7, $8, $9, 'running', now(), now(), COALESCE($10::jsonb, '{}'::jsonb))
            RETURNING runtime_instance_id`,
-          [id, context.agentId, context.resolvedRuntime, sessionName, providerPid, port,
+          [id, context.agentId, workspaceId, context.resolvedRuntime, sessionName, providerPid, port,
             runtimeTuple.checkout_path, context.repoHead, JSON.stringify({ bootstrap_run_id: context.runId, tuple_digest: runtimeTupleDigest })],
         )
         const insertedId = String(inserted[0]?.runtime_instance_id ?? id)

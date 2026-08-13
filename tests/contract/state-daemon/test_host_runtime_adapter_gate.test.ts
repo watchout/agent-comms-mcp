@@ -20,7 +20,14 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import {
+  cleanAll,
+  makeAgentId,
+  openClient,
+  seedAgent,
+  seedQueueRow,
+  TEST_MEMORY_READY_WORKSPACE,
+} from './seed'
 
 let pg: Client
 
@@ -212,8 +219,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
       '--output-schema', '/tmp/cp40d-schema.json',
       '--output-last-message', '/tmp/cp40d-final.txt',
       '--sandbox', 'read-only',
-      '--cd', '/repo',
-      '--add-dir', '/repo/shared',
+      '--cd', TEST_MEMORY_READY_WORKSPACE,
       '--ephemeral',
       '-',
     ])

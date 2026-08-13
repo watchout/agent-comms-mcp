@@ -8,7 +8,9 @@
  */
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { readFileSync, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 export const TEST_PREFIX = 'sd-test-'
@@ -20,6 +22,7 @@ export function makeAgentId(suffix: string): string {
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 export const TEST_MEMORY_READY_WORKSPACE = realpathSync(REPO_ROOT)
 export const TEST_MEMORY_READY_PROJECT = basename(TEST_MEMORY_READY_WORKSPACE)
+const TEST_MEMORY_READY_WORKSPACE_ID = `${TEST_PREFIX}authority-workspace`
 const MIGRATION_FILES = [
   'db/migrations/2026-05-08-state-daemon-323.up.sql',
   'db/migrations/2026-05-14-agent-wake-suppression-ssot.up.sql',
@@ -135,15 +138,64 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
 
   const runtimeInstanceId = a.runtime_instance_id ?? randomUUID()
   const sessionName = a.tmux_session === null ? `${a.agent_id}-codex` : metadata.tmux_session as string
+  const runtimeEngine = a.runtime_engine_preference ?? a.runtime ?? 'TUI'
+  const gitCommit = execFileSync('/usr/bin/git', ['-C', TEST_MEMORY_READY_WORKSPACE, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  const gitTree = execFileSync('/usr/bin/git', ['-C', TEST_MEMORY_READY_WORKSPACE, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
+  const workspaceOwner = statSync(TEST_MEMORY_READY_WORKSPACE)
+  const runtimeTransportToken = 'state-daemon-fixture-transport'
+  const transportDigest = createHash('sha256').update(JSON.stringify({
+    runtime_engine: runtimeEngine,
+    runtime_kind: 'local_process',
+    host_id: null,
+    endpoint_uri: null,
+    runtime_transport_token: runtimeTransportToken,
+  })).digest('hex')
+  const authorityWithoutDigest = {
+    schema: 'aun.runtime-memory-authority.v1',
+    agent_id: a.agent_id,
+    project: TEST_MEMORY_READY_PROJECT,
+    workspace_id: TEST_MEMORY_READY_WORKSPACE_ID,
+    workspace_realpath: TEST_MEMORY_READY_WORKSPACE,
+    workspace_owner_uid: workspaceOwner.uid,
+    workspace_owner_gid: workspaceOwner.gid,
+    runtime_instance_id: runtimeInstanceId,
+    profile_revision: 1,
+    profile_source: 'legacy',
+    session_name: sessionName,
+    port,
+    runtime_engine: runtimeEngine,
+    runtime_kind: 'local_process',
+    transport_digest: transportDigest,
+    git_toplevel_realpath: TEST_MEMORY_READY_WORKSPACE,
+    git_commit_sha: gitCommit,
+    git_tree_sha: gitTree,
+    git_clean: true,
+  }
+  const authority = {
+    ...authorityWithoutDigest,
+    tuple_digest: createHash('sha256').update(JSON.stringify(authorityWithoutDigest)).digest('hex'),
+  }
   const runtimeStartedAt = '2026-05-01T00:00:00.000Z'
   const completedAt = '2026-05-01T00:00:01.000Z'
   await c.query(
+    `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (workspace_id) DO UPDATE SET local_path=EXCLUDED.local_path`,
+    [TEST_MEMORY_READY_WORKSPACE_ID, TEST_MEMORY_READY_PROJECT, TEST_MEMORY_READY_WORKSPACE],
+  )
+  await c.query(
+    `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+     VALUES ($1, $2, 'primary', true)
+     ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET active=true`,
+    [a.agent_id, TEST_MEMORY_READY_WORKSPACE_ID],
+  )
+  await c.query(
     `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
+       (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, session_name, port,
         checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, $3, 'local_process', $4, $5,
-             '/tmp/state-daemon-test-checkout', 'state-daemon-test-head', 'running',
-             $6, $7, '{"source":"state-daemon-fixture"}'::jsonb)
+     VALUES ($1, $2, $3, $4, 'local_process', $5, $6,
+             $7, $8, 'running',
+             $9, $10, $11::jsonb)
      ON CONFLICT (runtime_instance_id) DO UPDATE SET
        agent_id=EXCLUDED.agent_id,
        runtime_engine=EXCLUDED.runtime_engine,
@@ -154,11 +206,15 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
     [
       runtimeInstanceId,
       a.agent_id,
-      a.runtime_engine_preference ?? a.runtime ?? 'TUI',
+      TEST_MEMORY_READY_WORKSPACE_ID,
+      runtimeEngine,
       sessionName,
       port,
+      TEST_MEMORY_READY_WORKSPACE,
+      gitCommit,
       runtimeStartedAt,
       a.last_seen_at ?? completedAt,
+      JSON.stringify({ source: 'state-daemon-fixture', tuple_digest: runtimeTransportToken }),
     ],
   )
   await c.query(
@@ -169,12 +225,13 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
         valid_until, source, metadata)
      VALUES
        ($1, $6, $2, 1, 'legacy',
-        $3, $4, $1, '/tmp/state-daemon-test-checkout', 'state-daemon-test-head',
+        $3, $4, $1, $7, $8,
         'fixture:mcp__wasurezu__recover_context', 'ready', $5,
         '/tmp/state-daemon-memory-ready-fixture.json', 'fixture-memory-ready-log',
         '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
-        '{"fixture":true}'::jsonb)`,
-    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt, TEST_MEMORY_READY_PROJECT],
+        $9::jsonb)`,
+    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt, TEST_MEMORY_READY_PROJECT,
+      TEST_MEMORY_READY_WORKSPACE, gitCommit, JSON.stringify({ fixture: true, memory_ready_authority: authority })],
   )
   const fixtureChannelId = `${TEST_PREFIX}channel-${a.agent_id}`
   await c.query(

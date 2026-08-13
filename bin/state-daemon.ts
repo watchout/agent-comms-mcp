@@ -31,6 +31,7 @@ import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import {
   assertRuntimeMemoryReadyProjectResolutionCurrent,
+  captureRuntimeMemoryReadyAuthority,
   resolveRuntimeMemoryReadyProject,
   type RuntimeMemoryReadyProjectResolution,
 } from '../core/runtime-memory-ready'
@@ -342,6 +343,28 @@ export async function resolveQueueWorkRuntimeResolution(
   return resolveRuntimeMemoryReadyProject(db as any, { agent_id: agentId })
 }
 
+async function resolveQueueWorkRuntimeAuthorityResolution(
+  db: QueueWorkRuntimeWorkspaceDb,
+  agentId: string,
+): Promise<RuntimeMemoryReadyProjectResolution> {
+  const resolution = await resolveQueueWorkRuntimeResolution(db, agentId)
+  const authority = await captureRuntimeMemoryReadyAuthority(db as any, resolution)
+  return Object.freeze({ ...resolution, authority_tuple_digest: authority.tuple_digest })
+}
+
+function assertQueueWorkAuthorityDigestCurrent(
+  expected: RuntimeMemoryReadyProjectResolution,
+  current: RuntimeMemoryReadyProjectResolution,
+): void {
+  assertRuntimeMemoryReadyProjectResolutionCurrent(expected, current)
+  if (expected.authority_tuple_digest && expected.authority_tuple_digest !== current.authority_tuple_digest) {
+    throw new Error(
+      `runtime memory-ready authority tuple changed: expected=${expected.authority_tuple_digest ?? 'missing'} `
+      + `current=${current.authority_tuple_digest ?? 'missing'}`,
+    )
+  }
+}
+
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
@@ -370,7 +393,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   ): Promise<void> {
     const expected = memoryReadyResolution ?? await this.resolveRuntimeResolution(input.agentId)
     const beforeClaim = await this.resolveRuntimeResolution(input.agentId)
-    assertRuntimeMemoryReadyProjectResolutionCurrent(expected, beforeClaim)
+    assertQueueWorkAuthorityDigestCurrent(expected, beforeClaim)
     const env = this.envFor(input.agentId, expected)
     const received = await this.receiveInvoker({
       agentId: input.agentId,
@@ -418,7 +441,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   ): Promise<void> {
     const baseline = expected ?? await this.resolveRuntimeResolution(input.agentId)
     const beforeDispatch = await this.resolveRuntimeResolution(input.agentId)
-    assertRuntimeMemoryReadyProjectResolutionCurrent(baseline, beforeDispatch)
+    assertQueueWorkAuthorityDigestCurrent(baseline, beforeDispatch)
     const runtimeCwd = baseline.canonical_workspace_path
     const env = {
       ...this.envFor(input.agentId, baseline),
@@ -1029,7 +1052,7 @@ export async function main(): Promise<void> {
       ? new QueueWorkRunnerScheduler(
           process.env,
           process.cwd(),
-          (agentId) => resolveQueueWorkRuntimeResolution(queryClient, agentId),
+          (agentId) => resolveQueueWorkRuntimeAuthorityResolution(queryClient, agentId),
         )
       : undefined,
     shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),

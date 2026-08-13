@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import {
@@ -29,6 +31,33 @@ const REPO = join(import.meta.dir, '..')
 const REPO_REALPATH = realpathSync(REPO)
 const REPO_PROJECT = basename(REPO_REALPATH)
 const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
+const AUTHORITY_WORKSPACE_ID = 'state-daemon-scheduler-workspace'
+const AUTHORITY_RUNTIME_ID = 'rt-queue-scheduler'
+const AUTHORITY_SESSION = 'queue-scheduler-session'
+function authorityPort(agentId: string): number {
+  return 30_000 + [...agentId].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 20_000, 0)
+}
+
+function authoritySnapshot(agentId: string) {
+  const port = authorityPort(agentId)
+  const gitCommit = execFileSync('/usr/bin/git', ['-C', REPO_REALPATH, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  const gitTree = execFileSync('/usr/bin/git', ['-C', REPO_REALPATH, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
+  const owner = statSync(REPO_REALPATH)
+  const transport = {
+    runtime_engine: 'codex', runtime_kind: 'local_process', host_id: null, endpoint_uri: null,
+    runtime_transport_token: 'queue-scheduler-transport',
+  }
+  const value = {
+    schema: 'aun.runtime-memory-authority.v1', agent_id: agentId, project: REPO_PROJECT,
+    workspace_id: AUTHORITY_WORKSPACE_ID, workspace_realpath: REPO_REALPATH,
+    workspace_owner_uid: owner.uid, workspace_owner_gid: owner.gid,
+    runtime_instance_id: AUTHORITY_RUNTIME_ID, profile_revision: 1, profile_source: 'legacy',
+    session_name: AUTHORITY_SESSION, port, runtime_engine: 'codex', runtime_kind: 'local_process',
+    transport_digest: createHash('sha256').update(JSON.stringify(transport)).digest('hex'),
+    git_toplevel_realpath: REPO_REALPATH, git_commit_sha: gitCommit, git_tree_sha: gitTree, git_clean: true,
+  }
+  return { ...value, tuple_digest: createHash('sha256').update(JSON.stringify(value)).digest('hex') }
+}
 
 function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; rowCount: number } | null {
   if (sql.includes('SELECT a.*') && sql.includes('FROM agents a')) {
@@ -44,7 +73,32 @@ function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; r
     }
   }
   if (sql.includes('FROM agent_workspace_bindings')) {
-    return { rows: [] as T[], rowCount: 0 }
+    return { rows: [{ workspace_id: AUTHORITY_WORKSPACE_ID, local_path: REPO_REALPATH }] as T[], rowCount: 1 }
+  }
+  if (sql.includes('profile_revision') && sql.includes('FROM agents')) {
+    return { rows: [{ agent_id: agentId, profile_revision: 1, profile_source: 'legacy', channel_port: authorityPort(agentId), home_directory: REPO_REALPATH, metadata: {} }] as T[], rowCount: 1 }
+  }
+  if (sql.includes('FROM agent_runtime_instances')) {
+    const authority = authoritySnapshot(agentId)
+    return { rows: [{
+      runtime_instance_id: AUTHORITY_RUNTIME_ID, agent_id: agentId, workspace_id: AUTHORITY_WORKSPACE_ID,
+      runtime_engine: 'codex', runtime_kind: 'local_process', host_id: null,
+      session_name: AUTHORITY_SESSION, port: authorityPort(agentId), checkout_path: REPO_REALPATH,
+      commit_sha: authority.git_commit_sha, endpoint_uri: null, started_at: '2026-05-07T23:50:00.000Z',
+      last_seen_at: '2026-05-07T23:59:00.000Z', status: 'running', metadata: { tuple_digest: 'queue-scheduler-transport' },
+    }] as T[], rowCount: 1 }
+  }
+  if (sql.includes('FROM runtime_memory_ready_evidence')) {
+    const authority = authoritySnapshot(agentId)
+    return { rows: [{
+      id: 1, agent_id: agentId, project: REPO_PROJECT, runtime_instance_id: AUTHORITY_RUNTIME_ID,
+      profile_revision: 1, profile_source: 'legacy', session_name: AUTHORITY_SESSION, port: authorityPort(agentId),
+      expected_agent_id: agentId, checkout_path: REPO_REALPATH, checkout_commit_sha: authority.git_commit_sha,
+      recovery_command: 'mcp__wasurezu__recover_context', result_status: 'ready', failure_reason: null,
+      completed_at: '2026-05-07T23:55:00.000Z', evidence_path: null, evidence_log_id: null,
+      valid_until: '2030-05-08T01:00:00.000Z', source: 'wasurezu_boot_recovery',
+      metadata: { memory_ready_authority: authority },
+    }] as T[], rowCount: 1 }
   }
   if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) {
     return {
@@ -456,7 +510,10 @@ class MultiPendingLlmDb implements DBClient {
       const delegate = this.delegatesById.get(String(params?.[0]))
       return delegate ? delegate.query<T>(sql, params) : { rows: [], rowCount: 0 }
     }
-    const delegate = this.delegatesByAgent.get(String(params?.[0])) ?? this.first
+    const portAgent = sql.includes('FROM agent_runtime_instances') && sql.includes('WHERE port = $1')
+      ? this.members.find((agentId) => authorityPort(agentId) === Number(params?.[0]))
+      : null
+    const delegate = this.delegatesByAgent.get(portAgent ?? String(params?.[0])) ?? this.first
     return delegate.query<T>(sql, params)
   }
 }
@@ -1181,7 +1238,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     })).toBe(1)
   })
 
-  test('same-basename workspace drift after the pre-gate blocks direct Codex child dispatch', async () => {
+  test('same-basename non-authoritative workspace blocks direct Codex child dispatch', async () => {
     const root = mkdtempSync(join(tmpdir(), 'state-daemon-direct-drift-'))
     const workspaceA = join(root, 'binding-a', REPO_PROJECT)
     const workspaceB = join(root, 'binding-b', REPO_PROJECT)
@@ -1246,10 +1303,11 @@ describe('state_daemon queue work scheduler boundary', () => {
 
     expect(invocations).toHaveLength(0)
     expect(metrics.countInc('state_daemon_wake_actions_total', {
-      result: 'memory_ready_resolution_drift_blocked',
-      reason: 'workspace_resolution_drift',
+      result: 'memory_ready_blocked',
+      action: 'invoke_codex_runner',
+      reason: 'authority_tuple_invalid',
     })).toBe(1)
-    expect(alert.alerts.join('\n')).toContain('workspace_resolution_drift')
+    expect(alert.alerts.join('\n')).toContain('authority_tuple_invalid')
   })
 
   test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {

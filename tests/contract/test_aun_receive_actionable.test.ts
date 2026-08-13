@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
@@ -16,6 +16,9 @@ let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
 let workspaceDir: string
+let workspaceHead: string
+let authorityMetadataJson: string
+const WORKSPACE_ID = 'actionable-dev-primary'
 
 function runAun(
   args: string[],
@@ -138,17 +141,20 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
         (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
          checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
        VALUES (?, 'agent-comms-mcp', ?, 1, 'legacy', ?, ?, ?,
-         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', ?, ?,
-         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', ?, 'agent_memory_boot_recovery', '{}')`,
+         ?, ?, 'test:mcp__wasurezu__recover_context', ?, ?,
+         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', ?, 'agent_memory_boot_recovery', ?)`,
     ).run(
       TEST_AGENT,
       row.runtime_instance_id,
       row.session_name,
       row.port,
       TEST_AGENT,
+      realpathSync(workspaceDir),
+      workspaceHead,
       row.result_status,
       row.completed_at,
       row.valid_until,
+      authorityMetadataJson,
     )
   })
 }
@@ -157,6 +163,33 @@ beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-actionable-'))
   workspaceDir = join(tmpDir, 'agent-comms-mcp')
   mkdirSync(workspaceDir)
+  spawnSync('/usr/bin/git', ['init', '-q', workspaceDir])
+  writeFileSync(join(workspaceDir, 'tracked.txt'), 'actionable fixture\n')
+  spawnSync('/usr/bin/git', ['-C', workspaceDir, 'add', 'tracked.txt'])
+  spawnSync('/usr/bin/git', ['-C', workspaceDir, '-c', 'user.name=AUN Test', '-c', 'user.email=aun@example.invalid', 'commit', '-qm', 'fixture'])
+  workspaceDir = realpathSync(workspaceDir)
+  workspaceHead = spawnSync('/usr/bin/git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+  const workspaceTree = spawnSync('/usr/bin/git', ['-C', workspaceDir, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).stdout.trim()
+  const owner = statSync(workspaceDir)
+  const transport = {
+    runtime_engine: 'codex', runtime_kind: 'local_process', host_id: null, endpoint_uri: null,
+    runtime_transport_token: 'actionable-transport',
+  }
+  const authorityWithoutDigest = {
+    schema: 'aun.runtime-memory-authority.v1', agent_id: TEST_AGENT, project: 'agent-comms-mcp',
+    workspace_id: WORKSPACE_ID, workspace_realpath: workspaceDir,
+    workspace_owner_uid: owner.uid, workspace_owner_gid: owner.gid,
+    runtime_instance_id: 'runtime-actionable-dev', profile_revision: 1, profile_source: 'legacy',
+    session_name: 'actionable-dev-session', port: 39001, runtime_engine: 'codex', runtime_kind: 'local_process',
+    transport_digest: createHash('sha256').update(JSON.stringify(transport)).digest('hex'),
+    git_toplevel_realpath: workspaceDir, git_commit_sha: workspaceHead, git_tree_sha: workspaceTree, git_clean: true,
+  }
+  authorityMetadataJson = JSON.stringify({
+    memory_ready_authority: {
+      ...authorityWithoutDigest,
+      tuple_digest: createHash('sha256').update(JSON.stringify(authorityWithoutDigest)).digest('hex'),
+    },
+  })
   dbPath = join(tmpDir, 'test.db')
   env = {
     ...process.env,
@@ -182,15 +215,19 @@ beforeEach(() => {
          SET channel_port = 39001,
              home_directory = '${workspaceDir}'
        WHERE agent_id = '${TEST_AGENT}';
+      INSERT INTO agent_workspaces (workspace_id, name, local_path)
+        VALUES ('${WORKSPACE_ID}', 'agent-comms-mcp', '${workspaceDir}');
+      INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+        VALUES ('${TEST_AGENT}', '${WORKSPACE_ID}', 'primary', true);
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-        VALUES ('runtime-actionable-dev', '${TEST_AGENT}', 'codex', 'local_process', 'actionable-dev-session', 39001, '/tmp/actionable-dev', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');
+        (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+        VALUES ('runtime-actionable-dev', '${TEST_AGENT}', '${WORKSPACE_ID}', 'codex', 'local_process', 'actionable-dev-session', 39001, '${workspaceDir}', '${workspaceHead}', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z', '{"tuple_digest":"actionable-transport"}');
       INSERT INTO runtime_memory_ready_evidence
         (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
          checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
         VALUES ('${TEST_AGENT}', 'agent-comms-mcp', 'runtime-actionable-dev', 1, 'legacy', 'actionable-dev-session', 39001, '${TEST_AGENT}',
-         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
-         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+         '${workspaceDir}', '${workspaceHead}', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '${authorityMetadataJson}');
       INSERT INTO channels (id, name, members)
         VALUES ('actionable-ch', 'actionable-ch', '["${TEST_AGENT}","codex-cto","auditor"]');
       INSERT INTO channel_routing_policy (channel_id, primary_agent_id, outbound_allowlist, policy_source)
@@ -259,6 +296,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
       workspace_id: null,
       source: 'home_directory',
       explicit_project: 'agent-comms-mcp',
+      authority_tuple_digest: 'a'.repeat(64),
     }
 
     const r = runAun([
@@ -279,6 +317,40 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
       claimed_by: null,
     })
     expect(realpathSync(workspaceDir)).not.toBe(staleToken.canonical_workspace_path)
+  })
+
+  test('cross-agent runtime authority mismatch performs zero queue mutation', () => {
+    const targetQueueId = seedQueue({ messageType: 'instruction', ageSeconds: 30, content: 'target must remain pending' })
+    const otherQueueId = withDb((db) => {
+      const messageId = randomUUID()
+      db.prepare(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source)
+         VALUES (?, 'actionable-ch', 'codex-cto', 'other agent work', 'instruction', 'agent-comms')`,
+      ).run(messageId)
+      const row = db.prepare(
+        `INSERT INTO message_queue (agent_id, message_id, payload, status, priority)
+         VALUES ('auditor', ?, '{"message_type":"instruction","content":"other agent work"}', 'pending', 0)
+         RETURNING id`,
+      ).get(messageId) as { id: number }
+      db.exec(`
+        INSERT INTO agent_workspaces (workspace_id, name, local_path)
+          VALUES ('other-agent-workspace', 'other', NULL);
+        INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+          VALUES ('auditor', 'other-agent-workspace', 'primary', true);
+        UPDATE agent_runtime_instances
+           SET workspace_id='other-agent-workspace'
+         WHERE agent_id='${TEST_AGENT}';
+      `)
+      return row.id
+    })
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(targetQueueId)])
+    expect(r.status).toBe(1)
+    expect(JSON.parse(r.stdout).selection_reason).toBe('memory_ready_authority_tuple_invalid')
+    withDb((db) => {
+      expect(db.prepare(`SELECT status FROM message_queue WHERE id=?`).get(targetQueueId)).toMatchObject({ status: 'pending' })
+      expect(db.prepare(`SELECT status FROM message_queue WHERE id=?`).get(otherQueueId)).toMatchObject({ status: 'pending' })
+    })
   })
 
   test('missing/stale/mismatched memory-ready evidence blocks receive-actionable and next-actionable before claim', () => {
@@ -522,7 +594,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
-  test('disabled target profile blocks direct mention wake', () => {
+  test('disabled target profile fails the authority gate before direct mention wake', () => {
     withDb((db) => db.exec(`UPDATE agents SET profile_enabled = 0 WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
@@ -534,7 +606,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--queue-id', String(chatId)])
     expect(r.status).toBe(1)
     const body = JSON.parse(r.stdout)
-    expect(body.selection_reason).toBe('disabled_agent')
+    expect(body.selection_reason).toBe('memory_ready_authority_tuple_invalid')
     expect(rows().find((row) => row.id === chatId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 

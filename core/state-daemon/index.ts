@@ -81,7 +81,7 @@ import {
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import { selectAgentAdapter } from './adapter-registry'
 import {
-  assertRuntimeMemoryReadyProjectResolutionCurrent,
+  assertRuntimeMemoryReadyAuthorityCurrent,
   evaluateRuntimeMemoryReadyGate,
   resolveRuntimeMemoryReadyProject,
   RuntimeMemoryReadyProjectResolutionError,
@@ -1119,9 +1119,12 @@ export class StateDaemon {
         now: this.clock.now(),
         queue_scope: {
           queue_id: row.id,
+          message_id: row.message_id,
+          created_at: row.created_at,
           status: row.status,
           action_kind: action.kind,
         },
+        project_resolution: project,
       })
       gate.details = {
         ...gate.details,
@@ -1131,7 +1134,6 @@ export class StateDaemon {
         workspace_id: project.workspace_id,
         explicit_project: project.explicit_project,
       }
-      gate.project_resolution = project
       return gate
     } catch (error) {
       const resolutionError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
@@ -1715,10 +1717,7 @@ export class StateDaemon {
       ? {
           ...configuredProfile,
           cwd: memoryReadyResolution.canonical_workspace_path,
-          allowed_dirs: Array.from(new Set([
-            memoryReadyResolution.canonical_workspace_path,
-            ...configuredProfile.allowed_dirs,
-          ])),
+          allowed_dirs: [],
         }
       : configuredProfile
     const hostAdapterEnabled =
@@ -1853,11 +1852,7 @@ export class StateDaemon {
           reason: 'missing_pre_gate_resolution',
         })
       }
-      const current = await resolveRuntimeMemoryReadyProject(this.db, {
-        agent_id: row.agent_id,
-        explicit_project: expected.explicit_project,
-      })
-      assertRuntimeMemoryReadyProjectResolutionCurrent(expected, current)
+      await assertRuntimeMemoryReadyAuthorityCurrent(this.db, expected)
       return true
     } catch (error) {
       await this.dbQuery(

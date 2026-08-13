@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import {
+  assertRuntimeMemoryReadyAuthorityCurrent,
   buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
@@ -17,12 +19,14 @@ import { memoryReadyBootstrap } from '../bin/aun/memory-ready'
 let tmp: string
 let dbPath: string
 let db: SqliteAdapter
+const runtimeAuthority = new Map<string, { workspace: string; workspaceId: string; commit: string; port: number }>()
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'memory-ready-'))
   dbPath = join(tmp, 'test.db')
   migrateSqlite(dbPath)
   db = new SqliteAdapter(dbPath)
+  runtimeAuthority.clear()
 })
 
 afterEach(async () => {
@@ -30,21 +34,45 @@ afterEach(async () => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-async function seedRuntime(agentId = 'agent-com-dev', port = 39100): Promise<void> {
+async function seedRuntime(agentId = 'agent-com-dev', port = 39100, bindAuthority = true): Promise<void> {
+  const workspace = join(tmp, 'workspaces', agentId, 'agent-comms-mcp')
+  mkdirSync(workspace, { recursive: true })
+  execFileSync('/usr/bin/git', ['init', '-q', workspace])
+  writeFileSync(join(workspace, 'tracked.txt'), `${agentId}\n`)
+  execFileSync('/usr/bin/git', ['-C', workspace, 'add', 'tracked.txt'])
+  execFileSync('/usr/bin/git', ['-C', workspace, '-c', 'user.name=AUN Test', '-c', 'user.email=aun@example.invalid', 'commit', '-qm', 'fixture'])
+  const commit = execFileSync('/usr/bin/git', ['-C', workspace, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  const workspaceId = `workspace-${agentId}`
+  runtimeAuthority.set(agentId, { workspace: realpathSync(workspace), workspaceId, commit, port })
   await db.execute(
     `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port, metadata, home_directory)
      VALUES ($1, $1, 'dev', 'codex', 'idle', $2, $3, $4)`,
-    [agentId, port, JSON.stringify({ tmux_session: `${agentId}-session` }), `/tmp/${agentId}`],
+    [agentId, port, JSON.stringify({ tmux_session: `${agentId}-session` }), workspace],
   )
+  if (bindAuthority) {
+    await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, name, local_path) VALUES ($1, 'agent-comms-mcp', $2)`,
+      [workspaceId, workspace],
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ($1, $2, 'primary', true)`,
+      [agentId, workspaceId],
+    )
+  }
   await db.execute(
     `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-     VALUES ($1, $2, 'codex', 'local_process', $3, $4, $5, 'head-sha', 'running', $6, $7)`,
-    [`runtime-${agentId}`, agentId, `${agentId}-session`, port, `/tmp/${agentId}`, '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z'],
+       (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, session_name, port,
+        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
+     VALUES ($1, $2, $3, 'codex', 'local_process', $4, $5, $6, $7, 'running', $8, $9, $10)`,
+    [`runtime-${agentId}`, agentId, bindAuthority ? workspaceId : null, `${agentId}-session`, port, workspace, commit,
+      '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z', JSON.stringify({ tuple_digest: `transport-${agentId}` })],
   )
 }
 
 async function recordReady(agentId = 'agent-com-dev', overrides: Record<string, unknown> = {}): Promise<void> {
+  const authority = runtimeAuthority.get(agentId)
+  if (!authority) throw new Error(`runtime authority fixture missing for ${agentId}`)
   await recordRuntimeMemoryReadyEvidence(db as any, {
     agent_id: agentId,
     project: 'agent-comms-mcp',
@@ -52,10 +80,10 @@ async function recordReady(agentId = 'agent-com-dev', overrides: Record<string, 
     profile_revision: 1,
     profile_source: 'legacy',
     session_name: `${agentId}-session`,
-    port: 39100,
+    port: authority.port,
     expected_agent_id: agentId,
-    checkout_path: `/tmp/${agentId}`,
-    checkout_commit_sha: 'head-sha',
+    checkout_path: authority.workspace,
+    checkout_commit_sha: authority.commit,
     recovery_command: 'mcp__wasurezu__recover_context',
     result_status: 'ready',
     completed_at: '2026-06-01T00:00:02.000Z',
@@ -116,12 +144,20 @@ describe('runtime memory-ready evidence gate', () => {
     })).reason).toBe('expired')
 
     await db.execute(`DELETE FROM runtime_memory_ready_evidence`)
-    await recordReady('agent-com-dev', { runtime_instance_id: 'runtime-other' })
+    await recordReady()
+    await db.execute(`UPDATE runtime_memory_ready_evidence SET runtime_instance_id='runtime-other'`)
     expect((await evaluateRuntimeMemoryReadyGate(db as any, {
       agent_id: 'agent-com-dev',
       project: 'agent-comms-mcp',
       now: new Date('2026-06-01T00:00:03.000Z'),
     })).reason).toBe('runtime_instance_mismatch')
+
+    await db.execute(`UPDATE runtime_memory_ready_evidence SET runtime_instance_id='runtime-agent-com-dev', checkout_path=NULL, checkout_commit_sha=NULL`)
+    expect((await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev',
+      project: 'agent-comms-mcp',
+      now: new Date('2026-06-01T00:00:03.000Z'),
+    })).reason).toBe('checkout_path_mismatch')
   })
 
   test('bypassed evidence without audited metadata fails closed', async () => {
@@ -198,6 +234,23 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.reason).toBe('bypass_scope_mismatch')
   })
 
+  test('ready evidence may bind exact queue/message and created-after metadata', async () => {
+    await seedRuntime()
+    await recordReady('agent-com-dev', {
+      metadata: { queue_scope: { queue_id: '42', message_id: 'message-42', created_after: '2026-06-01T00:00:00.000Z' } },
+    })
+    let gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+      queue_scope: { queue_id: 42, message_id: 'message-42', created_at: '2026-06-01T00:00:01.000Z' },
+    })
+    expect(gate.ok).toBe(true)
+    gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+      queue_scope: { queue_id: 43, message_id: 'message-42', created_at: '2026-06-01T00:00:01.000Z' },
+    })
+    expect(gate.reason).toBe('queue_scope_mismatch')
+  })
+
   test('wrong identity on occupied expected port fails readiness', async () => {
     await db.execute(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
@@ -221,6 +274,95 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.details.occupant_agent_id).toBe('other-dev')
   })
 
+  test('same-basename checkout at a different root and null runtime identity fail closed', async () => {
+    await seedRuntime()
+    const authority = runtimeAuthority.get('agent-com-dev')!
+    const shadow = join(tmp, 'shadow', 'agent-comms-mcp')
+    mkdirSync(join(tmp, 'shadow'), { recursive: true })
+    execFileSync('/usr/bin/git', ['clone', '-q', authority.workspace, shadow])
+    await db.execute(`UPDATE agent_runtime_instances SET checkout_path=$1 WHERE agent_id='agent-com-dev'`, [shadow])
+    let gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.reason).toBe('authority_tuple_invalid')
+    expect(gate.details.reason).toBe('runtime_checkout_realpath_mismatch')
+
+    await db.execute(`UPDATE agent_runtime_instances SET checkout_path=NULL, commit_sha=NULL WHERE agent_id='agent-com-dev'`)
+    gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.reason).toBe('authority_tuple_invalid')
+    expect(gate.details.field).toBe('runtime.checkout_path')
+  })
+
+  test('dirty worktree and evidence tree tampering fail closed', async () => {
+    await seedRuntime()
+    await recordReady()
+    const authority = runtimeAuthority.get('agent-com-dev')!
+    writeFileSync(join(authority.workspace, 'untracked.txt'), 'dirty\n')
+    let gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.reason).toBe('authority_tuple_invalid')
+    expect(gate.details.reason).toBe('git_worktree_dirty')
+    rmSync(join(authority.workspace, 'untracked.txt'))
+
+    const row = await db.queryOne<{ metadata: string }>(`SELECT metadata FROM runtime_memory_ready_evidence LIMIT 1`)
+    const metadata = JSON.parse(row!.metadata)
+    metadata.memory_ready_authority.git_tree_sha = '0'.repeat(40)
+    metadata.memory_ready_authority.workspace_owner_uid += 1
+    await db.execute(`UPDATE runtime_memory_ready_evidence SET metadata=$1`, [JSON.stringify(metadata)])
+    gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.reason).toBe('authority_tuple_mismatch')
+    expect(gate.details.changed_fields).toContain('git_tree_sha')
+    expect(gate.details.changed_fields).toContain('workspace_owner_uid')
+  })
+
+  test('profile, session, port, and transport drift invalidate the pre-gate tuple', async () => {
+    await seedRuntime()
+    await recordReady()
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.ok).toBe(true)
+    const token = gate.project_resolution!
+
+    await db.execute(`UPDATE agents SET profile_revision=profile_revision+1 WHERE agent_id='agent-com-dev'`)
+    await expect(assertRuntimeMemoryReadyAuthorityCurrent(db as any, token)).rejects.toMatchObject({ code: 'authority_tuple_drift' })
+    await db.execute(`UPDATE agents SET profile_revision=profile_revision-1 WHERE agent_id='agent-com-dev'`)
+    await db.execute(`UPDATE agent_runtime_instances SET session_name='retargeted-session' WHERE agent_id='agent-com-dev'`)
+    await expect(assertRuntimeMemoryReadyAuthorityCurrent(db as any, token)).rejects.toMatchObject({ code: 'authority_tuple_drift' })
+    await db.execute(`UPDATE agent_runtime_instances SET session_name='agent-com-dev-session', port=39101 WHERE agent_id='agent-com-dev'`)
+    await db.execute(`UPDATE agents SET channel_port=39101 WHERE agent_id='agent-com-dev'`)
+    await expect(assertRuntimeMemoryReadyAuthorityCurrent(db as any, token)).rejects.toMatchObject({ code: 'authority_tuple_drift' })
+    await db.execute(`UPDATE agent_runtime_instances SET port=39100, metadata=$1 WHERE agent_id='agent-com-dev'`, [JSON.stringify({ tuple_digest: 'transport-drift' })])
+    await db.execute(`UPDATE agents SET channel_port=39100 WHERE agent_id='agent-com-dev'`)
+    await expect(assertRuntimeMemoryReadyAuthorityCurrent(db as any, token)).rejects.toMatchObject({ code: 'authority_tuple_drift' })
+  })
+
+  test('symlink retarget after pre-gate is detected before a protected boundary', async () => {
+    await seedRuntime()
+    const authority = runtimeAuthority.get('agent-com-dev')!
+    const lexical = join(tmp, 'workspace-link')
+    symlinkSync(authority.workspace, lexical)
+    await db.execute(`UPDATE agent_workspaces SET local_path=$1 WHERE workspace_id=$2`, [lexical, authority.workspaceId])
+    await recordReady()
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.ok).toBe(true)
+
+    const shadow = join(tmp, 'retarget', 'agent-comms-mcp')
+    mkdirSync(join(tmp, 'retarget'), { recursive: true })
+    execFileSync('/usr/bin/git', ['clone', '-q', authority.workspace, shadow])
+    rmSync(lexical)
+    symlinkSync(shadow, lexical)
+    await expect(assertRuntimeMemoryReadyAuthorityCurrent(db as any, gate.project_resolution!))
+      .rejects.toMatchObject({ code: 'workspace_resolution_drift' })
+  })
+
   test('Wasurezu bootstrap evidence is queue-independent metadata', () => {
     const evidence = buildWasurezuBootstrapEvidence({
       agent_id: 'wasurezu',
@@ -241,6 +383,7 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('Wasurezu bootstrap command records ready evidence without queue or live activation dependencies', async () => {
     await seedRuntime('wasurezu', 39120)
+    const authority = runtimeAuthority.get('wasurezu')!
 
     const result = await memoryReadyBootstrap({
       agentId: 'wasurezu',
@@ -248,8 +391,10 @@ describe('runtime memory-ready evidence gate', () => {
       runtimeInstanceId: 'runtime-wasurezu',
       sessionName: 'wasurezu-session',
       port: '39120',
-      checkoutPath: '/tmp/wasurezu',
-      checkoutCommitSha: 'head-sha',
+      profileRevision: '1',
+      profileSource: 'legacy',
+      checkoutPath: authority.workspace,
+      checkoutCommitSha: authority.commit,
       evidencePath: '/tmp/wasurezu-bootstrap-memory-ready.json',
       evidenceLogId: 'wasurezu-bootstrap-memory-ready-log',
       env: {
@@ -292,7 +437,7 @@ describe('runtime memory-ready target project resolution', () => {
   test('derives codex project from the exact active primary workspace binding', async () => {
     const codexWorkspace = join(tmp, 'codex')
     mkdirSync(codexWorkspace)
-    await seedRuntime('codex-cto', 39130)
+    await seedRuntime('codex-cto', 39130, false)
     await db.execute(
       `INSERT INTO agent_workspaces (workspace_id, name, local_path)
        VALUES ('codex-primary', 'codex', $1)`,
@@ -322,7 +467,7 @@ describe('runtime memory-ready target project resolution', () => {
   test('uses canonical workspace when no primary binding exists', async () => {
     const codexWorkspace = join(tmp, 'codex')
     mkdirSync(codexWorkspace)
-    await seedRuntime('codex-cto', 39130)
+    await seedRuntime('codex-cto', 39130, false)
     await db.execute(`ALTER TABLE agents ADD COLUMN canonical_workspace TEXT`)
     await db.execute(
       `UPDATE agents SET canonical_workspace=$1 WHERE agent_id='codex-cto'`,
@@ -338,7 +483,7 @@ describe('runtime memory-ready target project resolution', () => {
   test('fails closed on ambiguous primary bindings and mismatched explicit override', async () => {
     const codexWorkspace = join(tmp, 'codex')
     mkdirSync(codexWorkspace)
-    await seedRuntime('codex-cto', 39130)
+    await seedRuntime('codex-cto', 39130, false)
     await db.execute(
       `INSERT INTO agent_workspaces (workspace_id, name, local_path)
        VALUES ('codex-primary-a', 'codex-a', $1),
@@ -369,7 +514,7 @@ describe('runtime memory-ready target project resolution', () => {
     const lexicalWorkspace = join(tmp, 'lexical-project')
     mkdirSync(canonicalWorkspace)
     symlinkSync(canonicalWorkspace, lexicalWorkspace)
-    await seedRuntime('codex-cto', 39130)
+    await seedRuntime('codex-cto', 39130, false)
     await db.execute(
       `INSERT INTO agent_workspaces (workspace_id, name, local_path)
        VALUES ('codex-primary', 'lexical-project', $1)`,
@@ -391,7 +536,7 @@ describe('runtime memory-ready target project resolution', () => {
   test('fails closed when the authoritative workspace is missing or not a directory', async () => {
     const regularFile = join(tmp, 'workspace-file')
     writeFileSync(regularFile, 'not a directory')
-    await seedRuntime('codex-cto', 39130)
+    await seedRuntime('codex-cto', 39130, false)
     await db.execute(`ALTER TABLE agents ADD COLUMN canonical_workspace TEXT`)
 
     await db.execute(

@@ -18,6 +18,7 @@ import {
   classifyQueueMessageType,
 } from '../../core/queue-message-classification'
 import {
+  assertRuntimeMemoryReadyAuthorityCurrent,
   assertRuntimeMemoryReadyProjectResolutionCurrent,
   evaluateRuntimeMemoryReadyGate,
   resolveRuntimeMemoryReadyProject,
@@ -1673,6 +1674,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             agent_id: plan.env.AGENT_ID,
             expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
             project: project.project,
+            project_resolution: project,
           })
           memoryReady.details = {
             ...memoryReady.details,
@@ -1682,7 +1684,6 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             workspace_id: project.workspace_id,
             explicit_project: project.explicit_project,
           }
-          memoryReady.project_resolution = project
         } catch (error) {
           memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
         }
@@ -1845,6 +1846,10 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           assertRuntimeMemoryReadyProjectResolutionCurrent(
             preGatedResolution ?? memoryReady.project_resolution!,
             beforeClaim,
+          )
+          await assertRuntimeMemoryReadyAuthorityCurrent(
+            tx as any,
+            preGatedResolution ?? memoryReady.project_resolution!,
           )
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()

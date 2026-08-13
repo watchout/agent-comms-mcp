@@ -228,8 +228,10 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
           agent_id: agent,
           project: TEST_MEMORY_READY_PROJECT,
           canonical_workspace_path: TEST_MEMORY_READY_WORKSPACE,
-          workspace_id: null,
-          source: 'canonical_workspace',
+          workspace_path: TEST_MEMORY_READY_WORKSPACE,
+          workspace_id: expect.any(String),
+          source: 'active_primary_workspace',
+          authority_tuple_digest: expect.any(String),
         },
       })
       expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
@@ -243,7 +245,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('pre-gate selects current evidence from the target workspace project', async () => {
+  test('pre-gate rejects a binding that drifts from the configured target project', async () => {
     const agent = makeAgentId('codex-project')
     await seedAgent(pg, {
       agent_id: agent,
@@ -309,13 +311,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
       })
 
-      expect(runner.invocations).toHaveLength(1)
-      expect(runner.invocations[0]?.memoryReadyResolution).toMatchObject({
-        agent_id: agent,
-        project: 'codex',
-        workspace_id: workspaceId,
-        canonical_workspace_path: '/Users/yuji/Developer/codex',
-      })
+      expect(runner.invocations).toHaveLength(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        action: 'invoke_codex_runner',
+        reason: 'project_resolution_failed',
+      })).toBe(1)
     } finally {
       await h.daemon.stop()
     }

@@ -1,5 +1,7 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { basename, isAbsolute } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
 
@@ -27,6 +29,9 @@ export type RuntimeMemoryReadyProjectResolutionErrorCode =
   | 'workspace_path_not_directory'
   | 'workspace_path_realpath_failed'
   | 'workspace_resolution_drift'
+  | 'authority_tuple_missing'
+  | 'authority_tuple_invalid'
+  | 'authority_tuple_drift'
   | 'workspace_resolution_token_invalid'
   | 'project_override_ambiguous'
   | 'project_override_mismatch'
@@ -50,6 +55,8 @@ export interface RuntimeMemoryReadyProjectResolution {
   readonly workspace_id: string | null
   readonly source: RuntimeMemoryReadyProjectSource
   readonly explicit_project: string | null
+  /** Fresh authority digest populated only by a successful memory-ready gate. */
+  readonly authority_tuple_digest?: string | null
 }
 
 interface RuntimeMemoryReadyProjectAgentRow {
@@ -185,6 +192,9 @@ export function runtimeMemoryReadyProjectResolutionFromEnv(
   const explicitProject = token?.explicit_project === null
     ? null
     : normalizedProjectOverride(token?.explicit_project)
+  const authorityTupleDigest = token?.authority_tuple_digest === null
+    ? null
+    : normalizedProjectOverride(token?.authority_tuple_digest)
   if (
     !agentId
     || !project
@@ -196,6 +206,7 @@ export function runtimeMemoryReadyProjectResolutionFromEnv(
     || !source
     || (token?.workspace_id !== null && !workspaceId)
     || (token?.explicit_project !== null && token?.explicit_project !== undefined && !explicitProject)
+    || !authorityTupleDigest
   ) {
     throw new RuntimeMemoryReadyProjectResolutionError('workspace_resolution_token_invalid', {
       reason: 'invalid_shape',
@@ -215,6 +226,7 @@ export function runtimeMemoryReadyProjectResolutionFromEnv(
     workspace_id: workspaceId,
     source,
     explicit_project: explicitProject,
+    authority_tuple_digest: authorityTupleDigest,
   })
 }
 
@@ -337,6 +349,29 @@ export async function resolveRuntimeMemoryReadyProject(
   })
 }
 
+export interface RuntimeMemoryReadyAuthoritySnapshot {
+  schema: 'aun.runtime-memory-authority.v1'
+  tuple_digest: string
+  agent_id: string
+  project: string
+  workspace_id: string
+  workspace_realpath: string
+  workspace_owner_uid: number
+  workspace_owner_gid: number
+  runtime_instance_id: string
+  profile_revision: number
+  profile_source: string
+  session_name: string
+  port: number
+  runtime_engine: string
+  runtime_kind: string
+  transport_digest: string
+  git_toplevel_realpath: string
+  git_commit_sha: string
+  git_tree_sha: string
+  git_clean: true
+}
+
 export interface RuntimeMemoryReadyEvidenceInput {
   agent_id: string
   project: string
@@ -374,6 +409,8 @@ export interface RuntimeMemoryReadyCurrentRuntime {
 
 export interface RuntimeMemoryReadyQueueScopeInput {
   queue_id?: string | number | null
+  message_id?: string | number | null
+  created_at?: string | Date | null
   status?: string | null
   action_kind?: string | null
 }
@@ -394,6 +431,9 @@ export interface RuntimeMemoryReadyGateResult {
     | 'expected_agent_id_mismatch'
     | 'project_mismatch'
     | 'project_resolution_failed'
+    | 'authority_tuple_invalid'
+    | 'authority_tuple_mismatch'
+    | 'queue_scope_mismatch'
     | 'session_mismatch'
     | 'port_mismatch'
     | 'profile_revision_mismatch'
@@ -436,13 +476,19 @@ interface AgentProfileRow {
 interface RuntimeRow {
   runtime_instance_id: string
   agent_id: string
+  workspace_id: string | null
+  runtime_engine: string | null
+  runtime_kind: string | null
+  host_id: string | null
   session_name: string | null
   port: number | string | null
   checkout_path: string | null
   commit_sha: string | null
+  endpoint_uri: string | null
   started_at: string | Date | null
   last_seen_at: string | Date | null
   status: string | null
+  metadata: unknown
 }
 
 interface EvidenceRow {
@@ -518,6 +564,235 @@ function parseRequiredObject(value: unknown): Record<string, unknown> | null {
   return Object.keys(parsed).length > 0 ? parsed : null
 }
 
+function digestJson(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function trustedGit(workspace: string, args: string[]): string {
+  try {
+    return execFileSync('/usr/bin/git', [
+      '--no-optional-locks',
+      '--no-replace-objects',
+      '-c', 'core.fsmonitor=false',
+      '-c', 'core.hooksPath=/dev/null',
+      '-c', 'diff.external=',
+      '-C', workspace,
+      ...args,
+    ], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        PATH: '/usr/bin:/bin',
+        LANG: 'C',
+        LC_ALL: 'C',
+        HOME: '/var/empty',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_TERMINAL_PROMPT: '0',
+      },
+    }).trim()
+  } catch (error) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'trusted_git_failed',
+      workspace,
+      git_args: args,
+      error: (error as Error)?.message ?? String(error),
+    })
+  }
+}
+
+function requiredText(value: unknown, field: string): string {
+  const normalized = normalizeText(value)
+  if (normalized) return normalized
+  throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+    reason: 'required_field_missing',
+    field,
+  })
+}
+
+function requiredNumber(value: unknown, field: string): number {
+  const normalized = normalizeNumber(value)
+  if (normalized !== null) return normalized
+  throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+    reason: 'required_field_missing',
+    field,
+  })
+}
+
+/**
+ * Capture the complete per-target authority tuple from authoritative DB, FS,
+ * runtime and git sources. No caller-supplied path or nullable fallback is
+ * accepted here.
+ */
+export async function captureRuntimeMemoryReadyAuthority(
+  db: RuntimeMemoryReadyDb,
+  expected: RuntimeMemoryReadyProjectResolution,
+): Promise<RuntimeMemoryReadyAuthoritySnapshot> {
+  const currentResolution = await resolveRuntimeMemoryReadyProject(db, {
+    agent_id: expected.agent_id,
+    explicit_project: expected.explicit_project,
+    require_enabled: false,
+  })
+  assertRuntimeMemoryReadyProjectResolutionCurrent(expected, currentResolution)
+  if (currentResolution.source !== 'active_primary_workspace' || !currentResolution.workspace_id) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'active_primary_workspace_required',
+      source: currentResolution.source,
+      workspace_id: currentResolution.workspace_id,
+    })
+  }
+
+  const agentRows = await queryRows<AgentProfileRow>(
+    db,
+    `SELECT agent_id, profile_revision, profile_source, channel_port, home_directory, metadata
+       FROM agents
+      WHERE agent_id = $1
+        AND profile_enabled = true
+        AND disabled_at IS NULL
+      LIMIT 2`,
+    [expected.agent_id],
+  )
+  if (agentRows.length !== 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'enabled_agent_profile_cardinality',
+      rows: agentRows.length,
+    })
+  }
+  const runtimeRows = await queryRows<RuntimeRow>(
+    db,
+    `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+            host_id, session_name, port, checkout_path, commit_sha, endpoint_uri,
+            started_at, last_seen_at, status, metadata
+       FROM agent_runtime_instances
+      WHERE agent_id = $1
+        AND status IN ('running', 'active')
+      ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
+      LIMIT 2`,
+    [expected.agent_id],
+  )
+  if (runtimeRows.length !== 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'active_runtime_cardinality',
+      rows: runtimeRows.length,
+    })
+  }
+  const agent = agentRows[0]!
+  const runtime = runtimeRows[0]!
+  const runtimeWorkspaceId = requiredText(runtime.workspace_id, 'runtime.workspace_id')
+  if (runtimeWorkspaceId !== currentResolution.workspace_id) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'runtime_workspace_id_mismatch',
+      expected_workspace_id: currentResolution.workspace_id,
+      runtime_workspace_id: runtimeWorkspaceId,
+    })
+  }
+  const checkoutPath = requiredText(runtime.checkout_path, 'runtime.checkout_path')
+  if (!isAbsolute(checkoutPath) || !existsSync(checkoutPath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'runtime_checkout_invalid',
+      checkout_path: checkoutPath,
+    })
+  }
+  const checkoutRealpath = canonicalWorkspacePath(expected.agent_id, checkoutPath, 'active_primary_workspace')
+  if (checkoutRealpath !== currentResolution.canonical_workspace_path) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'runtime_checkout_realpath_mismatch',
+      runtime_checkout_realpath: checkoutRealpath,
+      workspace_realpath: currentResolution.canonical_workspace_path,
+    })
+  }
+
+  const gitToplevel = trustedGit(currentResolution.canonical_workspace_path, ['rev-parse', '--show-toplevel'])
+  const gitToplevelRealpath = canonicalWorkspacePath(expected.agent_id, gitToplevel, 'active_primary_workspace')
+  if (gitToplevelRealpath !== currentResolution.canonical_workspace_path) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'git_toplevel_realpath_mismatch',
+      git_toplevel_realpath: gitToplevelRealpath,
+      workspace_realpath: currentResolution.canonical_workspace_path,
+    })
+  }
+  const gitCommit = trustedGit(gitToplevelRealpath, ['rev-parse', '--verify', 'HEAD^{commit}'])
+  const gitTree = trustedGit(gitToplevelRealpath, ['rev-parse', '--verify', 'HEAD^{tree}'])
+  const dirty = trustedGit(gitToplevelRealpath, ['status', '--porcelain=v1', '--untracked-files=all'])
+  if (dirty) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'git_worktree_dirty',
+    })
+  }
+  const runtimeCommit = requiredText(runtime.commit_sha, 'runtime.commit_sha')
+  if (runtimeCommit !== gitCommit) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'runtime_commit_mismatch',
+      runtime_commit_sha: runtimeCommit,
+      git_commit_sha: gitCommit,
+    })
+  }
+
+  const runtimeMetadata = parseObject(runtime.metadata)
+  const transportTuple = {
+    runtime_engine: requiredText(runtime.runtime_engine, 'runtime.runtime_engine'),
+    runtime_kind: requiredText(runtime.runtime_kind, 'runtime.runtime_kind'),
+    host_id: normalizeText(runtime.host_id),
+    endpoint_uri: normalizeText(runtime.endpoint_uri),
+    runtime_transport_token: requiredText(
+      runtimeMetadata.transport_tuple_digest ?? runtimeMetadata.tuple_digest,
+      'runtime.metadata.transport_tuple_digest|tuple_digest',
+    ),
+  }
+  const owner = statSync(currentResolution.canonical_workspace_path)
+  const tupleWithoutDigest = {
+    schema: 'aun.runtime-memory-authority.v1' as const,
+    agent_id: expected.agent_id,
+    project: currentResolution.project,
+    workspace_id: currentResolution.workspace_id,
+    workspace_realpath: currentResolution.canonical_workspace_path,
+    workspace_owner_uid: owner.uid,
+    workspace_owner_gid: owner.gid,
+    runtime_instance_id: requiredText(runtime.runtime_instance_id, 'runtime.runtime_instance_id'),
+    profile_revision: requiredNumber(agent.profile_revision, 'agent.profile_revision'),
+    profile_source: requiredText(agent.profile_source, 'agent.profile_source'),
+    session_name: requiredText(runtime.session_name, 'runtime.session_name'),
+    port: requiredNumber(runtime.port, 'runtime.port'),
+    runtime_engine: transportTuple.runtime_engine,
+    runtime_kind: transportTuple.runtime_kind,
+    transport_digest: digestJson(transportTuple),
+    git_toplevel_realpath: gitToplevelRealpath,
+    git_commit_sha: gitCommit,
+    git_tree_sha: gitTree,
+    git_clean: true as const,
+  }
+  if (requiredNumber(agent.channel_port, 'agent.channel_port') !== tupleWithoutDigest.port) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'agent_runtime_port_mismatch',
+      agent_port: normalizeNumber(agent.channel_port),
+      runtime_port: tupleWithoutDigest.port,
+    })
+  }
+  return Object.freeze({ ...tupleWithoutDigest, tuple_digest: digestJson(tupleWithoutDigest) })
+}
+
+/** Re-read every authority source immediately before a protected boundary. */
+export async function assertRuntimeMemoryReadyAuthorityCurrent(
+  db: RuntimeMemoryReadyDb,
+  expected: RuntimeMemoryReadyProjectResolution,
+): Promise<RuntimeMemoryReadyAuthoritySnapshot> {
+  const expectedDigest = normalizeText(expected.authority_tuple_digest)
+  if (!expectedDigest) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_missing', {
+      agent_id: expected.agent_id,
+    })
+  }
+  const current = await captureRuntimeMemoryReadyAuthority(db, expected)
+  if (current.tuple_digest !== expectedDigest) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_drift', {
+      agent_id: expected.agent_id,
+      expected_authority_tuple_digest: expectedDigest,
+      current_authority_tuple_digest: current.tuple_digest,
+    })
+  }
+  return current
+}
+
 function firstNonEmptyText(...values: unknown[]): string | null {
   for (const value of values) {
     const normalized = normalizeText(value)
@@ -551,6 +826,9 @@ function scopeValues(scope: Record<string, unknown>, singleKey: string, pluralKe
 
 function scopeHasQueueBound(scope: Record<string, unknown>): boolean {
   return scopeValues(scope, 'queue_id', 'queue_ids').length > 0 ||
+    scopeValues(scope, 'message_id', 'message_ids').length > 0 ||
+    textValues(scope.created_at).length > 0 ||
+    textValues(scope.created_after).length > 0 ||
     scopeValues(scope, 'status', 'statuses').length > 0 ||
     scopeValues(scope, 'action_kind', 'action_kinds').length > 0
 }
@@ -565,7 +843,12 @@ function queueScopeMatches(
   current: RuntimeMemoryReadyQueueScopeInput | null | undefined,
 ): boolean {
   if (!current) return false
+  const createdAt = dateMs(current.created_at)
+  const createdAfter = dateMs(scope.created_after)
+  if (createdAfter !== null && (createdAt === null || createdAt < createdAfter)) return false
   return scopeConstraintMatches(scopeValues(scope, 'queue_id', 'queue_ids'), normalizeIdentifier(current.queue_id)) &&
+    scopeConstraintMatches(scopeValues(scope, 'message_id', 'message_ids'), normalizeIdentifier(current.message_id)) &&
+    scopeConstraintMatches(textValues(scope.created_at), normalizeDateIso(current.created_at)) &&
     scopeConstraintMatches(scopeValues(scope, 'status', 'statuses'), normalizeText(current.status)) &&
     scopeConstraintMatches(scopeValues(scope, 'action_kind', 'action_kinds'), normalizeText(current.action_kind))
 }
@@ -732,7 +1015,47 @@ export async function recordRuntimeMemoryReadyEvidence(
   db: RuntimeMemoryReadyDb,
   input: RuntimeMemoryReadyEvidenceInput,
 ): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
-  const metadata = JSON.stringify(input.metadata ?? {})
+  const resolution = await resolveRuntimeMemoryReadyProject(db, {
+    agent_id: input.agent_id,
+    explicit_project: input.project,
+    require_enabled: false,
+  })
+  const authority = await captureRuntimeMemoryReadyAuthority(db, resolution)
+  const suppliedIdentity = {
+    runtime_instance_id: normalizeText(input.runtime_instance_id),
+    profile_revision: normalizeNumber(input.profile_revision),
+    profile_source: normalizeText(input.profile_source),
+    session_name: normalizeText(input.session_name),
+    port: normalizeNumber(input.port),
+    expected_agent_id: normalizeText(input.expected_agent_id),
+    checkout_path: normalizeText(input.checkout_path),
+    checkout_commit_sha: normalizeText(input.checkout_commit_sha),
+  }
+  const expectedIdentity = {
+    runtime_instance_id: authority.runtime_instance_id,
+    profile_revision: authority.profile_revision,
+    profile_source: authority.profile_source,
+    session_name: authority.session_name,
+    port: authority.port,
+    expected_agent_id: authority.agent_id,
+    checkout_path: authority.workspace_realpath,
+    checkout_commit_sha: authority.git_commit_sha,
+  }
+  const identityDrift = Object.keys(expectedIdentity).filter(
+    (field) => suppliedIdentity[field as keyof typeof suppliedIdentity] !== expectedIdentity[field as keyof typeof expectedIdentity],
+  )
+  if (identityDrift.length > 0) {
+    throw new RuntimeMemoryReadyProjectResolutionError('authority_tuple_invalid', {
+      reason: 'evidence_input_authority_mismatch',
+      changed_fields: identityDrift,
+      supplied: suppliedIdentity,
+      expected: expectedIdentity,
+    })
+  }
+  const metadata = JSON.stringify({
+    ...(input.metadata ?? {}),
+    memory_ready_authority: authority,
+  })
   const completedAt = normalizeDateIso(input.completed_at) ?? input.completed_at
   const validUntil = normalizeDateIso(input.valid_until) ?? input.valid_until
   const rows = await queryRows<{ id: string | number }>(
@@ -757,8 +1080,8 @@ export async function recordRuntimeMemoryReadyEvidence(
       input.session_name,
       input.port,
       input.expected_agent_id,
-      input.checkout_path ?? null,
-      input.checkout_commit_sha ?? null,
+      authority.workspace_realpath,
+      authority.git_commit_sha,
       input.recovery_command,
       input.result_status,
       input.failure_reason ?? null,
@@ -787,6 +1110,7 @@ export async function recordRuntimeMemoryReadyEvidence(
         evidence_id: evidenceId,
         evidence_path: input.evidence_path ?? null,
         evidence_log_id: input.evidence_log_id ?? null,
+        authority_tuple_digest: authority.tuple_digest,
       }),
     ],
   ).catch(() => [])
@@ -804,6 +1128,7 @@ export async function evaluateRuntimeMemoryReadyGate(
     expected_agent_id?: string | null
     now?: Date
     queue_scope?: RuntimeMemoryReadyQueueScopeInput | null
+    project_resolution?: RuntimeMemoryReadyProjectResolution | null
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -822,6 +1147,7 @@ export async function evaluateRuntimeMemoryReadyGate(
     valid_until: null,
     current_runtime: null,
     details: {},
+    project_resolution: null as RuntimeMemoryReadyProjectResolution | null,
   }
 
   let agent: AgentProfileRow | null = null
@@ -840,12 +1166,13 @@ export async function evaluateRuntimeMemoryReadyGate(
   }
   if (!agent) return fail(base, 'agent_missing')
 
-  const agentMetadata = parseObject(agent.metadata)
   const expectedPort = normalizeNumber(agent.channel_port)
   if (expectedPort !== null) {
     const occupants = await queryRows<RuntimeRow>(
       db,
-      `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
+      `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, host_id,
+              session_name, port, checkout_path, commit_sha, endpoint_uri,
+              started_at, last_seen_at, status, metadata
          FROM agent_runtime_instances
         WHERE port = $1
           AND status IN ('running', 'active')
@@ -863,9 +1190,45 @@ export async function evaluateRuntimeMemoryReadyGate(
     }
   }
 
+  let authority: RuntimeMemoryReadyAuthoritySnapshot
+  try {
+    const resolution = input.project_resolution ?? await resolveRuntimeMemoryReadyProject(db, {
+      agent_id: input.agent_id,
+      explicit_project: input.project,
+      require_enabled: false,
+    })
+    if (resolution.project !== input.project || resolution.agent_id !== input.agent_id) {
+      return fail(base, 'project_mismatch', {
+        resolved_project: resolution.project,
+        resolved_agent_id: resolution.agent_id,
+      })
+    }
+    authority = await captureRuntimeMemoryReadyAuthority(db, resolution)
+    base.project_resolution = Object.freeze({
+      ...resolution,
+      authority_tuple_digest: authority.tuple_digest,
+    })
+    base.details = {
+      authority_tuple_digest: authority.tuple_digest,
+      workspace_id: authority.workspace_id,
+      workspace_realpath: authority.workspace_realpath,
+      git_commit_sha: authority.git_commit_sha,
+      git_tree_sha: authority.git_tree_sha,
+    }
+  } catch (error) {
+    const authorityError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+    return fail(base, 'authority_tuple_invalid', {
+      authority_code: authorityError?.code ?? 'authority_tuple_read_error',
+      ...(authorityError?.details ?? {}),
+      error: (error as Error)?.message ?? String(error),
+    })
+  }
+
   const runtimeRows = await queryRows<RuntimeRow>(
     db,
-    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
+    `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind, host_id,
+            session_name, port, checkout_path, commit_sha, endpoint_uri,
+            started_at, last_seen_at, status, metadata
        FROM agent_runtime_instances
       WHERE agent_id = $1
         AND status IN ('running', 'active')
@@ -881,10 +1244,10 @@ export async function evaluateRuntimeMemoryReadyGate(
     runtime_instance_id: normalizeText(runtime.runtime_instance_id),
     profile_revision: normalizeNumber(agent.profile_revision),
     profile_source: normalizeText(agent.profile_source),
-    session_name: firstNonEmptyText(runtime.session_name, agentMetadata.tmux_session),
-    port: normalizeNumber(runtime.port) ?? expectedPort,
-    checkout_path: normalizeText(runtime.checkout_path) ?? normalizeText(agent.home_directory),
-    commit_sha: normalizeText(runtime.commit_sha),
+    session_name: normalizeText(runtime.session_name),
+    port: normalizeNumber(runtime.port),
+    checkout_path: authority.workspace_realpath,
+    commit_sha: authority.git_commit_sha,
     started_at: runtime.started_at,
     status: normalizeText(runtime.status),
   }
@@ -946,43 +1309,68 @@ export async function evaluateRuntimeMemoryReadyGate(
       expected_agent_id: expectedAgentId,
     })
   }
+  const evidenceMetadata = parseObject(evidence.metadata)
+  const evidenceQueueScope = parseRequiredObject(evidenceMetadata.queue_scope)
+  if (evidence.result_status !== 'bypassed' && evidenceQueueScope && !queueScopeMatches(evidenceQueueScope, input.queue_scope)) {
+    return fail(withEvidence, 'queue_scope_mismatch', {
+      evidence_queue_scope: evidenceQueueScope,
+      current_queue_scope: input.queue_scope ?? null,
+    })
+  }
+  const evidenceAuthority = parseRequiredObject(evidenceMetadata.memory_ready_authority)
+  const authorityFields: Array<keyof RuntimeMemoryReadyAuthoritySnapshot> = [
+    'schema', 'tuple_digest', 'agent_id', 'project', 'workspace_id', 'workspace_realpath',
+    'workspace_owner_uid', 'workspace_owner_gid', 'runtime_instance_id', 'profile_revision',
+    'profile_source', 'session_name', 'port', 'runtime_engine', 'runtime_kind',
+    'transport_digest', 'git_toplevel_realpath', 'git_commit_sha', 'git_tree_sha', 'git_clean',
+  ]
+  const authorityMismatches = !evidenceAuthority
+    ? authorityFields
+    : authorityFields.filter((field) => evidenceAuthority[field] !== authority[field])
+  if (authorityMismatches.length > 0) {
+    return fail(withEvidence, 'authority_tuple_mismatch', {
+      changed_fields: authorityMismatches,
+      evidence_authority_tuple_digest: normalizeText(evidenceAuthority?.tuple_digest),
+      current_authority_tuple_digest: authority.tuple_digest,
+    })
+  }
   const evidenceSession = normalizeText(evidence.session_name)
-  if (currentRuntime.session_name && evidenceSession !== currentRuntime.session_name) {
+  if (evidenceSession !== currentRuntime.session_name || evidenceSession !== authority.session_name) {
     return fail(withEvidence, 'session_mismatch', {
       evidence_session_name: evidenceSession,
       runtime_session_name: currentRuntime.session_name,
     })
   }
   const evidencePort = normalizeNumber(evidence.port)
-  if (currentRuntime.port !== null && evidencePort !== currentRuntime.port) {
+  if (evidencePort !== currentRuntime.port || evidencePort !== authority.port) {
     return fail(withEvidence, 'port_mismatch', {
       evidence_port: evidencePort,
       runtime_port: currentRuntime.port,
     })
   }
   const evidenceRevision = normalizeNumber(evidence.profile_revision)
-  if (currentRuntime.profile_revision !== null && evidenceRevision !== null && evidenceRevision !== currentRuntime.profile_revision) {
+  if (evidenceRevision !== currentRuntime.profile_revision || evidenceRevision !== authority.profile_revision) {
     return fail(withEvidence, 'profile_revision_mismatch', {
       evidence_profile_revision: evidenceRevision,
       runtime_profile_revision: currentRuntime.profile_revision,
     })
   }
   const evidenceProfileSource = normalizeText(evidence.profile_source)
-  if (currentRuntime.profile_source && evidenceProfileSource && evidenceProfileSource !== currentRuntime.profile_source) {
+  if (evidenceProfileSource !== currentRuntime.profile_source || evidenceProfileSource !== authority.profile_source) {
     return fail(withEvidence, 'profile_source_mismatch', {
       evidence_profile_source: evidenceProfileSource,
       runtime_profile_source: currentRuntime.profile_source,
     })
   }
   const evidenceCheckoutPath = normalizeText(evidence.checkout_path)
-  if (currentRuntime.checkout_path && evidenceCheckoutPath && evidenceCheckoutPath !== currentRuntime.checkout_path) {
+  if (evidenceCheckoutPath !== currentRuntime.checkout_path || evidenceCheckoutPath !== authority.workspace_realpath) {
     return fail(withEvidence, 'checkout_path_mismatch', {
       evidence_checkout_path: evidenceCheckoutPath,
       runtime_checkout_path: currentRuntime.checkout_path,
     })
   }
   const evidenceCommit = normalizeText(evidence.checkout_commit_sha)
-  if (currentRuntime.commit_sha && evidenceCommit && evidenceCommit !== currentRuntime.commit_sha) {
+  if (evidenceCommit !== currentRuntime.commit_sha || evidenceCommit !== authority.git_commit_sha) {
     return fail(withEvidence, 'checkout_commit_mismatch', {
       evidence_checkout_commit_sha: evidenceCommit,
       runtime_commit_sha: currentRuntime.commit_sha,
