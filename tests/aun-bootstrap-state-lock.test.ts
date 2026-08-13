@@ -662,6 +662,33 @@ if (childFixture) {
     retry.releaseLock(agentId, runId)
   })
 
+  test('winner admission survives the losing publisher quarantining a snapshotted concurrent stage', () => {
+    const { root, agentId } = fixture()
+    const dir = join(root, agentId)
+    const loserNonce = '00000000-0000-4000-8000-000000000023'
+    const loserStage = join(dir, `.lock.stage-${loserNonce}`)
+    const loserArchive = join(dir, `.lock.completed-stage-${loserNonce}`)
+    let injected = false
+    const winner = new FileBootstrapStateStore(root, {
+      acquireDurability: (event) => {
+        if (event !== 'after-pending-publish') return
+        mkdirSync(loserStage, { mode: 0o700 })
+      },
+      beforeConcurrentStageValidation: (path) => {
+        if (injected || path !== loserStage) return
+        injected = true
+        renameSync(loserStage, loserArchive)
+      },
+    })
+
+    winner.acquireLock(agentId, 'winner-across-loser-cleanup')
+    expect(injected).toBe(true)
+    expect(readdirSync(join(dir, '.lock')).sort()).toEqual(['acquire.ready', 'owner.json'])
+    expect(existsSync(loserStage)).toBe(false)
+    expect(existsSync(loserArchive)).toBe(true)
+    winner.releaseLock(agentId, 'winner-across-loser-cleanup')
+  })
+
   test('pending publish failure archives exact no-effect ownership before fresh work', () => {
     const { root, agentId } = fixture()
     const dir = join(root, agentId)

@@ -144,6 +144,7 @@ type BootstrapLockTestHooks = {
   afterStagePartialOwnerWrite?: () => void
   afterStageOwnerFsync?: () => void
   afterStageFsync?: () => void
+  beforeConcurrentStageValidation?: (path: string) => void
   reclaimDurability?: (event:
     | 'after-marker-mkdir'
     | 'before-marker-fsync'
@@ -506,7 +507,22 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       // residue; a later acquire also quarantines crash residue.
       if (name.startsWith(LOCK_STAGE_PREFIX)) {
         const nonce = name.slice(LOCK_STAGE_PREFIX.length)
-        const identity = lstatSync(candidatePath)
+        this.testHooks.beforeConcurrentStageValidation?.(candidatePath)
+        let identity
+        try {
+          identity = lstatSync(candidatePath)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          // The losing publisher owns cleanup of its inert stage. If it moved
+          // that stage after our directory snapshot, prove our pending lock is
+          // still exact before treating the disappearance as cooperative cleanup.
+          const stillPending = readBootstrapLockRecord(path, owner.agent_id)
+          if (!stillPending || !sameLockRecord(stillPending, owner)
+            || bootstrapLockPhase(path) !== 'pending') {
+            throw new Error('pending lock changed while concurrent stage disappeared')
+          }
+          continue
+        }
         if (!CANONICAL_LOCK_NONCE.test(nonce) || !identity.isDirectory() || identity.isSymbolicLink()) {
           throw new Error('concurrent stage artifact is invalid')
         }
