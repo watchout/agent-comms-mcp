@@ -293,6 +293,32 @@ describe('aun bootstrap B0-B8 state machine', () => {
     })
   })
 
+  test('normal release clamps a rolled-back callback clock to its authorization receipt', async () => {
+    const store = new class extends MemoryBootstrapStateStore {
+      override releaseLock(
+        agentId: string,
+        runId: string,
+        recordReleased?: (releasedAt: string, ownerNonce: string) => void,
+      ): void {
+        super.releaseLock(agentId, runId, (_releasedAt, ownerNonce) => {
+          recordReleased?.('2000-01-01T00:00:00.000Z', ownerNonce)
+        })
+      }
+    }()
+    const result = await bootstrap({
+      agentId: 'release-clock-rollback', runtime: 'codex', home: '/tmp/release-clock-rollback',
+      repoRoot: process.cwd(), env: { HOME: '/tmp/release-clock-rollback' },
+    }, {
+      stateStore: store, ports: passingPorts(), run: fakeRun(), uuid: () => 'clock-rollback',
+    })
+
+    expect(result.status).toBe('READY')
+    const state = store.states.get('release-clock-rollback/bootstrap-clock-rollback')!
+    expect(state.lock_released_at).toBe(state.lock_release_authorized_at)
+    expect(state.updated_at).toBe(state.lock_release_authorized_at)
+    expect(state.lock_release_owner_nonce).toBeString()
+  })
+
   test('dry-run plans B0-B8 without persisting a run journal', async () => {
     const store = new MemoryBootstrapStateStore()
     const calls: string[] = []

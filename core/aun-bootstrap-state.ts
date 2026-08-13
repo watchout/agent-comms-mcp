@@ -456,10 +456,17 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
             && releaseState.lock_release_owner_nonce !== released.nonce) {
             throw new Error('release marker journal owner receipt is corrupt')
           }
-          releaseState.lock_released_at = new Date().toISOString()
+          releaseState.lock_released_at = new Date(Math.max(Date.now(), authorizedAt)).toISOString()
           releaseState.lock_release_owner_nonce = released.nonce
           releaseState.updated_at = releaseState.lock_released_at
           this.save(releaseState)
+          const persisted = this.load(agentId, runId)
+          if (!persisted || persisted.agent_id !== agentId || persisted.run_id !== runId
+            || persisted.lock_release_authorized_at !== releaseState.lock_release_authorized_at
+            || persisted.lock_released_at !== releaseState.lock_released_at
+            || persisted.lock_release_owner_nonce !== released.nonce) {
+            throw new Error('release marker journal receipt readback mismatch')
+          }
         } else if (!Number.isFinite(Date.parse(releaseState.lock_released_at))
           || new Date(releaseState.lock_released_at).toISOString() !== releaseState.lock_released_at) {
           throw new Error('release marker journal receipt is corrupt')

@@ -282,6 +282,41 @@ if (childFixture) {
     store.releaseLock(agentId, runId)
   })
 
+  test('official recovery clamps a missing release receipt to future authorization before publishing', () => {
+    const { root, store, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000019')
+    const releasePath = join(dir, `.lock.release-${record.nonce}`)
+    seedDirectory(releasePath, record)
+    const authorizedAt = new Date(Date.now() + 60_000).toISOString()
+    store.save(releaseJournal(root, agentId, runId, {
+      lock_release_authorized_at: authorizedAt,
+      lock_released_at: null,
+      lock_release_owner_nonce: null,
+    }))
+
+    store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(store.load(agentId, runId)).toMatchObject({
+      lock_release_authorized_at: authorizedAt,
+      lock_released_at: authorizedAt,
+      lock_release_owner_nonce: record.nonce,
+    })
+    expect(existsSync(releasePath)).toBe(false)
+    expect(existsSync(join(dir, `.lock.completed-release-${record.nonce}`))).toBe(true)
+    expect(JSON.parse(readFileSync(join(dir, '.lock', 'owner.json'), 'utf8'))).toMatchObject({
+      agent_id: agentId, run_id: runId, pid: process.pid,
+    })
+    store.releaseLock(agentId, runId)
+
+    const repeat = new FileBootstrapStateStore(root)
+    repeat.acquireLock(agentId, runId)
+    repeat.releaseLock(agentId, runId)
+    const fresh = new FileBootstrapStateStore(root)
+    fresh.acquireLock(agentId, 'fresh-after-future-authorization')
+    fresh.releaseLock(agentId, 'fresh-after-future-authorization')
+    expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
+  })
+
   test('a distinct observer durability-closes a post-archive-rename crash before publishing', () => {
     const { root, agentId } = fixture()
     const dir = join(root, agentId)

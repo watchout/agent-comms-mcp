@@ -5423,9 +5423,13 @@ export async function bootstrap(
       state.updated_at = state.lock_release_authorized_at
       stateStore.save(state)
       stateStore.releaseLock(agentId, runId, (releasedAt, ownerNonce) => {
-        state.lock_released_at = releasedAt
+        const canonicalReleasedAt = new Date(Math.max(
+          Date.parse(state.lock_release_authorized_at!),
+          Date.parse(releasedAt),
+        )).toISOString()
+        state.lock_released_at = canonicalReleasedAt
         state.lock_release_owner_nonce = ownerNonce
-        state.updated_at = releasedAt
+        state.updated_at = canonicalReleasedAt
         stateStore.save(state)
       })
       lockHeld = false
