@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
@@ -8,6 +8,7 @@ import {
   buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
+  resolveRuntimeMemoryReadyProject,
 } from '../core/runtime-memory-ready'
 import { memoryReadyBootstrap } from '../bin/aun/memory-ready'
 
@@ -65,6 +66,19 @@ async function recordReady(agentId = 'agent-com-dev', overrides: Record<string, 
   } as any)
 }
 
+async function bindPrimaryWorkspace(agentId: string, workspacePath: string, workspaceId: string): Promise<void> {
+  await db.execute(
+    `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+     VALUES ($1, $2, $3)`,
+    [workspaceId, workspaceId, workspacePath],
+  )
+  await db.execute(
+    `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+     VALUES ($1, $2, 'primary', 1)`,
+    [agentId, workspaceId],
+  )
+}
+
 function auditedBypassMetadata(agentId = 'agent-com-dev', overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     actor: 'codex-cto',
@@ -81,6 +95,80 @@ function auditedBypassMetadata(agentId = 'agent-com-dev', overrides: Record<stri
 }
 
 describe('runtime memory-ready evidence gate', () => {
+  test('per-agent project resolution admits only current exact-runtime evidence for the target workspace', async () => {
+    const workspace = join(tmp, 'codex')
+    mkdirSync(workspace)
+    await seedRuntime('codex-cto', 39130)
+    await bindPrimaryWorkspace('codex-cto', workspace, 'workspace-codex')
+    await recordReady('codex-cto', {
+      project: 'agent-comms-mcp',
+      port: 39130,
+      valid_until: '2026-06-01T00:00:02.000Z',
+    })
+    await recordReady('codex-cto', {
+      project: 'codex',
+      port: 39130,
+      valid_until: '2099-01-01T00:00:00.000Z',
+    })
+
+    const resolution = await resolveRuntimeMemoryReadyProject(db as any, 'codex-cto')
+    expect(resolution).toEqual({
+      agent_id: 'codex-cto',
+      project: 'codex',
+      workspace_path: workspace,
+      source: 'active_primary_workspace',
+    })
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'codex-cto',
+      project: resolution.project,
+      now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+    expect(gate.ok).toBe(true)
+    expect(gate.project).toBe('codex')
+    expect(gate.reason).toBe('ready')
+  })
+
+  test('per-agent project resolution fails closed on missing, ambiguous, relative, and absent workspaces', async () => {
+    await seedRuntime('missing-workspace', 39131)
+    await db.execute(`UPDATE agents SET home_directory=NULL WHERE agent_id='missing-workspace'`)
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'missing-workspace'))
+      .rejects.toMatchObject({ code: 'WORKSPACE_MISSING' })
+
+    await seedRuntime('ambiguous-workspace', 39132)
+    const first = join(tmp, 'first-project')
+    const second = join(tmp, 'second-project')
+    mkdirSync(first)
+    mkdirSync(second)
+    await bindPrimaryWorkspace('ambiguous-workspace', first, 'workspace-first')
+    await bindPrimaryWorkspace('ambiguous-workspace', second, 'workspace-second')
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'ambiguous-workspace'))
+      .rejects.toMatchObject({ code: 'WORKSPACE_AMBIGUOUS' })
+
+    await seedRuntime('relative-workspace', 39133)
+    await bindPrimaryWorkspace('relative-workspace', 'relative/project', 'workspace-relative')
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'relative-workspace'))
+      .rejects.toMatchObject({ code: 'WORKSPACE_NOT_ABSOLUTE' })
+
+    await seedRuntime('absent-workspace', 39134)
+    await bindPrimaryWorkspace('absent-workspace', join(tmp, 'absent-project'), 'workspace-absent')
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'absent-workspace'))
+      .rejects.toMatchObject({ code: 'WORKSPACE_NOT_FOUND' })
+  })
+
+  test('explicit per-agent memory project override is deterministic without a workspace fallback', async () => {
+    await seedRuntime('project-override', 39135)
+    await db.execute(
+      `UPDATE agents SET home_directory=NULL, metadata=$1 WHERE agent_id='project-override'`,
+      [JSON.stringify({ memory_project: 'iyasaka-arc' })],
+    )
+    await expect(resolveRuntimeMemoryReadyProject(db as any, 'project-override')).resolves.toEqual({
+      agent_id: 'project-override',
+      project: 'iyasaka-arc',
+      workspace_path: null,
+      source: 'agent_metadata_override',
+    })
+  })
+
   test('valid current-runtime-bound evidence passes', async () => {
     await seedRuntime()
     await recordReady()

@@ -80,7 +80,12 @@ import {
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import { selectAgentAdapter } from './adapter-registry'
-import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../runtime-memory-ready'
+import {
+  evaluateRuntimeMemoryReadyGate,
+  resolveRuntimeMemoryReadyProject,
+  RuntimeMemoryReadyProjectResolutionError,
+  type RuntimeMemoryReadyGateResult,
+} from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -1099,10 +1104,36 @@ export class StateDaemon {
         },
       }
     }
-    return evaluateRuntimeMemoryReadyGate(this.db, {
+    let resolution
+    try {
+      resolution = await resolveRuntimeMemoryReadyProject(this.db, row.agent_id)
+    } catch (error) {
+      const typed = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+      return {
+        ok: false,
+        gate: 'memory_ready',
+        reason: 'project_resolution_failed',
+        agent_id: row.agent_id,
+        project: '',
+        checked_at: this.clock.now().toISOString(),
+        runtime_instance_id: null,
+        evidence_id: null,
+        evidence_path: null,
+        evidence_log_id: null,
+        source: 'state_daemon_target_project_resolver',
+        valid_until: null,
+        current_runtime: null,
+        details: {
+          code: typed?.code ?? 'PROJECT_RESOLUTION_ERROR',
+          error: (error as Error).message ?? String(error),
+          ...(typed?.details ?? {}),
+        },
+      }
+    }
+    const gate = await evaluateRuntimeMemoryReadyGate(this.db, {
       agent_id: row.agent_id,
       expected_agent_id: row.agent_id,
-      project: this.config.memoryReadyProject,
+      project: resolution.project,
       now: this.clock.now(),
       queue_scope: {
         queue_id: row.id,
@@ -1110,6 +1141,14 @@ export class StateDaemon {
         action_kind: action.kind,
       },
     })
+    return {
+      ...gate,
+      details: {
+        ...gate.details,
+        project_resolution_source: resolution.source,
+        project_workspace_path: resolution.workspace_path,
+      },
+    }
   }
 
   private recordMemoryReadyBlocked(

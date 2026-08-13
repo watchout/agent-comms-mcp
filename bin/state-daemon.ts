@@ -69,6 +69,7 @@ import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
 import type { QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
+import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import type {
   AlertSink,
   DBClient,
@@ -316,6 +317,28 @@ export function describeQueueWorkFailure(result: RunQueueWorkCliResult): string 
   return 'queue work runner returned ok=false'
 }
 
+export function buildQueueWorkAgentEnv(
+  base: NodeJS.ProcessEnv,
+  agentId: string,
+  memoryReadyProject: string,
+): NodeJS.ProcessEnv {
+  const project = memoryReadyProject.trim()
+  if (!project) throw new Error(`queue-work memory-ready project is required for ${agentId}`)
+  return {
+    ...base,
+    AGENT_ID: agentId,
+    AGENT_COM_EXPECTED_AGENT_ID: agentId,
+    AGENT_COMMS_MEMORY_READY_PROJECT: project,
+    AGENT_MEMORY_PROJECT: project,
+    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
+      base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+        ?? base.AUN_RECEIVE_CLAIM_SOURCE
+        ?? 'state-daemon-queue-work-scheduler',
+  }
+}
+
 export type QueueWorkRuntimeWorkspaceDb = {
   query<T = Record<string, unknown>>(
     sql: string,
@@ -366,10 +389,14 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
     private readonly resolveRuntimeWorkspace: (agentId: string) => Promise<string> = async () => cwd,
+    private readonly resolveMemoryReadyProject: (agentId: string) => Promise<string> = async () => {
+      throw new Error('queue-work memory-ready project resolver is required')
+    },
   ) {}
 
   async runPending(input: { queueId: number; agentId: string }): Promise<void> {
-    const env = this.envFor(input.agentId)
+    const project = await this.resolveMemoryReadyProject(input.agentId)
+    const env = this.envFor(input.agentId, project)
     const received = await receiveTargeted({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -387,7 +414,8 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   }
 
   async runDone(input: { queueId: number; agentId: string }): Promise<void> {
-    const env = this.envFor(input.agentId)
+    const project = await this.resolveMemoryReadyProject(input.agentId)
+    const env = this.envFor(input.agentId, project)
     const result = await runQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -405,9 +433,12 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
   ): Promise<void> {
-    const runtimeCwd = await this.resolveRuntimeWorkspace(input.agentId)
+    const [runtimeCwd, project] = await Promise.all([
+      this.resolveRuntimeWorkspace(input.agentId),
+      this.resolveMemoryReadyProject(input.agentId),
+    ])
     const env = {
-      ...this.envFor(input.agentId),
+      ...this.envFor(input.agentId, project),
       AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
     }
     const result = await runQueueWork({
@@ -429,20 +460,10 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     }
   }
 
-  private envFor(agentId: string): NodeJS.ProcessEnv {
-    const env = {
-      ...this.env,
-      AGENT_ID: agentId,
-      AGENT_COM_EXPECTED_AGENT_ID: agentId,
-      AUN_RECEIVE_CLAIM_SOURCE: this.env.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
-      AUN_QUEUE_WORK_INVOCATION_SOURCE: this.env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
-      // Only process rows this scheduler claimed itself (receive_claim.source
-      // match) — never rows claimed by a TUI session or another runner.
-      AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
-        this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
-          ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
-          ?? 'state-daemon-queue-work-scheduler',
-    }
+  private envFor(agentId: string, project: string): NodeJS.ProcessEnv {
+    // Only process rows this scheduler claimed itself (receive_claim.source
+    // match) — never rows claimed by a TUI session or another runner.
+    const env = buildQueueWorkAgentEnv(this.env, agentId, project)
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
     }
@@ -1004,6 +1025,7 @@ export async function main(): Promise<void> {
           process.env,
           process.cwd(),
           (agentId) => resolveQueueWorkRuntimeWorkspace(queryClient, agentId),
+          async (agentId) => (await resolveRuntimeMemoryReadyProject(queryClient, agentId)).project,
         )
       : undefined,
     shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),

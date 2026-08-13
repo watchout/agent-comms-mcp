@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  buildQueueWorkAgentEnv,
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
@@ -27,7 +28,11 @@ import {
 const REPO = join(import.meta.dir, '..')
 const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
 
-function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; rowCount: number } | null {
+function authorityFixtureResult<T>(
+  sql: string,
+  agentId: string,
+  memoryProject = 'agent-comms-mcp',
+): { rows: T[]; rowCount: number } | null {
   if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) {
     return {
       rows: [{
@@ -37,6 +42,7 @@ function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; r
         status: 'idle',
         profile_enabled: true,
         disabled_at: null,
+        metadata: { memory_project: memoryProject },
       }] as T[],
       rowCount: 1,
     }
@@ -104,6 +110,19 @@ test('queue-work runtime workspace fails closed on missing, relative, or absent 
   }
 })
 
+test('queue-work child env replaces daemon project with the resolved target project', () => {
+  const env = buildQueueWorkAgentEnv({
+    AGENT_MEMORY_PROJECT: 'agent-comms-mcp',
+    AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
+  }, 'codex-cto', 'codex')
+
+  expect(env.AGENT_ID).toBe('codex-cto')
+  expect(env.AGENT_COM_EXPECTED_AGENT_ID).toBe('codex-cto')
+  expect(env.AGENT_MEMORY_PROJECT).toBe('codex')
+  expect(env.AGENT_COMMS_MEMORY_READY_PROJECT).toBe('codex')
+  expect(() => buildQueueWorkAgentEnv({}, 'codex-cto', ' ')).toThrow('project is required')
+})
+
 class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
 
@@ -156,13 +175,16 @@ class DoneFinalizationDb implements DBClient {
 }
 
 class PendingLlmDb implements DBClient {
+  readonly evidenceProjects: string[] = []
+
   constructor(
     private readonly agentId: string,
     private readonly row: any,
+    private readonly memoryProject = 'agent-comms-mcp',
   ) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
-    const authority = authorityFixtureResult<T>(sql, this.agentId)
+    const authority = authorityFixtureResult<T>(sql, this.agentId, this.memoryProject)
     if (authority) return authority
     if (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1')) {
       if (String(this.row.id) === String(params?.[0])) return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
@@ -218,11 +240,12 @@ class PendingLlmDb implements DBClient {
       }
     }
     if (sql.includes('FROM runtime_memory_ready_evidence')) {
+      this.evidenceProjects.push(String(params?.[1] ?? ''))
       return {
         rows: [{
           id: 1,
           agent_id: this.agentId,
-          project: 'agent-comms-mcp',
+          project: this.memoryProject,
           runtime_instance_id: 'rt-queue-scheduler',
           profile_revision: null,
           profile_source: null,
@@ -996,6 +1019,58 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'pending_runner_invoked',
     })).toBe(1)
+  })
+
+  test('daemon pre-gate uses the target agent project instead of its global project', async () => {
+    const agentId = 'codex-cto'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const db = new PendingLlmDb(agentId, {
+      id: 155889,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-155889',
+      payload: JSON.stringify({
+        author_id: 'owner',
+        content: 'target project regression',
+        message_type: 'instruction',
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-13T11:41:19.210Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }, 'codex')
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-13T11:41:20.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending(input) { calls.push(input) },
+      },
+      config: {
+        codexRunnerEnabled: true,
+        memoryReadyProject: 'agent-comms-mcp',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 155889,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(db.evidenceProjects).toEqual(['codex'])
+    expect(calls).toEqual([{ queueId: 155889, agentId }])
   })
 
   test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {
