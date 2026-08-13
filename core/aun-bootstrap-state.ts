@@ -444,6 +444,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           || name !== `${LOCK_RELEASE_PREFIX}${released.nonce}`
           || !this.exactSameRunStale(released, agentId, runId)
           || !releaseState || releaseState.agent_id !== agentId || releaseState.run_id !== runId
+          || releaseState.schema_version !== 'shirube-v3/aun-bootstrap-run/v1'
           || !releaseState.lock_release_authorized_at
           || !Number.isFinite(Date.parse(releaseState.lock_release_authorized_at))
           || new Date(releaseState.lock_release_authorized_at).toISOString() !== releaseState.lock_release_authorized_at) {

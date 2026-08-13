@@ -336,15 +336,19 @@ if (childFixture) {
     store.releaseLock(agentId, runId)
   })
 
-  test('legacy release recovery rejects nonce, time, and owner drift without archiving', () => {
-    for (const variant of ['mismatch', 'present-null', 'noncanonical', 'preauthorization', 'foreign'] as const) {
+  test('legacy release recovery rejects schema, nonce, time, and owner drift without effects', () => {
+    for (const variant of [
+      'unknown-schema', 'missing-schema', 'mismatch', 'present-null', 'noncanonical', 'preauthorization', 'foreign',
+    ] as const) {
       const { root, store, agentId, runId } = fixture()
       const dir = join(root, agentId)
       const nonce = '00000000-0000-4000-8000-000000000017'
       const record = deadRecord(agentId, variant === 'foreign' ? 'foreign-run' : runId, nonce)
       const releasePath = join(dir, `.lock.release-${nonce}`)
       seedDirectory(releasePath, record)
-      const state = releaseJournal(root, agentId, runId, variant === 'mismatch'
+      const state = releaseJournal(root, agentId, runId, variant === 'unknown-schema'
+        ? { schema_version: 'shirube-v3/aun-bootstrap-run/v2' }
+        : variant === 'mismatch'
         ? { lock_release_owner_nonce: '00000000-0000-4000-8000-000000000018' }
         : variant === 'present-null'
           ? { lock_release_owner_nonce: null }
@@ -354,10 +358,16 @@ if (childFixture) {
               ? { lock_released_at: '2026-08-13T23:59:59.000Z' }
               : {})
       if (variant === 'foreign') delete state.lock_release_owner_nonce
+      if (variant === 'missing-schema') delete state.schema_version
       store.save(state)
+      const journalPath = join(dir, `${runId}.json`)
+      const journalBefore = readFileSync(journalPath, 'utf8')
+      const releaseBefore = readFileSync(join(releasePath, 'owner.json'), 'utf8')
       expect(() => store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })).toThrow(
         'NO_GO_BOOTSTRAP_BUSY',
       )
+      expect(readFileSync(journalPath, 'utf8')).toBe(journalBefore)
+      expect(readFileSync(join(releasePath, 'owner.json'), 'utf8')).toBe(releaseBefore)
       expect(existsSync(releasePath)).toBe(true)
       expect(existsSync(join(dir, `.lock.completed-release-${nonce}`))).toBe(false)
       expect(existsSync(join(dir, '.lock'))).toBe(false)
