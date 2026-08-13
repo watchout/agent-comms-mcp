@@ -206,6 +206,31 @@ describe('runtime inventory', () => {
       expect(report.blockers).toContain('hotel-dev:runtime_commit_mismatch')
     })
   })
+
+  test('propagates checkout evidence mismatch through runtime and connector blockers', async () => {
+    await withRuntimeDb(async (db) => {
+      await db.execute(
+        `UPDATE agent_runtime_instances
+            SET metadata = $1
+          WHERE runtime_instance_id = 'runtime-hotel'`,
+        [JSON.stringify({
+          git_checkout_path: '/tmp/not-hotel',
+          git_commit_sha: OTHER_COMMIT,
+          git_dirty: false,
+        })],
+      )
+
+      const report = await buildRuntimeInventoryReport(db, { staleMinutes: 60 })
+      const hotel = report.agents.find((agent) => agent.agent_id === 'hotel-dev')
+      const hotelConnector = report.connectors.find((connector) => connector.agent_id === 'hotel-dev')
+
+      expect(hotel?.checkout_drift.reasons).toContain('runtime_checkout_evidence_mismatch')
+      expect(hotel?.warnings).toContain('runtime_checkout_evidence_mismatch')
+      expect(hotelConnector?.warnings).toContain('connector_runtime_checkout_evidence_mismatch')
+      expect(report.blockers).toContain('hotel-dev:runtime_checkout_evidence_mismatch')
+      expect(report.blockers).toContain('hotel-dev:connector_runtime_checkout_evidence_mismatch')
+    })
+  })
 })
 
 describe('ordinary all-agent manifest candidate inventory', () => {

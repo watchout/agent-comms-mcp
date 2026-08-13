@@ -1,0 +1,33 @@
+schema_version: shirube-audit-checklist/v1
+checklist_id: AUDIT-CHECKLIST-CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+cell_id: CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+spec_id: SPEC-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+control_source: https://github.com/watchout/ai-dev-framework/issues/576
+exact_head_required: true
+forbidden_auditors:
+  - implementation_author
+items:
+  - audit_item_id: RCP-AUDIT-001
+    requirement_ids: [REQ-RCP-001, REQ-RCP-002]
+    pass_predicate: Server heartbeat row and metadata projections are derived from one frozen evidence object selected independently of process cwd.
+  - audit_item_id: RCP-AUDIT-002
+    requirement_ids: [REQ-RCP-003]
+    pass_predicate: Path or commit disagreement produces runtime_checkout_evidence_mismatch without an active drift policy and cannot be bypassed by dirty allowances or drift exclusions.
+  - audit_item_id: RCP-AUDIT-003
+    requirement_ids: [REQ-RCP-004]
+    pass_predicate: Runtime inventory connector inventory and fleet readiness all surface the mismatch as a blocker.
+  - audit_item_id: RCP-AUDIT-004
+    requirement_ids: [REQ-RCP-005]
+    pass_predicate: Aligned clean dirty allowed-dirty and legacy single-projection evidence retain their expected behavior.
+  - audit_item_id: RCP-AUDIT-005
+    requirement_ids: [REQ-RCP-001, REQ-RCP-002, REQ-RCP-003, REQ-RCP-004, REQ-RCP-005]
+    pass_predicate: Focused tests run with live database environment variables unset and no runtime DB provider queue daemon or protected effect occurs.
+verdict_contract:
+  PASS: Every item passes on one exact head with reproducible evidence and no implementation edit by the auditor.
+  REQUEST_CHANGES: A bounded implementation or test defect is identified with exact file and predicate.
+  ESCALATE: Correctness requires authority or scope outside the approved Cell.
+next_action:
+  blocking: true
+  actor: independent_auditor
+  active_function: evidence_audit_gate
+  action: Review the exact implementation head and publish one verdict without editing or activating runtime state.

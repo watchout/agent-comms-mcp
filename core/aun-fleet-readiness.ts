@@ -184,6 +184,8 @@ function actionForBlocker(blocker: string): string {
       return 'add tmux metadata or runtime heartbeat evidence'
     case 'runtime_commit_missing':
       return 'restart under an approved checkout that records commit evidence'
+    case 'runtime_checkout_evidence_mismatch':
+      return 'replace contradictory runtime heartbeat evidence; this integrity blocker cannot be excluded'
     case 'runtime_commit_mismatch':
       return 'restart under the approved deployed commit before recovery can count this agent'
     case 'runtime_checkout_path_missing':
@@ -431,7 +433,9 @@ export async function buildAunFleetReadinessReport(
     const checkoutDriftOk = (!driftPolicyActive || liveRuntimeRows.length > 0) && checkoutDriftReasons.length === 0
     const activeQueueCount = activeQueueCountByAgent.get(agentId) ?? 0
     const denied = denylist.has(agentId)
-    const approvedExclusion = validDriftExclusion(agentId, driftExclusions, now)
+    const approvedExclusion = checkoutDriftReasons.includes('runtime_checkout_evidence_mismatch')
+      ? null
+      : validDriftExclusion(agentId, driftExclusions, now)
     const profileExcludedReason = profileExclusionReason(row, {
       includeDisabledProfiles,
       includeTestProfiles,

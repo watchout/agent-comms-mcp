@@ -548,6 +548,7 @@ function runtimeWarningsForDrift(
 
 function blockerFromWarning(agentId: string, warning: string): string | null {
   if (warning === 'runtime_stale') return `${agentId}:runtime_stale`
+  if (warning === 'runtime_checkout_evidence_mismatch') return `${agentId}:runtime_checkout_evidence_mismatch`
   if (warning === 'runtime_commit_missing') return `${agentId}:runtime_commit_missing`
   if (warning === 'runtime_commit_mismatch') return `${agentId}:runtime_commit_mismatch`
   if (warning === 'runtime_checkout_path_missing') return `${agentId}:runtime_checkout_path_missing`
@@ -782,6 +783,7 @@ export async function buildRuntimeInventoryReport(
     ...connectors.flatMap((connector) => connector.warnings
       .filter((warning) => [
         'connector_runtime_stale',
+        'connector_runtime_checkout_evidence_mismatch',
         'connector_runtime_commit_missing',
         'connector_runtime_commit_mismatch',
         'connector_runtime_checkout_path_missing',
