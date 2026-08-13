@@ -704,38 +704,6 @@ export async function evaluateRuntimeMemoryReadyGate(
     }
   }
 
-  const runtimeRows = await queryRows<RuntimeRow>(
-    db,
-    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
-       FROM agent_runtime_instances
-      WHERE agent_id = $1
-        AND status IN ('running', 'active')
-      ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
-      LIMIT 1`,
-    [input.agent_id],
-  ).catch(() => [])
-  const runtime = runtimeRows[0] ?? null
-  if (!runtime) return fail(base, 'missing_current_runtime')
-
-  const currentRuntime: RuntimeMemoryReadyCurrentRuntime = {
-    agent_id: input.agent_id,
-    runtime_instance_id: normalizeText(runtime.runtime_instance_id),
-    profile_revision: normalizeNumber(agent.profile_revision),
-    profile_source: normalizeText(agent.profile_source),
-    session_name: firstNonEmptyText(runtime.session_name, agentMetadata.tmux_session),
-    port: normalizeNumber(runtime.port) ?? expectedPort,
-    checkout_path: normalizeText(runtime.checkout_path) ?? normalizeText(agent.home_directory),
-    commit_sha: normalizeText(runtime.commit_sha),
-    started_at: runtime.started_at,
-    status: normalizeText(runtime.status),
-  }
-  const withRuntime = {
-    ...base,
-    runtime_instance_id: currentRuntime.runtime_instance_id,
-    current_runtime: currentRuntime,
-  }
-  if (!currentRuntime.runtime_instance_id) return fail(withRuntime, 'missing_current_runtime')
-
   let evidenceRows: EvidenceRow[]
   try {
     evidenceRows = await queryRows<EvidenceRow>(
@@ -754,29 +722,90 @@ export async function evaluateRuntimeMemoryReadyGate(
   } catch (err) {
     const msg = (err as Error).message ?? String(err)
     const missing = /runtime_memory_ready_evidence|does not exist|no such table/i.test(msg)
-    return fail(withRuntime, missing ? 'missing_read_model' : 'read_error', { error: msg })
+    return fail(base, missing ? 'missing_read_model' : 'read_error', { error: msg })
   }
   const evidence = evidenceRows[0] ?? null
-  if (!evidence) return fail(withRuntime, 'missing_evidence')
+  if (!evidence) return fail(base, 'missing_evidence')
 
-  const withEvidence = {
-    ...withRuntime,
+  const withEvidenceBase = {
+    ...base,
     evidence_id: evidence.id ?? null,
     evidence_path: evidence.evidence_path ?? null,
     evidence_log_id: evidence.evidence_log_id ?? null,
     source: evidence.source ?? null,
     valid_until: normalizeDateIso(evidence.valid_until),
   }
-  if (evidence.project !== input.project) return fail(withEvidence, 'project_mismatch', { evidence_project: evidence.project })
+  if (evidence.project !== input.project) return fail(withEvidenceBase, 'project_mismatch', { evidence_project: evidence.project })
   if (evidence.result_status !== 'ready' && evidence.result_status !== 'bypassed') {
-    return fail(withEvidence, 'not_ready', {
+    return fail(withEvidenceBase, 'not_ready', {
       result_status: evidence.result_status,
       failure_reason: evidence.failure_reason,
     })
   }
   const validUntilMs = dateMs(evidence.valid_until)
   if (validUntilMs === null || validUntilMs <= now.getTime()) {
-    return fail(withEvidence, 'expired')
+    return fail(withEvidenceBase, 'expired')
+  }
+
+  const runtimeRows = await queryRows<RuntimeRow>(
+    db,
+    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
+       FROM agent_runtime_instances
+      WHERE CAST(runtime_instance_id AS TEXT) = $1
+        AND agent_id = $2
+        AND status IN ('running', 'active')
+      LIMIT 1`,
+    [evidence.runtime_instance_id, input.agent_id],
+  ).catch(() => [])
+  const runtime = runtimeRows[0] ?? null
+  if (!runtime) {
+    return fail(withEvidenceBase, 'runtime_instance_mismatch', {
+      evidence_runtime_instance_id: evidence.runtime_instance_id,
+    })
+  }
+
+  const currentRuntime: RuntimeMemoryReadyCurrentRuntime = {
+    agent_id: input.agent_id,
+    runtime_instance_id: normalizeText(runtime.runtime_instance_id),
+    profile_revision: normalizeNumber(agent.profile_revision),
+    profile_source: normalizeText(agent.profile_source),
+    session_name: normalizeText(runtime.session_name),
+    port: normalizeNumber(runtime.port),
+    checkout_path: normalizeText(runtime.checkout_path),
+    commit_sha: normalizeText(runtime.commit_sha),
+    started_at: runtime.started_at,
+    status: normalizeText(runtime.status),
+  }
+  const withEvidence = {
+    ...withEvidenceBase,
+    runtime_instance_id: currentRuntime.runtime_instance_id,
+    current_runtime: currentRuntime,
+  }
+  if (!currentRuntime.runtime_instance_id) {
+    return fail(withEvidence, 'runtime_instance_mismatch', {
+      evidence_runtime_instance_id: evidence.runtime_instance_id,
+    })
+  }
+
+  const expectedSession = normalizeText(agentMetadata.tmux_session)
+  if (expectedSession && currentRuntime.session_name !== expectedSession) {
+    return fail(withEvidence, 'session_mismatch', {
+      profile_session_name: expectedSession,
+      runtime_session_name: currentRuntime.session_name,
+    })
+  }
+  if (expectedPort !== null && currentRuntime.port !== expectedPort) {
+    return fail(withEvidence, 'port_mismatch', {
+      profile_port: expectedPort,
+      runtime_port: currentRuntime.port,
+    })
+  }
+  const expectedCheckoutPath = normalizeText(agent.home_directory)
+  if (expectedCheckoutPath && currentRuntime.checkout_path !== expectedCheckoutPath) {
+    return fail(withEvidence, 'checkout_path_mismatch', {
+      profile_checkout_path: expectedCheckoutPath,
+      runtime_checkout_path: currentRuntime.checkout_path,
+    })
   }
   if (evidence.runtime_instance_id !== currentRuntime.runtime_instance_id) {
     return fail(withEvidence, 'runtime_instance_mismatch', { evidence_runtime_instance_id: evidence.runtime_instance_id })

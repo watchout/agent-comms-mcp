@@ -202,6 +202,179 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.evidence_path).toBe('/tmp/agent-com-dev-memory-ready.json')
   })
 
+  test('exact-project evidence selects the same-profile runtime regardless of heartbeat order', async () => {
+    await seedRuntime('aun', 8811)
+    await db.execute(
+      `UPDATE agents
+          SET metadata=$1, home_directory=$2
+        WHERE agent_id='aun'`,
+      [JSON.stringify({ tmux_session: 'discord-aun' }), '/tmp/aun'],
+    )
+    await db.execute(
+      `UPDATE agent_runtime_instances
+          SET runtime_instance_id='runtime-aun-canonical', session_name='discord-aun', last_seen_at='2026-06-01T00:00:01.000Z'
+        WHERE agent_id='aun'`,
+    )
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
+       VALUES ('runtime-aun-competing', 'aun', 'codex', 'local_process', 'discord-aun', 8811, '/tmp/aun', 'wrong-sha', 'running',
+               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:05.000Z')`,
+    )
+    await recordReady('aun', {
+      project: 'codex-aun',
+      runtime_instance_id: 'runtime-aun-canonical',
+      session_name: 'discord-aun',
+      port: 8811,
+    })
+    await recordReady('aun', {
+      project: 'agent-comms-mcp',
+      runtime_instance_id: 'runtime-aun-competing',
+      session_name: 'discord-aun',
+      port: 8811,
+      checkout_path: '/tmp/aun',
+      checkout_commit_sha: 'wrong-sha',
+    })
+
+    const evaluate = () => evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'aun',
+      project: 'codex-aun',
+      now: new Date('2026-06-01T00:00:06.000Z'),
+    })
+    const competingNewest = await evaluate()
+    expect(competingNewest.ok).toBe(true)
+    expect(competingNewest.runtime_instance_id).toBe('runtime-aun-canonical')
+    expect(competingNewest.evidence_id).not.toBeNull()
+
+    await db.execute(
+      `UPDATE agent_runtime_instances
+          SET last_seen_at=CASE runtime_instance_id
+            WHEN 'runtime-aun-canonical' THEN '2026-06-01T00:00:10.000Z'
+            ELSE '2026-06-01T00:00:02.000Z'
+          END
+        WHERE agent_id='aun'`,
+    )
+    const canonicalNewest = await evaluate()
+    expect(canonicalNewest.ok).toBe(true)
+    expect(canonicalNewest.runtime_instance_id).toBe('runtime-aun-canonical')
+    expect(canonicalNewest.evidence_id).toBe(competingNewest.evidence_id)
+  })
+
+  test('latest exact-project evidence never falls back when its runtime is inactive', async () => {
+    await seedRuntime('no-fallback', 39140)
+    await recordReady('no-fallback', {
+      completed_at: '2026-06-01T00:00:02.000Z',
+    })
+    await recordReady('no-fallback', {
+      runtime_instance_id: 'runtime-no-fallback-stopped',
+      completed_at: '2026-06-01T00:00:04.000Z',
+    })
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
+       VALUES ('runtime-no-fallback-stopped', 'no-fallback', 'codex', 'local_process', 'no-fallback-session',
+               39140, '/tmp/no-fallback', 'head-sha', 'stopped', '2026-06-01T00:00:03.000Z',
+               '2026-06-01T00:00:04.000Z')`,
+    )
+
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'no-fallback',
+      project: 'agent-comms-mcp',
+      now: new Date('2026-06-01T00:00:05.000Z'),
+    })
+
+    expect(gate.ok).toBe(false)
+    expect(gate.reason).toBe('runtime_instance_mismatch')
+    expect(gate.evidence_id).not.toBeNull()
+    expect(gate.details.evidence_runtime_instance_id).toBe('runtime-no-fallback-stopped')
+  })
+
+  test('equal evidence timestamps select the highest id without runtime fallback', async () => {
+    await seedRuntime('evidence-order', 39141)
+    await recordReady('evidence-order', {
+      completed_at: '2026-06-01T00:00:02.000Z',
+    })
+    await recordReady('evidence-order', {
+      runtime_instance_id: 'runtime-evidence-order-missing',
+      completed_at: '2026-06-01T00:00:02.000Z',
+    })
+
+    const latest = await db.queryOne<{ id: number }>(
+      `SELECT id FROM runtime_memory_ready_evidence
+        WHERE agent_id='evidence-order' AND project='agent-comms-mcp'
+        ORDER BY completed_at DESC, id DESC LIMIT 1`,
+    )
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'evidence-order',
+      project: 'agent-comms-mcp',
+      now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+
+    expect(gate.ok).toBe(false)
+    expect(gate.reason).toBe('runtime_instance_mismatch')
+    expect(Number(gate.evidence_id)).toBe(Number(latest?.id))
+    expect(gate.details.evidence_runtime_instance_id).toBe('runtime-evidence-order-missing')
+  })
+
+  const profileMismatchCases = [
+    {
+      label: 'session',
+      agentId: 'profile-session-mismatch',
+      update: `session_name='runtime-only-session'`,
+      evidence: { session_name: 'runtime-only-session' },
+      reason: 'session_mismatch',
+      details: {
+        profile_session_name: 'profile-session-mismatch-session',
+        runtime_session_name: 'runtime-only-session',
+      },
+    },
+    {
+      label: 'port',
+      agentId: 'profile-port-mismatch',
+      update: 'port=39152',
+      evidence: { port: 39152 },
+      reason: 'port_mismatch',
+      details: {
+        profile_port: 39142,
+        runtime_port: 39152,
+      },
+    },
+    {
+      label: 'checkout',
+      agentId: 'profile-checkout-mismatch',
+      update: `checkout_path='/tmp/runtime-only-checkout'`,
+      evidence: { checkout_path: '/tmp/runtime-only-checkout' },
+      reason: 'checkout_path_mismatch',
+      details: {
+        profile_checkout_path: '/tmp/profile-checkout-mismatch',
+        runtime_checkout_path: '/tmp/runtime-only-checkout',
+      },
+    },
+  ] as const
+
+  for (const profileMismatch of profileMismatchCases) {
+    test(`exact evidence fails closed on ${profileMismatch.label} mismatch between profile and runtime`, async () => {
+      await seedRuntime(profileMismatch.agentId, 39142)
+      await db.execute(
+        `UPDATE agent_runtime_instances
+            SET ${profileMismatch.update}
+          WHERE agent_id=$1`,
+        [profileMismatch.agentId],
+      )
+      await recordReady(profileMismatch.agentId, profileMismatch.evidence)
+
+      const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+        agent_id: profileMismatch.agentId,
+        project: 'agent-comms-mcp',
+        now: new Date('2026-06-01T00:00:03.000Z'),
+      })
+
+      expect(gate.ok).toBe(false)
+      expect(gate.reason).toBe(profileMismatch.reason)
+      expect(gate.details).toMatchObject(profileMismatch.details)
+    })
+  }
+
   test('missing, stale, and mismatched evidence fail closed', async () => {
     await seedRuntime()
     expect((await evaluateRuntimeMemoryReadyGate(db as any, {
