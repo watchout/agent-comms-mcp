@@ -28,6 +28,21 @@ const REPO = join(import.meta.dir, '..')
 const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
 
 function authorityFixtureResult<T>(sql: string, agentId: string): { rows: T[]; rowCount: number } | null {
+  if (sql.includes('SELECT a.*') && sql.includes('FROM agents a')) {
+    return {
+      rows: [{
+        agent_id: agentId,
+        profile_enabled: true,
+        disabled_at: null,
+        canonical_workspace: '/repo/agent-comms-mcp',
+        home_directory: '/repo/agent-comms-mcp',
+      }] as T[],
+      rowCount: 1,
+    }
+  }
+  if (sql.includes('FROM agent_workspace_bindings')) {
+    return { rows: [] as T[], rowCount: 0 }
+  }
   if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) {
     return {
       rows: [{
@@ -72,18 +87,24 @@ test('queue-work runtime workspace resolves from the enabled agent DB binding', 
     const resolved = await resolveQueueWorkRuntimeWorkspace({
       async query<T>(sql: string, params?: unknown[]) {
         calls.push({ sql, params })
+        if (sql.includes('FROM agents a')) {
+          return {
+            rows: [{ agent_id: 'codex-audit', canonical_workspace: workspace, home_directory: null }] as T[],
+            rowCount: 1,
+          }
+        }
         return {
-          rows: [{ agent_id: 'codex-audit', runtime_workspace: workspace }] as T[],
-          rowCount: 1,
+          rows: [] as T[],
+          rowCount: 0,
         }
       },
     }, 'codex-audit')
 
     expect(resolved).toBe(realpathSync(workspace))
     expect(calls[0]?.params).toEqual(['codex-audit'])
-    expect(calls[0]?.sql).toContain('agent_workspace_bindings')
     expect(calls[0]?.sql).toContain('a.profile_enabled = true')
     expect(calls[0]?.sql).toContain('a.disabled_at IS NULL')
+    expect(calls[1]?.sql).toContain('agent_workspace_bindings')
   } finally {
     rmSync(workspace, { recursive: true, force: true })
   }
@@ -91,14 +112,17 @@ test('queue-work runtime workspace resolves from the enabled agent DB binding', 
 
 test('queue-work runtime workspace fails closed on missing, relative, or absent DB paths', async () => {
   const cases = [
-    { rows: [], message: 'requires one enabled DB agent row' },
-    { rows: [{ agent_id: 'codex-audit', runtime_workspace: 'relative/path' }], message: 'must be an absolute DB path' },
-    { rows: [{ agent_id: 'codex-audit', runtime_workspace: '/definitely/missing/aun-workspace' }], message: 'does not exist as a directory' },
+    { rows: [], message: 'agent_mapping_missing' },
+    { rows: [{ agent_id: 'codex-audit', canonical_workspace: 'relative/path' }], message: 'workspace_path_invalid' },
+    { rows: [{ agent_id: 'codex-audit', canonical_workspace: '/definitely/missing/aun-workspace' }], message: 'does not exist as a directory' },
   ]
   for (const fixture of cases) {
     await expect(resolveQueueWorkRuntimeWorkspace({
-      async query<T>() {
-        return { rows: fixture.rows as T[], rowCount: fixture.rows.length }
+      async query<T>(sql: string) {
+        if (sql.includes('FROM agents a')) {
+          return { rows: fixture.rows as T[], rowCount: fixture.rows.length }
+        }
+        return { rows: [] as T[], rowCount: 0 }
       },
     }, 'codex-audit')).rejects.toThrow(fixture.message)
   }
@@ -942,9 +966,11 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {
     const agentId = 'codex-audit'
     const calls: Array<{ queueId: number; agentId: string }> = []
+    const projects: Array<string | undefined> = []
     const scheduler: QueueWorkScheduler = {
-      async runPending(input) {
+      async runPending(input, memoryReadyProject) {
         calls.push(input)
+        projects.push(memoryReadyProject)
       },
       async runReceived() {
         throw new Error('runReceived should not be called for pending events')
@@ -992,6 +1018,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
 
     expect(calls).toEqual([{ queueId: 490, agentId }])
+    expect(projects).toEqual(['agent-comms-mcp'])
     expect(tmux.sentKeys).toEqual([])
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'pending_runner_invoked',

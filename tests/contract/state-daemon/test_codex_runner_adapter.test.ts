@@ -50,6 +50,24 @@ describe('state_daemon Codex runner adapter command contract', () => {
     }
   })
 
+  test('pins the pre-gated target project into the targeted runner child env', () => {
+    const plan = buildCodexRunnerCommand({
+      agentId: 'codex-cto',
+      queueId: 155889,
+      messageId: 'msg-155889',
+      requester: 'misell',
+      databaseUrl: 'postgresql:///agent_comms?host=/tmp',
+      ackContent: 'ACK',
+      memoryReadyProject: 'codex',
+    })
+
+    expect(plan.env).toMatchObject({
+      AGENT_ID: 'codex-cto',
+      AGENT_MEMORY_PROJECT: 'codex',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'codex',
+    })
+  })
+
   test('omits ACK flags when requester is unknown rather than inventing prose ownership', () => {
     const plan = buildCodexRunnerCommand({
       agentId: 'codex-aun',

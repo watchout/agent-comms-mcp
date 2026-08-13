@@ -61,6 +61,10 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
       AGENT_ID: runtimeInput.agent_id,
       AGENT_COM_EXPECTED_AGENT_ID: runtimeInput.agent_id,
       DATABASE_URL: runtimeInput.database_url,
+      ...(input.memoryReadyProject?.trim() ? {
+        AGENT_MEMORY_PROJECT: input.memoryReadyProject.trim(),
+        AGENT_COMMS_MEMORY_READY_PROJECT: input.memoryReadyProject.trim(),
+      } : {}),
     },
   }
 }

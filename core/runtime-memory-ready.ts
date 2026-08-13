@@ -1,3 +1,5 @@
+import { basename, isAbsolute } from 'node:path'
+
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
 
 export type RuntimeMemoryReadySource =
@@ -8,6 +10,167 @@ export type RuntimeMemoryReadySource =
 
 export type RuntimeMemoryReadyDb = {
   query<T = any>(sql: string, params?: any[]): Promise<{ rows: T[]; rowCount?: number | null } | T[]>
+}
+
+export type RuntimeMemoryReadyProjectSource =
+  | 'active_primary_workspace'
+  | 'canonical_workspace'
+  | 'home_directory'
+
+export type RuntimeMemoryReadyProjectResolutionErrorCode =
+  | 'agent_mapping_missing'
+  | 'primary_workspace_ambiguous'
+  | 'workspace_path_missing'
+  | 'workspace_path_invalid'
+  | 'project_override_ambiguous'
+  | 'project_override_mismatch'
+
+export class RuntimeMemoryReadyProjectResolutionError extends Error {
+  constructor(
+    readonly code: RuntimeMemoryReadyProjectResolutionErrorCode,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(`${code}: runtime memory-ready project resolution failed`)
+    this.name = 'RuntimeMemoryReadyProjectResolutionError'
+  }
+}
+
+export interface RuntimeMemoryReadyProjectResolution {
+  agent_id: string
+  project: string
+  workspace_path: string
+  source: RuntimeMemoryReadyProjectSource
+  explicit_project: string | null
+}
+
+interface RuntimeMemoryReadyProjectAgentRow {
+  agent_id: string
+  canonical_workspace?: string | null
+  home_directory?: string | null
+}
+
+interface RuntimeMemoryReadyPrimaryWorkspaceRow {
+  workspace_id: string
+  local_path: string | null
+}
+
+function normalizedProjectOverride(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+export function runtimeMemoryReadyProjectOverrideFromEnv(
+  env: Record<string, string | undefined>,
+): string | null {
+  const candidates = [
+    normalizedProjectOverride(env.AGENT_MEMORY_PROJECT),
+    normalizedProjectOverride(env.AGENT_COMMS_MEMORY_READY_PROJECT),
+  ].filter((value): value is string => value !== null)
+  const unique = [...new Set(candidates)]
+  if (unique.length > 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError('project_override_ambiguous', {
+      configured_projects: unique,
+    })
+  }
+  return unique[0] ?? null
+}
+
+/**
+ * Resolve the memory-readiness project from the same target workspace basename
+ * used by bootstrap/recovery. A single active primary binding is authoritative;
+ * canonical_workspace (or its legacy home_directory projection) is the only
+ * fallback. Explicit project env is an equality assertion, never a way to
+ * select evidence from a different project.
+ */
+export async function resolveRuntimeMemoryReadyProject(
+  db: RuntimeMemoryReadyDb,
+  input: { agent_id: string; explicit_project?: string | null; require_enabled?: boolean },
+): Promise<RuntimeMemoryReadyProjectResolution> {
+  const enabledPredicate = input.require_enabled === false
+    ? ''
+    : `
+        AND a.profile_enabled = true
+        AND a.disabled_at IS NULL`
+  const agentRows = await queryRows<RuntimeMemoryReadyProjectAgentRow>(
+    db,
+    `SELECT a.*
+       FROM agents a
+      WHERE a.agent_id = $1
+      ${enabledPredicate}
+      LIMIT 2`,
+    [input.agent_id],
+  )
+  if (agentRows.length !== 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError('agent_mapping_missing', {
+      agent_id: input.agent_id,
+      enabled_agent_rows: agentRows.length,
+    })
+  }
+
+  const primaryRows = await queryRows<RuntimeMemoryReadyPrimaryWorkspaceRow>(
+    db,
+    `SELECT w.workspace_id, w.local_path
+       FROM agent_workspace_bindings b
+       JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+      WHERE b.agent_id = $1
+        AND b.active = true
+        AND b.binding_role = 'primary'
+      ORDER BY w.workspace_id
+      LIMIT 2`,
+    [input.agent_id],
+  )
+  if (primaryRows.length > 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError('primary_workspace_ambiguous', {
+      agent_id: input.agent_id,
+      workspace_ids: primaryRows.map((row) => row.workspace_id),
+    })
+  }
+
+  const agent = agentRows[0]!
+  const primaryPath = normalizedProjectOverride(primaryRows[0]?.local_path)
+  const canonicalPath = normalizedProjectOverride(agent.canonical_workspace)
+  const legacyHomePath = normalizedProjectOverride(agent.home_directory)
+  const workspacePath = primaryRows.length === 1
+    ? primaryPath
+    : canonicalPath ?? legacyHomePath
+  const source: RuntimeMemoryReadyProjectSource = primaryRows.length === 1
+    ? 'active_primary_workspace'
+    : canonicalPath
+      ? 'canonical_workspace'
+      : 'home_directory'
+  if (!workspacePath) {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_missing', {
+      agent_id: input.agent_id,
+      primary_binding_present: primaryRows.length === 1,
+      canonical_workspace_present: canonicalPath !== null,
+      home_directory_present: legacyHomePath !== null,
+    })
+  }
+  const project = basename(workspacePath)
+  if (!isAbsolute(workspacePath) || !project || project === '.' || project === '..') {
+    throw new RuntimeMemoryReadyProjectResolutionError('workspace_path_invalid', {
+      agent_id: input.agent_id,
+      workspace_path: workspacePath,
+      source,
+    })
+  }
+
+  const explicitProject = normalizedProjectOverride(input.explicit_project)
+  if (explicitProject && explicitProject !== project) {
+    throw new RuntimeMemoryReadyProjectResolutionError('project_override_mismatch', {
+      agent_id: input.agent_id,
+      configured_project: explicitProject,
+      derived_project: project,
+      workspace_path: workspacePath,
+      source,
+    })
+  }
+  return {
+    agent_id: input.agent_id,
+    project,
+    workspace_path: workspacePath,
+    source,
+    explicit_project: explicitProject,
+  }
 }
 
 export interface RuntimeMemoryReadyEvidenceInput {
@@ -66,6 +229,7 @@ export interface RuntimeMemoryReadyGateResult {
     | 'runtime_instance_mismatch'
     | 'expected_agent_id_mismatch'
     | 'project_mismatch'
+    | 'project_resolution_failed'
     | 'session_mismatch'
     | 'port_mismatch'
     | 'profile_revision_mismatch'

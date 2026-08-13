@@ -81,7 +81,8 @@ export interface StateDaemonConfig {
   hostRuntimeInvocationSchemaJson: string | null
   hostRuntimeInvocationOutputLastMessagePath: string | null
   memoryReadyGateEnabled: boolean
-  memoryReadyProject: string
+  /** Optional equality assertion; the target workspace basename is authoritative. */
+  memoryReadyProject: string | null
   /**
    * Temporary one-target canary overlay only. A non-null value is valid only
    * after LaunchAgent preflight verifies the Issue #917 control/owner refs,
@@ -183,7 +184,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   hostRuntimeInvocationSchemaJson: null,
   hostRuntimeInvocationOutputLastMessagePath: null,
   memoryReadyGateEnabled: true,
-  memoryReadyProject: 'agent-comms-mcp',
+  memoryReadyProject: null,
   agentAllowlist: null,
   agentDenylist: null,
   allAgentCommunicationManifestEnforcementEnabled: false,
@@ -353,6 +354,8 @@ export interface CodexRunnerInvocation {
   completionReason?: string | null
   autoFinalReply?: boolean
   payload?: unknown
+  /** Exact project derived by the state-daemon memory-readiness pre-gate. */
+  memoryReadyProject?: string | null
 }
 
 export interface CodexRunnerResult {
@@ -379,8 +382,14 @@ export interface HostRuntimeInvoker {
 
 /** Schedules queue work for agents driven by LLM runners (Codex, Claude Code, etc.). */
 export interface QueueWorkScheduler {
-  runPending?(input: { queueId: number; agentId: string }): Promise<void>
-  runReceived(input: { queueId: number; agentId: string }): Promise<void>
+  runPending?(
+    input: { queueId: number; agentId: string },
+    memoryReadyProject?: string,
+  ): Promise<void>
+  runReceived(
+    input: { queueId: number; agentId: string },
+    memoryReadyProject?: string,
+  ): Promise<void>
   runDone?(input: { queueId: number; agentId: string }): Promise<void>
 }
 

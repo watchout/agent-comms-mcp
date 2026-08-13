@@ -8,6 +8,9 @@ import {
   buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
+  resolveRuntimeMemoryReadyProject,
+  runtimeMemoryReadyProjectOverrideFromEnv,
+  RuntimeMemoryReadyProjectResolutionError,
 } from '../core/runtime-memory-ready'
 import { memoryReadyBootstrap } from '../bin/aun/memory-ready'
 
@@ -282,5 +285,78 @@ describe('runtime memory-ready evidence gate', () => {
       live_discord_send: false,
       launchagent_mutation: false,
     })
+  })
+})
+
+describe('runtime memory-ready target project resolution', () => {
+  test('derives codex project from the exact active primary workspace binding', async () => {
+    await seedRuntime('codex-cto', 39130)
+    await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+       VALUES ('codex-primary', 'codex', '/Users/yuji/Developer/codex')`,
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('codex-cto', 'codex-primary', 'primary', true)`,
+    )
+
+    const resolved = await resolveRuntimeMemoryReadyProject(db as any, {
+      agent_id: 'codex-cto',
+      explicit_project: 'codex',
+    })
+
+    expect(resolved).toEqual({
+      agent_id: 'codex-cto',
+      project: 'codex',
+      workspace_path: '/Users/yuji/Developer/codex',
+      source: 'active_primary_workspace',
+      explicit_project: 'codex',
+    })
+  })
+
+  test('uses canonical workspace when no primary binding exists', async () => {
+    await seedRuntime('codex-cto', 39130)
+    await db.execute(`ALTER TABLE agents ADD COLUMN canonical_workspace TEXT`)
+    await db.execute(
+      `UPDATE agents SET canonical_workspace='/Users/yuji/Developer/codex' WHERE agent_id='codex-cto'`,
+    )
+
+    const resolved = await resolveRuntimeMemoryReadyProject(db as any, { agent_id: 'codex-cto' })
+
+    expect(resolved.project).toBe('codex')
+    expect(resolved.source).toBe('canonical_workspace')
+  })
+
+  test('fails closed on ambiguous primary bindings and mismatched explicit override', async () => {
+    await seedRuntime('codex-cto', 39130)
+    await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+       VALUES ('codex-primary-a', 'codex-a', '/Users/yuji/Developer/codex'),
+              ('codex-primary-b', 'codex-b', '/Users/yuji/Developer/codex-shadow')`,
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('codex-cto', 'codex-primary-a', 'primary', true),
+              ('codex-cto', 'codex-primary-b', 'primary', true)`,
+    )
+
+    await expect(resolveRuntimeMemoryReadyProject(db as any, {
+      agent_id: 'codex-cto',
+    })).rejects.toMatchObject({ code: 'primary_workspace_ambiguous' })
+
+    await db.execute(
+      `UPDATE agent_workspace_bindings SET active=false WHERE workspace_id='codex-primary-b'`,
+    )
+    await expect(resolveRuntimeMemoryReadyProject(db as any, {
+      agent_id: 'codex-cto',
+      explicit_project: 'agent-comms-mcp',
+    })).rejects.toMatchObject({ code: 'project_override_mismatch' })
+  })
+
+  test('rejects conflicting explicit project variables', () => {
+    expect(() => runtimeMemoryReadyProjectOverrideFromEnv({
+      AGENT_MEMORY_PROJECT: 'codex',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
+    })).toThrow(RuntimeMemoryReadyProjectResolutionError)
   })
 })

@@ -104,8 +104,9 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
     `INSERT INTO agents
        (agent_id, display_name, agent_type, runtime, status, last_seen_at,
         last_wake_attempt_at, channel_port, metadata, runtime_engine_preference,
-        profile_enabled, disabled_at)
-     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL)
+        profile_enabled, disabled_at, home_directory)
+     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL,
+             '/tmp/agent-comms-mcp')
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
        runtime_engine_preference = EXCLUDED.runtime_engine_preference,
@@ -114,7 +115,8 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
        last_wake_attempt_at = NULL,
        metadata = EXCLUDED.metadata,
        profile_enabled = TRUE,
-       disabled_at = NULL`,
+       disabled_at = NULL,
+       home_directory = EXCLUDED.home_directory`,
     [
       a.agent_id,
       a.agent_id,

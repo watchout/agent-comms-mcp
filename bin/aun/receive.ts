@@ -17,7 +17,13 @@ import {
   NON_ACTIONABLE_MESSAGE_TYPES,
   classifyQueueMessageType,
 } from '../../core/queue-message-classification'
-import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../../core/runtime-memory-ready'
+import {
+  evaluateRuntimeMemoryReadyGate,
+  resolveRuntimeMemoryReadyProject,
+  runtimeMemoryReadyProjectOverrideFromEnv,
+  RuntimeMemoryReadyProjectResolutionError,
+  type RuntimeMemoryReadyGateResult,
+} from '../../core/runtime-memory-ready'
 
 export interface ReceiveOptions {
   agentId?: string
@@ -1425,10 +1431,32 @@ async function withDb<T>(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 }
 
-function memoryReadyProject(env: Record<string, string>): string {
-  return env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim()
-    || env.AGENT_MEMORY_PROJECT?.trim()
-    || 'agent-comms-mcp'
+function projectResolutionFailure(
+  agentId: string,
+  env: Record<string, string>,
+  error: unknown,
+): RuntimeMemoryReadyGateResult {
+  const resolutionError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+  return {
+    ok: false,
+    gate: 'memory_ready',
+    reason: 'project_resolution_failed',
+    agent_id: agentId,
+    project: env.AGENT_MEMORY_PROJECT?.trim() || env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim() || '',
+    checked_at: new Date().toISOString(),
+    runtime_instance_id: null,
+    evidence_id: null,
+    evidence_path: null,
+    evidence_log_id: null,
+    source: 'target_workspace_project_resolution',
+    valid_until: null,
+    current_runtime: null,
+    details: {
+      resolution_code: resolutionError?.code ?? 'project_resolution_read_error',
+      ...(resolutionError?.details ?? {}),
+      error: (error as Error)?.message ?? String(error),
+    },
+  }
 }
 
 export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promise<DiagnoseReceiveResult> {
@@ -1628,11 +1656,27 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
       return db.transaction<ActionableReceiveSummary>(async (tx) => {
-        const memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
-          agent_id: plan.env.AGENT_ID,
-          expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
-          project: memoryReadyProject(plan.env),
-        })
+        let memoryReady: RuntimeMemoryReadyGateResult
+        try {
+          const project = await resolveRuntimeMemoryReadyProject(tx as any, {
+            agent_id: plan.env.AGENT_ID,
+            explicit_project: runtimeMemoryReadyProjectOverrideFromEnv(plan.env),
+            require_enabled: false,
+          })
+          memoryReady = await evaluateRuntimeMemoryReadyGate(tx as any, {
+            agent_id: plan.env.AGENT_ID,
+            expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+            project: project.project,
+          })
+          memoryReady.details = {
+            ...memoryReady.details,
+            project_source: project.source,
+            workspace_path: project.workspace_path,
+            explicit_project: project.explicit_project,
+          }
+        } catch (error) {
+          memoryReady = projectResolutionFailure(plan.env.AGENT_ID, plan.env, error)
+        }
         if (!memoryReady.ok) {
           const waitingRow = await tx.queryOne<{ n: number | string }>(
             `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,

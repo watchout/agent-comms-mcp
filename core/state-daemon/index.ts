@@ -80,7 +80,12 @@ import {
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import { selectAgentAdapter } from './adapter-registry'
-import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../runtime-memory-ready'
+import {
+  evaluateRuntimeMemoryReadyGate,
+  resolveRuntimeMemoryReadyProject,
+  RuntimeMemoryReadyProjectResolutionError,
+  type RuntimeMemoryReadyGateResult,
+} from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -923,7 +928,7 @@ export class StateDaemon {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
-      return this.runObservedQueueAction(action, row, bot)
+      return this.runObservedQueueAction(action, row, bot, memoryReady.project)
     }
 
     this.metrics.inc('state_daemon_wake_actions_total', {
@@ -1060,13 +1065,14 @@ export class StateDaemon {
 
   private async checkMemoryReadyGate(row: QueueRow, action: PlannedQueueAction): Promise<RuntimeMemoryReadyGateResult> {
     const gateRequired = action.gates.some((gate) => gate.kind === 'memory_ready' && gate.required)
+    const configuredProject = this.config.memoryReadyProject?.trim() || ''
     if (!gateRequired) {
       return {
         ok: true,
         gate: 'memory_ready',
         reason: 'ready',
         agent_id: row.agent_id,
-        project: this.config.memoryReadyProject,
+        project: configuredProject,
         checked_at: this.clock.now().toISOString(),
         runtime_instance_id: null,
         evidence_id: null,
@@ -1084,7 +1090,7 @@ export class StateDaemon {
         gate: 'memory_ready',
         reason: 'unaudited_bypass',
         agent_id: row.agent_id,
-        project: this.config.memoryReadyProject,
+        project: configuredProject,
         checked_at: this.clock.now().toISOString(),
         runtime_instance_id: null,
         evidence_id: null,
@@ -1099,17 +1105,52 @@ export class StateDaemon {
         },
       }
     }
-    return evaluateRuntimeMemoryReadyGate(this.db, {
-      agent_id: row.agent_id,
-      expected_agent_id: row.agent_id,
-      project: this.config.memoryReadyProject,
-      now: this.clock.now(),
-      queue_scope: {
-        queue_id: row.id,
-        status: row.status,
-        action_kind: action.kind,
-      },
-    })
+    try {
+      const project = await resolveRuntimeMemoryReadyProject(this.db, {
+        agent_id: row.agent_id,
+        explicit_project: configuredProject || null,
+      })
+      const gate = await evaluateRuntimeMemoryReadyGate(this.db, {
+        agent_id: row.agent_id,
+        expected_agent_id: row.agent_id,
+        project: project.project,
+        now: this.clock.now(),
+        queue_scope: {
+          queue_id: row.id,
+          status: row.status,
+          action_kind: action.kind,
+        },
+      })
+      gate.details = {
+        ...gate.details,
+        project_source: project.source,
+        workspace_path: project.workspace_path,
+        explicit_project: project.explicit_project,
+      }
+      return gate
+    } catch (error) {
+      const resolutionError = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+      return {
+        ok: false,
+        gate: 'memory_ready',
+        reason: 'project_resolution_failed',
+        agent_id: row.agent_id,
+        project: configuredProject,
+        checked_at: this.clock.now().toISOString(),
+        runtime_instance_id: null,
+        evidence_id: null,
+        evidence_path: null,
+        evidence_log_id: null,
+        source: 'target_workspace_project_resolution',
+        valid_until: null,
+        current_runtime: null,
+        details: {
+          resolution_code: resolutionError?.code ?? 'project_resolution_read_error',
+          ...(resolutionError?.details ?? {}),
+          error: (error as Error)?.message ?? String(error),
+        },
+      }
+    }
   }
 
   private recordMemoryReadyBlocked(
@@ -1131,6 +1172,7 @@ export class StateDaemon {
     action: PlannedQueueAction,
     row: QueueRow,
     agent?: AgentRow | null,
+    memoryReadyProject?: string,
   ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
@@ -1138,10 +1180,10 @@ export class StateDaemon {
           this.scheduleQueueWorkRunner('pending', row, () => this.queueWorkScheduler!.runPending!({
             queueId: row.id,
             agentId: row.agent_id,
-          }))
+          }, memoryReadyProject))
           return true
         }
-        return this.invokeCodexRunner(row, agent)
+        return this.invokeCodexRunner(row, agent, memoryReadyProject)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -1163,7 +1205,7 @@ export class StateDaemon {
           this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
             queueId: row.id,
             agentId: row.agent_id,
-          }))
+          }, memoryReadyProject))
           return true
         }
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
@@ -1599,7 +1641,11 @@ export class StateDaemon {
     return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
   }
 
-  private async invokeCodexRunner(row: QueueRow, agent?: AgentRow | null): Promise<boolean> {
+  private async invokeCodexRunner(
+    row: QueueRow,
+    agent?: AgentRow | null,
+    memoryReadyProject?: string,
+  ): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
       return false
@@ -1651,6 +1697,7 @@ export class StateDaemon {
         : null,
       autoFinalReply,
       payload: row.payload,
+      memoryReadyProject: memoryReadyProject?.trim() || null,
     }
     // Per-agent adapter selection: if the agent has a runtime_engine_preference
     // that maps to a known LLM (claude-code, codex), use the per-agent profile.

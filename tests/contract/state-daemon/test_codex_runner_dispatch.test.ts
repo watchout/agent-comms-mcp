@@ -216,6 +216,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
         completeNoReply: false,
         completionReason: null,
+        memoryReadyProject: 'agent-comms-mcp',
       })
       expect(runner.invocations[0].ackContent).toContain('queue_id={queue_id}')
       expect(runner.invocations[0].ackContent).toContain('message_id={message_id}')
@@ -223,6 +224,79 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
+  test('pre-gate selects current evidence from the target workspace project', async () => {
+    const agent = makeAgentId('codex-project')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    await pg.query(
+      `UPDATE agents SET home_directory='/Users/yuji/Developer/codex' WHERE agent_id=$1`,
+      [agent],
+    )
+    const existingWorkspace = await pg.query<{ workspace_id: string }>(
+      `SELECT workspace_id FROM agent_workspaces WHERE local_path='/Users/yuji/Developer/codex' LIMIT 1`,
+    )
+    const workspaceId = existingWorkspace.rows[0]?.workspace_id ?? `${agent}-primary`
+    if (existingWorkspace.rows.length === 0) {
+      await pg.query(
+        `INSERT INTO agent_workspaces (workspace_id, name, local_path)
+         VALUES ($1, $1, '/Users/yuji/Developer/codex')`,
+        [workspaceId],
+      )
+    }
+    await pg.query(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ($1, $2, 'primary', true)`,
+      [agent, workspaceId],
+    )
+    await pg.query(
+      `UPDATE runtime_memory_ready_evidence
+          SET valid_until='2026-05-17T00:00:00.000Z'
+        WHERE agent_id=$1 AND project='agent-comms-mcp'`,
+      [agent],
+    )
+    await pg.query(
+      `INSERT INTO runtime_memory_ready_evidence
+         (agent_id, project, runtime_instance_id, profile_revision, profile_source,
+          session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+          recovery_command, result_status, failure_reason, completed_at,
+          evidence_path, evidence_log_id, valid_until, source, metadata)
+       SELECT agent_id, 'codex', runtime_instance_id, profile_revision, profile_source,
+              session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
+              recovery_command, result_status, failure_reason, '2026-05-18T00:00:00.500Z',
+              evidence_path, 'fixture-codex-project-current', '2099-01-01T00:00:00.000Z', source, metadata
+         FROM runtime_memory_ready_evidence
+        WHERE agent_id=$1 AND project='agent-comms-mcp'
+        ORDER BY id DESC
+        LIMIT 1`,
+      [agent],
+    )
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+
+    const runner = new FakeCodexRunner()
+    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({
+        op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
+      })
+
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]?.memoryReadyProject).toBe('codex')
     } finally {
       await h.daemon.stop()
     }

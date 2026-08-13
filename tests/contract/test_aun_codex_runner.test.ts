@@ -137,6 +137,8 @@ beforeEach(() => {
     AGENT_COMMS_CLAIM_TTL_SEC: '60',
     AGENT_ID: 'codex-aun',
     AGENT_COM_EXPECTED_AGENT_ID: 'codex-aun',
+    AGENT_MEMORY_PROJECT: 'agent-comms-mcp',
+    AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
   }
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
@@ -144,7 +146,10 @@ beforeEach(() => {
     INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
       VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010"}'),
              ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}');
-    UPDATE agents SET channel_port = 39002 WHERE agent_id = 'codex-aun';
+    UPDATE agents
+       SET channel_port = 39002,
+           home_directory = '/tmp/agent-comms-mcp'
+     WHERE agent_id = 'codex-aun';
     INSERT INTO agent_runtime_instances
       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
       VALUES ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'codex-aun-session', 39002, '/tmp/codex-aun', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');

@@ -26,9 +26,10 @@ import { Client } from 'pg'
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
+import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import { PgAdapter } from '../core/db/pg-adapter'
 import {
   AunConfigurationReconciler,
@@ -327,31 +328,8 @@ export async function resolveQueueWorkRuntimeWorkspace(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
 ): Promise<string> {
-  const result = await db.query<{
-    agent_id: string
-    runtime_workspace: string | null
-  }>(
-    `SELECT a.agent_id,
-            COALESCE(workspace.local_path, NULLIF(a.canonical_workspace, ''), NULLIF(a.home_directory, '')) AS runtime_workspace
-       FROM agents a
-       LEFT JOIN LATERAL (
-         SELECT w.local_path
-           FROM agent_workspace_bindings b
-           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
-          WHERE b.agent_id = a.agent_id
-            AND b.active = true
-          ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
-          LIMIT 1
-       ) workspace ON true
-      WHERE a.agent_id = $1
-        AND a.profile_enabled = true
-        AND a.disabled_at IS NULL`,
-    [agentId],
-  )
-  if (result.rows.length !== 1) {
-    throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
-  }
-  const configured = result.rows[0]?.runtime_workspace?.trim() ?? ''
+  const project = await resolveRuntimeMemoryReadyProject(db as any, { agent_id: agentId })
+  const configured = project.workspace_path.trim()
   if (!configured || !isAbsolute(configured)) {
     throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
   }
@@ -368,8 +346,20 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     private readonly resolveRuntimeWorkspace: (agentId: string) => Promise<string> = async () => cwd,
   ) {}
 
-  async runPending(input: { queueId: number; agentId: string }): Promise<void> {
-    const env = this.envFor(input.agentId)
+  async runPending(
+    input: { queueId: number; agentId: string },
+    memoryReadyProject?: string,
+  ): Promise<void> {
+    const runtimeCwd = await this.resolveRuntimeWorkspace(input.agentId)
+    const derivedProject = basename(runtimeCwd)
+    if (memoryReadyProject && memoryReadyProject !== derivedProject) {
+      throw new Error(
+        `queue-work memory-ready project changed after pre-gate for ${input.agentId}: `
+        + `expected ${memoryReadyProject}, resolved ${derivedProject}`,
+      )
+    }
+    const exactProject = memoryReadyProject ?? derivedProject
+    const env = this.envFor(input.agentId, exactProject)
     const received = await receiveTargeted({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -379,11 +369,19 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     if (!received.ok) {
       throw new Error(`targeted receive failed code=${received.code} stderr=${received.stderr.trim()}`)
     }
-    await this.runReceivedWithFence(input, exactClaimFenceFromTargetedReceive(received, input))
+    await this.runReceivedWithFence(
+      input,
+      exactClaimFenceFromTargetedReceive(received, input),
+      runtimeCwd,
+      exactProject,
+    )
   }
 
-  async runReceived(input: { queueId: number; agentId: string }): Promise<void> {
-    await this.runReceivedWithFence(input)
+  async runReceived(
+    input: { queueId: number; agentId: string },
+    memoryReadyProject?: string,
+  ): Promise<void> {
+    await this.runReceivedWithFence(input, undefined, undefined, memoryReadyProject)
   }
 
   async runDone(input: { queueId: number; agentId: string }): Promise<void> {
@@ -404,10 +402,19 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   private async runReceivedWithFence(
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
+    resolvedRuntimeCwd?: string,
+    memoryReadyProject?: string,
   ): Promise<void> {
-    const runtimeCwd = await this.resolveRuntimeWorkspace(input.agentId)
+    const runtimeCwd = resolvedRuntimeCwd ?? await this.resolveRuntimeWorkspace(input.agentId)
+    const derivedProject = basename(runtimeCwd)
+    if (memoryReadyProject && memoryReadyProject !== derivedProject) {
+      throw new Error(
+        `queue-work memory-ready project changed after pre-gate for ${input.agentId}: `
+        + `expected ${memoryReadyProject}, resolved ${derivedProject}`,
+      )
+    }
     const env = {
-      ...this.envFor(input.agentId),
+      ...this.envFor(input.agentId, memoryReadyProject ?? derivedProject),
       AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
     }
     const result = await runQueueWork({
@@ -429,7 +436,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     }
   }
 
-  private envFor(agentId: string): NodeJS.ProcessEnv {
+  private envFor(agentId: string, memoryReadyProject?: string): NodeJS.ProcessEnv {
     const env = {
       ...this.env,
       AGENT_ID: agentId,
@@ -442,6 +449,10 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
         this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
           ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
           ?? 'state-daemon-queue-work-scheduler',
+      ...(memoryReadyProject?.trim() ? {
+        AGENT_MEMORY_PROJECT: memoryReadyProject.trim(),
+        AGENT_COMMS_MEMORY_READY_PROJECT: memoryReadyProject.trim(),
+      } : {}),
     }
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
@@ -584,7 +595,10 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerAckContentMaxChars', num('STATE_DAEMON_CODEX_RUNNER_ACK_CONTENT_MAX_CHARS'))
   set('codexRunnerAutoCompleteNoReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_COMPLETE_NO_REPLY'))
   set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
-  set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
+  // AGENT_MEMORY_PROJECT belongs to the daemon process itself and is not a
+  // fleet-wide target override. Only the state-daemon-specific equality
+  // assertion may constrain a derived per-agent project.
+  set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
   set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))

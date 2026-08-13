@@ -69,6 +69,8 @@ beforeEach(() => {
     AGENT_COMMS_CLAIM_TTL_SEC: '60',
     AGENT_ID: 'codex-aun',
     AGENT_COM_EXPECTED_AGENT_ID: 'codex-aun',
+    AGENT_MEMORY_PROJECT: 'agent-comms-mcp',
+    AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
   }
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
@@ -76,7 +78,10 @@ beforeEach(() => {
     INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
       VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010"}'),
              ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}');
-    UPDATE agents SET channel_port = 39002 WHERE agent_id = 'codex-aun';
+    UPDATE agents
+       SET channel_port = 39002,
+           home_directory = '/tmp/agent-comms-mcp'
+     WHERE agent_id = 'codex-aun';
     INSERT INTO agent_runtime_instances
       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
       VALUES ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'codex-aun-session', 39002, '/tmp/codex-aun', 'test-head', 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z');
@@ -146,6 +151,63 @@ describe('test_aun_codex_runner_preflight - read-only lifecycle readiness', () =
     expect(dbRead(`SELECT status, claimed_by, replied_with FROM message_queue WHERE id = ?`, [queueId])[0])
       .toEqual({ status: 'pending', claimed_by: null, replied_with: null })
     expect(dbRead(`SELECT count(*) AS n FROM agent_messages WHERE author_id = 'codex-aun'`)[0].n).toBe(0)
+  })
+
+  test('uses codex-cto-like target workspace project instead of stale global evidence', () => {
+    const { queueId } = seedPending('per-target memory project preflight')
+    dbExec(`
+      UPDATE agents
+         SET home_directory = '/Users/yuji/Developer/codex'
+       WHERE agent_id = 'codex-aun';
+      UPDATE runtime_memory_ready_evidence
+         SET valid_until = '2026-06-01T00:00:03.000Z'
+       WHERE agent_id = 'codex-aun' AND project = 'agent-comms-mcp';
+      INSERT INTO runtime_memory_ready_evidence
+        (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
+         checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
+        VALUES ('codex-aun', 'codex', 'runtime-codex-aun', 1, 'legacy', 'codex-aun-session', 39002, 'codex-aun',
+         '/tmp/codex-aun', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:04.000Z',
+         '/tmp/codex-aun-memory-ready-codex.json', 'sqlite-codex-aun-memory-ready-codex', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+    `)
+
+    const mismatched = runAun([
+      'codex-runner-preflight', '--agent-id', 'codex-aun', '--queue-id', String(queueId),
+    ], {
+      AGENT_MEMORY_PROJECT: 'agent-comms-mcp',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
+    })
+    expect(mismatched.status).toBe(1)
+    expect(JSON.parse(mismatched.stdout).receive_actionable.memory_ready).toMatchObject({
+      ok: false,
+      reason: 'project_resolution_failed',
+    })
+
+    const exact = runAun([
+      'codex-runner-preflight', '--agent-id', 'codex-aun', '--queue-id', String(queueId),
+    ], {
+      AGENT_MEMORY_PROJECT: 'codex',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'codex',
+    })
+    expect(exact.status).toBe(0)
+    expect(JSON.parse(exact.stdout).receive_actionable.memory_ready).toMatchObject({
+      ok: true,
+      reason: 'ready',
+    })
+
+    dbExec(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id='codex-aun' AND project='codex'`)
+    const missingTargetEvidence = runAun([
+      'codex-runner-preflight', '--agent-id', 'codex-aun', '--queue-id', String(queueId),
+    ], {
+      AGENT_MEMORY_PROJECT: 'codex',
+      AGENT_COMMS_MEMORY_READY_PROJECT: 'codex',
+    })
+    expect(missingTargetEvidence.status).toBe(1)
+    expect(JSON.parse(missingTargetEvidence.stdout).receive_actionable.memory_ready).toMatchObject({
+      ok: false,
+      reason: 'missing_evidence',
+    })
+    expect(dbRead(`SELECT status, claimed_by FROM message_queue WHERE id = ?`, [queueId])[0])
+      .toEqual({ status: 'pending', claimed_by: null })
   })
 
   test('active claim is reported as a blocker without mutation', () => {
