@@ -29,6 +29,19 @@ function seedDirectory(path: string, record: ReturnType<typeof deadRecord>, clai
   if (claim) mkdirSync(join(path, 'reclaim.complete'), { mode: 0o700 })
 }
 
+function releaseJournal(root: string, agentId: string, runId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: 'shirube-v3/aun-bootstrap-run/v1', run_id: runId, agent_id: agentId,
+    requested_runtime: 'codex', resolved_runtime: null, input_digest: 'a'.repeat(64), repo_root: root,
+    workspace_root: root, repo_head: null, created_at: '2026-08-14T00:00:00.000Z',
+    updated_at: '2026-08-14T00:00:01.000Z', terminal_status: null,
+    lock_release_authorized_at: '2026-08-14T00:00:00.000Z',
+    lock_released_at: '2026-08-14T00:00:01.000Z', lock_release_owner_nonce: null,
+    stages: [], mutations: [], mutation_manifest_digest: bootstrapDigest([]), readback_bindings: null,
+    evidence_refs: [], safe_D1_readback: {}, ...overrides,
+  } as any
+}
+
 async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, pattern: RegExp): Promise<string> {
   let output = ''
   while (!pattern.test(output)) {
@@ -267,6 +280,88 @@ if (childFixture) {
     expect(existsSync(releasePath)).toBe(false)
     expect(readdirSync(dir).some((name) => name === `.lock.completed-release-${record.nonce}`)).toBe(true)
     store.releaseLock(agentId, runId)
+  })
+
+  test('a distinct observer durability-closes a post-archive-rename crash before publishing', () => {
+    const { root, agentId } = fixture()
+    const dir = join(root, agentId)
+    const crashing = new FileBootstrapStateStore(root, {
+      afterCompletedReleaseRename: () => { throw new Error('injected after completed release rename') },
+    })
+    crashing.acquireLock(agentId, 'archive-crash-run')
+    expect(() => crashing.releaseLock(agentId, 'archive-crash-run')).toThrow(
+      'injected after completed release rename',
+    )
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+    expect(readdirSync(dir).filter((name) => name.startsWith('.lock.release-'))).toEqual([])
+    const firstArchive = readdirSync(dir).find((name) => name.startsWith('.lock.completed-release-'))!
+    const firstOwner = readFileSync(join(dir, firstArchive, 'owner.json'), 'utf8')
+
+    const trace: string[] = []
+    const observer = new FileBootstrapStateStore(root, {
+      completedReleaseObserverDurability: (event) => {
+        trace.push(event)
+        if (event === 'after-strict-reread') expect(existsSync(join(dir, '.lock'))).toBe(false)
+      },
+    })
+    observer.acquireLock(agentId, 'ordinary-after-archive-crash')
+    expect(trace).toEqual(['after-archive-fsync', 'after-agent-fsync', 'after-strict-reread'])
+    expect(existsSync(join(dir, '.lock'))).toBe(true)
+    expect(readFileSync(join(dir, firstArchive, 'owner.json'), 'utf8')).toBe(firstOwner)
+    observer.releaseLock(agentId, 'ordinary-after-archive-crash')
+    expect(existsSync(join(dir, firstArchive))).toBe(true)
+    expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
+  })
+
+  test('official recovery durably upgrades an exact legacy release receipt missing only owner nonce', () => {
+    const { root, store, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000016')
+    const releasePath = join(dir, `.lock.release-${record.nonce}`)
+    seedDirectory(releasePath, record)
+    const state = releaseJournal(root, agentId, runId)
+    delete state.lock_release_owner_nonce
+    store.save(state)
+
+    store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    const upgraded = store.load(agentId, runId)!
+    expect(upgraded).toMatchObject({
+      agent_id: agentId, run_id: runId,
+      lock_release_authorized_at: '2026-08-14T00:00:00.000Z',
+      lock_released_at: '2026-08-14T00:00:01.000Z',
+      lock_release_owner_nonce: record.nonce,
+    })
+    expect(existsSync(releasePath)).toBe(false)
+    expect(existsSync(join(dir, `.lock.completed-release-${record.nonce}`))).toBe(true)
+    store.releaseLock(agentId, runId)
+  })
+
+  test('legacy release recovery rejects nonce, time, and owner drift without archiving', () => {
+    for (const variant of ['mismatch', 'present-null', 'noncanonical', 'preauthorization', 'foreign'] as const) {
+      const { root, store, agentId, runId } = fixture()
+      const dir = join(root, agentId)
+      const nonce = '00000000-0000-4000-8000-000000000017'
+      const record = deadRecord(agentId, variant === 'foreign' ? 'foreign-run' : runId, nonce)
+      const releasePath = join(dir, `.lock.release-${nonce}`)
+      seedDirectory(releasePath, record)
+      const state = releaseJournal(root, agentId, runId, variant === 'mismatch'
+        ? { lock_release_owner_nonce: '00000000-0000-4000-8000-000000000018' }
+        : variant === 'present-null'
+          ? { lock_release_owner_nonce: null }
+          : variant === 'noncanonical'
+            ? { lock_released_at: '2026-08-14T00:00:01Z' }
+            : variant === 'preauthorization'
+              ? { lock_released_at: '2026-08-13T23:59:59.000Z' }
+              : {})
+      if (variant === 'foreign') delete state.lock_release_owner_nonce
+      store.save(state)
+      expect(() => store.acquireLock(agentId, runId, { reclaimStaleSameRun: true })).toThrow(
+        'NO_GO_BOOTSTRAP_BUSY',
+      )
+      expect(existsSync(releasePath)).toBe(true)
+      expect(existsSync(join(dir, `.lock.completed-release-${nonce}`))).toBe(false)
+      expect(existsSync(join(dir, '.lock'))).toBe(false)
+    }
   })
 
   test('live, foreign, legacy, corrupt, and regular-acquire marker locks are immutable NO_GO', () => {

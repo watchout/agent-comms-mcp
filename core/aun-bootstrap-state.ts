@@ -117,6 +117,11 @@ const CANONICAL_LOCK_NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-
 
 type BootstrapLockTestHooks = {
   beforeReclaimRename?: () => void
+  afterCompletedReleaseRename?: () => void
+  completedReleaseObserverDurability?: (event:
+    | 'after-archive-fsync'
+    | 'after-agent-fsync'
+    | 'after-strict-reread', path: string) => void
   afterStageMkdir?: () => void
   afterStagePartialOwnerWrite?: () => void
   afterStageOwnerFsync?: () => void
@@ -244,10 +249,16 @@ function validCompletedReclaim(path: string, owner: BootstrapLockRecord): boolea
     && validEmptyDirectory(join(path, LOCK_RECLAIM_COMPLETE_FILE))
 }
 
-function archiveCompletedRelease(dir: string, releasePath: string, owner: BootstrapLockRecord): void {
+function archiveCompletedRelease(
+  dir: string,
+  releasePath: string,
+  owner: BootstrapLockRecord,
+  afterRename?: () => void,
+): void {
   const archived = join(dir, `${LOCK_COMPLETED_RELEASE_PREFIX}${owner.nonce}`)
   if (existsSync(archived)) throw new Error('completed release archive target exists')
   renameSync(releasePath, archived)
+  afterRename?.()
   fsyncBootstrapDirectory(dir)
 }
 
@@ -353,6 +364,26 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     this.testHooks.reclaimDurability?.('after-strict-reread', path)
   }
 
+  private closeObservedCompletedRelease(
+    dir: string,
+    path: string,
+    name: string,
+    owner: BootstrapLockRecord,
+  ): void {
+    if (name !== `${LOCK_COMPLETED_RELEASE_PREFIX}${owner.nonce}`) {
+      throw new Error('completed release archive is corrupt')
+    }
+    fsyncBootstrapDirectory(path)
+    this.testHooks.completedReleaseObserverDurability?.('after-archive-fsync', path)
+    fsyncBootstrapDirectory(dir)
+    this.testHooks.completedReleaseObserverDurability?.('after-agent-fsync', path)
+    const reread = readBootstrapLockRecord(path, owner.agent_id)
+    if (!reread || basename(path) !== name || !sameLockRecord(reread, owner)) {
+      throw new Error('completed release archive durability readback mismatch')
+    }
+    this.testHooks.completedReleaseObserverDurability?.('after-strict-reread', path)
+  }
+
   private exactSameRunStale(record: BootstrapLockRecord, agentId: string, runId: string): boolean {
     if (record.agent_id !== agentId || record.run_id !== runId) return false
     const observed = processIdentityState(record.pid)
@@ -388,6 +419,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           if (!archived || name !== `${LOCK_COMPLETED_RELEASE_PREFIX}${archived.nonce}`) {
             throw new Error('completed release archive is corrupt')
           }
+          this.closeObservedCompletedRelease(dir, candidatePath, name, archived)
           continue
         }
         if (name.startsWith(LOCK_COMPLETED_STAGE_PREFIX)) {
@@ -417,6 +449,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           || new Date(releaseState.lock_release_authorized_at).toISOString() !== releaseState.lock_release_authorized_at) {
           throw new Error('release marker is live, foreign, corrupt, or unauthorized')
         }
+        const authorizedAt = Date.parse(releaseState.lock_release_authorized_at)
         if (!releaseState.lock_released_at) {
           if (releaseState.lock_release_owner_nonce != null
             && releaseState.lock_release_owner_nonce !== released.nonce) {
@@ -427,15 +460,35 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           releaseState.updated_at = releaseState.lock_released_at
           this.save(releaseState)
         } else if (!Number.isFinite(Date.parse(releaseState.lock_released_at))
-          || new Date(releaseState.lock_released_at).toISOString() !== releaseState.lock_released_at
-          || releaseState.lock_release_owner_nonce !== released.nonce) {
+          || new Date(releaseState.lock_released_at).toISOString() !== releaseState.lock_released_at) {
           throw new Error('release marker journal receipt is corrupt')
+        }
+        const releasedAt = Date.parse(releaseState.lock_released_at)
+        if (releasedAt < authorizedAt) throw new Error('release marker journal receipt precedes authorization')
+
+        const legacyNonceMissing = !Object.prototype.hasOwnProperty.call(releaseState, 'lock_release_owner_nonce')
+        if (legacyNonceMissing) {
+          const beforeBind = readBootstrapLockRecord(releasePath, agentId)
+          if (!beforeBind || !sameLockRecord(beforeBind, released)) {
+            throw new Error('release marker changed before legacy receipt binding')
+          }
+          releaseState.lock_release_owner_nonce = released.nonce
+          this.save(releaseState)
+          const persisted = this.load(agentId, runId)
+          if (!persisted || persisted.agent_id !== agentId || persisted.run_id !== runId
+            || persisted.lock_release_authorized_at !== releaseState.lock_release_authorized_at
+            || persisted.lock_released_at !== releaseState.lock_released_at
+            || persisted.lock_release_owner_nonce !== released.nonce) {
+            throw new Error('legacy release marker journal receipt binding readback mismatch')
+          }
+        } else if (releaseState.lock_release_owner_nonce !== released.nonce) {
+          throw new Error('release marker journal owner receipt is corrupt')
         }
         const reread = readBootstrapLockRecord(releasePath, agentId)
         if (!reread || !sameLockRecord(reread, released)) {
           throw new Error('release marker changed before recovery cleanup')
         }
-        archiveCompletedRelease(dir, releasePath, released)
+        archiveCompletedRelease(dir, releasePath, released, this.testHooks.afterCompletedReleaseRename)
       }
       const recoverableReclaims: string[] = []
       for (const name of reclaimNames) {
@@ -519,7 +572,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     if (!released || !sameLockRecord(released, owner)) {
       throw new Error('bootstrap release marker changed before exact cleanup')
     }
-    archiveCompletedRelease(dir, releasePath, owner)
+    archiveCompletedRelease(dir, releasePath, owner, this.testHooks.afterCompletedReleaseRename)
     this.acquiredLocks.delete(agentId)
   }
 
