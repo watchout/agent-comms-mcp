@@ -181,7 +181,6 @@ if (crashFixtureStage) {
 
       const lockPath = join(home, '.aun', 'bootstrap', agentId, '.lock')
       expect(existsSync(lockPath)).toBe(true)
-      rmSync(lockPath)
       let reentryCount = 0
       const resumed = await bootstrap({
         agentId,

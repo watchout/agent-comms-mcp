@@ -8,7 +8,7 @@ import type { BootstrapExecutionPorts, BootstrapMutation, BootstrapStageContext 
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { migrateSqlite } from '../../db/migrate-sqlite'
-import { bootstrapDigest } from '../../core/aun-bootstrap-state'
+import { FileBootstrapStateStore, bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
   DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   parseStateDaemonLaunchAgentPlist,
@@ -291,10 +291,14 @@ describe('aun bootstrap clean-host journal', () => {
               ('workspace-foreign-a', 'shared-workspace-authority', 'primary', true)`,
     )
     await db.execute(
-      `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, workspace_id, status, metadata)
-       VALUES ($1, 'workspace-owner', NULL, 'active', $3),
-              ($2, 'workspace-foreign-a', 'shared-workspace-authority', 'active', $4)`,
-      [targetRuntimeId, foreignRuntimeId, JSON.stringify({ owner: 'target-runtime' }), JSON.stringify({ owner: 'foreign-runtime' })],
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, workspace_id, status, process_id, last_seen_at, metadata)
+       VALUES ($1, 'workspace-owner', NULL, 'active', $5, $6, $3),
+              ($2, 'workspace-foreign-a', 'shared-workspace-authority', 'active', 456, $6, $4)`,
+      [targetRuntimeId, foreignRuntimeId,
+        JSON.stringify({ owner: 'target-runtime', api_token: 'target-runtime-raw-secret' }),
+        JSON.stringify({ owner: 'foreign-runtime', api_token: 'foreign-runtime-raw-secret' }),
+        backend === 'sqlite' ? 0.1 : 123, '2026-08-14T00:00:00.123456Z'],
     )
     const authorityProjection = async () => ({
       workspace: await db.queryOne<any>(
@@ -407,6 +411,44 @@ describe('aun bootstrap clean-host journal', () => {
     const workspaceMutation = appliedMutations.find((mutation) => mutation.kind === 'workspace_authority')
     expect(workspaceMutation).toBeDefined()
     expect(admissions.findIndex((mutation) => mutation.kind === 'workspace_authority')).toBe(0)
+    const workspaceAdmission = admissions.find((mutation) => mutation.kind === 'workspace_authority')!
+    const expectedOwned = workspaceAdmission.rollback_payload?.lossless_expected_owned_postimage
+    expect(workspaceAdmission.rollback_payload?.lossless_expected_owned_postimage_digest)
+      .toBe(bootstrapDigest(expectedOwned))
+    expect(expectedOwned).toMatchObject({
+      schema_version: 'aun-bootstrap-workspace-authority-owned-lossless/v1',
+      workspace: { workspace_id: 'shared-workspace-authority' },
+      binding: { agent_id: 'workspace-owner' },
+    })
+    expect((expectedOwned as any).workspace.row_digest).toMatch(/^[0-9a-f]{64}$/)
+    expect((expectedOwned as any).binding.row_digest).toMatch(/^[0-9a-f]{64}$/)
+    const admissionJson = JSON.stringify(workspaceAdmission)
+    expect(admissionJson).not.toContain('target-runtime-raw-secret')
+    expect(admissionJson).not.toContain('foreign-runtime-raw-secret')
+    const persistedStore = new FileBootstrapStateStore(join(home, 'workspace-admission-journal'))
+    const persistedMutation = {
+      mutation_id: `persisted-workspace-admission-${backend}`,
+      stage: 'B3_AGENT_PROFILE',
+      rollback_status: 'not_run',
+      ...workspaceAdmission,
+    } as BootstrapMutation
+    persistedStore.save({
+      schema_version: 'shirube-v3/aun-bootstrap-run/v1', run_id: `persisted-workspace-${backend}`,
+      agent_id: 'workspace-owner', requested_runtime: 'codex', resolved_runtime: 'codex',
+      input_digest: 'a'.repeat(64), repo_root: repoRoot, workspace_root: repoRoot, repo_head: 'b'.repeat(40),
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(), terminal_status: null,
+      lock_release_authorized_at: null, lock_released_at: null, stages: [], mutations: [persistedMutation],
+      mutation_manifest_digest: '', readback_bindings: null, evidence_refs: [], safe_D1_readback: {} as any,
+    })
+    const persistedBody = readFileSync(join(
+      persistedStore.root, 'workspace-owner', `persisted-workspace-${backend}.json`,
+    ), 'utf8')
+    expect(persistedBody).not.toContain('target-runtime-raw-secret')
+    expect(persistedBody).not.toContain('foreign-runtime-raw-secret')
+    expect(persistedBody).not.toContain(Buffer.from('target-runtime-raw-secret').toString('hex'))
+    expect(persistedBody).not.toContain(Buffer.from('target-runtime-raw-secret').toString('base64'))
+    const persistedState = persistedStore.load('workspace-owner', `persisted-workspace-${backend}`)!
+    expect(persistedState.mutation_manifest_digest).toBe(bootstrapDigest(persistedState.mutations))
     expect((await authorityProjection()).binding?.active).toBe(backend === 'postgres' ? true : 1)
     expect((await authorityProjection()).target_runtime?.workspace_id).toBe('shared-workspace-authority')
 
@@ -420,12 +462,92 @@ describe('aun bootstrap clean-host journal', () => {
     expect([...(noOp.mutations ?? []), ...(noOp.mutation ? [noOp.mutation] : [])]
       .some((mutation) => mutation.kind === 'workspace_authority')).toBe(false)
 
-    const restored = await ports.rollbackMutation(baseContext, {
-      mutation_id: `workspace-authority-applied-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
-      ...workspaceMutation!,
+    const corruptedAdmission = structuredClone(workspaceAdmission)
+    ;(corruptedAdmission.rollback_payload!.lossless_expected_owned_postimage as any).runtime_rows = {}
+    const corruptRejected = await ports.rollbackMutation(baseContext, {
+      mutation_id: `workspace-authority-corrupt-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...corruptedAdmission,
     })
-    expect(restored.ok).toBe(true)
-    expect(restored.readinessPredicates).toMatchObject({ rollback_verified: true, foreign_shared_rows_unchanged: true })
+    expect(corruptRejected).toMatchObject({ ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] })
+
+    if (backend === 'sqlite') {
+      for (const driftSql of [
+        `UPDATE agent_runtime_instances SET process_id = 0.10000000000000002 WHERE runtime_instance_id = $1`,
+        `UPDATE agent_runtime_instances SET process_id = CAST(process_id AS BLOB) WHERE runtime_instance_id = $1`,
+      ]) {
+        await db.execute(driftSql, [targetRuntimeId])
+        const driftedType = await db.queryOne<any>(
+          `SELECT typeof(process_id) AS storage_class, printf('%!.26g', process_id) AS exact_value
+             FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [targetRuntimeId],
+        )
+        const ownedDriftRejected = await ports.rollbackMutation(baseContext, {
+          mutation_id: `workspace-authority-owned-drift-${randomUUID()}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+          ...workspaceAdmission,
+        })
+        expect(ownedDriftRejected).toMatchObject({ ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] })
+        expect(await db.queryOne<any>(
+          `SELECT typeof(process_id) AS storage_class, printf('%!.26g', process_id) AS exact_value
+             FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [targetRuntimeId],
+        )).toEqual(driftedType)
+        await db.execute(`UPDATE agent_runtime_instances SET process_id = 0.1 WHERE runtime_instance_id = $1`, [targetRuntimeId])
+      }
+    } else {
+      const pgDrifts = [
+        {
+          apply: `UPDATE agent_runtime_instances SET last_seen_at = last_seen_at + INTERVAL '1 microsecond' WHERE runtime_instance_id = $1`,
+          restore: `UPDATE agent_runtime_instances SET last_seen_at = $2::timestamptz WHERE runtime_instance_id = $1`,
+          params: [targetRuntimeId, '2026-08-14T00:00:00.123456Z'],
+        },
+        {
+          apply: `UPDATE agent_runtime_instances SET metadata = jsonb_set(metadata, '{exact_integer}', '9007199254740993'::jsonb, true) WHERE runtime_instance_id = $1`,
+          restore: `UPDATE agent_runtime_instances SET metadata = $2::jsonb WHERE runtime_instance_id = $1`,
+          params: [targetRuntimeId, JSON.stringify({ owner: 'target-runtime', api_token: 'target-runtime-raw-secret' })],
+        },
+      ]
+      for (const drift of pgDrifts) {
+        await db.execute(drift.apply, [targetRuntimeId])
+        const drifted = await db.queryOne<any>(
+          `SELECT to_char(last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_seen,
+                  metadata::text AS metadata_text
+             FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [targetRuntimeId],
+        )
+        const ownedDriftRejected = await ports.rollbackMutation(baseContext, {
+          mutation_id: `workspace-authority-owned-drift-${randomUUID()}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+          ...workspaceAdmission,
+        })
+        expect(ownedDriftRejected).toMatchObject({ ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] })
+        expect(await db.queryOne<any>(
+          `SELECT to_char(last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS last_seen,
+                  metadata::text AS metadata_text
+             FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [targetRuntimeId],
+        )).toEqual(drifted)
+        await db.execute(drift.restore, drift.params)
+      }
+    }
+
+    await db.execute(
+      `UPDATE agent_runtime_instances SET metadata = $2::jsonb WHERE runtime_instance_id = $1`,
+      [foreignRuntimeId, JSON.stringify({ owner: 'foreign-runtime-drift', exact_integer: 9007199254740993 })],
+    )
+    const foreignDrift = await db.queryOne<any>(
+      `SELECT metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [foreignRuntimeId],
+    )
+    const recoveredCommittedAdmission = await ports.rollbackMutation(baseContext, {
+      mutation_id: `workspace-authority-admission-postcommit-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...workspaceAdmission,
+    })
+    expect(recoveredCommittedAdmission.ok).toBe(true)
+    expect(recoveredCommittedAdmission.readinessPredicates).toMatchObject({
+      rollback_verified: true, recovery_admission_no_effect: false, foreign_shared_rows_preserved: true,
+    })
+    expect(await db.queryOne<any>(
+      `SELECT metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1`, [foreignRuntimeId],
+    )).toEqual(foreignDrift)
+    await db.execute(
+      `UPDATE agent_runtime_instances SET metadata = $2::jsonb WHERE runtime_instance_id = $1`,
+      [foreignRuntimeId, JSON.stringify({ owner: 'foreign-runtime', api_token: 'foreign-runtime-raw-secret' })],
+    )
+
     expect(bootstrapDigest(await authorityProjection())).toBe(exactPreimageDigest)
 
     const secondAdmissions: Array<Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>> = []
@@ -441,19 +563,56 @@ describe('aun bootstrap clean-host journal', () => {
       `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
        VALUES ('workspace-foreign-b', 'shared-workspace-authority', 'primary', true)`,
     )
-    const rejectedRollback = await ports.rollbackMutation(baseContext, {
+    const completedForeignDriftRollback = await ports.rollbackMutation(baseContext, {
       mutation_id: `workspace-authority-drift-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
       ...secondWorkspaceMutation!,
     })
-    expect(rejectedRollback.ok).toBe(false)
-    expect(rejectedRollback.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+    expect(completedForeignDriftRollback.ok).toBe(true)
     const preservedAfterRejection = await authorityProjection()
-    expect(preservedAfterRejection.binding?.active).toBe(backend === 'postgres' ? true : 1)
-    expect(preservedAfterRejection.target_runtime?.workspace_id).toBe('shared-workspace-authority')
+    expect(preservedAfterRejection.binding?.active).toBe(backend === 'postgres' ? false : 0)
+    expect(preservedAfterRejection.target_runtime?.workspace_id).toBeNull()
     expect(await db.queryOne<any>(
       `SELECT agent_id FROM agent_workspace_bindings
         WHERE agent_id = 'workspace-foreign-b' AND workspace_id = 'shared-workspace-authority'`,
     )).toEqual({ agent_id: 'workspace-foreign-b' })
+
+    const createdWorkspaceRoot = join(home, `created-workspace-${backend}`)
+    mkdirSync(createdWorkspaceRoot)
+    const createdProfile = Bun.spawnSync([
+      process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'workspace-created-owner',
+      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', createdWorkspaceRoot,
+      '--channel-port', '8813', '--tmux-session', 'workspace-session', '--enabled', 'true', '--execute',
+    ], { cwd: repoRoot, env })
+    expect(createdProfile.exitCode).toBe(0)
+    const createdContext = {
+      ...baseContext,
+      runId: `workspace-created-${backend}`,
+      agentId: 'workspace-created-owner',
+      workspaceRoot: createdWorkspaceRoot,
+    }
+    const createdOutcome = await ports.ensureAgentProfile(createdContext)
+    expect(createdOutcome.ok).toBe(true)
+    const createdMutation = [...(createdOutcome.mutations ?? []), ...(createdOutcome.mutation ? [createdOutcome.mutation] : [])]
+      .find((mutation) => mutation.kind === 'workspace_authority')
+    expect(createdMutation?.rollback_payload?.workspace_created).toBe(true)
+    const createdWorkspaceId = String(createdMutation?.rollback_payload?.workspace_id)
+    await db.execute(
+      `UPDATE agent_workspaces
+          SET name = 'typed-drift-name', repo_url = 'https://example.invalid/drift.git', metadata = $2::jsonb
+        WHERE workspace_id = $1`,
+      [createdWorkspaceId, JSON.stringify({ bootstrap_run_id: 'foreign-owner', exact_integer: 9007199254740993 })],
+    )
+    const createdDriftBefore = await db.queryOne<any>(
+      `SELECT name, repo_url, metadata FROM agent_workspaces WHERE workspace_id = $1`, [createdWorkspaceId],
+    )
+    const createdDriftRollback = await ports.rollbackMutation(createdContext, {
+      mutation_id: `workspace-created-drift-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...createdMutation!,
+    })
+    expect(createdDriftRollback).toMatchObject({ ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] })
+    expect(await db.queryOne<any>(
+      `SELECT name, repo_url, metadata FROM agent_workspaces WHERE workspace_id = $1`, [createdWorkspaceId],
+    )).toEqual(createdDriftBefore)
     await db.close()
   }, 60_000)
 

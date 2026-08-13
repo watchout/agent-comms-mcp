@@ -2,6 +2,8 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -11,9 +13,10 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type {
   BootstrapRunState,
   BootstrapSafeD1Readback,
@@ -81,15 +84,162 @@ export function bootstrapStateRoot(home?: string, env: NodeJS.ProcessEnv = proce
 }
 
 export interface BootstrapStateStore {
-  acquireLock(agentId: string, runId: string): void
-  releaseLock(agentId: string, runId: string): void
+  acquireLock(agentId: string, runId: string, options?: { reclaimStaleSameRun?: boolean }): void
+  releaseLock(agentId: string, runId: string, recordReleased?: (releasedAt: string) => void): void
   load(agentId: string, runId: string): BootstrapRunState | null
   save(state: BootstrapRunState): void
   findLatestReady(agentId: string, inputDigest: string): BootstrapRunState | null
 }
 
+type BootstrapLockRecord = {
+  schema_version: 'aun-bootstrap-lock/v1'
+  agent_id: string
+  run_id: string
+  pid: number
+  process_start_identity: string
+  created_at: string
+  nonce: string
+}
+type ProcessIdentityState =
+  | { status: 'alive'; identity: string }
+  | { status: 'dead' }
+  | { status: 'unknown' }
+
+const LOCK_RECORD_FILE = 'owner.json'
+const LOCK_RECLAIM_PREFIX = '.lock.reclaim-'
+const LOCK_RELEASE_PREFIX = '.lock.release-'
+const LOCK_COMPLETED_RELEASE_PREFIX = '.lock.completed-release-'
+const LOCK_STAGE_PREFIX = '.lock.stage-'
+const LOCK_COMPLETED_STAGE_PREFIX = '.lock.completed-stage-'
+const LOCK_RECLAIM_COMPLETE_FILE = 'reclaim.complete'
+
+function fsyncBootstrapDirectory(path: string): void {
+  const fd = openSync(path, 'r')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+function ensureDurableBootstrapDirectory(path: string): void {
+  const parent = dirname(path)
+  if (existsSync(path)) {
+    const identity = lstatSync(path)
+    if (!identity.isDirectory() || identity.isSymbolicLink()) throw new Error('bootstrap directory identity invalid')
+    fsyncBootstrapDirectory(path)
+    if (parent !== path) fsyncBootstrapDirectory(parent)
+    return
+  }
+  if (parent === path) throw new Error('bootstrap directory has no existing ancestor')
+  ensureDurableBootstrapDirectory(parent)
+  try {
+    mkdirSync(path, { mode: 0o700 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  const identity = lstatSync(path)
+  if (!identity.isDirectory() || identity.isSymbolicLink()) throw new Error('bootstrap directory identity invalid')
+  fsyncBootstrapDirectory(path)
+  if (parent !== path) fsyncBootstrapDirectory(parent)
+}
+
+function processIdentityState(pid: number): ProcessIdentityState {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return { status: 'unknown' }
+  try {
+    process.kill(pid, 0)
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+      ? { status: 'dead' }
+      : { status: 'unknown' }
+  }
+  const ps = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: '/usr/bin:/bin', LC_ALL: 'C', LANG: 'C', TZ: 'UTC' },
+  })
+  const started = ps.status === 0 ? String(ps.stdout ?? '').trim().replace(/\s+/g, ' ') : ''
+  return started
+    ? { status: 'alive', identity: bootstrapDigest({ pid, started }) }
+    : { status: 'unknown' }
+}
+
+function validateBootstrapLockRecord(value: unknown, agentId: string): BootstrapLockRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Record<string, unknown>
+  if (row.schema_version !== 'aun-bootstrap-lock/v1'
+    || Object.keys(row).sort().join(',') !== 'agent_id,created_at,nonce,pid,process_start_identity,run_id,schema_version'
+    || row.agent_id !== agentId
+    || typeof row.run_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,191}$/.test(row.run_id)
+    || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+    || typeof row.process_start_identity !== 'string' || !/^[0-9a-f]{64}$/.test(row.process_start_identity)
+    || typeof row.created_at !== 'string' || !Number.isFinite(Date.parse(row.created_at))
+    || new Date(row.created_at).toISOString() !== row.created_at
+    || typeof row.nonce !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.nonce)) return null
+  return row as BootstrapLockRecord
+}
+
+function readBootstrapLockRecord(path: string, agentId: string): BootstrapLockRecord | null {
+  try {
+    const identity = lstatSync(path)
+    if (!identity.isDirectory() || identity.isSymbolicLink()) return null
+    const ownerPath = join(path, LOCK_RECORD_FILE)
+    const ownerIdentity = lstatSync(ownerPath)
+    if (!ownerIdentity.isFile() || ownerIdentity.isSymbolicLink() || ownerIdentity.nlink !== 1) return null
+    const names = readdirSync(path).sort()
+    const record = validateBootstrapLockRecord(JSON.parse(readFileSync(ownerPath, 'utf8')), agentId)
+    if (!record) return null
+    const base = basename(path)
+    const layout = names.join(',')
+    const ownerOnly = layout === LOCK_RECORD_FILE
+    const reclaimComplete = layout === [LOCK_RECORD_FILE, LOCK_RECLAIM_COMPLETE_FILE].sort().join(',')
+      && validEmptyDirectory(join(path, LOCK_RECLAIM_COMPLETE_FILE))
+    if (base === '.lock' || base.startsWith(LOCK_STAGE_PREFIX) || base.startsWith(LOCK_COMPLETED_STAGE_PREFIX)
+      || base.startsWith(LOCK_RELEASE_PREFIX) || base.startsWith(LOCK_COMPLETED_RELEASE_PREFIX)) return ownerOnly ? record : null
+    if (base === `${LOCK_RECLAIM_PREFIX}${record.nonce}`) return ownerOnly || reclaimComplete ? record : null
+    return null
+  } catch {
+    return null
+  }
+}
+
+function sameLockRecord(left: BootstrapLockRecord, right: BootstrapLockRecord): boolean {
+  return bootstrapDigest(left) === bootstrapDigest(right)
+}
+
+function validEmptyDirectory(path: string): boolean {
+  try {
+    const identity = lstatSync(path)
+    return identity.isDirectory() && !identity.isSymbolicLink() && readdirSync(path).length === 0
+  } catch {
+    return false
+  }
+}
+
+function validCompletedReclaim(path: string, owner: BootstrapLockRecord): boolean {
+  return basename(path) === `${LOCK_RECLAIM_PREFIX}${owner.nonce}`
+    && validEmptyDirectory(join(path, LOCK_RECLAIM_COMPLETE_FILE))
+}
+
+function completeLockTransition(path: string, markerName: string): void {
+  const marker = join(path, markerName)
+  if (!existsSync(marker)) mkdirSync(marker, { mode: 0o700 })
+  if (!validEmptyDirectory(marker)) throw new Error('lock transition completion marker is corrupt')
+  fsyncBootstrapDirectory(marker)
+  fsyncBootstrapDirectory(path)
+}
+
+function archiveCompletedRelease(dir: string, releasePath: string, owner: BootstrapLockRecord): void {
+  const archived = join(dir, `${LOCK_COMPLETED_RELEASE_PREFIX}${owner.nonce}`)
+  if (existsSync(archived)) throw new Error('completed release archive target exists')
+  renameSync(releasePath, archived)
+  fsyncBootstrapDirectory(dir)
+}
+
 export class FileBootstrapStateStore implements BootstrapStateStore {
-  constructor(readonly root: string) {}
+  private readonly acquiredLocks = new Map<string, BootstrapLockRecord>()
+
+  constructor(
+    readonly root: string,
+    private readonly testHooks: { beforeReclaimRename?: () => void } = {},
+  ) {}
 
   private agentDir(agentId: string): string {
     return join(this.root, validateBootstrapAgentId(agentId))
@@ -100,26 +250,199 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     return join(this.agentDir(agentId), `${runId}.json`)
   }
 
-  acquireLock(agentId: string, runId: string): void {
-    const dir = this.agentDir(agentId)
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const path = join(dir, '.lock')
+  private lockPath(agentId: string): string {
+    return join(this.agentDir(agentId), '.lock')
+  }
+
+  private writeStagedLock(dir: string, record: BootstrapLockRecord): string {
+    const staged = join(dir, `${LOCK_STAGE_PREFIX}${record.nonce}`)
+    mkdirSync(staged, { mode: 0o700 })
+    const ownerPath = join(staged, LOCK_RECORD_FILE)
+    const fd = openSync(ownerPath, 'wx', 0o600)
     try {
-      const fd = openSync(path, 'wx', 0o600)
-      writeFileSync(fd, `${runId}\n`, { encoding: 'utf8' })
+      writeFileSync(fd, `${JSON.stringify(record)}\n`, { encoding: 'utf8' })
+      fsyncSync(fd)
+    } finally {
       closeSync(fd)
+    }
+    chmodSync(ownerPath, 0o600)
+    fsyncBootstrapDirectory(staged)
+    return staged
+  }
+
+  private exactSameRunStale(record: BootstrapLockRecord, agentId: string, runId: string): boolean {
+    if (record.agent_id !== agentId || record.run_id !== runId) return false
+    const observed = processIdentityState(record.pid)
+    return observed.status === 'dead'
+      || (observed.status === 'alive' && observed.identity !== record.process_start_identity)
+  }
+
+  acquireLock(agentId: string, runId: string, options: { reclaimStaleSameRun?: boolean } = {}): void {
+    const dir = this.agentDir(agentId)
+    ensureDurableBootstrapDirectory(this.root)
+    ensureDurableBootstrapDirectory(dir)
+    const path = this.lockPath(agentId)
+    const currentIdentity = processIdentityState(process.pid)
+    if (currentIdentity.status !== 'alive') {
+      throw new Error('NO_GO_BOOTSTRAP_BUSY: current process start identity is unavailable')
+    }
+    const record: BootstrapLockRecord = {
+      schema_version: 'aun-bootstrap-lock/v1',
+      agent_id: agentId,
+      run_id: runId,
+      pid: process.pid,
+      process_start_identity: currentIdentity.identity,
+      created_at: new Date().toISOString(),
+      nonce: randomUUID(),
+    }
+    let staged: string | null = null
+    try {
+      for (const name of readdirSync(dir).filter((entry) => entry.startsWith('.lock.')).sort()) {
+        const candidatePath = join(dir, name)
+        if (name.startsWith(LOCK_RECLAIM_PREFIX) || name.startsWith(LOCK_RELEASE_PREFIX)) continue
+        if (name.startsWith(LOCK_COMPLETED_RELEASE_PREFIX)) {
+          const archived = readBootstrapLockRecord(candidatePath, agentId)
+          if (!archived || name !== `${LOCK_COMPLETED_RELEASE_PREFIX}${archived.nonce}`) {
+            throw new Error('completed release archive is corrupt')
+          }
+          continue
+        }
+        if (name.startsWith(LOCK_COMPLETED_STAGE_PREFIX)) {
+          const archived = readBootstrapLockRecord(candidatePath, agentId)
+          if (!archived || name !== `${LOCK_COMPLETED_STAGE_PREFIX}${archived.nonce}`) {
+            throw new Error('completed stage archive is corrupt')
+          }
+          continue
+        }
+        if (name.startsWith(LOCK_STAGE_PREFIX)) {
+          const stagedOwner = readBootstrapLockRecord(candidatePath, agentId)
+          if (!options.reclaimStaleSameRun || !stagedOwner
+            || name !== `${LOCK_STAGE_PREFIX}${stagedOwner.nonce}`
+            || !this.exactSameRunStale(stagedOwner, agentId, runId)) {
+            throw new Error('staged lock artifact is live, foreign, or corrupt')
+          }
+          const archived = join(dir, `${LOCK_COMPLETED_STAGE_PREFIX}${stagedOwner.nonce}`)
+          if (existsSync(archived)) throw new Error('completed stage archive target exists')
+          renameSync(candidatePath, archived)
+          fsyncBootstrapDirectory(dir)
+          continue
+        }
+        throw new Error('unknown reserved lock artifact')
+      }
+      const reclaimNames = readdirSync(dir).filter((name) => name.startsWith(LOCK_RECLAIM_PREFIX)).sort()
+      const releaseNames = readdirSync(dir).filter((name) => name.startsWith(LOCK_RELEASE_PREFIX)).sort()
+      for (const name of releaseNames) {
+        const releasePath = join(dir, name)
+        const released = readBootstrapLockRecord(releasePath, agentId)
+        const releaseState = options.reclaimStaleSameRun ? this.load(agentId, runId) : null
+        if (!options.reclaimStaleSameRun || !released
+          || name !== `${LOCK_RELEASE_PREFIX}${released.nonce}`
+          || !this.exactSameRunStale(released, agentId, runId)
+          || !releaseState || !releaseState.lock_release_authorized_at
+          || !Number.isFinite(Date.parse(releaseState.lock_release_authorized_at))) {
+          throw new Error('release marker is live, foreign, corrupt, or unauthorized')
+        }
+        if (!releaseState.lock_released_at) {
+          releaseState.lock_released_at = new Date().toISOString()
+          releaseState.updated_at = releaseState.lock_released_at
+          this.save(releaseState)
+        } else if (!Number.isFinite(Date.parse(releaseState.lock_released_at))) {
+          throw new Error('release marker journal receipt is corrupt')
+        }
+        const reread = readBootstrapLockRecord(releasePath, agentId)
+        if (!reread || !sameLockRecord(reread, released)) {
+          throw new Error('release marker changed before recovery cleanup')
+        }
+        archiveCompletedRelease(dir, releasePath, released)
+      }
+      const recoverableReclaims: string[] = []
+      for (const name of reclaimNames) {
+        const reclaimPath = join(dir, name)
+        const reclaimed = readBootstrapLockRecord(reclaimPath, agentId)
+        if (reclaimed && name === `${LOCK_RECLAIM_PREFIX}${reclaimed.nonce}`
+          && validCompletedReclaim(reclaimPath, reclaimed)) {
+          continue
+        }
+        if (!options.reclaimStaleSameRun || !reclaimed
+          || name !== `${LOCK_RECLAIM_PREFIX}${reclaimed.nonce}`
+          || !this.exactSameRunStale(reclaimed, agentId, runId)) {
+          throw new Error('reclaim marker is live, foreign, or corrupt')
+        }
+        recoverableReclaims.push(reclaimPath)
+      }
+
+      if (existsSync(path)) {
+        const owner = readBootstrapLockRecord(path, agentId)
+        if (!options.reclaimStaleSameRun || !owner || !this.exactSameRunStale(owner, agentId, runId)) {
+          throw new Error(`agent lock is ${owner ? `owned by run ${owner.run_id}` : 'corrupt'}`)
+        }
+        const reclaimedPath = join(dir, `${LOCK_RECLAIM_PREFIX}${owner.nonce}`)
+        this.testHooks.beforeReclaimRename?.()
+        renameSync(path, reclaimedPath)
+        fsyncBootstrapDirectory(dir)
+        recoverableReclaims.push(reclaimedPath)
+      }
+
+      staged = this.writeStagedLock(dir, record)
+      renameSync(staged, path)
+      staged = null
+      fsyncBootstrapDirectory(dir)
+      const installed = readBootstrapLockRecord(path, agentId)
+      if (!installed || !sameLockRecord(installed, record)) {
+        throw new Error('installed lock readback mismatch')
+      }
+      this.acquiredLocks.set(agentId, record)
     } catch (err) {
-      const owner = existsSync(path) ? readFileSync(path, 'utf8').trim() : 'unknown'
-      throw new Error(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} is locked by run ${owner}: ${(err as Error).message}`)
+      if (staged && existsSync(staged)) rmSync(staged, { recursive: true })
+      throw new Error(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} lock unavailable: ${(err as Error).message}`)
     }
   }
 
-  releaseLock(agentId: string, runId: string): void {
-    const path = join(this.agentDir(agentId), '.lock')
-    if (!existsSync(path)) return
-    const owner = readFileSync(path, 'utf8').trim()
-    if (owner !== runId) throw new Error(`refusing to release bootstrap lock owned by ${owner}`)
-    rmSync(path)
+  releaseLock(agentId: string, runId: string, recordReleased?: (releasedAt: string) => void): void {
+    const dir = this.agentDir(agentId)
+    const path = this.lockPath(agentId)
+    if (!existsSync(path)) {
+      if (this.acquiredLocks.has(agentId)) throw new Error('bootstrap lock disappeared before exact release')
+      return
+    }
+    const owner = readBootstrapLockRecord(path, agentId)
+    const acquired = this.acquiredLocks.get(agentId)
+    if (!owner || !acquired || owner.run_id !== runId || !sameLockRecord(owner, acquired)) {
+      throw new Error('refusing to release bootstrap lock without exact process ownership')
+    }
+    for (const name of readdirSync(dir).filter((entry) => entry.startsWith(LOCK_RECLAIM_PREFIX)).sort()) {
+      const reclaimPath = join(dir, name)
+      const reclaimed = readBootstrapLockRecord(reclaimPath, agentId)
+      if (!reclaimed || name !== `${LOCK_RECLAIM_PREFIX}${reclaimed.nonce}`) {
+        throw new Error('refusing release with corrupt reclaim generation')
+      }
+      if (!validCompletedReclaim(reclaimPath, reclaimed)) {
+        if (!this.exactSameRunStale(reclaimed, agentId, runId)) {
+          throw new Error('refusing release with foreign pending reclaim generation')
+        }
+        completeLockTransition(reclaimPath, LOCK_RECLAIM_COMPLETE_FILE)
+      }
+    }
+    for (const name of readdirSync(dir).filter((entry) => entry.startsWith(LOCK_RECLAIM_PREFIX)).sort()) {
+      const reclaimPath = join(dir, name)
+      const reclaimed = readBootstrapLockRecord(reclaimPath, agentId)
+      if (!reclaimed || name !== `${LOCK_RECLAIM_PREFIX}${reclaimed.nonce}`
+        || !validCompletedReclaim(reclaimPath, reclaimed)) {
+        throw new Error('reclaim generation completion readback mismatch')
+      }
+    }
+    const releasePath = join(dir, `${LOCK_RELEASE_PREFIX}${owner.nonce}`)
+    if (existsSync(releasePath)) throw new Error('refusing to replace an existing bootstrap lock release record')
+    renameSync(path, releasePath)
+    fsyncBootstrapDirectory(dir)
+    const releasedAt = new Date().toISOString()
+    recordReleased?.(releasedAt)
+    const released = readBootstrapLockRecord(releasePath, agentId)
+    if (!released || !sameLockRecord(released, owner)) {
+      throw new Error('bootstrap release marker changed before exact cleanup')
+    }
+    archiveCompletedRelease(dir, releasePath, owner)
+    this.acquiredLocks.delete(agentId)
   }
 
   load(agentId: string, runId: string): BootstrapRunState | null {
@@ -131,13 +454,23 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
   save(state: BootstrapRunState): void {
     state.mutation_manifest_digest = bootstrapDigest(state.mutations)
     const path = this.runPath(state.agent_id, state.run_id)
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    const temp = `${path}.${process.pid}.tmp`
+    ensureDurableBootstrapDirectory(dirname(path))
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
     const redacted = redactBootstrapValue(state) as BootstrapRunState
-    writeFileSync(temp, `${JSON.stringify(redacted, null, 2)}\n`, { mode: 0o600 })
-    chmodSync(temp, 0o600)
-    renameSync(temp, path)
-    chmodSync(path, 0o600)
+    let fd: number | null = openSync(temp, 'wx', 0o600)
+    try {
+      writeFileSync(fd, `${JSON.stringify(redacted, null, 2)}\n`, { encoding: 'utf8' })
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = null
+      chmodSync(temp, 0o600)
+      renameSync(temp, path)
+      chmodSync(path, 0o600)
+      fsyncBootstrapDirectory(dirname(path))
+    } finally {
+      if (fd !== null) closeSync(fd)
+      if (existsSync(temp)) rmSync(temp, { force: true })
+    }
   }
 
   findLatestReady(agentId: string, inputDigest: string): BootstrapRunState | null {
@@ -160,14 +493,17 @@ export class MemoryBootstrapStateStore implements BootstrapStateStore {
   readonly states = new Map<string, BootstrapRunState>()
   readonly locks = new Map<string, string>()
 
-  acquireLock(agentId: string, runId: string): void {
+  acquireLock(agentId: string, runId: string, _options: { reclaimStaleSameRun?: boolean } = {}): void {
     const owner = this.locks.get(agentId)
     if (owner) throw new Error(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} is locked by run ${owner}`)
     this.locks.set(agentId, runId)
   }
 
-  releaseLock(agentId: string, runId: string): void {
-    if (this.locks.get(agentId) === runId) this.locks.delete(agentId)
+  releaseLock(agentId: string, runId: string, recordReleased?: (releasedAt: string) => void): void {
+    if (this.locks.get(agentId) === runId) {
+      this.locks.delete(agentId)
+      recordReleased?.(new Date().toISOString())
+    }
   }
 
   load(agentId: string, runId: string): BootstrapRunState | null {

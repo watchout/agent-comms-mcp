@@ -1503,6 +1503,22 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     agent_id: string
     workspace_id: string | null
   }
+  type WorkspaceAuthorityRuntimeRow = WorkspaceAuthorityRuntimeLink & {
+    runtime_engine: string
+    runtime_kind: string
+    host_id: string | null
+    session_name: string | null
+    process_id: number | null
+    port: number | null
+    checkout_path: string | null
+    commit_sha: string | null
+    endpoint_uri: string | null
+    status: string
+    started_at: string | null
+    stopped_at: string | null
+    last_seen_at: string | null
+    metadata: Record<string, unknown>
+  }
   type WorkspaceAuthorityBinding = {
     agent_id: string
     workspace_id: string
@@ -1541,6 +1557,23 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     agent_id: String(row.agent_id),
     workspace_id: row.workspace_id === null || row.workspace_id === undefined ? null : String(row.workspace_id),
   })
+  const normalizedRuntimeRow = (row: any): WorkspaceAuthorityRuntimeRow => ({
+    ...normalizedRuntimeLink(row),
+    runtime_engine: String(row.runtime_engine),
+    runtime_kind: String(row.runtime_kind),
+    host_id: row.host_id === null || row.host_id === undefined ? null : String(row.host_id),
+    session_name: row.session_name === null || row.session_name === undefined ? null : String(row.session_name),
+    process_id: row.process_id === null || row.process_id === undefined ? null : Number(row.process_id),
+    port: row.port === null || row.port === undefined ? null : Number(row.port),
+    checkout_path: row.checkout_path === null || row.checkout_path === undefined ? null : String(row.checkout_path),
+    commit_sha: row.commit_sha === null || row.commit_sha === undefined ? null : String(row.commit_sha),
+    endpoint_uri: row.endpoint_uri === null || row.endpoint_uri === undefined ? null : String(row.endpoint_uri),
+    status: String(row.status),
+    started_at: normalizedTimestamp(row.started_at),
+    stopped_at: normalizedTimestamp(row.stopped_at),
+    last_seen_at: normalizedTimestamp(row.last_seen_at),
+    metadata: parseJsonRecord(row.metadata),
+  })
   const workspaceAuthorityProjection = (input: {
     workspaceId: string
     canonicalPath: string
@@ -1572,6 +1605,286 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     runtime_links: [...input.runtimeLinks].sort((a, b) => a.runtime_instance_id.localeCompare(b.runtime_instance_id)),
     preserved_reference_digest: input.preservedReferenceDigest,
   })
+  type WorkspaceAuthorityLosslessSnapshot = {
+    schema_version: 'aun-bootstrap-workspace-authority-lossless/v1'
+    workspace: { workspace_id: string; row_digest: string } | null
+    binding: { agent_id: string; workspace_id: string; binding_role: string; row_digest: string } | null
+    runtime_rows: Array<{ runtime_instance_id: string; agent_id: string; row_digest: string }>
+    preserved_bindings: Array<{ agent_id: string; workspace_id: string; binding_role: string; row_digest: string }>
+    preserved_runtimes: Array<{ runtime_instance_id: string; agent_id: string; row_digest: string }>
+  }
+  type WorkspaceAuthorityOwnedLosslessSnapshot = Pick<WorkspaceAuthorityLosslessSnapshot,
+    'workspace' | 'binding' | 'runtime_rows'> & {
+      schema_version: 'aun-bootstrap-workspace-authority-owned-lossless/v1'
+    }
+  type WorkspaceAuthorityForeignLosslessSnapshot = Pick<WorkspaceAuthorityLosslessSnapshot,
+    'preserved_bindings' | 'preserved_runtimes'> & {
+      schema_version: 'aun-bootstrap-workspace-authority-foreign-lossless/v1'
+    }
+  const workspaceAuthorityOwnedLossless = (
+    snapshot: WorkspaceAuthorityLosslessSnapshot,
+  ): WorkspaceAuthorityOwnedLosslessSnapshot => ({
+    schema_version: 'aun-bootstrap-workspace-authority-owned-lossless/v1',
+    workspace: snapshot.workspace,
+    binding: snapshot.binding,
+    runtime_rows: snapshot.runtime_rows,
+  })
+  const workspaceAuthorityForeignLossless = (
+    snapshot: WorkspaceAuthorityLosslessSnapshot,
+  ): WorkspaceAuthorityForeignLosslessSnapshot => ({
+    schema_version: 'aun-bootstrap-workspace-authority-foreign-lossless/v1',
+    preserved_bindings: snapshot.preserved_bindings,
+    preserved_runtimes: snapshot.preserved_runtimes,
+  })
+  const isPlainBootstrapRecord = (value: unknown): value is Record<string, unknown> => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  }
+  const validLosslessDigest = (value: unknown): value is string =>
+    typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+  const hasExactBootstrapKeys = (value: Record<string, unknown>, keys: string[]): boolean =>
+    bootstrapDigest(Object.keys(value).sort()) === bootstrapDigest([...keys].sort())
+  const sortedUniqueStrings = (values: string[]): boolean =>
+    new Set(values).size === values.length
+      && values.every((value, index) => index === 0 || values[index - 1]!.localeCompare(value) <= 0)
+  const validLosslessIdentity = (value: unknown): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= 512 && !value.includes('\0')
+  const validOwnedLosslessSnapshot = (
+    value: unknown,
+    input: { workspaceId: string; agentId: string; runtimeIds: string[]; postimage: boolean },
+  ): value is WorkspaceAuthorityOwnedLosslessSnapshot => {
+    if (!isPlainBootstrapRecord(value)
+      || value.schema_version !== 'aun-bootstrap-workspace-authority-owned-lossless/v1'
+      || !hasExactBootstrapKeys(value, ['schema_version', 'workspace', 'binding', 'runtime_rows'])
+      || !Array.isArray(value.runtime_rows)) return false
+    const workspace = value.workspace
+    const binding = value.binding
+    const runtimeRows = value.runtime_rows
+    if (input.postimage && (!isPlainBootstrapRecord(workspace) || !isPlainBootstrapRecord(binding))) return false
+    if (workspace !== null && (!isPlainBootstrapRecord(workspace)
+      || !hasExactBootstrapKeys(workspace, ['workspace_id', 'row_digest'])
+      || !validLosslessIdentity(workspace.workspace_id)
+      || workspace.workspace_id !== input.workspaceId || !validLosslessDigest(workspace.row_digest))) return false
+    if (binding !== null && (!isPlainBootstrapRecord(binding)
+      || !hasExactBootstrapKeys(binding, ['agent_id', 'workspace_id', 'binding_role', 'row_digest'])
+      || !validLosslessIdentity(binding.agent_id) || !validLosslessIdentity(binding.workspace_id)
+      || !validLosslessIdentity(binding.binding_role)
+      || binding.agent_id !== input.agentId || binding.workspace_id !== input.workspaceId
+      || binding.binding_role !== 'primary' || !validLosslessDigest(binding.row_digest))) return false
+    if (runtimeRows.some((row) => !isPlainBootstrapRecord(row)
+      || !hasExactBootstrapKeys(row, ['runtime_instance_id', 'agent_id', 'row_digest'])
+      || row.agent_id !== input.agentId || !validLosslessIdentity(row.agent_id)
+      || !validLosslessIdentity(row.runtime_instance_id)
+      || !validLosslessDigest(row.row_digest))) return false
+    const ids = runtimeRows.map((row) => String(row.runtime_instance_id))
+    return sortedUniqueStrings(ids)
+      && bootstrapDigest(ids) === bootstrapDigest([...input.runtimeIds].sort())
+  }
+  const validLosslessSnapshot = (
+    value: unknown,
+    input: { workspaceId: string; agentId: string; runtimeIds: string[] },
+  ): value is WorkspaceAuthorityLosslessSnapshot => {
+    if (!isPlainBootstrapRecord(value)
+      || value.schema_version !== 'aun-bootstrap-workspace-authority-lossless/v1'
+      || !hasExactBootstrapKeys(value, [
+        'schema_version', 'workspace', 'binding', 'runtime_rows', 'preserved_bindings', 'preserved_runtimes',
+      ])
+      || !Array.isArray(value.runtime_rows) || !Array.isArray(value.preserved_bindings)
+      || !Array.isArray(value.preserved_runtimes)) return false
+    const owned = {
+      schema_version: 'aun-bootstrap-workspace-authority-owned-lossless/v1',
+      workspace: value.workspace,
+      binding: value.binding,
+      runtime_rows: value.runtime_rows,
+    }
+    if (!validOwnedLosslessSnapshot(owned, { ...input, postimage: false })) return false
+    const bindings = value.preserved_bindings
+    const runtimes = value.preserved_runtimes
+    if (bindings.some((row) => !isPlainBootstrapRecord(row)
+      || !hasExactBootstrapKeys(row, ['agent_id', 'workspace_id', 'binding_role', 'row_digest'])
+      || !validLosslessIdentity(row.agent_id) || row.workspace_id !== input.workspaceId
+      || !validLosslessIdentity(row.workspace_id) || !validLosslessIdentity(row.binding_role)
+      || !validLosslessDigest(row.row_digest))) return false
+    if (runtimes.some((row) => !isPlainBootstrapRecord(row)
+      || !hasExactBootstrapKeys(row, ['runtime_instance_id', 'agent_id', 'row_digest'])
+      || !validLosslessIdentity(row.runtime_instance_id) || !validLosslessIdentity(row.agent_id)
+      || !validLosslessDigest(row.row_digest))) return false
+    const bindingKeys = bindings.map((row) => bootstrapDigest([row.agent_id, row.binding_role]))
+    const runtimeKeys = runtimes.map((row) => String(row.runtime_instance_id))
+    return sortedUniqueStrings(bindingKeys) && sortedUniqueStrings(runtimeKeys)
+  }
+  const workspaceAuthorityLosslessSql = (db: DbAdapter) => {
+    // SQLite must tag the storage class of the raw value before applying any
+    // canonical representation.  In particular, INTEGER 123 and BLOB '123'
+    // must never collapse merely because both have the same textual spelling.
+    const timestamp = (raw: string) => db.dialect === 'postgres'
+      ? `to_char((${raw})::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+      : raw
+    const json = (raw: string) => db.dialect === 'postgres' ? `((${raw})::jsonb)::text` : raw
+    const encode = (raw: string, canonical = raw) => db.dialect === 'postgres'
+      ? `CASE WHEN (${raw}) IS NULL THEN 'N' ELSE 'V' || encode(convert_to(CAST((${canonical}) AS TEXT), 'UTF8'), 'hex') END`
+      : `CASE WHEN (${raw}) IS NULL THEN 'N' ELSE 'V' || typeof((${raw})) || ':' || CASE typeof((${raw}))
+          WHEN 'integer' THEN hex(CAST(printf('%lld', (${raw})) AS BLOB))
+          WHEN 'real' THEN hex(CAST(printf('%!.26g', (${raw})) AS BLOB))
+          WHEN 'text' THEN hex(CAST((${canonical}) AS BLOB))
+          WHEN 'blob' THEN hex((${raw}))
+          ELSE hex(CAST((${canonical}) AS BLOB)) END END`
+    // Every non-null payload is hexadecimal, so the pipe is an unambiguous
+    // field delimiter; NULL is encoded as its own token.
+    const tuple = (expressions: Array<string | { raw: string; canonical: string }>) => expressions
+      .map((expression) => typeof expression === 'string'
+        ? encode(expression)
+        : encode(expression.raw, expression.canonical))
+      .join(` || '|' || `)
+    return { timestamp, json, tuple }
+  }
+  const workspaceAuthorityLosslessSnapshot = async (
+    db: DbAdapter,
+    workspaceId: string,
+    agentId: string,
+    runtimeIds: Set<string>,
+  ): Promise<WorkspaceAuthorityLosslessSnapshot> => {
+    const { timestamp, json, tuple } = workspaceAuthorityLosslessSql(db)
+    const workspace = await db.queryOne<any>(
+      `SELECT workspace_id,
+              ${tuple([
+                'workspace_id', 'org_id', 'name', 'workspace_type', 'local_path', 'repo_url', 'default_branch',
+                json('metadata'), timestamp('created_at'), timestamp('updated_at'),
+              ])} AS lossless_row
+         FROM agent_workspaces WHERE workspace_id = $1 FOR UPDATE`,
+      [workspaceId],
+    )
+    const bindings = await db.query<any>(
+      `SELECT agent_id, workspace_id, binding_role,
+              ${tuple(['agent_id', 'workspace_id', 'binding_role', 'active', timestamp('created_at'), timestamp('updated_at')])}
+                AS lossless_row
+         FROM agent_workspace_bindings WHERE workspace_id = $1 ORDER BY agent_id, binding_role FOR UPDATE`,
+      [workspaceId],
+    )
+    const runtimes = await db.query<any>(
+      `SELECT runtime_instance_id, agent_id, workspace_id,
+              ${tuple([
+                'runtime_instance_id', 'agent_id', 'workspace_id', 'runtime_engine', 'runtime_kind',
+                'host_id', 'session_name', 'process_id', 'port', 'checkout_path',
+                'commit_sha', 'endpoint_uri', 'status', timestamp('started_at'), timestamp('stopped_at'),
+                timestamp('last_seen_at'), json('metadata'),
+              ])} AS lossless_row
+         FROM agent_runtime_instances
+        WHERE (agent_id = $2 OR workspace_id = $1)
+        ORDER BY runtime_instance_id FOR UPDATE`,
+      [workspaceId, agentId],
+    )
+    const bindingRows = bindings.map((row) => ({
+      agent_id: String(row.agent_id), workspace_id: String(row.workspace_id), binding_role: String(row.binding_role),
+      row_digest: bootstrapDigest(String(row.lossless_row)),
+    }))
+    const runtimeRows = runtimes.map((row) => ({
+      runtime_instance_id: String(row.runtime_instance_id), agent_id: String(row.agent_id),
+      workspace_id: row.workspace_id === null || row.workspace_id === undefined ? null : String(row.workspace_id),
+      row_digest: bootstrapDigest(String(row.lossless_row)),
+    }))
+    return {
+      schema_version: 'aun-bootstrap-workspace-authority-lossless/v1',
+      workspace: workspace ? { workspace_id: String(workspace.workspace_id), row_digest: bootstrapDigest(String(workspace.lossless_row)) } : null,
+      binding: bindingRows.find((row) => row.agent_id === agentId && row.binding_role === 'primary') ?? null,
+      runtime_rows: runtimeRows.filter((row) => row.agent_id === agentId && runtimeIds.has(row.runtime_instance_id))
+        .map(({ workspace_id: _workspaceId, ...row }) => row),
+      preserved_bindings: bindingRows.filter((row) => row.agent_id !== agentId || row.binding_role !== 'primary'),
+      preserved_runtimes: runtimeRows.filter((row) => row.workspace_id === workspaceId
+        && (row.agent_id !== agentId || !runtimeIds.has(row.runtime_instance_id)))
+        .map(({ workspace_id: _workspaceId, ...row }) => row),
+    }
+  }
+
+  const workspaceAuthorityExpectedOwnedLossless = async (
+    db: DbAdapter,
+    input: {
+      workspaceId: string
+      agentId: string
+      project: string
+      canonicalPath: string
+      runId: string
+      mutationTimestamp: string
+      workspaceCreated: boolean
+      bindingExisted: boolean
+      runtimeIds: Set<string>
+      preimage: WorkspaceAuthorityLosslessSnapshot
+    },
+  ): Promise<WorkspaceAuthorityOwnedLosslessSnapshot> => {
+    const { timestamp, json, tuple } = workspaceAuthorityLosslessSql(db)
+    const metadata = JSON.stringify({
+      source: 'aun-bootstrap',
+      agent_id: input.agentId,
+      bootstrap_run_id: input.runId,
+    })
+    const workspace = input.workspaceCreated
+      ? await db.queryOne<any>(
+          `SELECT ${tuple([
+            '$1::text', '$2::text', '$3::text', '$4::text', '$5::text', '$6::text', '$7::text',
+            json('$8::jsonb'), timestamp('$9::timestamptz'), timestamp('$10::timestamptz'),
+          ])} AS lossless_row`,
+          [input.workspaceId, 'default', input.project, 'local_path', input.canonicalPath, null, null,
+            metadata, input.mutationTimestamp, input.mutationTimestamp],
+        )
+      : null
+    const binding = input.bindingExisted
+      ? await db.queryOne<any>(
+          `SELECT ${tuple([
+            'agent_id', 'workspace_id', 'binding_role', db.dialect === 'postgres' ? 'true::boolean' : 'CAST(1 AS INTEGER)',
+            timestamp('created_at'), timestamp('updated_at'),
+          ])} AS lossless_row
+             FROM agent_workspace_bindings
+            WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary'`,
+          [input.agentId, input.workspaceId],
+        )
+      : await db.queryOne<any>(
+          `SELECT ${tuple([
+            '$1::text', '$2::text', '$3::text', '$4::boolean',
+            timestamp('$5::timestamptz'), timestamp('$6::timestamptz'),
+          ])} AS lossless_row`,
+          [input.agentId, input.workspaceId, 'primary', true, input.mutationTimestamp, input.mutationTimestamp],
+        )
+    const runtimeRows = [] as Array<{ runtime_instance_id: string; agent_id: string; row_digest: string }>
+    for (const runtimeId of [...input.runtimeIds].sort()) {
+      const runtime = await db.queryOne<any>(
+        `SELECT runtime_instance_id, agent_id,
+                ${tuple([
+                  'runtime_instance_id', 'agent_id', '$2::text', 'runtime_engine', 'runtime_kind',
+                  'host_id', 'session_name', 'process_id', 'port', 'checkout_path',
+                  'commit_sha', 'endpoint_uri', 'status', timestamp('started_at'), timestamp('stopped_at'),
+                  timestamp('last_seen_at'), json('metadata'),
+                ])} AS lossless_row
+           FROM agent_runtime_instances
+          WHERE runtime_instance_id = $1 AND agent_id = $3`,
+        [runtimeId, input.workspaceId, input.agentId],
+      )
+      if (!runtime) throw new Error('workspace authority expected runtime row unavailable')
+      runtimeRows.push({
+        runtime_instance_id: String(runtime.runtime_instance_id),
+        agent_id: String(runtime.agent_id),
+        row_digest: bootstrapDigest(String(runtime.lossless_row)),
+      })
+    }
+    const expectedWorkspace = input.workspaceCreated
+      ? { workspace_id: input.workspaceId, row_digest: bootstrapDigest(String(workspace?.lossless_row)) }
+      : input.preimage.workspace
+    const expectedBinding = binding
+      ? {
+          agent_id: input.agentId,
+          workspace_id: input.workspaceId,
+          binding_role: 'primary',
+          row_digest: bootstrapDigest(String(binding.lossless_row)),
+        }
+      : null
+    if (!expectedWorkspace || !expectedBinding) throw new Error('workspace authority expected owned digest unavailable')
+    return {
+      schema_version: 'aun-bootstrap-workspace-authority-owned-lossless/v1',
+      workspace: expectedWorkspace,
+      binding: expectedBinding,
+      runtime_rows: runtimeRows,
+    }
+  }
 
   const ensureActivePrimaryWorkspace = async (context: BootstrapStageContext): Promise<{
     workspace_id: string
@@ -1610,7 +1923,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
            FROM agent_workspaces
           WHERE org_id = 'default' AND local_path = $1
           ORDER BY workspace_id
-          LIMIT 2`,
+          LIMIT 2
+          FOR UPDATE`,
         [canonicalPath],
       )
       if (existing.length > 1) throw new Error('bootstrap target workspace row is ambiguous')
@@ -1629,14 +1943,17 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           FOR UPDATE`,
         [context.agentId, workspaceId],
       ))
-      const activeRuntimes = (await tx.query<any>(
-        `SELECT runtime_instance_id, agent_id, workspace_id
+      const activeRuntimeRows = (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                host_id, session_name, process_id, port, checkout_path, commit_sha,
+                endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
            FROM agent_runtime_instances
           WHERE agent_id = $1 AND status IN ('running', 'active')
           ORDER BY runtime_instance_id
           FOR UPDATE`,
         [context.agentId],
-      )).map(normalizedRuntimeLink)
+      )).map(normalizedRuntimeRow)
+      const activeRuntimes = activeRuntimeRows.map(normalizedRuntimeLink)
       const conflictingRuntime = activeRuntimes.find((row) => row.workspace_id !== null && row.workspace_id !== workspaceId)
       if (conflictingRuntime) throw new Error('active runtime workspace conflicts with bootstrap target')
       const runtimePreimages = activeRuntimes.filter((row) => row.workspace_id === null)
@@ -1650,12 +1967,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       )).map(normalizedWorkspaceBinding)
       const runtimePreimageIds = new Set(runtimePreimages.map((row) => row.runtime_instance_id))
       const preservedRuntimesBefore = (await tx.query<any>(
-        `SELECT runtime_instance_id, agent_id, workspace_id
+        `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                host_id, session_name, process_id, port, checkout_path, commit_sha,
+                endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
            FROM agent_runtime_instances
           WHERE workspace_id = $1
           ORDER BY runtime_instance_id`,
         [workspaceId],
-      )).map(normalizedRuntimeLink).filter((row) =>
+      )).map(normalizedRuntimeRow).filter((row) =>
         row.agent_id !== context.agentId || !runtimePreimageIds.has(row.runtime_instance_id))
       const preservedReferenceDigest = bootstrapDigest({
         bindings: preservedBindingsBefore,
@@ -1672,6 +1991,22 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         active: true,
       }
       const intendedRuntimeLinks = runtimePreimages.map((row) => ({ ...row, workspace_id: workspaceId }))
+      const mutationTimestamp = nowIso()
+      const losslessPreimage = await workspaceAuthorityLosslessSnapshot(
+        tx, workspaceId, context.agentId, runtimePreimageIds,
+      )
+      const expectedOwnedPostimage = await workspaceAuthorityExpectedOwnedLossless(tx, {
+        workspaceId,
+        agentId: context.agentId,
+        project,
+        canonicalPath,
+        runId: context.runId,
+        mutationTimestamp,
+        workspaceCreated,
+        bindingExisted: bindingBefore !== null,
+        runtimeIds: runtimePreimageIds,
+        preimage: losslessPreimage,
+      })
       const workspaceBeforeDigest = workspaceBefore ? bootstrapDigest(workspaceBefore) : null
       const beforeProjection = workspaceAuthorityProjection({
         workspaceId, canonicalPath, workspaceCreated: false,
@@ -1707,11 +2042,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           row_digest: bootstrapDigest(bindingBefore),
         } : { existed: false, active: null, row_digest: null },
         runtime_preimages: runtimePreimages,
-        preserved_bindings_preimage: preservedBindingsBefore,
-        preserved_runtimes_preimage: preservedRuntimesBefore,
         preserved_reference_digest: preservedReferenceDigest,
         before_projection_digest: bootstrapDigest(beforeProjection),
         intended_projection_digest: bootstrapDigest(intendedProjection),
+        lossless_preimage: losslessPreimage,
+        lossless_preimage_digest: bootstrapDigest(losslessPreimage),
+        lossless_expected_owned_postimage: expectedOwnedPostimage,
+        lossless_expected_owned_postimage_digest: bootstrapDigest(expectedOwnedPostimage),
       }
       const admission = {
         kind: 'workspace_authority' as const,
@@ -1731,21 +2068,21 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       if (workspaceCreated) {
         await tx.execute(
           `INSERT INTO agent_workspaces
-             (workspace_id, org_id, name, workspace_type, local_path, metadata)
-           VALUES ($1, 'default', $2, 'local_path', $3, COALESCE($4::jsonb, '{}'::jsonb))`,
+             (workspace_id, org_id, name, workspace_type, local_path, metadata, created_at, updated_at)
+           VALUES ($1, 'default', $2, 'local_path', $3, COALESCE($4::jsonb, '{}'::jsonb), $5, $5)`,
           [workspaceId, project, canonicalPath, JSON.stringify({
             source: 'aun-bootstrap',
             agent_id: context.agentId,
             bootstrap_run_id: context.runId,
-          })],
+          }), mutationTimestamp],
         )
       }
       await tx.execute(
         `INSERT INTO agent_workspace_bindings
-           (agent_id, workspace_id, binding_role, active)
-         VALUES ($1, $2, 'primary', true)
+           (agent_id, workspace_id, binding_role, active, created_at, updated_at)
+         VALUES ($1, $2, 'primary', true, $3, $3)
          ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET active = true`,
-        [context.agentId, workspaceId],
+        [context.agentId, workspaceId, mutationTimestamp],
       )
       for (const runtime of runtimePreimages) {
         const linked = await tx.execute(
@@ -1767,13 +2104,16 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           WHERE agent_id = $1 AND workspace_id = $2 AND binding_role = 'primary'`,
         [context.agentId, workspaceId],
       ))
-      const runtimeAfter = runtimePreimages.length === 0 ? [] : (await tx.query<any>(
-        `SELECT runtime_instance_id, agent_id, workspace_id
+      const runtimeAfterRows = runtimePreimages.length === 0 ? [] : (await tx.query<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                host_id, session_name, process_id, port, checkout_path, commit_sha,
+                endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
            FROM agent_runtime_instances
           WHERE agent_id = $1
           ORDER BY runtime_instance_id`,
         [context.agentId],
-      )).map(normalizedRuntimeLink).filter((row) => runtimePreimageIds.has(row.runtime_instance_id))
+      )).map(normalizedRuntimeRow).filter((row) => runtimePreimageIds.has(row.runtime_instance_id))
+      const runtimeAfter = runtimeAfterRows.map(normalizedRuntimeLink)
       const preservedBindingsAfter = (await tx.query<any>(
         `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
            FROM agent_workspace_bindings
@@ -1783,12 +2123,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         [workspaceId, context.agentId],
       )).map(normalizedWorkspaceBinding)
       const preservedRuntimesAfter = (await tx.query<any>(
-        `SELECT runtime_instance_id, agent_id, workspace_id
+        `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                host_id, session_name, process_id, port, checkout_path, commit_sha,
+                endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
            FROM agent_runtime_instances
           WHERE workspace_id = $1
           ORDER BY runtime_instance_id`,
         [workspaceId],
-      )).map(normalizedRuntimeLink).filter((row) =>
+      )).map(normalizedRuntimeRow).filter((row) =>
         row.agent_id !== context.agentId || !runtimePreimageIds.has(row.runtime_instance_id))
       if (!workspaceAfter || realpathOrResolve(String(workspaceAfter.local_path ?? '')) !== canonicalPath
         || !bindingAfter?.active
@@ -1804,6 +2146,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       } else if (bootstrapDigest(workspaceAfter) !== workspaceBeforeDigest) {
         throw new Error('preexisting workspace changed during authority binding')
       }
+      const losslessPostimage = await workspaceAuthorityLosslessSnapshot(
+        tx, workspaceId, context.agentId, runtimePreimageIds,
+      )
+      if (bootstrapDigest(workspaceAuthorityOwnedLossless(losslessPostimage))
+        !== bootstrapDigest(expectedOwnedPostimage)) {
+        throw new Error('workspace authority exact owned postimage mismatch')
+      }
       const mutation = {
         ...admission,
         actual_after_digest: bootstrapDigest(intendedProjection),
@@ -1811,8 +2160,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           ...rollbackPayload,
           workspace_postimage_digest: bootstrapDigest(workspaceAfter),
           binding_postimage_digest: bootstrapDigest(bindingAfter),
-          runtime_postimages: runtimeAfter,
           post_projection_digest: bootstrapDigest(intendedProjection),
+          lossless_postimage_digest: bootstrapDigest(losslessPostimage),
         },
       }
       return { workspace_id: workspaceId, canonical_path: canonicalPath, mutation }
@@ -3667,26 +4016,98 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const bindingPreimage = payload.binding_preimage && typeof payload.binding_preimage === 'object'
           ? payload.binding_preimage as Record<string, unknown>
           : null
-        const runtimePreimages = Array.isArray(payload.runtime_preimages)
-          ? payload.runtime_preimages.map(normalizedRuntimeLink)
-          : []
-        const preservedBindingsPreimage = Array.isArray(payload.preserved_bindings_preimage)
-          ? payload.preserved_bindings_preimage.map(normalizedWorkspaceBinding)
-          : []
-        const preservedRuntimesPreimage = Array.isArray(payload.preserved_runtimes_preimage)
-          ? payload.preserved_runtimes_preimage.map(normalizedRuntimeLink)
+        const rawRuntimePreimages = Array.isArray(payload.runtime_preimages) ? payload.runtime_preimages : null
+        const runtimePreimagesValid = rawRuntimePreimages !== null
+          && rawRuntimePreimages.every((row) => isPlainBootstrapRecord(row)
+            && hasExactBootstrapKeys(row, ['runtime_instance_id', 'agent_id', 'workspace_id'])
+            && typeof row.runtime_instance_id === 'string' && row.agent_id === context.agentId
+            && row.workspace_id === null)
+        const runtimePreimages = runtimePreimagesValid
+          ? rawRuntimePreimages!.map(normalizedRuntimeLink)
           : []
         const preservedReferenceDigest = String(payload.preserved_reference_digest ?? '')
         const beforeProjectionDigest = String(payload.before_projection_digest ?? '')
         const intendedProjectionDigest = String(payload.intended_projection_digest ?? '')
+        const losslessPreimageDigest = String(payload.lossless_preimage_digest ?? '')
+        const losslessPostimageDigest = String(payload.lossless_postimage_digest ?? '')
+        const losslessPreimage = isPlainBootstrapRecord(payload.lossless_preimage)
+          ? payload.lossless_preimage as WorkspaceAuthorityLosslessSnapshot
+          : null
+        const expectedOwnedPostimage = isPlainBootstrapRecord(payload.lossless_expected_owned_postimage)
+          ? payload.lossless_expected_owned_postimage as WorkspaceAuthorityOwnedLosslessSnapshot
+          : null
+        const expectedOwnedPostimageDigest = String(payload.lossless_expected_owned_postimage_digest ?? '')
+        const recoveryAdmission = payload.recovery_admission === true
+        const expectedOwnedRuntimeRows = expectedOwnedPostimage && Array.isArray(expectedOwnedPostimage.runtime_rows)
+          ? expectedOwnedPostimage.runtime_rows
+          : null
+        const expectedOwnedRuntimeIds = expectedOwnedRuntimeRows?.map((row) => row?.runtime_instance_id) ?? []
+        const recordedRuntimeIds = runtimePreimages.map((row) => row.runtime_instance_id)
+        const allowedWorkspaceRollbackKeys = new Set([
+          'schema_version', 'bootstrap_run_id', 'agent_id', 'workspace_id', 'canonical_path', 'project',
+          'workspace_created', 'workspace_preimage_digest', 'binding_preimage', 'runtime_preimages',
+          'preserved_reference_digest', 'before_projection_digest', 'intended_projection_digest',
+          'lossless_preimage', 'lossless_preimage_digest', 'lossless_expected_owned_postimage',
+          'lossless_expected_owned_postimage_digest', 'workspace_postimage_digest', 'binding_postimage_digest',
+          'post_projection_digest', 'lossless_postimage_digest', 'recovery_admission',
+          'recovery_admission_phase', 'recovery_preimage_readback_fence', 'recovery_intended_mutation_fence',
+          'recovery_ownership_predicate_digest', 'rollback_disposition', 'rollback_started_at',
+          'rollback_completed_at', 'rollback_evidence_refs', 'rollback_readback_digest',
+        ])
+        const requiredWorkspaceRollbackKeys = [
+          'schema_version', 'bootstrap_run_id', 'agent_id', 'workspace_id', 'canonical_path', 'project',
+          'workspace_created', 'workspace_preimage_digest', 'binding_preimage', 'runtime_preimages',
+          'preserved_reference_digest', 'before_projection_digest', 'intended_projection_digest',
+          'lossless_preimage', 'lossless_preimage_digest', 'lossless_expected_owned_postimage',
+          'lossless_expected_owned_postimage_digest',
+        ]
+        const committedWorkspaceRollbackKeys = [
+          'workspace_postimage_digest', 'binding_postimage_digest', 'post_projection_digest', 'lossless_postimage_digest',
+        ]
+        const recoveryPhaseValid = recoveryAdmission
+          ? payload.recovery_admission_phase === 'B3_WORKSPACE_PRE_COMMIT'
+          : payload.recovery_admission === undefined
+            ? payload.recovery_admission_phase === undefined
+            : payload.recovery_admission === false && payload.recovery_admission_phase === 'COMMITTED_AND_READ_BACK'
         const expectedOwner = `workspace-authority:${context.runId}:${context.agentId}:${workspaceId}`
         if (payload.schema_version !== 'aun-bootstrap-workspace-authority-rollback/v1'
+          || !Object.keys(payload).every((key) => allowedWorkspaceRollbackKeys.has(key))
+          || !requiredWorkspaceRollbackKeys.every((key) => Object.hasOwn(payload, key))
+          || (!recoveryAdmission && !committedWorkspaceRollbackKeys.every((key) => Object.hasOwn(payload, key)))
+          || !recoveryPhaseValid
           || payload.bootstrap_run_id !== context.runId || payload.agent_id !== context.agentId
           || mutation.owner_key !== expectedOwner || !workspaceId || !canonicalPath || !project
-          || !bindingPreimage || typeof bindingPreimage.existed !== 'boolean'
+          || !isPlainBootstrapRecord(bindingPreimage) || typeof bindingPreimage.existed !== 'boolean'
+          || !hasExactBootstrapKeys(bindingPreimage, ['existed', 'active', 'row_digest'])
+          || (bindingPreimage.existed === true
+            ? typeof bindingPreimage.active !== 'boolean' || !validLosslessDigest(bindingPreimage.row_digest)
+            : bindingPreimage.active !== null || bindingPreimage.row_digest !== null)
+          || !runtimePreimagesValid || new Set(recordedRuntimeIds).size !== recordedRuntimeIds.length
           || !/^[0-9a-f]{64}$/.test(preservedReferenceDigest)
           || !/^[0-9a-f]{64}$/.test(beforeProjectionDigest)
           || !/^[0-9a-f]{64}$/.test(intendedProjectionDigest)
+          || !losslessPreimage || !validLosslessSnapshot(losslessPreimage, {
+            workspaceId, agentId: context.agentId, runtimeIds: recordedRuntimeIds,
+          })
+          || !/^[0-9a-f]{64}$/.test(losslessPreimageDigest) || bootstrapDigest(losslessPreimage) !== losslessPreimageDigest
+          || !expectedOwnedPostimage || !validOwnedLosslessSnapshot(expectedOwnedPostimage, {
+            workspaceId, agentId: context.agentId, runtimeIds: recordedRuntimeIds, postimage: true,
+          })
+          || !expectedOwnedRuntimeRows
+          || !/^[0-9a-f]{64}$/.test(expectedOwnedPostimageDigest)
+          || bootstrapDigest(expectedOwnedPostimage) !== expectedOwnedPostimageDigest
+          || expectedOwnedPostimage.workspace?.workspace_id !== workspaceId
+          || !/^[0-9a-f]{64}$/.test(expectedOwnedPostimage.workspace?.row_digest ?? '')
+          || expectedOwnedPostimage.binding?.agent_id !== context.agentId
+          || expectedOwnedPostimage.binding?.workspace_id !== workspaceId
+          || expectedOwnedPostimage.binding?.binding_role !== 'primary'
+          || !/^[0-9a-f]{64}$/.test(expectedOwnedPostimage.binding?.row_digest ?? '')
+          || expectedOwnedRuntimeRows.length !== runtimePreimages.length
+          || new Set(expectedOwnedRuntimeIds).size !== expectedOwnedRuntimeIds.length
+          || bootstrapDigest([...expectedOwnedRuntimeIds].sort()) !== bootstrapDigest([...recordedRuntimeIds].sort())
+          || expectedOwnedRuntimeRows.some((row) => !row || row.agent_id !== context.agentId
+            || !/^[0-9a-f]{64}$/.test(row.row_digest))
+          || (!recoveryAdmission && !/^[0-9a-f]{64}$/.test(losslessPostimageDigest))
           || mutation.before_digest !== beforeProjectionDigest
           || mutation.intended_after_digest !== intendedProjectionDigest
           || (!workspaceCreated && !/^[0-9a-f]{64}$/.test(workspacePreimageDigest ?? ''))) {
@@ -3711,11 +4132,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             [context.agentId, workspaceId],
           ))
           const runtimeIds = new Set(runtimePreimages.map((row) => row.runtime_instance_id))
-          const readRuntimeLinks = async () => (runtimeIds.size === 0 ? [] : (await tx.query<any>(
-            `SELECT runtime_instance_id, agent_id, workspace_id
-               FROM agent_runtime_instances WHERE agent_id = $1 ORDER BY runtime_instance_id`,
+          const readRuntimeRows = async () => (runtimeIds.size === 0 ? [] : (await tx.query<any>(
+            `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                    host_id, session_name, process_id, port, checkout_path, commit_sha,
+                    endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
+               FROM agent_runtime_instances WHERE agent_id = $1 ORDER BY runtime_instance_id FOR UPDATE`,
             [context.agentId],
-          )).map(normalizedRuntimeLink).filter((row) => runtimeIds.has(row.runtime_instance_id)))
+          )).map(normalizedRuntimeRow).filter((row) => runtimeIds.has(row.runtime_instance_id)))
           const readPreservedReferences = async () => {
             const bindings = (await tx.query<any>(
               `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
@@ -3726,42 +4149,41 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
               [workspaceId, context.agentId],
             )).map(normalizedWorkspaceBinding)
             const runtimes = (await tx.query<any>(
-              `SELECT runtime_instance_id, agent_id, workspace_id
+              `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
+                      host_id, session_name, process_id, port, checkout_path, commit_sha,
+                      endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
                  FROM agent_runtime_instances WHERE workspace_id = $1 ORDER BY runtime_instance_id`,
               [workspaceId],
-            )).map(normalizedRuntimeLink).filter((row) =>
+            )).map(normalizedRuntimeRow).filter((row) =>
               row.agent_id !== context.agentId || !runtimeIds.has(row.runtime_instance_id))
             return { bindings, runtimes }
           }
           const currentWorkspace = await readWorkspace()
           const currentBinding = await readBinding()
-          const currentRuntimeLinks = await readRuntimeLinks()
+          const currentRuntimeRows = await readRuntimeRows()
+          const currentRuntimeLinks = currentRuntimeRows.map(normalizedRuntimeLink)
           const currentPreserved = await readPreservedReferences()
           const currentPreservedDigest = bootstrapDigest(currentPreserved)
+          const currentLossless = await workspaceAuthorityLosslessSnapshot(
+            tx, workspaceId, context.agentId, runtimeIds,
+          )
+          const currentOwnedLossless = workspaceAuthorityOwnedLossless(currentLossless)
+          const currentForeignLosslessDigest = bootstrapDigest(workspaceAuthorityForeignLossless(currentLossless))
           const preBinding = bindingPreimage.existed === true ? {
             agent_id: context.agentId,
             workspace_id: workspaceId,
             binding_role: 'primary',
             active: bindingPreimage.active === true,
           } : null
-          const beforeProjection = workspaceAuthorityProjection({
-            workspaceId, canonicalPath, workspaceCreated: false,
-            workspaceRowDigest: workspacePreimageDigest,
-            binding: preBinding,
-            runtimeLinks: runtimePreimages,
-            preservedReferenceDigest: currentPreservedDigest,
-            bootstrapRunId: context.runId,
-            project,
-          })
-          const currentIsPreimage = (workspaceCreated ? currentWorkspace === null
-            : bootstrapDigest(currentWorkspace) === workspacePreimageDigest)
-            && (bindingPreimage.existed === true
-              ? bootstrapDigest(currentBinding) === String(bindingPreimage.row_digest ?? '')
-              : currentBinding === null)
-            && bootstrapDigest(currentRuntimeLinks) === bootstrapDigest(runtimePreimages)
-            && currentPreservedDigest === preservedReferenceDigest
-            && bootstrapDigest(beforeProjection) === beforeProjectionDigest
+          const recordedOwnedPreimage = workspaceAuthorityOwnedLossless(losslessPreimage)
+          const currentIsPreimage = bootstrapDigest(currentOwnedLossless) === bootstrapDigest(recordedOwnedPreimage)
           if (currentIsPreimage) {
+            const noEffectReadback = await workspaceAuthorityLosslessSnapshot(
+              tx, workspaceId, context.agentId, runtimeIds,
+            )
+            if (bootstrapDigest(workspaceAuthorityForeignLossless(noEffectReadback)) !== currentForeignLosslessDigest) {
+              throw new Error('workspace rollback no-effect foreign reference drift')
+            }
             return { noEffect: true, digest: beforeProjectionDigest }
           }
 
@@ -3772,18 +4194,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             active: true,
           }
           const intendedRuntimeLinks = runtimePreimages.map((row) => ({ ...row, workspace_id: workspaceId }))
-          const currentProjection = workspaceAuthorityProjection({
-            workspaceId, canonicalPath, workspaceCreated,
-            workspaceRowDigest: workspacePreimageDigest,
-            binding: currentBinding,
-            runtimeLinks: currentRuntimeLinks,
-            preservedReferenceDigest: currentPreservedDigest,
-            bootstrapRunId: context.runId,
-            project,
-          })
           if (!currentWorkspace || !currentBinding?.active
-            || bootstrapDigest(currentProjection) !== intendedProjectionDigest
-            || currentPreservedDigest !== preservedReferenceDigest
+            || bootstrapDigest(currentOwnedLossless) !== expectedOwnedPostimageDigest
             || bootstrapDigest(currentRuntimeLinks) !== bootstrapDigest(intendedRuntimeLinks)) {
             throw new Error('workspace rollback postimage fence mismatch')
           }
@@ -3836,18 +4248,15 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }
           const finalWorkspace = await readWorkspace()
           const finalBinding = await readBinding()
-          const finalRuntimeLinks = await readRuntimeLinks()
+          const finalRuntimeRows = await readRuntimeRows()
           const finalPreserved = await readPreservedReferences()
+          const finalLossless = await workspaceAuthorityLosslessSnapshot(
+            tx, workspaceId, context.agentId, runtimeIds,
+          )
           const finalPreservedDigest = bootstrapDigest(finalPreserved)
-          const exact = (workspaceCreated ? finalWorkspace === null
-            : bootstrapDigest(finalWorkspace) === workspacePreimageDigest)
-            && (bindingPreimage.existed === true
-              ? bootstrapDigest(finalBinding) === String(bindingPreimage.row_digest ?? '')
-              : finalBinding === null)
-            && bootstrapDigest(finalRuntimeLinks) === bootstrapDigest(runtimePreimages)
-            && finalPreservedDigest === preservedReferenceDigest
-            && bootstrapDigest(finalPreserved.bindings) === bootstrapDigest(preservedBindingsPreimage)
-            && bootstrapDigest(finalPreserved.runtimes) === bootstrapDigest(preservedRuntimesPreimage)
+          const exact = bootstrapDigest(workspaceAuthorityOwnedLossless(finalLossless))
+              === bootstrapDigest(recordedOwnedPreimage)
+            && bootstrapDigest(workspaceAuthorityForeignLossless(finalLossless)) === currentForeignLosslessDigest
           if (!exact) throw new Error('workspace rollback exact preimage readback mismatch')
           return { noEffect: false, digest: beforeProjectionDigest }
         })).catch((error) => ({ error: bootstrapDigest(String(error)) }))
@@ -3864,6 +4273,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             rollback_verified: true,
             recovery_admission_no_effect: restored.noEffect,
             foreign_shared_rows_unchanged: true,
+            foreign_shared_rows_preserved: true,
           },
           evidenceRefs: [`workspace-authority-rollback:${bootstrapDigest({
             workspace_id: workspaceId,
@@ -4623,6 +5033,11 @@ export async function bootstrap(
     return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
   }
   state ??= initialState({ runId, agentId, runtime: options.runtime, inputDigest, repoRoot, workspaceRoot, repoHead })
+  // A new run journal is durable before lock acquisition.  A SIGKILL after
+  // acquiring the structured lock can therefore always use the official
+  // exact-run resume/rollback path; a busy loser leaves only a no-effect
+  // pending journal and performs no protected mutation.
+  if (!options.dryRun && !options.resumeRunId && !options.rollbackRunId) stateStore.save(state)
   if (options.rollbackRunId && state.resolved_runtime) env.AUN_BOOTSTRAP_PROCESS_RUNTIME = state.resolved_runtime
   const hydrateRunEnvironment = (source: BootstrapRunState) => {
     const memory = [...source.mutations].reverse().find((mutation) => mutation.kind === 'memory_readiness')
@@ -4667,7 +5082,9 @@ export async function bootstrap(
 
   if (!options.dryRun) {
     try {
-      stateStore.acquireLock(agentId, runId)
+      stateStore.acquireLock(agentId, runId, {
+        reclaimStaleSameRun: Boolean(options.resumeRunId || options.rollbackRunId),
+      })
       lockHeld = true
     } catch {
       return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_BOOTSTRAP_BUSY'])
@@ -5000,13 +5417,15 @@ export async function bootstrap(
   } finally {
     if (lockHeld) {
       state.lock_release_authorized_at = nowIso()
+      state.lock_released_at = null
       state.updated_at = state.lock_release_authorized_at
       stateStore.save(state)
-      stateStore.releaseLock(agentId, runId)
+      stateStore.releaseLock(agentId, runId, (releasedAt) => {
+        state.lock_released_at = releasedAt
+        state.updated_at = releasedAt
+        stateStore.save(state)
+      })
       lockHeld = false
-      state.lock_released_at = nowIso()
-      state.updated_at = state.lock_released_at
-      stateStore.save(state)
     }
   }
 }
