@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
-import type { BootstrapExecutionPorts, BootstrapStageContext } from '../../bin/aun/bootstrap-types'
+import type { BootstrapExecutionPorts, BootstrapMutation, BootstrapStageContext } from '../../bin/aun/bootstrap-types'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { migrateSqlite } from '../../db/migrate-sqlite'
@@ -243,6 +243,219 @@ describe('aun bootstrap clean-host journal', () => {
     expect(tmuxCalls).not.toContain('display-message -p #S')
     expect(profileSetCalls).toBe(0)
   })
+
+  for (const backend of ['sqlite', 'postgres'] as const) test(`B3-WORKSPACE-AUTHORITY-${backend.toUpperCase()} journals before mutation and restores exact shared preimages`, async () => {
+    const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), `aun-bootstrap-b3-workspace-${backend}-`)))
+    roots.push(home)
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const dbPath = join(home, 'workspace-authority.db')
+    const postgresDatabase = backend === 'postgres'
+      ? createPostgresTestDatabase(`aun_bootstrap_b3_workspace_${process.pid}_${Date.now()}`)
+      : null
+    if (postgresDatabase) postgresDatabases.push(postgresDatabase)
+    const env = {
+      ...process.env,
+      HOME: home,
+      AUN_HOME: join(home, '.aun'),
+      AGENT_COM_DB: backend,
+      AGENT_COM_SQLITE_PATH: dbPath,
+      AUN_BOOTSTRAP_CHANNEL_PORT: '8813',
+      ...(postgresDatabase ? { DATABASE_URL: postgresDatabase.databaseUrl } : {}),
+    } as Record<string, string>
+    expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
+    if (postgresDatabase) {
+      expect(Bun.spawnSync([
+        'psql', postgresDatabase.databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
+        join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
+      ], { cwd: repoRoot, env }).exitCode).toBe(0)
+    }
+    for (const agentId of ['workspace-owner', 'workspace-foreign-a', 'workspace-foreign-b']) {
+      const profileSet = Bun.spawnSync([
+        process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', agentId,
+        '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
+        '--channel-port', '8813', '--tmux-session', 'workspace-session', '--enabled', 'true', '--execute',
+      ], { cwd: repoRoot, env })
+      expect(profileSet.exitCode).toBe(0)
+    }
+    const db = postgresDatabase ? new PgAdapter(postgresDatabase.databaseUrl) : new SqliteAdapter(dbPath)
+    const targetRuntimeId = randomUUID()
+    const foreignRuntimeId = randomUUID()
+    await db.execute(
+      `INSERT INTO agent_workspaces (workspace_id, org_id, name, workspace_type, local_path, metadata)
+       VALUES ('shared-workspace-authority', 'default', 'shared-workspace', 'local_path', $1, $2)`,
+      [repoRoot, JSON.stringify({ owner: 'shared-fixture' })],
+    )
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('workspace-owner', 'shared-workspace-authority', 'primary', false),
+              ('workspace-foreign-a', 'shared-workspace-authority', 'primary', true)`,
+    )
+    await db.execute(
+      `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, workspace_id, status, metadata)
+       VALUES ($1, 'workspace-owner', NULL, 'active', $3),
+              ($2, 'workspace-foreign-a', 'shared-workspace-authority', 'active', $4)`,
+      [targetRuntimeId, foreignRuntimeId, JSON.stringify({ owner: 'target-runtime' }), JSON.stringify({ owner: 'foreign-runtime' })],
+    )
+    const authorityProjection = async () => ({
+      workspace: await db.queryOne<any>(
+        `SELECT workspace_id, org_id, name, workspace_type, local_path, repo_url, default_branch,
+                metadata, created_at, updated_at FROM agent_workspaces WHERE workspace_id = $1`,
+        ['shared-workspace-authority'],
+      ),
+      binding: await db.queryOne<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings WHERE agent_id = 'workspace-owner' AND workspace_id = $1`,
+        ['shared-workspace-authority'],
+      ),
+      target_runtime: await db.queryOne<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id FROM agent_runtime_instances WHERE runtime_instance_id = $1`,
+        [targetRuntimeId],
+      ),
+      foreign_binding: await db.queryOne<any>(
+        `SELECT agent_id, workspace_id, binding_role, active, created_at, updated_at
+           FROM agent_workspace_bindings WHERE agent_id = 'workspace-foreign-a' AND workspace_id = $1`,
+        ['shared-workspace-authority'],
+      ),
+      foreign_runtime: await db.queryOne<any>(
+        `SELECT runtime_instance_id, agent_id, workspace_id FROM agent_runtime_instances WHERE runtime_instance_id = $1`,
+        [foreignRuntimeId],
+      ),
+    })
+    const exactPreimageDigest = bootstrapDigest(await authorityProjection())
+    const run = async (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => {
+      const joined = args.join(' ')
+      if (command === 'tmux' && joined === 'display-message -p #S') {
+        return { exitCode: 0, stdout: 'workspace-session\n', stderr: '' }
+      }
+      if (command === 'git' && joined === 'rev-parse HEAD^{tree}') {
+        return { exitCode: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' }
+      }
+      if (command === process.execPath && args.slice(0, 4).join(' ') === 'cli/index.ts agent profile get') {
+        const child = Bun.spawn([command, ...args], { cwd: options.cwd, env: options.env, stdout: 'pipe', stderr: 'pipe' })
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+        ])
+        return { exitCode, stdout, stderr }
+      }
+      return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
+    }
+    const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+    const baseContext = {
+      runId: `workspace-authority-${backend}`, agentId: 'workspace-owner', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
+      priorState: { mutations: [] } as any,
+    } satisfies BootstrapStageContext
+
+    let crashAdmission: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'> | null = null
+    const interrupted = await ports.ensureAgentProfile({
+      ...baseContext,
+      admitRecoveryMutation: (mutation) => {
+        crashAdmission = mutation
+        throw new Error('simulated durable-journal interruption')
+      },
+    })
+    expect(interrupted.ok).toBe(false)
+    expect(interrupted.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+    expect(crashAdmission?.kind).toBe('workspace_authority')
+    expect(bootstrapDigest(await authorityProjection())).toBe(exactPreimageDigest)
+    const recoveredAdmission = await ports.rollbackMutation(baseContext, {
+      mutation_id: `workspace-admission-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...crashAdmission!,
+    })
+    expect(recoveredAdmission.ok).toBe(true)
+    expect(recoveredAdmission.readinessPredicates).toMatchObject({
+      rollback_verified: true,
+      recovery_admission_no_effect: true,
+      foreign_shared_rows_unchanged: true,
+    })
+
+    if (backend === 'sqlite') {
+      await db.execute(
+        `CREATE TRIGGER workspace_authority_post_update_drift
+           AFTER UPDATE OF active ON agent_workspace_bindings
+           WHEN NEW.agent_id = 'workspace-owner' AND NEW.workspace_id = 'shared-workspace-authority'
+         BEGIN
+           UPDATE agent_workspace_bindings SET active = 0
+            WHERE agent_id = NEW.agent_id AND workspace_id = NEW.workspace_id AND binding_role = NEW.binding_role;
+         END`,
+      )
+      let driftAdmission: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'> | null = null
+      const postMutationDrift = await ports.ensureAgentProfile({
+        ...baseContext,
+        admitRecoveryMutation: (mutation) => { driftAdmission = mutation },
+      })
+      expect(postMutationDrift.ok).toBe(false)
+      expect(postMutationDrift.reasonCodes).toEqual(['NO_GO_POST_MUTATION_READBACK'])
+      expect(driftAdmission?.kind).toBe('workspace_authority')
+      expect(bootstrapDigest(await authorityProjection())).toBe(exactPreimageDigest)
+      const recoveredDrift = await ports.rollbackMutation(baseContext, {
+        mutation_id: 'workspace-drift-admission', stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+        ...driftAdmission!,
+      })
+      expect(recoveredDrift.ok).toBe(true)
+      expect(recoveredDrift.readinessPredicates?.recovery_admission_no_effect).toBe(true)
+      await db.execute('DROP TRIGGER workspace_authority_post_update_drift')
+    }
+
+    const admissions: Array<Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>> = []
+    const applied = await ports.ensureAgentProfile({
+      ...baseContext,
+      admitRecoveryMutation: (mutation) => { admissions.push(mutation) },
+    })
+    expect(applied.ok).toBe(true)
+    const appliedMutations = [...(applied.mutations ?? []), ...(applied.mutation ? [applied.mutation] : [])]
+    const workspaceMutation = appliedMutations.find((mutation) => mutation.kind === 'workspace_authority')
+    expect(workspaceMutation).toBeDefined()
+    expect(admissions.findIndex((mutation) => mutation.kind === 'workspace_authority')).toBe(0)
+    expect((await authorityProjection()).binding?.active).toBe(backend === 'postgres' ? true : 1)
+    expect((await authorityProjection()).target_runtime?.workspace_id).toBe('shared-workspace-authority')
+
+    let noOpAdmissions = 0
+    const noOp = await ports.ensureAgentProfile({
+      ...baseContext,
+      admitRecoveryMutation: () => { noOpAdmissions++; throw new Error('exact no-op must not admit') },
+    })
+    expect(noOp.ok).toBe(true)
+    expect(noOpAdmissions).toBe(0)
+    expect([...(noOp.mutations ?? []), ...(noOp.mutation ? [noOp.mutation] : [])]
+      .some((mutation) => mutation.kind === 'workspace_authority')).toBe(false)
+
+    const restored = await ports.rollbackMutation(baseContext, {
+      mutation_id: `workspace-authority-applied-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...workspaceMutation!,
+    })
+    expect(restored.ok).toBe(true)
+    expect(restored.readinessPredicates).toMatchObject({ rollback_verified: true, foreign_shared_rows_unchanged: true })
+    expect(bootstrapDigest(await authorityProjection())).toBe(exactPreimageDigest)
+
+    const secondAdmissions: Array<Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>> = []
+    const reapplied = await ports.ensureAgentProfile({
+      ...baseContext,
+      admitRecoveryMutation: (mutation) => { secondAdmissions.push(mutation) },
+    })
+    expect(reapplied.ok).toBe(true)
+    const secondWorkspaceMutation = [...(reapplied.mutations ?? []), ...(reapplied.mutation ? [reapplied.mutation] : [])]
+      .find((mutation) => mutation.kind === 'workspace_authority')
+    expect(secondWorkspaceMutation).toBeDefined()
+    await db.execute(
+      `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
+       VALUES ('workspace-foreign-b', 'shared-workspace-authority', 'primary', true)`,
+    )
+    const rejectedRollback = await ports.rollbackMutation(baseContext, {
+      mutation_id: `workspace-authority-drift-${backend}`, stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run',
+      ...secondWorkspaceMutation!,
+    })
+    expect(rejectedRollback.ok).toBe(false)
+    expect(rejectedRollback.reasonCodes).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+    const preservedAfterRejection = await authorityProjection()
+    expect(preservedAfterRejection.binding?.active).toBe(backend === 'postgres' ? true : 1)
+    expect(preservedAfterRejection.target_runtime?.workspace_id).toBe('shared-workspace-authority')
+    expect(await db.queryOne<any>(
+      `SELECT agent_id FROM agent_workspace_bindings
+        WHERE agent_id = 'workspace-foreign-b' AND workspace_id = 'shared-workspace-authority'`,
+    )).toEqual({ agent_id: 'workspace-foreign-b' })
+    await db.close()
+  }, 60_000)
 
   test('B5-ROLLBACK-001 stops only the current-run receipt and preserves ordinary runtime identity and status', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-rollback-'))
@@ -959,6 +1172,17 @@ describe('aun bootstrap clean-host journal', () => {
     const first = await bootstrap(input, { run })
     expect(first.status).toBe('READY')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
+    const firstState = JSON.parse(readFileSync(
+      join(home, '.aun', 'bootstrap', 'clean-default', `${first.run_id}.json`),
+      'utf8',
+    ))
+    expect(firstState.mutations
+      .filter((mutation: BootstrapMutation) => mutation.stage === 'B3_AGENT_PROFILE')
+      .map((mutation: BootstrapMutation) => mutation.kind)).toEqual(
+        backend === 'postgres'
+          ? ['profile', 'workspace_authority', 'configuration_desired']
+          : ['profile', 'workspace_authority'],
+      )
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
     expect(stateDaemonRestoreCalls[0]).toContain('--bootstrap-safe-defaults')
@@ -1092,8 +1316,10 @@ describe('aun bootstrap clean-host journal', () => {
         await rollbackReadback.query<any>(`SELECT id FROM runtime_memory_ready_evidence
           WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [first.run_id]),
         activeOwnedQueueRows,
+        await rollbackReadback.query<any>(`SELECT workspace_id FROM agent_workspaces
+          WHERE metadata->>'bootstrap_run_id' = $1`, [first.run_id]),
       ]
-      expect(activeOwned.map((rows) => rows.length)).toEqual([0, 0, 0])
+      expect(activeOwned.map((rows) => rows.length)).toEqual([0, 0, 0, 0])
       const expiredOwned = await rollbackReadback.queryOne<any>(
         'SELECT status, failed_reason, done_at, payload FROM message_queue WHERE id = $1',
         [activeOwnedQueueId],

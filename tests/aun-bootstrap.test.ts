@@ -455,6 +455,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
         ok: true,
         mutations: [
           { kind: 'profile', owner_key: 'profile:ordered', before_digest: 'p0', intended_after_digest: 'p1', actual_after_digest: 'p1', rollback_action: 'profile rollback' },
+          { kind: 'workspace_authority', owner_key: 'workspace-authority:ordered', before_digest: 'w0', intended_after_digest: 'w1', actual_after_digest: 'w1', rollback_action: 'workspace rollback' },
           { kind: 'configuration_desired', owner_key: 'configuration-desired:ordered', before_digest: 'c0', intended_after_digest: 'c1', actual_after_digest: 'c1', rollback_action: 'desired rollback' },
         ],
       })
@@ -487,8 +488,8 @@ describe('aun bootstrap B0-B8 state machine', () => {
       expect(result.status, failedStage).toBe('NO_GO')
       const b4Index = rollbackOrder.indexOf('mcp_registration')
       expect(b4Index, failedStage).toBeGreaterThanOrEqual(0)
-      expect(rollbackOrder.slice(b4Index, b4Index + 3), failedStage)
-        .toEqual(['mcp_registration', 'configuration_desired', 'profile'])
+      expect(rollbackOrder.slice(b4Index, b4Index + 4), failedStage)
+        .toEqual(['mcp_registration', 'configuration_desired', 'workspace_authority', 'profile'])
       const state = store.states.get(`${agentId}/${result.run_id}`)!
       expect(state.mutations.every((mutation) => mutation.rollback_status === 'verified'), failedStage).toBe(true)
     }
