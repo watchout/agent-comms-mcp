@@ -496,6 +496,47 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.details.occupant_agent_id).toBe('other-dev')
   })
 
+  test('newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant', async () => {
+    await seedRuntime('port-shadow-target', 39111)
+    await db.execute(
+      `UPDATE agent_runtime_instances
+          SET runtime_kind='bootstrap_bound_provider', last_seen_at='2026-06-01T00:00:05.000Z'
+        WHERE runtime_instance_id='runtime-port-shadow-target'`,
+    )
+    await db.execute(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
+       VALUES ('port-shadow-other', 'port-shadow-other', 'dev', 'codex', 'idle', 39111)`,
+    )
+    await db.execute(
+      `INSERT INTO agent_runtime_instances
+         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
+       VALUES ('runtime-port-shadow-same-agent', 'port-shadow-target', 'codex', 'local_process',
+               'port-shadow-target-session', 39111, '/tmp/port-shadow-target', 'head-sha', 'running',
+               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:10.000Z'),
+              ('runtime-port-shadow-other', 'port-shadow-other', 'codex', 'local_process',
+               'port-shadow-other-session', 39111, '/tmp/port-shadow-other', 'other-sha', 'active',
+               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z')`,
+    )
+    await recordReady('port-shadow-target', {
+      runtime_instance_id: 'runtime-port-shadow-target',
+      port: 39111,
+    })
+
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: 'port-shadow-target',
+      project: 'agent-comms-mcp',
+      now: new Date('2026-06-01T00:00:11.000Z'),
+    })
+
+    expect(gate.ok).toBe(false)
+    expect(gate.reason).toBe('port_identity_mismatch')
+    expect(gate.details).toMatchObject({
+      expected_port: 39111,
+      occupant_agent_id: 'port-shadow-other',
+      occupant_runtime_instance_id: 'runtime-port-shadow-other',
+    })
+  })
+
   test('Wasurezu bootstrap evidence is queue-independent metadata', () => {
     const evidence = buildWasurezuBootstrapEvidence({
       agent_id: 'wasurezu',

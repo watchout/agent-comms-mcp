@@ -690,12 +690,13 @@ export async function evaluateRuntimeMemoryReadyGate(
          FROM agent_runtime_instances
         WHERE port = $1
           AND status IN ('running', 'active')
+          AND agent_id <> $2
         ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
         LIMIT 1`,
-      [expectedPort],
+      [expectedPort, input.agent_id],
     ).catch(() => [])
     const occupant = occupants[0]
-    if (occupant && occupant.agent_id !== input.agent_id) {
+    if (occupant) {
       return fail(base, 'port_identity_mismatch', {
         expected_port: expectedPort,
         occupant_agent_id: occupant.agent_id,
