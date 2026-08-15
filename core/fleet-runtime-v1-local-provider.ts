@@ -50,6 +50,21 @@ export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   payload_path_count: 24,
 })
 
+export const FLEET_RUNTIME_V1_ADF_READBACK_RELEASE = Object.freeze({
+  root: '/Users/yuji/.local/share/shirube/releases/07640c9c173b36930434847e1cb6838d56b993c0',
+  origin_allowed: Object.freeze([
+    'git@github.com:watchout/ai-dev-framework.git',
+    'https://github.com/watchout/ai-dev-framework.git',
+  ]),
+  head: '07640c9c173b36930434847e1cb6838d56b993c0',
+  tree: '10ffb6acb558d9eecaedab7ce3c97ea447a2b1e5',
+  source_path: 'src/cli/commands/goal-runtime.ts',
+  source_sha256: '5c8cbc0bb0e33c1a5e6c5892a50c03e98a60f78cd2f5e9baa8a5fd3b3724e0de',
+  dist_path: 'dist/cli/index.js',
+  dist_sha256: 'ba396b5a7b1d27bdab2fcb3534bbda5fb33a10e388f9dbfc199b2769fb92250f',
+  store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
+})
+
 export const FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES = Object.freeze([
   { bytes: 6894, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:8166ff6d42388a37ea4d170ed08c7204fc540a2bdd1a08548d1c9e378980fcf6' },
   { bytes: 12331, path: '.shirube/runtime/rapid-lite/build-review-plan.mjs', sha256: 'sha256:e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85' },
@@ -2012,6 +2027,46 @@ export const bunFleetRuntimeArgvRunner: FleetRuntimeArgvRunner = {
   },
 }
 
+export interface FleetRuntimeAdfReleaseReadback {
+  root: string
+  root_realpath: string
+  root_is_directory: boolean
+  root_is_symlink: boolean
+  remote: string
+  head: string
+  tree: string
+  status_porcelain: string
+  branch: string
+  source_sha256: string
+  dist_sha256: string
+}
+
+export type FleetRuntimeAdfReleaseReader = (
+  runner: FleetRuntimeArgvRunner,
+  root: string,
+) => Promise<FleetRuntimeAdfReleaseReadback>
+
+export function validateFleetRuntimeAdfReleaseReadback(input: FleetRuntimeAdfReleaseReadback): void {
+  assertPlainRecord(input, 'ADF readback release')
+  assertExactKeys(input, [
+    'branch', 'dist_sha256', 'head', 'remote', 'root', 'root_is_directory', 'root_is_symlink',
+    'root_realpath', 'source_sha256', 'status_porcelain', 'tree',
+  ], 'ADF readback release')
+  const expected = FLEET_RUNTIME_V1_ADF_READBACK_RELEASE
+  if (input.root !== expected.root || input.root_realpath !== expected.root
+    || input.root_is_directory !== true || input.root_is_symlink !== false) {
+    return providerFail('READBACK_INVALID', 'ADF readback release must be the exact real non-symlink approved root')
+  }
+  if (!(expected.origin_allowed as readonly string[]).includes(input.remote)
+    || input.head !== expected.head || input.tree !== expected.tree
+    || input.branch !== '' || input.status_porcelain !== '') {
+    return providerFail('READBACK_INVALID', 'ADF readback release origin or exact detached clean image differs')
+  }
+  if (input.source_sha256 !== expected.source_sha256 || input.dist_sha256 !== expected.dist_sha256) {
+    return providerFail('READBACK_INVALID', 'ADF readback release source or built CLI digest differs')
+  }
+}
+
 interface GitHubCommentReadback {
   body: string
   user: { login: string }
@@ -2087,6 +2142,60 @@ function readSafeRegularFile(root: string, path: string, label: string): Buffer 
     return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} changed during readback`)
   }
   return bytes
+}
+
+async function readFleetRuntimeAdfRelease(
+  runner: FleetRuntimeArgvRunner,
+  root: string,
+): Promise<FleetRuntimeAdfReleaseReadback> {
+  if (root !== FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root || !existsSync(root)) {
+    return providerFail('READBACK_INVALID', 'ADF readback release path differs or is absent')
+  }
+  const before = lstatSync(root)
+  const rootRealpath = realpathSync(root)
+  if (!before.isDirectory() || before.isSymbolicLink() || rootRealpath !== root) {
+    return providerFail('READBACK_INVALID', 'ADF readback release is not the exact real non-symlink directory')
+  }
+  const run = async (argv: readonly string[]): Promise<string> => {
+    const result = await runner.run(argv, { cwd: root })
+    if (result.exitCode !== 0) return commandError(argv, result)
+    return result.stdout.trim()
+  }
+  const [remote, head, tree, statusPorcelain, branch] = await Promise.all([
+    run(['git', 'remote', 'get-url', 'origin']),
+    run(['git', 'rev-parse', 'HEAD']),
+    run(['git', 'rev-parse', 'HEAD^{tree}']),
+    run(['git', 'status', '--porcelain=v1']),
+    run(['git', 'branch', '--show-current']),
+  ])
+  const source = readSafeRegularFile(
+    root,
+    join(root, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.source_path),
+    'ADF goal-runtime released source',
+  )
+  const dist = readSafeRegularFile(
+    root,
+    join(root, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_path),
+    'ADF released built CLI',
+  )
+  const after = lstatSync(root)
+  if (!after.isDirectory() || after.isSymbolicLink() || realpathSync(root) !== root
+    || before.dev !== after.dev || before.ino !== after.ino) {
+    return providerFail('READBACK_INVALID', 'ADF readback release root changed during verification')
+  }
+  return {
+    root,
+    root_realpath: rootRealpath,
+    root_is_directory: true,
+    root_is_symlink: false,
+    remote,
+    head,
+    tree,
+    status_porcelain: statusPorcelain,
+    branch,
+    source_sha256: sha256(source).replace(/^sha256:/, ''),
+    dist_sha256: sha256(dist).replace(/^sha256:/, ''),
+  }
 }
 
 export function validateFleetRuntimePayloadDirectory(input: {
@@ -2247,6 +2356,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     private readonly runner: FleetRuntimeArgvRunner = bunFleetRuntimeArgvRunner,
     private readonly providerRepositoryRoot: string = resolve(import.meta.dir, '..'),
     private readonly nowMs: () => number = Date.now,
+    private readonly adfReleaseReader: FleetRuntimeAdfReleaseReader = readFleetRuntimeAdfRelease,
   ) {}
 
   private async run(argv: readonly string[], cwd?: string): Promise<string> {
@@ -2261,6 +2371,15 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
 
   private async comment(url: string): Promise<GitHubCommentReadback> {
     return this.ghJson<GitHubCommentReadback>(`repos/watchout/ai-dev-framework/issues/comments/${commentId(url)}`)
+  }
+
+  async readAdfRootGoalStatus(): Promise<string> {
+    const release = await this.adfReleaseReader(this.runner, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+    validateFleetRuntimeAdfReleaseReadback(release)
+    return this.run([
+      'node', FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_path, 'goal-runtime', 'status', '--store',
+      FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path, '--format', 'json',
+    ], FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
   }
 
   private async remotePreimage(request: FleetRuntimeRequest) {
@@ -2305,10 +2424,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       this.comment(request.predecessor_receipt.url),
       this.remotePreimage(request),
       this.run([process.execPath, 'cli/index.ts', 'status', '--format', 'json'], this.providerRepositoryRoot),
-      this.run([
-        'node', 'dist/cli/index.js', 'goal-runtime', 'status', '--store',
-        '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json', '--format', 'json',
-      ], '/Users/yuji/Developer/ai-dev-framework'),
+      this.readAdfRootGoalStatus(),
       this.run([process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json'], this.providerRepositoryRoot),
       this.run([
         process.execPath, 'cli/index.ts', 'agent', 'profile', 'get',

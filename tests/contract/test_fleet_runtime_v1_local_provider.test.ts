@@ -20,6 +20,7 @@ import {
 } from '../../core/fleet-runtime-v1-adapter'
 import {
   ConcreteFleetRuntimeV1LocalSystem,
+  FLEET_RUNTIME_V1_ADF_READBACK_RELEASE,
   FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES,
   FileFleetRuntimeV1Persistence,
   FleetRuntimeLocalProviderError,
@@ -46,6 +47,7 @@ import {
   type FleetRuntimeLocalReconcileResult,
   type FleetRuntimeLocalSystem,
   type FleetRuntimeArgvRunner,
+  type FleetRuntimeAdfReleaseReadback,
 } from '../../core/fleet-runtime-v1-local-provider'
 
 const temporaryRoots: string[] = []
@@ -746,6 +748,94 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(result.exitCode).toBe(2)
     expect(JSON.parse(result.stdout.toString())).toMatchObject({ code: 'PROTECTED_EFFECTS_DISABLED', protected_effect_count: 0 })
     expect(existsSync(statePath)).toBe(false)
+  })
+
+  test('root-goal preflight verifies only the exact released ADF image before the immutable goal argv', async () => {
+    const canonicalDirtyRoot = '/Users/yuji/Developer/ai-dev-framework'
+    const calls: Array<{ argv: string[]; cwd?: string }> = []
+    const blocked = canonicalFleetRuntimeJson({
+      schema: 'shirube-goal-runtime-command/v1', verdict: 'BLOCKED', store_code: 'STORE_NOT_CREATED',
+      runtime_digest: null, root: null, write_count: 0, effect_delivery_performed: false,
+    })
+    const exact: FleetRuntimeAdfReleaseReadback = {
+      root: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
+      root_realpath: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
+      root_is_directory: true,
+      root_is_symlink: false,
+      remote: 'https://github.com/watchout/ai-dev-framework.git',
+      head: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.head,
+      tree: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.tree,
+      status_porcelain: '',
+      branch: '',
+      source_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.source_sha256,
+      dist_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_sha256,
+    }
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv, options) {
+        calls.push({ argv: [...argv], cwd: options?.cwd })
+        const command = argv.join(' ')
+        if (canonicalFleetRuntimeJson(argv) === canonicalFleetRuntimeJson([
+          'node', 'dist/cli/index.js', 'goal-runtime', 'status', '--store',
+          '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json', '--format', 'json',
+        ])) return { exitCode: 0, stdout: blocked, stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(
+      runner,
+      resolveRepo(),
+      Date.now,
+      async (_runner, root) => {
+        expect(root).toBe(FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+        return exact
+      },
+    )
+    expect(await system.readAdfRootGoalStatus()).toBe(blocked)
+    expect(calls).toHaveLength(1)
+    expect(calls.every(call => call.cwd === FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)).toBe(true)
+    expect(calls.some(call => call.cwd === canonicalDirtyRoot)).toBe(false)
+    expect(calls.at(-1)!.argv).toEqual([
+      'node', 'dist/cli/index.js', 'goal-runtime', 'status', '--store',
+      '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json', '--format', 'json',
+    ])
+
+    const mutations: Array<[string, (value: FleetRuntimeAdfReleaseReadback) => void]> = [
+      ['wrong path', value => {
+        value.root = canonicalDirtyRoot
+        value.root_realpath = canonicalDirtyRoot
+      }],
+      ['symlink root', value => { value.root_is_symlink = true }],
+      ['wrong origin', value => { value.remote = 'https://github.com/watchout/not-ai-dev-framework.git' }],
+      ['attached branch', value => { value.branch = 'main' }],
+      ['wrong head', value => { value.head = 'c'.repeat(40) }],
+      ['wrong tree', value => { value.tree = 'd'.repeat(40) }],
+      ['dirty checkout', value => { value.status_porcelain = ' M src/cli/commands/goal-runtime.ts' }],
+      ['wrong source digest', value => { value.source_sha256 = '0'.repeat(64) }],
+      ['wrong dist digest', value => { value.dist_sha256 = '0'.repeat(64) }],
+    ]
+    for (const [label, mutate] of mutations) {
+      const observed = structuredClone(exact)
+      mutate(observed)
+      const rejectedCalls: Array<{ argv: string[]; cwd?: string }> = []
+      const rejectedRunner: FleetRuntimeArgvRunner = {
+        async run(argv, options) {
+          rejectedCalls.push({ argv: [...argv], cwd: options?.cwd })
+          return { exitCode: 0, stdout: blocked, stderr: '' }
+        },
+      }
+      const rejected = new ConcreteFleetRuntimeV1LocalSystem(
+        rejectedRunner,
+        resolveRepo(),
+        Date.now,
+        async (_runner, root) => {
+          expect(root, label).toBe(FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+          return observed
+        },
+      )
+      await expectProviderCode(() => rejected.readAdfRootGoalStatus(), 'READBACK_INVALID')
+      expect(rejectedCalls, `${label} reached the goal command`).toHaveLength(0)
+      expect(rejectedCalls.some(call => call.cwd === canonicalDirtyRoot)).toBe(false)
+    }
   })
 
   test.each(['CANARY_COLD_START', 'ROLLBACK', 'RECOVERY', 'REAPPLY'] as const)(
