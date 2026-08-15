@@ -16,6 +16,7 @@ import {
 import {
   parseAllAgentCommunicationManifest,
 } from '../all-agent-communication-manifest'
+import { validateProviderEffectsZeroActivationConfig } from '../provider-effects-activation-preflight'
 
 export const STATE_DAEMON_LAUNCH_AGENT_LABEL = 'com.agent-comms.state-daemon'
 export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist`
@@ -738,6 +739,9 @@ export function validateStateDaemonLaunchAgentConfig(
   errors.push(...validateShirubeD1LaunchAgentEnv(env))
   errors.push(...validateAllAgentCommunicationManifestLaunchAgentEnv(env))
   errors.push(...validateStateDaemonCanaryOverlayEnv(env, options.now?.() ?? new Date()).issues)
+  errors.push(...validateProviderEffectsZeroActivationConfig(env, {
+    nowMs: options.now?.().getTime() ?? Date.now(),
+  }).issues)
   const allAgentManifestPath = env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH?.trim()
   if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED === '1' && allAgentManifestPath) {
     if (!probe.exists(allAgentManifestPath)) {

@@ -101,6 +101,36 @@ function shirubeD1FleetRestoreEnv(): Record<string, string> {
 }
 
 describe('#603 state-daemon LaunchAgent durable restore contract', () => {
+  test('provider-zero activation preflight is opt-in, bounded, and runs before plist replacement/bootstrap', () => {
+    const source = readFileSync(join(REPO, 'scripts', 'state-daemon-launchagent.ts'), 'utf8')
+    for (const flag of [
+      '--provider-effects-zero-preflight',
+      '--provider-effects-control-file',
+      '--provider-effects-consumer-attestation-dir',
+      '--outbound-exact-fence-json',
+    ]) {
+      expect(source).toContain(flag)
+    }
+    expect(source).toContain("ps', '-axo', 'pid=,comm=,command='")
+
+    const completionStart = source.indexOf('async function completeRestoreAfterQueueWorkCanaryResiduePreflight')
+    const completionEnd = source.indexOf('\nfunction finishRestore', completionStart)
+    const completion = source.slice(completionStart, completionEnd)
+    expect(completion.indexOf('runQueueWorkCanaryResiduePreflight')).toBeGreaterThan(-1)
+    expect(completion.indexOf('runProviderEffectsActivationPreflight')).toBeGreaterThan(
+      completion.indexOf('runQueueWorkCanaryResiduePreflight'),
+    )
+    expect(completion.indexOf('finishRestore')).toBeGreaterThan(
+      completion.indexOf('runProviderEffectsActivationPreflight'),
+    )
+
+    const restoreStart = source.indexOf('function commandRestore')
+    const restoreEnd = source.indexOf('\nasync function completeRestoreAfterQueueWorkCanaryResiduePreflight', restoreStart)
+    const restore = source.slice(restoreStart, restoreEnd)
+    expect(restore.indexOf('if (!args.execute)')).toBeLessThan(restore.indexOf('ensureCheckout(plan)'))
+    expect(restore.slice(0, restore.indexOf('if (!args.execute)'))).not.toContain('sampleProviderConsumerProcesses')
+  })
+
   test('restore plan defaults to a durable operator-owned checkout, not /private/tmp', () => {
     const plan = buildStateDaemonRestorePlan({
       commit: '316f32d6c79e4fcae9244c7f74b47b1d3d0d12f9',

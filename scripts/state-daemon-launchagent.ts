@@ -19,6 +19,14 @@ import {
   loadQueueWorkResiduePolicyFromEnv,
   type StateDaemonLaunchAgentConfig,
 } from '../core/state-daemon/launchagent'
+import {
+  PROVIDER_EFFECTS_ZERO_ALLOW_EMPTY_ENV,
+  PROVIDER_EFFECTS_ZERO_PREFLIGHT_ENV,
+  providerEffectsZeroPreflightRequested,
+  runProviderEffectsZeroActivationPreflight,
+} from '../core/provider-effects-activation-preflight'
+import { PROVIDER_EFFECTS_CONSUMER_ATTESTATION_DIR_ENV } from '../core/provider-effects-consumer-attestation'
+import { PROVIDER_EFFECTS_CONTROL_FILE_ENV } from '../core/provider-effects-control'
 
 type ParsedArgs = {
   command: 'restore' | 'preflight' | 'prune' | 'help'
@@ -181,6 +189,10 @@ Usage:
     [--queue-work-mediated-posting-command <path>]
     [--github-token-file <path>]
     [--queue-work-residue-policy-file <path>] [--execute]
+    [--provider-effects-zero-preflight
+     --provider-effects-control-file <absolute-path>
+     --provider-effects-consumer-attestation-dir <absolute-path>
+     --outbound-exact-fence-json <strict-v2-json>]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
@@ -281,6 +293,13 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = next()
     else if (arg === '--queue-work-fleet-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_MODE = '1'
     else if (arg === '--queue-work-fleet-decision-ref') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF = next()
+    else if (arg === '--provider-effects-zero-preflight') args.extraEnv[PROVIDER_EFFECTS_ZERO_PREFLIGHT_ENV] = '1'
+    else if (arg === '--provider-effects-zero-allow-empty-consumers') args.extraEnv[PROVIDER_EFFECTS_ZERO_ALLOW_EMPTY_ENV] = '1'
+    else if (arg === '--provider-effects-control-file') args.extraEnv[PROVIDER_EFFECTS_CONTROL_FILE_ENV] = next()
+    else if (arg === '--provider-effects-consumer-attestation-dir') {
+      args.extraEnv[PROVIDER_EFFECTS_CONSUMER_ATTESTATION_DIR_ENV] = next()
+    }
+    else if (arg === '--outbound-exact-fence-json') args.extraEnv.OUTBOUND_QUEUE_EXACT_FENCE = next()
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
@@ -394,6 +413,28 @@ async function runQueueWorkCanaryResiduePreflight(
   }
 }
 
+function sampleProviderConsumerProcesses(): string {
+  const proc = Bun.spawnSync(['ps', '-axo', 'pid=,comm=,command='], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (proc.exitCode !== 0) {
+    throw new Error(`provider consumer process inventory failed (${proc.exitCode}): ${proc.stderr.toString()}`)
+  }
+  return proc.stdout.toString()
+}
+
+async function runProviderEffectsActivationPreflight(config: StateDaemonLaunchAgentConfig): Promise<void> {
+  if (!providerEffectsZeroPreflightRequested(config.environmentVariables)) return
+  const result = await runProviderEffectsZeroActivationPreflight(config.environmentVariables, {
+    sampleProcesses: sampleProviderConsumerProcesses,
+    waitBetweenSamples: () => new Promise(resolve => setTimeout(resolve, 250)),
+  })
+  if (!result.ok) {
+    throw new Error(`provider-effects zero activation preflight failed:\n${JSON.stringify(result, null, 2)}`)
+  }
+}
+
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
   const requestedExtraEnv = {
@@ -464,6 +505,7 @@ async function completeRestoreAfterQueueWorkCanaryResiduePreflight(
 ): Promise<void> {
   try {
     await runQueueWorkCanaryResiduePreflight(config, plan.databaseUrl)
+    await runProviderEffectsActivationPreflight(config)
     finishRestore(plan, args, extraEnv)
   } catch (err) {
     process.stderr.write(`state-daemon-launchagent: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -481,12 +523,21 @@ function finishRestore(
   process.stdout.write(`${JSON.stringify({ ok: true, plan, extraEnv, bootstrapped: !args.noBootstrap }, null, 2)}\n`)
 }
 
-function commandPreflight(args: ParsedArgs): void {
+async function commandPreflight(args: ParsedArgs): Promise<void> {
   const plistPath = resolve(args.plist ?? `${process.env.HOME}/Library/LaunchAgents/com.agent-comms.state-daemon.plist`)
   const config = parseStateDaemonLaunchAgentPlist(readFileSync(plistPath, 'utf8'))
   const result = validateStateDaemonLaunchAgentConfig(config)
-  process.stdout.write(`${JSON.stringify({ plist: plistPath, ...result }, null, 2)}\n`)
-  if (!result.ok) process.exitCode = 1
+  let providerEffectsResult: { ok: boolean; error?: string } | null = null
+  if (result.ok && providerEffectsZeroPreflightRequested(config.environmentVariables)) {
+    try {
+      await runProviderEffectsActivationPreflight(config)
+      providerEffectsResult = { ok: true }
+    } catch (error) {
+      providerEffectsResult = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ plist: plistPath, ...result, provider_effects_zero_preflight: providerEffectsResult }, null, 2)}\n`)
+  if (!result.ok || providerEffectsResult?.ok === false) process.exitCode = 1
 }
 
 function commandPrune(args: ParsedArgs): void {
@@ -518,7 +569,7 @@ async function main(): Promise<void> {
     return
   }
   if (args.command === 'restore') commandRestore(args)
-  else if (args.command === 'preflight') commandPreflight(args)
+  else if (args.command === 'preflight') await commandPreflight(args)
   else if (args.command === 'prune') commandPrune(args)
 }
 

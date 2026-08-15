@@ -119,4 +119,25 @@ describe('fleet-mode scheduler activation', () => {
     expect(codes).toContain('queue_work_scheduler_requires_single_agent_allowlist')
     expect(codes).toContain('queue_work_scheduler_requires_canary_fence')
   })
+
+  test('provider-zero opt-in is wired into LaunchAgent validation and rejects fleet/wrong-seat activation', () => {
+    const plan = buildPlan({
+      STATE_DAEMON_PROVIDER_EFFECTS_ZERO_PREFLIGHT: '1',
+      STATE_DAEMON_QUEUE_WORK_FLEET_MODE: '1',
+      STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF: DECISION_REF,
+      STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: RESIDUE_POLICY,
+      STATE_DAEMON_AGENT_ALLOWLIST: 'adf-lead',
+    })
+    const codes = validate(plan, [RESIDUE_POLICY]).errors.map(error => error.code)
+    expect(codes).toEqual(expect.arrayContaining([
+      'provider_effects_zero_requires_valid_forbidden_control',
+      'provider_effects_zero_attestation_dir_invalid',
+      'provider_effects_zero_requires_fleet_off',
+      'provider_effects_zero_requires_aun_only',
+      'provider_effects_zero_requires_single_queue',
+      'provider_effects_zero_requires_single_message',
+      'provider_effects_zero_created_after_invalid',
+      'provider_effects_zero_outbound_fence_invalid',
+    ]))
+  })
 })
