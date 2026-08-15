@@ -188,6 +188,21 @@ export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoRec
   }
 }
 
+/**
+ * Keep the retired Shirube D1 path outside the production daemon unless it is
+ * explicitly enabled. Constructing the dispatcher while D1 is disabled still
+ * lets D1-shaped legacy rows win classification, which prevents the DB-SSOT
+ * queue-work scheduler from handling those rows.
+ */
+export function buildOptionalShirubeD1AutoReceiveDispatcher(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  invokeRuntimeV2?: RuntimeV2Invoker,
+): ShirubeD1AutoReceiveDispatcher | undefined {
+  if (env.SHIRUBE_D1_ENABLED !== '1') return undefined
+  return new RuntimeV2ShirubeD1AutoReceiveDispatcher(env, cwd, invokeRuntimeV2)
+}
+
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
 class PgClientAdapter implements DBClient {
   private chain: Promise<void> = Promise.resolve()
@@ -1028,7 +1043,7 @@ export async function main(): Promise<void> {
           async (agentId) => (await resolveRuntimeMemoryReadyProject(queryClient, agentId)).project,
         )
       : undefined,
-    shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
+    shirubeD1AutoReceive: buildOptionalShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
     githubWorkPuller: githubWorkPullerEnabled(process.env)
       ? new StateDaemonGithubWorkPuller({
         db,

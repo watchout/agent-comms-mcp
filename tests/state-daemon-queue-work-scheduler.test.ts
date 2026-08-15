@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  buildOptionalShirubeD1AutoReceiveDispatcher,
   buildQueueWorkAgentEnv,
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
@@ -28,6 +29,16 @@ import {
 
 const REPO = join(import.meta.dir, '..')
 const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
+
+test('disabled Shirube D1 is not wired into the production daemon', () => {
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({}, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '0' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: ' 1 ' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: 'true' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '1' }, REPO))
+    .toBeInstanceOf(RuntimeV2ShirubeD1AutoReceiveDispatcher)
+})
 
 function authorityFixtureResult<T>(
   sql: string,
@@ -851,6 +862,53 @@ describe('state_daemon queue work scheduler boundary', () => {
     })).toBe(1)
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+  })
+
+  test('invalid disabled D1 env leaves a D1-shaped row to the generic scheduler exactly once', async () => {
+    const agentId = 'devauditor'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 488,
+      agent_id: agentId,
+      status: 'received',
+      message_id: 'msg-d1-invalid-disabled',
+      payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-15T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new SingleRowDb(row),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived(input) { calls.push(input) },
+      },
+      shirubeD1AutoReceive: buildOptionalShirubeD1AutoReceiveDispatcher(
+        { SHIRUBE_D1_ENABLED: ' 1 ' },
+        REPO,
+      ),
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: row.id,
+        agent_id: agentId,
+        status: 'received',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: row.id, agentId }])
   })
 
   test('done generic queue events resume only the stored-result finalizer', async () => {
