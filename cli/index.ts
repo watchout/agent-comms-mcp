@@ -87,6 +87,11 @@ import {
   isDbCodeDriftError,
 } from '../core/message-queue-schema-guard'
 import {
+  FleetRuntimeObservationError,
+  canonicalFleetRuntimeObservationJson,
+  readFleetRuntimeQueueObservationV2,
+} from '../core/fleet-runtime-v1-queue-observation'
+import {
   buildLocalLaunchdInstallDryRunPlan,
   formatLocalLaunchdInstallDryRunText,
 } from '../core/local-supervisor-adapter'
@@ -6329,6 +6334,40 @@ async function leaseCommand(subcommand: string | undefined, args: string[]) {
   }
 }
 
+async function fleetRuntimeCommand(subcommand: string | undefined, args: string[]): Promise<void> {
+  if (subcommand !== 'queue-observation') {
+    console.error('Usage: agent-com fleet-runtime queue-observation [--format json]')
+    process.exitCode = 2
+    return
+  }
+  const { flags, positional } = parseArgs(args)
+  if (positional.length !== 0 || (flags.format !== undefined && flags.format !== 'json')) {
+    console.error('Usage: agent-com fleet-runtime queue-observation [--format json]')
+    process.exitCode = 2
+    return
+  }
+  if (isSqliteMode() || !process.env.DATABASE_URL) {
+    console.error('Error [QUEUE_OBSERVATION_DIALECT_MISMATCH]: exact PostgreSQL DATABASE_URL environment binding is required')
+    process.exitCode = 1
+    return
+  }
+  let db: Awaited<ReturnType<typeof getDb>> | undefined
+  try {
+    db = await getDb()
+    const adapter = getRawDbAdapter(db)
+    if (!adapter) throw new Error('database adapter unavailable')
+    const observation = await readFleetRuntimeQueueObservationV2(adapter)
+    process.stdout.write(`${canonicalFleetRuntimeObservationJson(observation)}\n`)
+  } catch (error) {
+    const code = error instanceof FleetRuntimeObservationError ? error.code : 'QUEUE_OBSERVATION_FAILED'
+    const detail = error instanceof FleetRuntimeObservationError ? error.message.slice(error.message.indexOf(':') + 1).trim() : 'observation failed closed'
+    console.error(`Error [${code}]: ${detail}`)
+    process.exitCode = 1
+  } finally {
+    await db?.end()
+  }
+}
+
 // --- Main ---
 const [, , command, subcommand, ...rest] = process.argv
 
@@ -6358,6 +6397,8 @@ if (command === 'channel') {
   await daemon([subcommand, ...rest].filter((s): s is string => typeof s === 'string'))
 } else if (command === 'lease') {
   await leaseCommand(subcommand, rest)
+} else if (command === 'fleet-runtime') {
+  await fleetRuntimeCommand(subcommand, rest)
 } else if (command === 'next') {
   await nextMessage()
 } else if (command === 'send') {
@@ -6433,6 +6474,7 @@ Commands:
   agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
   agent profile doctor [--strict] [--live-tmux] [--include-disabled] [--include-test]
+  fleet-runtime queue-observation [--format json]          — atomic PostgreSQL queue/profile/runtime observation v2
   status
 
 Message I/O (requires AGENT_ID env var):
