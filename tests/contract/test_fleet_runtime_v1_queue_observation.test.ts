@@ -354,7 +354,7 @@ describe('fleet runtime queue observation v2 semantic core', () => {
       if (initiallyActive.rows[0].active !== null) await client.query(DOWN_SQL)
       await client.query(`DELETE FROM message_queue WHERE agent_id IN ('kodama', 'queue-history-agent', 'cross-agent')`)
       await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = 'kodama'`)
-      await client.query(`DELETE FROM agents WHERE agent_id IN ('aun-runtime-executor', 'kodama', 'zero-history-agent', 'queue-history-agent', 'cross-agent', 'disabled-agent')`)
+      await client.query(`DELETE FROM agents WHERE agent_id IN ('aun-runtime-executor', 'kodama', 'zero-history-agent', 'queue-history-agent', 'cross-agent', 'disabled-agent', 'unrelated-enabled-fixture')`)
       await client.query(`
         INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, home_directory, profile_enabled, profile_revision, profile_source, disabled_at)
         VALUES
@@ -362,9 +362,28 @@ describe('fleet runtime queue observation v2 semantic core', () => {
           ('kodama', 'Kodama', 'dev', 'TUI', 'offline', '/Users/yuji/Developer/kodama', true, 1, 'legacy', NULL),
           ('zero-history-agent', 'Zero History', 'dev', 'codex', 'offline', '/tmp/zero-history', true, 1, 'legacy', NULL),
           ('cross-agent', 'Cross Agent', 'dev', 'codex', 'offline', '/tmp/cross-agent', true, 1, 'legacy', NULL),
+          ('unrelated-enabled-fixture', 'Unrelated Enabled Fixture', 'dev', 'codex', 'offline', '/tmp/unrelated-enabled-fixture', true, 1, 'legacy', NULL),
           ('disabled-agent', 'Disabled', 'dev', 'codex', 'disabled', '/tmp/disabled', false, 1, 'legacy', transaction_timestamp())
       `)
       await client.query(`INSERT INTO message_queue (agent_id, payload, status) VALUES ('queue-history-agent', '{}', 'done')`)
+      const expectedBootstrap = await client.query(`
+        SELECT agent_id, '0'::text AS revision
+          FROM (
+            SELECT agent_id
+              FROM agents
+             WHERE profile_enabled = true
+               AND disabled_at IS NULL
+               AND status <> 'disabled'
+               AND agent_id IS NOT NULL
+               AND agent_id <> ''
+            UNION
+            SELECT agent_id
+              FROM message_queue
+             WHERE agent_id IS NOT NULL
+               AND agent_id <> ''
+          ) AS expected_source
+         ORDER BY agent_id
+      `)
       const beforeDigest = await objectDigest(client)
       await client.query(UP_SQL)
       const activeDigest = await objectDigest(client)
@@ -376,13 +395,17 @@ describe('fleet runtime queue observation v2 semantic core', () => {
           FROM fleet_runtime_queue_agent_revisions
          WHERE migration_epoch = $1::bigint ORDER BY agent_id
       `, [firstEpoch])
-      expect(bootstrapped.rows).toEqual([
+      expect(bootstrapped.rows).toEqual(expectedBootstrap.rows)
+      expect(bootstrapped.rows).toEqual(expect.arrayContaining([
         { agent_id: 'aun-runtime-executor', revision: '0' },
         { agent_id: 'cross-agent', revision: '0' },
         { agent_id: 'kodama', revision: '0' },
         { agent_id: 'queue-history-agent', revision: '0' },
+        { agent_id: 'unrelated-enabled-fixture', revision: '0' },
         { agent_id: 'zero-history-agent', revision: '0' },
-      ])
+      ]))
+      expect(bootstrapped.rows).not.toContainEqual({ agent_id: 'disabled-agent', revision: '0' })
+      expect(bootstrapped.rows.every(row => row.revision === '0')).toBe(true)
       await client.query(UP_SQL)
       const markerAgain = await client.query(`SELECT migration_epoch::text AS epoch FROM fleet_runtime_queue_observation_active WHERE singleton = true`)
       expect(markerAgain.rows[0].epoch).toBe(firstEpoch)
