@@ -20,8 +20,25 @@ import {
   type FleetRuntimeQueueObservationV2,
 } from '../../core/fleet-runtime-v1-queue-observation'
 
-const TEST_DATABASE_NAME = 'agent_comms_n40_queue_observation_test'
-const TEST_DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL
+const ISOLATED_TEST_DATABASE_NAME = /^agent_comms_n40_queue_observation(?:_[a-z0-9]+)*_test$/
+
+function requireIsolatedTestDatabaseName(value: string | undefined): string {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()
+    || value === 'agent_comms' || !ISOLATED_TEST_DATABASE_NAME.test(value)) {
+    throw new Error('AGENT_COM_TEST_DATABASE_NAME must be an explicit isolated queue-observation test database name')
+  }
+  return value
+}
+
+function requireTestDatabaseUrl(value: string | undefined): string {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) {
+    throw new Error('AGENT_COM_TEST_DATABASE_URL is required alongside AGENT_COM_TEST_DATABASE_NAME')
+  }
+  return value
+}
+
+const TEST_DATABASE_NAME = requireIsolatedTestDatabaseName(process.env.AGENT_COM_TEST_DATABASE_NAME)
+const TEST_DATABASE_URL = requireTestDatabaseUrl(process.env.AGENT_COM_TEST_DATABASE_URL)
 const UP_PATH = resolve(import.meta.dir, '../../db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql')
 const DOWN_PATH = resolve(import.meta.dir, '../../db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.down.sql')
 const UP_SQL = readFileSync(UP_PATH, 'utf8')
@@ -97,7 +114,6 @@ function refreshQueueIdentity(value: FleetRuntimeQueueObservationV2): void {
 }
 
 async function connect(): Promise<Client> {
-  if (!TEST_DATABASE_URL) throw new Error('AGENT_COM_TEST_DATABASE_URL is required')
   const client = new Client({ connectionString: TEST_DATABASE_URL })
   await client.connect()
   const identity = await client.query('SELECT current_database() AS database_name')
@@ -132,6 +148,15 @@ describe('fleet runtime queue observation v2 semantic core', () => {
     expect(() => assertNoProductionDestructiveMigration(DOWN_SQL, 'postgresql:///agent_comms', {})).toThrow(
       'Destructive migration targets production database',
     )
+    expect(requireIsolatedTestDatabaseName('agent_comms_n40_queue_observation_rework_test')).toBe(
+      'agent_comms_n40_queue_observation_rework_test',
+    )
+    expect(requireIsolatedTestDatabaseName('agent_comms_n40_queue_observation_independent_audit_test')).toBe(
+      'agent_comms_n40_queue_observation_independent_audit_test',
+    )
+    for (const invalid of [undefined, '', 'agent_comms', 'postgres', 'agent_comms_n40_queue_observation_rework']) {
+      expect(() => requireIsolatedTestDatabaseName(invalid)).toThrow('explicit isolated queue-observation test database name')
+    }
   })
 
   test('exact envelope accepts only canonical nested keys, types, identities, and digests', () => {
