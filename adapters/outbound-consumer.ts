@@ -72,13 +72,20 @@ export const OUTBOUND_ORPHAN_TICK_MS = 60_000
 export const OUTBOUND_BACKOFF_MAX_MS = 30_000
 export const OUTBOUND_QUEUE_EXACT_FENCE_ENV = 'OUTBOUND_QUEUE_EXACT_FENCE'
 
-const OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA = 'agent-comms/outbound-exact-correlation-fence/v1'
+const OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V1 = 'agent-comms/outbound-exact-correlation-fence/v1'
+const OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V2 = 'agent-comms/outbound-exact-correlation-fence/v2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_FENCE_ROOT_MESSAGE_IDS = 32
 
 export type OutboundQueueExactFence =
   | { kind: 'unfenced' }
-  | { kind: 'active'; rootMessageIds: string[]; expiresAt: string }
+  | {
+      kind: 'active'
+      schemaVersion: typeof OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V1 | typeof OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V2
+      rootMessageIds: string[]
+      createdAfter: string | null
+      expiresAt: string
+    }
   | { kind: 'invalid'; reason: string }
 
 /**
@@ -106,13 +113,17 @@ export function parseOutboundQueueExactFence(
   }
 
   const value = parsed as Record<string, unknown>
-  const allowedKeys = ['expires_at', 'root_message_ids', 'schema_version']
+  const schemaVersion = value.schema_version
+  if (schemaVersion !== OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V1
+      && schemaVersion !== OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V2) {
+    return { kind: 'invalid', reason: 'unsupported_schema' }
+  }
+  const allowedKeys = schemaVersion === OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V2
+    ? ['created_after', 'expires_at', 'root_message_ids', 'schema_version']
+    : ['expires_at', 'root_message_ids', 'schema_version']
   const actualKeys = Object.keys(value).sort()
   if (actualKeys.length !== allowedKeys.length || actualKeys.some((key, index) => key !== allowedKeys[index])) {
     return { kind: 'invalid', reason: 'unexpected_or_missing_fields' }
-  }
-  if (value.schema_version !== OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA) {
-    return { kind: 'invalid', reason: 'unsupported_schema' }
   }
   if (!Array.isArray(value.root_message_ids)
       || value.root_message_ids.length === 0
@@ -139,26 +150,52 @@ export function parseOutboundQueueExactFence(
   if (!Number.isFinite(expiresAtMs)) return { kind: 'invalid', reason: 'invalid_expires_at' }
   if (expiresAtMs <= nowMs) return { kind: 'invalid', reason: 'expired_fence' }
 
-  return { kind: 'active', rootMessageIds, expiresAt: value.expires_at }
+  let createdAfter: string | null = null
+  if (schemaVersion === OUTBOUND_QUEUE_EXACT_FENCE_SCHEMA_V2) {
+    if (typeof value.created_after !== 'string' || !/(?:Z|[+-]\d{2}:\d{2})$/.test(value.created_after)) {
+      return { kind: 'invalid', reason: 'invalid_created_after' }
+    }
+    const createdAfterMs = Date.parse(value.created_after)
+    if (!Number.isFinite(createdAfterMs) || createdAfterMs >= expiresAtMs) {
+      return { kind: 'invalid', reason: 'invalid_created_after' }
+    }
+    createdAfter = value.created_after
+  }
+
+  return {
+    kind: 'active',
+    schemaVersion,
+    rootMessageIds,
+    createdAfter,
+    expiresAt: value.expires_at,
+  }
 }
 
 function readOutboundQueueExactFence(): OutboundQueueExactFence {
   return parseOutboundQueueExactFence(process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV])
 }
 
-function correlationFenceSql(fence: OutboundQueueExactFence, parameter: number): string {
+function correlationFenceSql(
+  fence: OutboundQueueExactFence,
+  rootMessageIdsParameter: number,
+  createdAfterParameter = rootMessageIdsParameter + 1,
+): string {
   if (fence.kind !== 'active') return ''
   return `
           AND (
-            outbound_queue.message_id = ANY($${parameter}::text[])
+            outbound_queue.message_id = ANY($${rootMessageIdsParameter}::text[])
             OR EXISTS (
               SELECT 1
                 FROM agent_messages AS correlated_message
                WHERE correlated_message.id::text = outbound_queue.message_id
-                 AND correlated_message.reply_to::text = ANY($${parameter}::text[])
+                 AND correlated_message.reply_to::text = ANY($${rootMessageIdsParameter}::text[])
                  AND correlated_message.author_id = $1
             )
           )`
+          + (fence.createdAfter
+            ? `
+          AND outbound_queue.created_at >= $${createdAfterParameter}::timestamptz`
+            : '')
 }
 
 function logInvalidExactFence(operation: string, fence: Extract<OutboundQueueExactFence, { kind: 'invalid' }>): void {
@@ -419,7 +456,7 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
     if (!client) return
     const fenceSql = correlationFenceSql(fence, 2)
     const claimParams = fence.kind === 'active'
-      ? [AGENT_ID, fence.rootMessageIds]
+      ? [AGENT_ID, fence.rootMessageIds, ...(fence.createdAfter ? [fence.createdAfter] : [])]
       : [AGENT_ID]
 
     // §3.3 Atomic claim: flip status 'pending' → 'claimed' + set claimed_at
@@ -631,7 +668,7 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
   const timeoutSec = Math.max(30, parseInt(process.env.OUTBOUND_ORPHAN_TIMEOUT_SEC ?? '600', 10) || 600)
   const fenceSql = correlationFenceSql(fence, 3)
   const reclaimParams = fence.kind === 'active'
-    ? [AGENT_ID, timeoutSec, fence.rootMessageIds]
+    ? [AGENT_ID, timeoutSec, fence.rootMessageIds, ...(fence.createdAfter ? [fence.createdAfter] : [])]
     : [AGENT_ID, timeoutSec]
   try {
     // Stage A: rows under the attempts cap return to 'pending'.

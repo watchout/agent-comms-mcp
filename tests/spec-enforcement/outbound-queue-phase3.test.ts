@@ -227,6 +227,18 @@ describe('T2b — exact outbound correlation fence', () => {
     })
   }
 
+  function activeFenceV2(
+    createdAfter = '2026-08-12T00:00:00.000Z',
+    rootMessageIds = [ROOT_MESSAGE_ID],
+  ): string {
+    return JSON.stringify({
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v2',
+      root_message_ids: rootMessageIds,
+      created_after: createdAfter,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  }
+
   function installRecordingDb(calls: QueryCall[]): void {
     setDbGetter(async () => ({
       query: async (sql: string, params?: any[]) => {
@@ -289,6 +301,47 @@ describe('T2b — exact outbound correlation fence', () => {
       expect(call.params?.[0]).toBe('aun')
       expect(call.params?.[2]).toEqual([ROOT_MESSAGE_ID])
     }
+  })
+
+  test('v2 fence also excludes every outbound row older than created_after', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    const createdAfter = new Date(Date.now() - 1_000).toISOString()
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFenceV2(createdAfter)
+
+    await consumeOneOutboundRow()
+    await reclaimOrphanOutboundRows()
+
+    expect(calls).toHaveLength(3)
+    expect(calls[0].sql).toContain('outbound_queue.created_at >= $3::timestamptz')
+    expect(calls[0].params).toEqual(['aun', [ROOT_MESSAGE_ID], createdAfter])
+    for (const call of calls.slice(1)) {
+      expect(call.sql).toContain('outbound_queue.created_at >= $4::timestamptz')
+      expect(call.params?.[2]).toEqual([ROOT_MESSAGE_ID])
+      expect(call.params?.[3]).toBe(createdAfter)
+    }
+  })
+
+  test('v2 fence fails closed when created_after is missing, malformed, or not before expiry', () => {
+    const fixedNow = Date.parse('2026-08-12T00:00:00.000Z')
+    const expiry = '2026-08-12T00:01:00.000Z'
+    const base = {
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v2',
+      root_message_ids: [ROOT_MESSAGE_ID],
+      expires_at: expiry,
+    }
+    const cases = [
+      base,
+      { ...base, created_after: 'not-a-date' },
+      { ...base, created_after: expiry },
+      { ...base, created_after: '2026-08-12T00:02:00.000Z' },
+    ]
+    expect(cases.map((value) => parseOutboundQueueExactFence(JSON.stringify(value), fixedNow))).toEqual([
+      { kind: 'invalid', reason: 'unexpected_or_missing_fields' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+    ])
   })
 
   test('invalid, missing-field, expired, and duplicate fence values fail closed before DB access', async () => {
