@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from 'node:path'
 import type { FleetRuntimeRequest } from '../core/fleet-runtime-v1-adapter'
 import {
   ConcreteFleetRuntimeV1LocalSystem,
+  FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
   FleetRuntimeLocalProviderError,
   executeLocalFleetRuntimeV1,
 } from '../core/fleet-runtime-v1-local-provider'
@@ -78,9 +79,13 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     if (args.format !== 'json') throw new Error('--format json is required')
     const requestPath = absoluteNormalized(args.requestPath, '--request')
     const stateDirectory = absoluteNormalized(args.stateDirectory, '--state-dir')
+    if (args.executeProtectedEffects && stateDirectory !== FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT) {
+      throw new FleetRuntimeLocalProviderError('STATE_DIRECTORY_INVALID', `protected execution requires ${FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT}`)
+    }
     const result = await executeLocalFleetRuntimeV1({
       request: readRequest(requestPath),
       stateDirectory,
+      approvedStateRoot: FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
       executeProtectedEffects: args.executeProtectedEffects,
       system: new ConcreteFleetRuntimeV1LocalSystem(),
     })

@@ -1,20 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
-  statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { hostname } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   FLEET_RUNTIME_V1_CONTRACT,
+  FLEET_RUNTIME_V1_TARGETS,
   FleetRuntimeV1Error,
   canonicalFleetRuntimeJson,
   computeFleetRuntimeReceiptDigest,
@@ -45,16 +49,21 @@ export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   payload_path_count: 24,
 })
 
+export const FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT = '/Users/yuji/Library/Application Support/agent-comms-mcp/fleet-runtime-v1'
+
 const STATE_SCHEMA = 'fleet-runtime-v1/local-operation-state/v1' as const
 const INVOCATION_KEY = /^frv1:N40:[a-f0-9]{64}$/
 const SHA256 = /^sha256:[a-f0-9]{64}$/
 const COMMIT = /^[a-f0-9]{40}$/
+const ACTIVE_LOCAL_INVOCATIONS = new Set<string>()
+const PROCESS_EXECUTION_OWNER_ID = `${hostname()}:${process.pid}:${randomUUID()}`
 
 export type FleetRuntimeLocalProviderErrorCode =
   | 'PROTECTED_EFFECTS_DISABLED'
   | 'STATE_DIRECTORY_INVALID'
   | 'STATE_RECORD_INVALID'
   | 'STATE_COLLISION'
+  | 'IN_FLIGHT'
   | 'EXECUTOR_BINDING_MISMATCH'
   | 'TARGET_NOT_ADMITTED'
   | 'COMMAND_FAILED'
@@ -116,27 +125,55 @@ function findAgentRecord(value: unknown, agentId: string): Record<string, unknow
   return null
 }
 
-function assertAbsoluteDirectoryInput(path: string): string {
-  if (!isAbsolute(path) || path !== resolve(path)) {
-    return providerFail('STATE_DIRECTORY_INVALID', 'state-dir must be an absolute normalized path')
-  }
-  if (existsSync(path)) {
-    const metadata = lstatSync(path)
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      return providerFail('STATE_DIRECTORY_INVALID', 'state-dir must be a real directory, never a symlink')
+function assertNoSymlinkComponents(path: string): void {
+  const normalized = resolve(path)
+  const parts = normalized.split(sep).filter(Boolean)
+  let cursor = sep
+  for (const part of parts) {
+    cursor = join(cursor, part)
+    if (!existsSync(cursor)) continue
+    if (lstatSync(cursor).isSymbolicLink()) {
+      return providerFail('STATE_DIRECTORY_INVALID', `symlink component is forbidden: ${cursor}`)
     }
-    return realpathSync(path)
   }
-  let existingParent = dirname(path)
-  while (!existsSync(existingParent)) existingParent = dirname(existingParent)
-  const suffix = relative(existingParent, path)
-  return resolve(realpathSync(existingParent), suffix)
+}
+
+function assertApprovedRoot(stateDirectory: string, approvedRoot: string): string {
+  if (!isAbsolute(stateDirectory) || stateDirectory !== resolve(stateDirectory)
+    || !isAbsolute(approvedRoot) || approvedRoot !== resolve(approvedRoot)
+    || stateDirectory !== approvedRoot) {
+    return providerFail('STATE_DIRECTORY_INVALID', 'state-dir must equal the exact approved absolute root')
+  }
+  assertNoSymlinkComponents(approvedRoot)
+  if (existsSync(approvedRoot) && (!lstatSync(approvedRoot).isDirectory() || realpathSync(approvedRoot) !== approvedRoot)) {
+    return providerFail('STATE_DIRECTORY_INVALID', 'approved state root must be a real directory')
+  }
+  return approvedRoot
 }
 
 function ensureContained(root: string, candidate: string): string {
   const rel = relative(root, candidate)
   if (rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))) return candidate
   return providerFail('STATE_DIRECTORY_INVALID', 'provider path escaped the state directory')
+}
+
+
+function assertSafeStatePath(root: string, candidate: string, allowRoot = false): string {
+  const normalizedRoot = resolve(root)
+  const normalized = resolve(candidate)
+  if (!allowRoot && normalized === normalizedRoot) {
+    return providerFail('STATE_DIRECTORY_INVALID', 'operation path must be a strict state-root descendant')
+  }
+  ensureContained(normalizedRoot, normalized)
+  assertNoSymlinkComponents(normalizedRoot)
+  assertNoSymlinkComponents(normalized)
+  return normalized
+}
+
+function safeMkdir(root: string, path: string): void {
+  assertSafeStatePath(root, path, path === root)
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  assertSafeStatePath(root, path, path === root)
 }
 
 export function validateFleetRuntimeCheckoutReadback(input: {
@@ -156,13 +193,271 @@ export function validateFleetRuntimeCheckoutReadback(input: {
     return providerFail('UNSAFE_CHECKOUT', 'canonical checkout is never an execution checkout')
   }
   ensureContained(root, checkout)
-  if (!/(^|[:/@])watchout\/kodama(?:\.git)?$/.test(input.remote)
+  assertNoSymlinkComponents(root)
+  assertNoSymlinkComponents(checkout)
+  const admittedRemotes = new Set([
+    'https://github.com/watchout/kodama.git',
+    'git@github.com:watchout/kodama.git',
+  ])
+  if (!admittedRemotes.has(input.remote)
     || !COMMIT.test(input.head)
     || !COMMIT.test(input.tree)
     || input.status_porcelain !== ''
     || (input.expected_head !== undefined && input.head !== input.expected_head)
     || (input.expected_tree !== undefined && input.tree !== input.expected_tree)) {
     return providerFail('UNSAFE_CHECKOUT', 'checkout repository, head, tree, or cleanliness differs')
+  }
+}
+
+function exactCounter(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    return providerFail('READBACK_INVALID', `${label} must be an explicit nonnegative integer`)
+  }
+  return value
+}
+
+export function parseFleetRuntimeQueueStatus(
+  report: unknown,
+  observedNowMs: number,
+  maxAgeMs = 5 * 60_000,
+): FleetRuntimeRequest['queue_precheck'] {
+  assertPlainRecord(report, 'agent-com status')
+  if (typeof report.observed_at !== 'string') return providerFail('READBACK_INVALID', 'official status omitted observed_at')
+  const observedAtMs = Date.parse(report.observed_at)
+  if (!Number.isFinite(observedAtMs) || observedAtMs > observedNowMs + 30_000 || observedNowMs - observedAtMs > maxAgeMs) {
+    return providerFail('READBACK_INVALID', 'official queue observed_at is invalid or stale')
+  }
+  const agents = Array.isArray(report.agents) ? report.agents : Array.isArray(report.rows) ? report.rows : null
+  if (!agents) return providerFail('READBACK_INVALID', 'official status omitted agents')
+  const kodama = agents.find(candidate => candidate !== null && typeof candidate === 'object'
+    && (candidate as Record<string, unknown>).agent_id === 'kodama')
+  if (!kodama) return providerFail('READBACK_INVALID', 'official status omitted kodama')
+  const agent = kodama as Record<string, unknown>
+  const queue = agent.queue !== null && typeof agent.queue === 'object' && !Array.isArray(agent.queue)
+    ? agent.queue as Record<string, unknown> : agent
+  const counted = ['pending_count', 'received_count', 'in_progress_count'].every(key => Object.hasOwn(queue, key))
+  const official = ['pending', 'received', 'in_progress'].every(key => Object.hasOwn(queue, key))
+  if (counted === official) return providerFail('READBACK_INVALID', 'queue counters must use exactly one complete official field set')
+  const pending = exactCounter(queue[counted ? 'pending_count' : 'pending'], counted ? 'pending_count' : 'pending')
+  const received = exactCounter(queue[counted ? 'received_count' : 'received'], counted ? 'received_count' : 'received')
+  const inProgress = exactCounter(queue[counted ? 'in_progress_count' : 'in_progress'], counted ? 'in_progress_count' : 'in_progress')
+  const material = { observed_at: report.observed_at, agent_id: 'kodama', pending, received, in_progress: inProgress }
+  return {
+    source_receipt_sha256: sha256(canonicalFleetRuntimeJson(material)),
+    observed_at: report.observed_at,
+    entries: [{ repository: 'watchout/kodama', agent_id: 'kodama', pending_count: pending, active_count: received + inProgress }],
+  }
+}
+
+export function assertExactFleetRuntimePathSet(expected: readonly string[], actual: readonly string[], label: string): void {
+  if (expected.length !== 24 || actual.length !== expected.length
+    || new Set(expected).size !== expected.length || new Set(actual).size !== actual.length
+    || expected.some((path, index) => path !== actual[index])) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} differs from the exact ordered 24-path manifest`)
+  }
+}
+
+export function validateFleetRuntimeExternalMergeBinding(input: {
+  request: FleetRuntimeRequest
+  receipt: Record<string, unknown>
+  pr: Record<string, unknown>
+  createdPrUrl: string
+  pushedHead: string
+  observedMergeTree: string
+}): void {
+  const mergeCommit = input.pr.mergeCommit as Record<string, unknown> | null
+  if (input.receipt.repository !== 'watchout/kodama'
+    || input.receipt.base !== input.request.preimages[0].required_base_branch
+    || input.receipt.operation !== input.request.operation
+    || input.receipt.request_digest !== input.request.request_digest
+    || input.receipt.pr_url !== input.createdPrUrl
+    || input.pr.url !== input.createdPrUrl
+    || input.pr.headRefOid !== input.pushedHead
+    || input.pr.state !== 'MERGED' || input.pr.mergedAt === null
+    || input.pr.baseRefName !== input.request.preimages[0].required_base_branch
+    || mergeCommit?.oid !== input.receipt.merge_commit
+    || input.receipt.merge_tree !== input.observedMergeTree) {
+    return providerFail('READBACK_INVALID', 'external merge is not bound to the created PR and exact pushed head')
+  }
+}
+
+function yamlTopScalar(body: string, key: string): string {
+  const matches = [...body.matchAll(new RegExp(`^${key}:\\s*([^\\n]+)$`, 'gm'))]
+  if (matches.length !== 1) return providerFail('READBACK_INVALID', `immutable body requires exactly one ${key}`)
+  return matches[0][1].trim()
+}
+
+function yamlSection(body: string, key: string): string {
+  const lines = body.split('\n')
+  const start = lines.findIndex(line => line === `${key}:`)
+  if (start < 0 || lines.filter(line => line === `${key}:`).length !== 1) {
+    return providerFail('READBACK_INVALID', `immutable body requires exactly one ${key} section`)
+  }
+  let end = start + 1
+  while (end < lines.length && (lines[end].startsWith(' ') || lines[end].trim() === '')) end += 1
+  return lines.slice(start + 1, end).join('\n')
+}
+
+function yamlIndentedScalar(section: string, key: string): string {
+  const matches = [...section.matchAll(new RegExp(`^  ${key}:\\s*([^\\n]+)$`, 'gm'))]
+  if (matches.length !== 1) return providerFail('READBACK_INVALID', `immutable section requires exactly one ${key}`)
+  return matches[0][1].trim()
+}
+
+function yamlNestedSection(section: string, key: string, indent = 2): string {
+  const prefix = ' '.repeat(indent)
+  const lines = section.split('\n')
+  const start = lines.findIndex(line => line === `${prefix}${key}:`)
+  if (start < 0 || lines.filter(line => line === `${prefix}${key}:`).length !== 1) {
+    return providerFail('READBACK_INVALID', `immutable section requires exactly one ${key} subsection`)
+  }
+  let end = start + 1
+  while (end < lines.length && (lines[end].startsWith(`${prefix}  `) || lines[end].trim() === '')) end += 1
+  return lines.slice(start + 1, end).map(line => line.slice(indent)).join('\n')
+}
+
+function yamlList(section: string, key: string): string[] {
+  const nested = yamlNestedSection(section, key)
+  const values = nested.split('\n').filter(line => line.startsWith('  - ')).map(line => line.slice(4).trim())
+  if (values.length === 0 || nested.split('\n').some(line => line.trim() && !line.startsWith('  - '))) {
+    return providerFail('READBACK_INVALID', `${key} must be an explicit list`)
+  }
+  return values
+}
+
+function yamlInlineList(value: string, label: string): string[] {
+  if (!/^\[[^\[\]]*\]$/.test(value)) return providerFail('READBACK_INVALID', `${label} must be an inline list`)
+  return value.slice(1, -1).split(',').map(item => item.trim()).filter(Boolean)
+}
+
+function parseOwnerStageMatrix(body: string): FleetRuntimeRequest['owner_decision']['stage_authority_matrix'] {
+  const section = yamlSection(body, 'stage_authority_matrix')
+  const chunks = section.split(/(?=^  - stage_id: )/m).filter(chunk => chunk.trim())
+  if (chunks.length !== 4) return providerFail('READBACK_INVALID', 'owner stage matrix must contain exactly four entries')
+  return chunks.map(chunk => {
+    const stage = chunk.match(/^  - stage_id:\s*(\S+)$/m)?.[1]
+    const scalar = (key: string) => chunk.match(new RegExp(`^    ${key}:\\s*(\\S.*)$`, 'm'))?.[1]
+    const actor = scalar('actor_agent_id')
+    const activeFunction = scalar('active_function')
+    const operations = scalar('allowed_operations')
+    const targets = scalar('target_repositories')
+    if (!stage || !actor || !activeFunction || !operations || !targets) {
+      return providerFail('READBACK_INVALID', 'owner stage matrix entry is incomplete')
+    }
+    return {
+      stage_id: stage,
+      actor_agent_id: actor,
+      active_function: activeFunction,
+      allowed_operations: yamlInlineList(operations, 'allowed_operations') as FleetRuntimeOperation[],
+      target_repositories: yamlInlineList(targets, 'target_repositories'),
+    }
+  })
+}
+
+export function validateFleetRuntimeLocalReceipt(
+  raw: string | Record<string, unknown>,
+  expected: {
+    subjectDigest: string
+    operation: FleetRuntimeOperation
+    target: string
+    receiptSha256?: string
+    predecessorSha256?: string
+  },
+): Record<string, unknown> {
+  const receipt = typeof raw === 'string' ? parseJson<Record<string, unknown>>(raw, 'local receipt') : clone(raw)
+  assertPlainRecord(receipt, 'local receipt')
+  const expectedSchema = expected.operation === 'ROLLBACK'
+    ? 'fleet-runtime-v1/rollback-receipt/v1'
+    : expected.operation === 'REAPPLY'
+      ? 'fleet-runtime-v1/reapply-receipt/v1'
+      : 'fleet-runtime-v1/effect-receipt/v1'
+  const perTarget = receipt.per_target
+  const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] : null
+  assertPlainRecord(target, 'local receipt target')
+  const postimage = target.postimage
+  assertPlainRecord(postimage, 'local receipt postimage')
+  if (receipt.schema_version !== expectedSchema || receipt.operation !== expected.operation
+    || receipt.stage_id !== 'N40-P4-CANARY-VERIFY' || receipt.result !== 'PASS'
+    || receipt.subject_digest !== expected.subjectDigest || receipt.target_repository !== expected.target
+    || target.repository !== expected.target || !SHA256.test(String(receipt.request_digest ?? ''))
+    || !INVOCATION_KEY.test(String(receipt.idempotency_key ?? ''))
+    || typeof postimage.runtime_instance_id !== 'string' || postimage.runtime_instance_id.length === 0
+    || !COMMIT.test(String(postimage.head_commit ?? '')) || !COMMIT.test(String(postimage.tree ?? ''))
+    || (expected.predecessorSha256 !== undefined && receipt.predecessor_receipt_sha256 !== expected.predecessorSha256)) {
+    return providerFail('READBACK_INVALID', 'local receipt schema, subject, operation, target, predecessor, or postimage differs')
+  }
+  const selfDigest = computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)
+  if (receipt.receipt_sha256 !== selfDigest) return providerFail('READBACK_INVALID', 'local receipt self-digest differs')
+  if (expected.operation === 'ROLLBACK' && receipt.forward_effect_receipt_sha256 !== receipt.predecessor_receipt_sha256) {
+    return providerFail('READBACK_INVALID', 'rollback receipt does not bind its forward effect predecessor')
+  }
+  if (expected.operation === 'REAPPLY'
+    && (!SHA256.test(String(receipt.rollback_receipt_sha256 ?? ''))
+      || receipt.recovery_receipt_sha256 !== receipt.predecessor_receipt_sha256)) {
+    return providerFail('READBACK_INVALID', 'reapply receipt does not bind rollback and recovery predecessors')
+  }
+  return receipt
+}
+
+export function validateFleetRuntimeImmutableSemantics(
+  request: FleetRuntimeRequest,
+  ownerBody: string,
+  predecessorBody: string,
+): void {
+  const ownerSubject = yamlSection(ownerBody, 'subject')
+  const canary = yamlSection(ownerBody, 'canary_selection')
+  const release = yamlNestedSection(ownerSubject, 'release')
+  const targetSet = yamlNestedSection(ownerSubject, 'target_set')
+  const rollback = yamlSection(ownerBody, 'rollback_preimage')
+  const rollbackRepository = yamlNestedSection(rollback, 'repository_preimage')
+  if (yamlTopScalar(ownerBody, 'schema_version') !== 'shirube-v3/owner_decision/v1'
+    || yamlTopScalar(ownerBody, 'decision') !== 'GO' || yamlTopScalar(ownerBody, 'result') !== request.owner_decision.result
+    || yamlTopScalar(ownerBody, 'actor_identity') !== request.owner_decision.actor
+    || yamlIndentedScalar(ownerSubject, 'graph_digest') !== request.subject.graph_digest
+    || yamlIndentedScalar(ownerSubject, 'graph_generation') !== String(request.subject.graph_generation)
+    || yamlIndentedScalar(ownerSubject, 'node_id') !== request.owner_decision.node_id
+    || yamlIndentedScalar(ownerSubject, 'lease_epoch') !== request.subject.lease_epoch
+    || yamlIndentedScalar(release, 'repository') !== request.subject.release_repository
+    || yamlIndentedScalar(release, 'tag') !== request.subject.release_tag
+    || yamlIndentedScalar(release, 'commit') !== request.subject.release_commit
+    || yamlIndentedScalar(release, 'tree') !== request.subject.release_tree
+    || yamlIndentedScalar(release, 'manifest_self_digest') !== request.subject.release_manifest_digest
+    || canonicalFleetRuntimeJson(yamlList(targetSet, 'ordered')) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_TARGETS)
+    || yamlIndentedScalar(targetSet, 'canonical_digest') !== request.subject.target_set_digest
+    || yamlIndentedScalar(targetSet, 'payload_digest') !== request.subject.payload_digest
+    || yamlIndentedScalar(canary, 'target') !== request.owner_decision.canary_target
+    || yamlIndentedScalar(canary, 'explicit_owner_selection') !== 'true'
+    || yamlIndentedScalar(canary, 'target_count') !== '1'
+    || yamlIndentedScalar(rollback, 'target_repository') !== 'watchout/kodama'
+    || yamlIndentedScalar(rollbackRepository, 'required_base_branch') !== request.preimages[0].required_base_branch
+    || yamlIndentedScalar(rollbackRepository, 'head_commit') !== request.preimages[0].head_commit
+    || yamlIndentedScalar(rollbackRepository, 'tree') !== request.preimages[0].tree
+    || yamlIndentedScalar(rollbackRepository, 'runtime_surface_sha256') !== request.preimages[0].runtime_surface_sha256
+    || yamlIndentedScalar(rollbackRepository, 'distribution_surface_sha256') !== request.preimages[0].distribution_surface_sha256
+    || canonicalFleetRuntimeJson(parseOwnerStageMatrix(ownerBody)) !== canonicalFleetRuntimeJson(request.owner_decision.stage_authority_matrix)) {
+    return providerFail('READBACK_INVALID', 'owner body semantics differ from the sealed request')
+  }
+  if (request.operation !== 'CANARY_COLD_START') {
+    validateFleetRuntimeLocalReceipt(predecessorBody, {
+      subjectDigest: request.predecessor_receipt.subject_digest,
+      operation: request.predecessor_receipt.operation!,
+      target: 'watchout/kodama',
+    })
+    return
+  }
+  const exact = yamlSection(predecessorBody, 'exact_subject')
+  if (yamlTopScalar(predecessorBody, 'schema_version') !== 'shirube-v3/node-result/v1'
+    || yamlTopScalar(predecessorBody, 'node_id') !== request.predecessor_receipt.node_id
+    || yamlTopScalar(predecessorBody, 'result') !== request.predecessor_receipt.result
+    || yamlTopScalar(predecessorBody, 'verdict') !== 'PASS_EXACT_SUBJECT'
+    || yamlIndentedScalar(exact, 'graph_digest') !== request.subject.graph_digest.replace(/^sha256:/, '')
+    || yamlIndentedScalar(exact, 'release_tag') !== request.subject.release_tag
+    || yamlIndentedScalar(exact, 'release_commit') !== request.subject.release_commit
+    || yamlIndentedScalar(exact, 'release_tree') !== request.subject.release_tree
+    || yamlIndentedScalar(exact, 'release_manifest_digest') !== request.subject.release_manifest_digest.replace(/^sha256:/, '')
+    || yamlIndentedScalar(exact, 'target_set_digest') !== request.subject.target_set_digest.replace(/^sha256:/, '')
+    || yamlIndentedScalar(exact, 'payload_digest') !== request.subject.payload_digest.replace(/^sha256:/, '')) {
+    return providerFail('READBACK_INVALID', 'predecessor body semantics differ from the exact subject')
   }
 }
 
@@ -175,9 +470,10 @@ function syncDirectory(path: string): void {
   }
 }
 
-function atomicWrite(path: string, value: unknown, exclusive = false): void {
+function atomicWrite(root: string, path: string, value: unknown, exclusive = false): void {
+  assertSafeStatePath(root, path)
   const parent = dirname(path)
-  mkdirSync(parent, { recursive: true, mode: 0o700 })
+  safeMkdir(root, parent)
   const body = `${canonicalFleetRuntimeJson(value)}\n`
   if (exclusive) {
     const fd = openSync(path, 'wx', 0o600)
@@ -188,6 +484,7 @@ function atomicWrite(path: string, value: unknown, exclusive = false): void {
       closeSync(fd)
     }
     syncDirectory(parent)
+    assertSafeStatePath(root, path)
     return
   }
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
@@ -200,9 +497,11 @@ function atomicWrite(path: string, value: unknown, exclusive = false): void {
   }
   renameSync(temporary, path)
   syncDirectory(parent)
+  assertSafeStatePath(root, path)
 }
 
-function readState<T>(path: string, label: string): T {
+function readState<T>(root: string, path: string, label: string): T {
+  assertSafeStatePath(root, path)
   if (lstatSync(path).isSymbolicLink()) return providerFail('STATE_RECORD_INVALID', `${label} cannot be a symlink`)
   return parseJson<T>(readFileSync(path, 'utf8'), label)
 }
@@ -216,19 +515,73 @@ function assertInvocationStateShape(state: FleetRuntimeInvocationState): void {
     || (state.status === 'completed' && state.receipt === null)) {
     return providerFail('STATE_RECORD_INVALID', 'invocation state has an invalid shape')
   }
+  const owned = state as OwnedFleetRuntimeInvocationState
+  if (owned.execution_owner !== undefined) {
+    const owner = owned.execution_owner
+    if (owner === null || typeof owner !== 'object' || typeof owner.owner_id !== 'string' || owner.owner_id.length === 0
+      || typeof owner.host !== 'string' || owner.host.length === 0 || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || !Number.isFinite(Date.parse(owner.acquired_at)) || !Number.isFinite(Date.parse(owner.heartbeat_at))) {
+      return providerFail('STATE_RECORD_INVALID', 'invocation execution owner has an invalid shape')
+    }
+  }
+}
+
+export interface FleetRuntimeExecutionOwner {
+  owner_id: string
+  host: string
+  pid: number
+  acquired_at: string
+  heartbeat_at: string
+}
+
+interface OwnedFleetRuntimeInvocationState extends FleetRuntimeInvocationState {
+  execution_owner?: FleetRuntimeExecutionOwner
+}
+
+export interface FleetRuntimePersistenceOptions {
+  approvedRoot?: string
+  ownerId?: string
+  host?: string
+  pid?: number
+  nowMs?: () => number
+  staleAfterMs?: number
+  ownerAlive?: (owner: FleetRuntimeExecutionOwner) => boolean
 }
 
 /** Durable adapter persistence. It performs no filesystem mutation until reserve_once. */
 export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePort {
   readonly root: string
+  readonly owner: FleetRuntimeExecutionOwner
+  private readonly nowMs: () => number
+  private readonly ownerAlive: (owner: FleetRuntimeExecutionOwner) => boolean
+  private readonly staleAfterMs: number
 
-  constructor(stateDirectory: string) {
-    this.root = assertAbsoluteDirectoryInput(stateDirectory)
+  constructor(stateDirectory: string, options: FleetRuntimePersistenceOptions = {}) {
+    this.root = assertApprovedRoot(stateDirectory, options.approvedRoot ?? FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT)
+    this.nowMs = options.nowMs ?? Date.now
+    this.staleAfterMs = options.staleAfterMs ?? 60_000
+    const ownerId = options.ownerId ?? PROCESS_EXECUTION_OWNER_ID
+    this.owner = {
+      owner_id: ownerId,
+      host: options.host ?? hostname(),
+      pid: options.pid ?? process.pid,
+      acquired_at: new Date(this.nowMs()).toISOString(),
+      heartbeat_at: new Date(this.nowMs()).toISOString(),
+    }
+    this.ownerAlive = options.ownerAlive ?? (owner => {
+      if (owner.host !== hostname()) return true
+      try {
+        process.kill(owner.pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    })
   }
 
   invocationDirectory(key: string): string {
     if (!INVOCATION_KEY.test(key)) return providerFail('STATE_RECORD_INVALID', 'invalid N40 idempotency key')
-    return ensureContained(this.root, join(this.root, 'invocations', key))
+    return assertSafeStatePath(this.root, join(this.root, 'invocations', key))
   }
 
   private reservationPath(key: string): string {
@@ -244,7 +597,7 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     const reserved = this.reservationPath(key)
     const path = existsSync(completed) ? completed : existsSync(reserved) ? reserved : null
     if (!path) return null
-    const state = readState<FleetRuntimeInvocationState>(path, 'invocation state')
+    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'invocation state')
     assertInvocationStateShape(state)
     return clone(state)
   }
@@ -252,13 +605,13 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
   async reserve_once(state: FleetRuntimeInvocationState): Promise<{ acquired: boolean; state: FleetRuntimeInvocationState }> {
     assertInvocationStateShape(state)
     if (state.status !== 'reserved') return providerFail('STATE_RECORD_INVALID', 'reservation must use reserved state')
-    assertAbsoluteDirectoryInput(this.root)
-    mkdirSync(this.root, { recursive: true, mode: 0o700 })
-    if (realpathSync(this.root) !== this.root) return providerFail('STATE_DIRECTORY_INVALID', 'state-dir became a symlink')
-    mkdirSync(this.invocationDirectory(state.idempotency_key), { recursive: true, mode: 0o700 })
+    assertApprovedRoot(this.root, this.root)
+    safeMkdir(this.root, this.root)
+    safeMkdir(this.root, this.invocationDirectory(state.idempotency_key))
+    const owned: OwnedFleetRuntimeInvocationState = { ...state, execution_owner: clone(this.owner) }
     try {
-      atomicWrite(this.reservationPath(state.idempotency_key), state, true)
-      return { acquired: true, state: clone(state) }
+      atomicWrite(this.root, this.reservationPath(state.idempotency_key), owned, true)
+      return { acquired: true, state: clone(owned) }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       const existing = await this.load(state.idempotency_key)
@@ -266,8 +619,64 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
       if (existing.request_digest !== state.request_digest) {
         return providerFail('STATE_COLLISION', 'same idempotency key is bound to another request')
       }
-      return { acquired: false, state: existing }
+      if (existing.status === 'completed') return { acquired: false, state: existing }
+      const current = existing as OwnedFleetRuntimeInvocationState
+      if (!current.execution_owner) return providerFail('STATE_RECORD_INVALID', 'reserved invocation lacks durable owner')
+      if (current.execution_owner.owner_id === this.owner.owner_id) {
+        await this.heartbeatOwner(state.idempotency_key)
+        return { acquired: true, state: existing }
+      }
+      if (this.ownerAlive(current.execution_owner)) {
+        return providerFail('IN_FLIGHT', `request is owned by live executor ${current.execution_owner.owner_id}`)
+      }
+      const heartbeat = Date.parse(current.execution_owner.heartbeat_at)
+      if (!Number.isFinite(heartbeat) || this.nowMs() - heartbeat < this.staleAfterMs) {
+        return providerFail('IN_FLIGHT', 'dead execution owner is not yet stale')
+      }
+      return this.takeover(state, current)
     }
+  }
+
+  private async takeover(
+    state: FleetRuntimeInvocationState,
+    observed: OwnedFleetRuntimeInvocationState,
+  ): Promise<{ acquired: boolean; state: FleetRuntimeInvocationState }> {
+    const lock = join(this.invocationDirectory(state.idempotency_key), 'takeover.lock')
+    try {
+      atomicWrite(this.root, lock, { prior_owner: observed.execution_owner, next_owner: this.owner }, true)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        return providerFail('IN_FLIGHT', 'another executor is taking over the stale owner')
+      }
+      throw error
+    }
+    try {
+      const latest = await this.load(state.idempotency_key) as OwnedFleetRuntimeInvocationState | null
+      if (!latest || latest.status !== 'reserved' || latest.request_digest !== state.request_digest
+        || latest.execution_owner?.owner_id !== observed.execution_owner?.owner_id
+        || this.ownerAlive(latest.execution_owner)) {
+        return providerFail('IN_FLIGHT', 'reservation changed or its owner is live during takeover')
+      }
+      const heartbeat = Date.parse(latest.execution_owner.heartbeat_at)
+      if (!Number.isFinite(heartbeat) || this.nowMs() - heartbeat < this.staleAfterMs) {
+        return providerFail('IN_FLIGHT', 'reservation is not stale during takeover')
+      }
+      const replaced: OwnedFleetRuntimeInvocationState = { ...state, execution_owner: clone(this.owner) }
+      atomicWrite(this.root, this.reservationPath(state.idempotency_key), replaced)
+      return { acquired: true, state: clone(replaced) }
+    } finally {
+      if (existsSync(lock)) unlinkSync(lock)
+    }
+  }
+
+  async heartbeatOwner(key: string): Promise<void> {
+    const path = this.reservationPath(key)
+    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'reservation owner')
+    if (state.status !== 'reserved' || state.execution_owner?.owner_id !== this.owner.owner_id) {
+      return providerFail('IN_FLIGHT', 'current executor does not own the reservation')
+    }
+    state.execution_owner.heartbeat_at = new Date(this.nowMs()).toISOString()
+    atomicWrite(this.root, path, state)
   }
 
   async complete_once(state: FleetRuntimeInvocationState): Promise<FleetRuntimeInvocationState> {
@@ -282,7 +691,7 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
       }
       return existing
     }
-    atomicWrite(this.completionPath(state.idempotency_key), state)
+    atomicWrite(this.root, this.completionPath(state.idempotency_key), state)
     return clone(state)
   }
 }
@@ -333,6 +742,7 @@ export interface FleetRuntimeLocalPhaseState {
   started_at: string
   completed_at: string | null
   evidence: Record<string, unknown> | null
+  intent: Record<string, unknown>
   protected_effect_count: number
 }
 
@@ -349,6 +759,7 @@ export interface FleetRuntimeLocalPhaseContext {
   state_directory: string
   invocation_directory: string
   prior_evidence: Partial<Record<FleetRuntimeLocalPhase, Record<string, unknown>>>
+  current_intent: Record<string, unknown>
 }
 
 export interface FleetRuntimeLocalPhaseResult {
@@ -363,6 +774,11 @@ export interface FleetRuntimeLocalReconcileResult {
 }
 
 export interface FleetRuntimeLocalSystem {
+  phaseIntent?(
+    request: Readonly<FleetRuntimeRequest>,
+    phase: FleetRuntimeLocalPhase,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>
   inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
   performPhase(
     request: Readonly<FleetRuntimeRequest>,
@@ -392,6 +808,11 @@ function assertJournal(state: FleetRuntimeLocalOperationState, request: FleetRun
     || state.operation !== request.operation) {
     return providerFail('OPERATION_STATE_MISMATCH', 'operation journal is not bound to this exact request')
   }
+  for (const phase of Object.values(state.phases)) {
+    if (!phase || phase.intent === null || typeof phase.intent !== 'object' || Array.isArray(phase.intent)) {
+      return providerFail('STATE_RECORD_INVALID', 'operation phase lacks an immutable intent')
+    }
+  }
 }
 
 class FleetRuntimeLocalEffectPort {
@@ -417,12 +838,16 @@ class FleetRuntimeLocalEffectPort {
         phases: {},
       }
     }
-    const state = readState<FleetRuntimeLocalOperationState>(path, 'operation state')
+    const state = readState<FleetRuntimeLocalOperationState>(this.persistence.root, path, 'operation state')
     assertJournal(state, request)
     return state
   }
 
-  private context(request: FleetRuntimeRequest, state: FleetRuntimeLocalOperationState): FleetRuntimeLocalPhaseContext {
+  private context(
+    request: FleetRuntimeRequest,
+    state: FleetRuntimeLocalOperationState,
+    currentIntent: Record<string, unknown> = {},
+  ): FleetRuntimeLocalPhaseContext {
     return {
       state_directory: this.persistence.root,
       invocation_directory: this.persistence.invocationDirectory(request.idempotency_key),
@@ -431,6 +856,7 @@ class FleetRuntimeLocalEffectPort {
           .filter((entry): entry is [FleetRuntimeLocalPhase, FleetRuntimeLocalPhaseState] => entry[1]?.status === 'completed')
           .map(([phase, entry]) => [phase, clone(entry.evidence ?? {})]),
       ),
+      current_intent: clone(currentIntent),
     }
   }
 
@@ -453,7 +879,8 @@ class FleetRuntimeLocalEffectPort {
       const prior = state.phases[phase]
       if (prior?.status === 'completed') continue
       if (prior?.status === 'started') {
-        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(request, state))
+        await this.persistence.heartbeatOwner(request.idempotency_key)
+        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(request, state, prior.intent))
         if (!reconciled.completed || !reconciled.evidence) {
           return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', `${phase} started but cannot be proven complete; it will not be repeated`)
         }
@@ -461,19 +888,23 @@ class FleetRuntimeLocalEffectPort {
         prior.completed_at = this.now()
         prior.evidence = clone(reconciled.evidence)
         prior.protected_effect_count = reconciled.protected_effect_count
-        atomicWrite(this.journalPath(request), state)
+        atomicWrite(this.persistence.root, this.journalPath(request), state)
         continue
       }
 
+      const intentContext = this.context(request, state)
+      const intent = this.system.phaseIntent ? await this.system.phaseIntent(request, phase, intentContext) : {}
       state.phases[phase] = {
         status: 'started',
         started_at: this.now(),
         completed_at: null,
         evidence: null,
+        intent: clone(intent),
         protected_effect_count: 0,
       }
-      atomicWrite(this.journalPath(request), state)
-      const result = await this.system.performPhase(request, preflight, phase, this.context(request, state))
+      atomicWrite(this.persistence.root, this.journalPath(request), state)
+      await this.persistence.heartbeatOwner(request.idempotency_key)
+      const result = await this.system.performPhase(request, preflight, phase, this.context(request, state, intent))
       if (PROTECTED_PHASES.has(phase) && result.protected_effect_count !== 1) {
         return providerFail('STATE_RECORD_INVALID', `${phase} must report exactly one protected subeffect`)
       }
@@ -485,9 +916,10 @@ class FleetRuntimeLocalEffectPort {
         started_at: state.phases[phase]!.started_at,
         completed_at: this.now(),
         evidence: clone(result.evidence),
+        intent: clone(intent),
         protected_effect_count: result.protected_effect_count,
       }
-      atomicWrite(this.journalPath(request), state)
+      atomicWrite(this.persistence.root, this.journalPath(request), state)
     }
     return this.system.buildReceipt(request, preflight, state)
   }
@@ -532,22 +964,35 @@ export function buildFleetRuntimeV1DryRunReceipt(untrustedRequest: FleetRuntimeR
 export async function executeLocalFleetRuntimeV1(input: {
   request: FleetRuntimeRequest
   stateDirectory: string
+  approvedStateRoot?: string
   executeProtectedEffects: boolean
   system: FleetRuntimeLocalSystem
   now?: () => string
+  persistenceOptions?: Omit<FleetRuntimePersistenceOptions, 'approvedRoot'>
 }): Promise<FleetRuntimeEffectReceipt | FleetRuntimeV1DryRunReceipt> {
   if (!input.executeProtectedEffects) return buildFleetRuntimeV1DryRunReceipt(input.request)
   if (input.request.executor_identity.actor_agent_id !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.actor_agent_id
     || input.request.executor_identity.active_function !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.active_function) {
     return providerFail('EXECUTOR_BINDING_MISMATCH', 'protected execution requires the exact registered executor binding')
   }
-  const persistence = new FileFleetRuntimeV1Persistence(input.stateDirectory)
-  const effect = new FleetRuntimeLocalEffectPort(persistence, input.system, input.now ?? (() => new Date().toISOString()))
-  return executeFleetRuntimeV1(input.request, {
-    preflight: { inspect: request => input.system.inspect(request) },
-    persistence,
-    effect,
+  const persistence = new FileFleetRuntimeV1Persistence(input.stateDirectory, {
+    ...input.persistenceOptions,
+    approvedRoot: input.approvedStateRoot ?? FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
   })
+  const effect = new FleetRuntimeLocalEffectPort(persistence, input.system, input.now ?? (() => new Date().toISOString()))
+  if (ACTIVE_LOCAL_INVOCATIONS.has(input.request.idempotency_key)) {
+    return providerFail('IN_FLIGHT', 'the invocation is already active in this executor process')
+  }
+  ACTIVE_LOCAL_INVOCATIONS.add(input.request.idempotency_key)
+  try {
+    return await executeFleetRuntimeV1(input.request, {
+      preflight: { inspect: request => input.system.inspect(request) },
+      persistence,
+      effect,
+    })
+  } finally {
+    ACTIVE_LOCAL_INVOCATIONS.delete(input.request.idempotency_key)
+  }
 }
 
 export interface FleetRuntimeArgvResult {
@@ -597,6 +1042,12 @@ interface GitTreeEntry {
   sha: string
 }
 
+interface FleetRuntimePayloadManifest {
+  files: Array<{ path: string; bytes: number; sha256: string }>
+  payload_records_sha256: string
+  path_count: number
+}
+
 function commentId(url: string): string {
   const matched = url.match(/#issuecomment-([1-9][0-9]*)$/)
   if (!matched) return providerFail('READBACK_INVALID', 'evidence URL is not an immutable issue comment')
@@ -618,6 +1069,20 @@ function surfaceDigest(entries: GitTreeEntry[], runtime: boolean): { count: numb
   return { count: selected.length, digest: sha256(canonicalFleetRuntimeJson(selected)) }
 }
 
+function recursiveRelativeFiles(root: string, cursor = root): string[] {
+  if (!existsSync(cursor)) return []
+  const files: string[] = []
+  for (const name of readdirSync(cursor).sort()) {
+    const path = join(cursor, name)
+    const metadata = lstatSync(path)
+    if (metadata.isSymbolicLink()) return providerFail('PAYLOAD_VERIFICATION_FAILED', `payload path is a symlink: ${path}`)
+    if (metadata.isDirectory()) files.push(...recursiveRelativeFiles(root, path))
+    else if (metadata.isFile()) files.push(relative(root, path).split(sep).join('/'))
+    else return providerFail('PAYLOAD_VERIFICATION_FAILED', `payload path is not a regular file: ${path}`)
+  }
+  return files
+}
+
 function commandError(argv: readonly string[], result: FleetRuntimeArgvResult): never {
   const diagnostic = result.stderr.trim().slice(0, 400).replace(/[\r\n]+/g, ' ')
   return providerFail('COMMAND_FAILED', `${argv[0]} exited ${result.exitCode}${diagnostic ? `: ${diagnostic}` : ''}`)
@@ -632,6 +1097,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   constructor(
     private readonly runner: FleetRuntimeArgvRunner = bunFleetRuntimeArgvRunner,
     private readonly providerRepositoryRoot: string = resolve(import.meta.dir, '..'),
+    private readonly nowMs: () => number = Date.now,
   ) {}
 
   private async run(argv: readonly string[], cwd?: string): Promise<string> {
@@ -676,24 +1142,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   private queueFromStatus(report: unknown, request: FleetRuntimeRequest): FleetRuntimeRequest['queue_precheck'] {
-    assertPlainRecord(report, 'agent-com status')
-    const agents = Array.isArray(report.agents) ? report.agents : Array.isArray(report.rows) ? report.rows : []
-    const kodama = agents.find(candidate => {
-      if (!candidate || typeof candidate !== 'object') return false
-      return (candidate as Record<string, unknown>).agent_id === 'kodama'
-    }) as Record<string, unknown> | undefined
-    if (!kodama) return providerFail('READBACK_INVALID', 'official status omitted kodama')
-    const queue = (kodama.queue && typeof kodama.queue === 'object' ? kodama.queue : kodama) as Record<string, unknown>
-    const pending = Number(queue.pending_count ?? queue.pending ?? 0)
-    const received = Number(queue.received_count ?? queue.received ?? 0)
-    const inProgress = Number(queue.in_progress_count ?? queue.in_progress ?? 0)
-    const observed = String(report.observed_at ?? request.queue_precheck.observed_at)
-    const material = { observed_at: observed, agent_id: 'kodama', pending, received, in_progress: inProgress }
-    return {
-      source_receipt_sha256: sha256(canonicalFleetRuntimeJson(material)),
-      observed_at: observed,
-      entries: [{ repository: 'watchout/kodama', agent_id: 'kodama', pending_count: pending, active_count: received + inProgress }],
+    const parsed = parseFleetRuntimeQueueStatus(report, this.nowMs())
+    if (parsed.observed_at !== request.queue_precheck.observed_at) {
+      return providerFail('READBACK_INVALID', 'official queue timestamp differs from the sealed request')
     }
+    return parsed
   }
 
   private rootGoalReadback(raw: unknown): FleetRuntimeRootGoalReadback {
@@ -737,6 +1190,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (sha256(predecessor.body) !== request.predecessor_receipt.sha256) {
       return providerFail('READBACK_INVALID', 'predecessor raw-body digest differs')
     }
+    validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body)
     const queue = this.queueFromStatus(parseJson(statusRaw, 'official queue status'), request)
     if (canonicalFleetRuntimeJson(queue) !== canonicalFleetRuntimeJson(request.queue_precheck)) {
       return providerFail('READBACK_INVALID', 'fresh official queue receipt differs from request')
@@ -771,10 +1225,15 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   private checkoutPath(context: FleetRuntimeLocalPhaseContext): string {
-    return ensureContained(context.state_directory, join(context.invocation_directory, 'checkout'))
+    return assertSafeStatePath(context.state_directory, join(context.invocation_directory, 'checkout'))
   }
 
-  private async verifyCheckout(path: string, expectedHead?: string, expectedTree?: string): Promise<Record<string, unknown>> {
+  private async verifyCheckout(
+    path: string,
+    stateDirectory: string,
+    expectedHead?: string,
+    expectedTree?: string,
+  ): Promise<Record<string, unknown>> {
     if (!existsSync(path) || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path) {
       return providerFail('UNSAFE_CHECKOUT', 'checkout must be a real, dedicated directory')
     }
@@ -784,7 +1243,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const status = await this.run(['git', 'status', '--porcelain=v1'], path)
     validateFleetRuntimeCheckoutReadback({
       checkout_path: path,
-      state_directory: dirname(dirname(path)),
+      state_directory: stateDirectory,
       canonical_path: '/Users/yuji/Developer/kodama',
       remote,
       head,
@@ -794,6 +1253,54 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       expected_tree: expectedTree,
     })
     return { checkout_path: path, remote, head, tree, clean: true }
+  }
+
+  phaseIntent(
+    readonlyRequest: Readonly<FleetRuntimeRequest>,
+    phase: FleetRuntimeLocalPhase,
+    readonlyContext: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Record<string, unknown> {
+    const request = readonlyRequest as FleetRuntimeRequest
+    const context = readonlyContext as FleetRuntimeLocalPhaseContext
+    const prepared = context.prior_evidence.PREPARE_CLEAN_CHECKOUT
+    const merged = context.prior_evidence.VERIFY_EXTERNAL_MERGE
+    const local = context.prior_evidence.CREATE_LOCAL_COMMIT ?? context.prior_evidence.CREATE_LOCAL_REVERT
+    const pushed = context.prior_evidence.PUSH_NORMAL_BRANCH
+    const created = context.prior_evidence.CREATE_DRAFT_PR
+    if (phase === 'PREPARE_CLEAN_CHECKOUT') {
+      const input = this.operationInputReceipt(request, context)
+      return {
+        expected_head: request.operation === 'ROLLBACK' || request.operation === 'RECOVERY'
+          ? String(input?.merge_commit ?? '') : request.preimages[0].head_commit,
+        expected_tree: request.operation === 'ROLLBACK' || request.operation === 'RECOVERY'
+          ? String(input?.merge_tree ?? '') : request.preimages[0].tree,
+      }
+    }
+    if (phase === 'PREPARE_MERGED_CHECKOUT') {
+      return { expected_head: merged?.merge_commit, expected_tree: merged?.merge_tree }
+    }
+    if (phase === 'VERIFY_EXACT_PREIMAGE') {
+      return { expected_head: prepared?.head, expected_tree: request.preimages[0].tree }
+    }
+    if (phase === 'PUSH_NORMAL_BRANCH') return { branch: local?.branch, head: local?.head, force: false }
+    if (phase === 'CREATE_DRAFT_PR') {
+      return { repository: 'watchout/kodama', base: request.preimages[0].required_base_branch, branch: pushed?.branch, head: pushed?.head }
+    }
+    if (phase === 'VERIFY_EXTERNAL_MERGE') {
+      return {
+        repository: 'watchout/kodama', operation: request.operation, request_digest: request.request_digest,
+        pr_url: created?.pr_url, pushed_head: pushed?.head, base: request.preimages[0].required_base_branch,
+      }
+    }
+    if (phase === 'COLD_START_DISCORD_KODAMA' || phase === 'VERIFY_LIVE_IDENTITY') {
+      return {
+        checkout_path: this.checkoutPath(context), session: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session,
+        port: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port,
+        expected_head: merged?.merge_commit ?? prepared?.head,
+        expected_tree: merged?.merge_tree ?? (request.operation === 'RECOVERY' ? request.preimages[0].tree : prepared?.tree),
+      }
+    }
+    return {}
   }
 
   private operationInputReceipt(
@@ -810,15 +1317,25 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (!name) return null
     const path = join(context.state_directory, name)
     if (!existsSync(path)) return providerFail('READBACK_INVALID', `${request.operation} requires ${name}`)
-    const receipt = readState<Record<string, unknown>>(path, `${request.operation} input receipt`)
+    const receipt = readState<Record<string, unknown>>(context.state_directory, path, `${request.operation} input receipt`)
     if (request.operation === 'REAPPLY') {
-      if (!SHA256.test(String(receipt.receipt_sha256 ?? ''))) {
-        return providerFail('READBACK_INVALID', 'reapply rollback receipt digest is invalid')
-      }
-      return receipt
+      return validateFleetRuntimeLocalReceipt(receipt, {
+        subjectDigest: sha256(canonicalFleetRuntimeJson(request.subject)),
+        operation: 'ROLLBACK',
+        target: 'watchout/kodama',
+      })
     }
-    if (!COMMIT.test(String(receipt.merge_commit ?? '')) || !COMMIT.test(String(receipt.merge_tree ?? ''))) {
-      return providerFail('READBACK_INVALID', `${request.operation} merge receipt commit/tree is invalid`)
+    const sourceOperation = request.operation === 'ROLLBACK' ? 'CANARY_COLD_START' : 'ROLLBACK'
+    if (receipt.schema_version !== 'fleet-runtime-v1/external-merge-receipt/v1'
+      || receipt.operation !== sourceOperation || receipt.result !== 'PASS'
+      || receipt.subject_digest !== sha256(canonicalFleetRuntimeJson(request.subject))
+      || receipt.target_repository !== 'watchout/kodama'
+      || receipt.predecessor_receipt_sha256 !== request.predecessor_receipt.sha256
+      || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(receipt.pr_url ?? ''))
+      || !COMMIT.test(String(receipt.pushed_head ?? ''))
+      || !COMMIT.test(String(receipt.merge_commit ?? '')) || !COMMIT.test(String(receipt.merge_tree ?? ''))
+      || receipt.receipt_sha256 !== computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)) {
+      return providerFail('READBACK_INVALID', `${request.operation} merge receipt chain is invalid`)
     }
     return receipt
   }
@@ -836,7 +1353,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       await this.run(['git', 'clone', '--no-checkout', 'https://github.com/watchout/kodama.git', path])
       await this.run(['git', 'checkout', '--detach', inputHead], path)
     }
-    const evidence = await this.verifyCheckout(path, inputHead, inputTree)
+    const evidence = await this.verifyCheckout(path, context.state_directory, inputHead, inputTree)
     if (request.operation === 'RECOVERY' && inputTree !== request.preimages[0].tree) {
       return providerFail('READBACK_INVALID', 'recovery input tree is not the exact frozen preimage tree')
     }
@@ -854,8 +1371,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   private async externalMerge(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
     const path = join(context.invocation_directory, 'external-merge-receipt.json')
     if (!existsSync(path)) return providerFail('WAITING_INDEPENDENT_MERGE', 'exact external merge receipt is not present')
-    const receipt = readState<Record<string, unknown>>(path, 'external merge receipt')
+    const receipt = readState<Record<string, unknown>>(context.state_directory, path, 'external merge receipt')
     if (receipt.request_digest !== request.request_digest || receipt.operation !== request.operation
+      || receipt.repository !== 'watchout/kodama' || receipt.base !== request.preimages[0].required_base_branch
       || typeof receipt.pr_url !== 'string' || !COMMIT.test(String(receipt.merge_commit)) || !COMMIT.test(String(receipt.merge_tree))) {
       return providerFail('READBACK_INVALID', 'external merge receipt binding is invalid')
     }
@@ -863,14 +1381,37 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       'gh', 'pr', 'view', String(receipt.pr_url), '--repo', 'watchout/kodama',
       '--json', 'url,state,mergedAt,mergeCommit,headRefOid,baseRefName,isDraft',
     ]), 'merged PR readback')
-    const mergeCommit = pr.mergeCommit as Record<string, unknown> | null
-    if (pr.url !== receipt.pr_url || pr.state !== 'MERGED' || pr.mergedAt === null
-      || mergeCommit?.oid !== receipt.merge_commit || pr.baseRefName !== request.preimages[0].required_base_branch) {
-      return providerFail('READBACK_INVALID', 'independent merge receipt differs from GitHub readback')
-    }
     const commit = await this.ghJson<{ tree: { sha: string } }>(`repos/watchout/kodama/git/commits/${String(receipt.merge_commit)}`)
-    if (commit.tree.sha !== receipt.merge_tree) return providerFail('READBACK_INVALID', 'merge tree differs from external receipt')
+    validateFleetRuntimeExternalMergeBinding({
+      request,
+      receipt,
+      pr,
+      createdPrUrl: String(context.current_intent.pr_url ?? ''),
+      pushedHead: String(context.current_intent.pushed_head ?? ''),
+      observedMergeTree: commit.tree.sha,
+    })
     return clone(receipt)
+  }
+
+  private async payloadManifest(request: FleetRuntimeRequest): Promise<FleetRuntimePayloadManifest> {
+    const envelope = await this.ghJson<{ encoding: string; content: string }>(
+      'repos/watchout/ai-dev-framework/contents/releases/shirube-v4.1/target-payload-manifest.json?ref=9ab2be2476735d7ccc8bafb105a1dd0e7bff9df3',
+    )
+    if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest API encoding differs')
+    }
+    const manifest = parseJson<FleetRuntimePayloadManifest>(
+      Buffer.from(envelope.content.replace(/\s+/g, ''), 'base64').toString('utf8'),
+      'payload manifest',
+    )
+    if (!Array.isArray(manifest.files)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest files are absent')
+    const paths = manifest.files.map(file => file.path)
+    assertExactFleetRuntimePathSet([...paths].sort(), paths, 'manifest ordering')
+    if (manifest.path_count !== 24 || manifest.files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256))
+      || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'aggregate payload manifest differs')
+    }
+    return manifest
   }
 
   async performPhase(
@@ -894,10 +1435,10 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       const mergeTree = String(receipt?.merge_tree ?? '')
       await this.run(['git', 'fetch', 'origin', mergeCommit], checkout)
       await this.run(['git', 'checkout', '--detach', mergeCommit], checkout)
-      return { evidence: await this.verifyCheckout(checkout, mergeCommit, mergeTree), protected_effect_count: 0 }
+      return { evidence: await this.verifyCheckout(checkout, context.state_directory, mergeCommit, mergeTree), protected_effect_count: 0 }
     }
     if (phase === 'VERIFY_EXACT_PREIMAGE') {
-      return { evidence: await this.verifyCheckout(checkout, undefined, request.preimages[0].tree), protected_effect_count: 0 }
+      return { evidence: await this.verifyCheckout(checkout, context.state_directory, String(context.current_intent.expected_head ?? '') || undefined, request.preimages[0].tree), protected_effect_count: 0 }
     }
     if (phase === 'STAGE_EXACT_PAYLOAD' || phase === 'VERIFY_EXACT_PAYLOAD') {
       // The released renderer is the sole byte source. It is invoked with its
@@ -905,6 +1446,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       // immutable payload manifest before any push is admitted.
       const out = join(context.invocation_directory, 'rendered')
       if (phase === 'STAGE_EXACT_PAYLOAD') {
+        const manifest = await this.payloadManifest(request)
+        const payloadPaths = manifest.files.map(file => file.path)
         const releaseCheckout = join(context.invocation_directory, 'adf-release')
         if (!existsSync(releaseCheckout)) {
           await this.run(['git', 'clone', '--no-checkout', 'https://github.com/watchout/ai-dev-framework.git', releaseCheckout])
@@ -917,7 +1460,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           || releaseTree !== FLEET_RUNTIME_V1_CONTRACT.release_tree || releaseStatus !== '') {
           return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release renderer checkout differs from the frozen release')
         }
-        mkdirSync(out, { recursive: true, mode: 0o700 })
+        safeMkdir(context.state_directory, out)
         await this.run([
           'node', 'scripts/shirube/render-adoption-pack.mjs', '--profile', 'hotel-lite',
           '--target-repo', 'watchout/kodama', '--product', 'Kodama',
@@ -929,44 +1472,49 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           '--generated-at', '2026-08-12T00:00:00.000Z', '--fetched-at', '2026-08-12T00:00:00.000Z',
           '--generated-by', 'codex-cto', '--include-workflow-caller',
         ], releaseCheckout)
-        mkdirSync(join(checkout, '.github', 'workflows'), { recursive: true, mode: 0o700 })
-        mkdirSync(join(checkout, '.shirube', 'runtime', 'rapid-lite'), { recursive: true, mode: 0o700 })
-        await this.run(['rsync', '-a', join(out, '.github', 'workflows', 'shirube-rapid-lite-gates-report.yml'), join(checkout, '.github', 'workflows')])
-        await this.run(['rsync', '-a', `${join(out, '.shirube', 'runtime', 'rapid-lite')}/`, `${join(checkout, '.shirube', 'runtime', 'rapid-lite')}/`])
+        assertExactFleetRuntimePathSet(payloadPaths, recursiveRelativeFiles(out), 'renderer output')
+        for (const payloadPath of payloadPaths) {
+          const source = assertSafeStatePath(context.state_directory, join(out, payloadPath))
+          const target = assertSafeStatePath(context.state_directory, join(checkout, payloadPath))
+          safeMkdir(context.state_directory, dirname(target))
+          copyFileSync(source, target)
+        }
         return {
-          evidence: { rendered_path: out, release_checkout: releaseCheckout, checkout_path: checkout, path_count: 24 },
+          evidence: { rendered_path: out, release_checkout: releaseCheckout, checkout_path: checkout, path_count: 24, payload_paths: payloadPaths },
           protected_effect_count: 0,
         }
       }
-      const manifestEnvelope = await this.ghJson<{ encoding: string; content: string }>(
-        'repos/watchout/ai-dev-framework/contents/releases/shirube-v4.1/target-payload-manifest.json?ref=9ab2be2476735d7ccc8bafb105a1dd0e7bff9df3',
-      )
-      if (manifestEnvelope.encoding !== 'base64' || typeof manifestEnvelope.content !== 'string') {
-        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest API encoding differs')
+      const manifest = await this.payloadManifest(request)
+      const expectedPaths = manifest.files.map(file => file.path)
+      const stagedPaths = context.prior_evidence.STAGE_EXACT_PAYLOAD?.payload_paths
+      if (!Array.isArray(stagedPaths) || stagedPaths.some(path => typeof path !== 'string')) {
+        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'stage evidence lacks exact payload paths')
       }
-      const manifest = parseJson<{ files: Array<{ path: string; bytes: number; sha256: string }>; payload_records_sha256: string; path_count: number }>(
-        Buffer.from(manifestEnvelope.content.replace(/\s+/g, ''), 'base64').toString('utf8'),
-        'payload manifest',
-      )
-      if (!Array.isArray(manifest.files)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest readback is not decoded')
+      assertExactFleetRuntimePathSet(expectedPaths, stagedPaths as string[], 'stage evidence')
       for (const file of manifest.files) {
         const bytes = readFileSync(join(checkout, file.path))
         if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
           return providerFail('PAYLOAD_VERIFICATION_FAILED', `payload bytes differ at ${file.path}`)
         }
       }
-      if (manifest.path_count !== 24 || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest) {
-        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'aggregate payload digest or count differs')
-      }
-      return { evidence: { payload_digest: request.payload_digest, path_count: 24 }, protected_effect_count: 0 }
+      return { evidence: { payload_digest: request.payload_digest, path_count: 24, payload_paths: expectedPaths }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_COMMIT') {
       const branch = `shirube-v41-${request.operation.toLowerCase().replaceAll('_', '-')}-${request.request_digest.slice(-12)}`
+      const paths = context.prior_evidence.VERIFY_EXACT_PAYLOAD?.payload_paths
+      if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string')) {
+        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'verified payload path evidence is absent')
+      }
+      assertExactFleetRuntimePathSet([...paths as string[]].sort(), paths as string[], 'commit path evidence')
       await this.run(['git', 'switch', '-c', branch], checkout)
-      await this.run(['git', 'add', '--', '.github/workflows/shirube-rapid-lite-gates-report.yml', '.shirube/runtime/rapid-lite'], checkout)
+      await this.run(['git', 'add', '--', ...paths as string[]], checkout)
+      const staged = (await this.run(['git', 'diff', '--cached', '--name-only'], checkout)).trim().split('\n').filter(Boolean).sort()
+      assertExactFleetRuntimePathSet(paths as string[], staged, 'staged index')
       await this.run(['git', 'commit', '-m', `chore(shirube): ${request.operation.toLowerCase().replaceAll('_', ' ')}`], checkout)
       const head = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
-      return { evidence: { branch, head }, protected_effect_count: 0 }
+      const committed = (await this.run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', head], checkout)).trim().split('\n').filter(Boolean).sort()
+      assertExactFleetRuntimePathSet(paths as string[], committed, 'commit diff')
+      return { evidence: { branch, head, payload_paths: paths }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_REVERT') {
       const prior = this.operationInputReceipt(request, mutableContext)!
@@ -1001,7 +1549,12 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { evidence: { pr_url: prUrl, branch, draft: true }, protected_effect_count: 1 }
     }
     if (phase === 'COLD_START_DISCORD_KODAMA') {
-      const clean = await this.verifyCheckout(checkout)
+      const clean = await this.verifyCheckout(
+        checkout,
+        context.state_directory,
+        String(context.current_intent.expected_head ?? '') || undefined,
+        String(context.current_intent.expected_tree ?? '') || undefined,
+      )
       const session = FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
       await this.run(['tmux', 'kill-session', '-t', session]).catch(error => {
         if (!(error instanceof FleetRuntimeLocalProviderError)) throw error
@@ -1084,12 +1637,62 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { completed: true, evidence, protected_effect_count: 0 }
     }
     if (phase === 'PREPARE_CLEAN_CHECKOUT' || phase === 'PREPARE_MERGED_CHECKOUT' || phase === 'VERIFY_EXACT_PREIMAGE') {
-      const evidence = await this.verifyCheckout(this.checkoutPath(context as FleetRuntimeLocalPhaseContext))
+      const mutable = context as FleetRuntimeLocalPhaseContext
+      const expectedHead = String(mutable.current_intent.expected_head ?? '')
+      const expectedTree = String(mutable.current_intent.expected_tree ?? '')
+      if (!COMMIT.test(expectedHead) || !COMMIT.test(expectedTree)) {
+        return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', `${phase} persisted intent lacks exact head/tree`)
+      }
+      const evidence = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
       return { completed: true, evidence, protected_effect_count: 0 }
     }
     if (phase === 'VERIFY_EXACT_PAYLOAD' || phase === 'VERIFY_LIVE_IDENTITY') {
       const result = await this.performPhase(request, preflight, phase, context)
       return { completed: true, ...result }
+    }
+    if (phase === 'PUSH_NORMAL_BRANCH') {
+      const branch = String(context.current_intent.branch ?? '')
+      const head = String(context.current_intent.head ?? '')
+      if (!branch || !COMMIT.test(head)) return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'push intent is incomplete')
+      const observed = (await this.run(['git', 'ls-remote', '--heads', 'https://github.com/watchout/kodama.git', `refs/heads/${branch}`])).trim()
+      if (observed !== `${head}\trefs/heads/${branch}`) return { completed: false, evidence: null, protected_effect_count: 1 }
+      return { completed: true, evidence: { branch, head, force: false, reconciled: true }, protected_effect_count: 1 }
+    }
+    if (phase === 'CREATE_DRAFT_PR') {
+      const branch = String(context.current_intent.branch ?? '')
+      const head = String(context.current_intent.head ?? '')
+      const base = String(context.current_intent.base ?? '')
+      const rows = parseJson<Record<string, unknown>[]>(await this.run([
+        'gh', 'pr', 'list', '--repo', 'watchout/kodama', '--state', 'all', '--head', branch,
+        '--json', 'url,isDraft,headRefOid,baseRefName',
+      ]), 'draft PR reconciliation')
+      const exact = rows.filter(row => row.isDraft === true && row.headRefOid === head && row.baseRefName === base
+        && /^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(row.url)))
+      if (exact.length !== 1) return { completed: false, evidence: null, protected_effect_count: 1 }
+      return { completed: true, evidence: { pr_url: exact[0].url, branch, draft: true, reconciled: true }, protected_effect_count: 1 }
+    }
+    if (phase === 'COLD_START_DISCORD_KODAMA') {
+      const mutable = context as FleetRuntimeLocalPhaseContext
+      const expectedHead = String(mutable.current_intent.expected_head ?? '')
+      const expectedTree = String(mutable.current_intent.expected_tree ?? '')
+      if (!COMMIT.test(expectedHead) || !COMMIT.test(expectedTree)) {
+        return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'cold-start intent lacks exact checkout image')
+      }
+      await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
+      const inventory = parseJson<Record<string, unknown>>(await this.run([
+        process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
+      ], this.providerRepositoryRoot), 'cold-start reconciliation inventory')
+      const live = findAgentRecord(inventory, 'kodama')
+      if (String(live?.session_name ?? live?.tmux_session ?? '') !== mutable.current_intent.session
+        || Number(live?.port ?? live?.channel_port ?? 0) !== mutable.current_intent.port
+        || String(live?.checkout_path ?? live?.workspace ?? '') !== mutable.current_intent.checkout_path) {
+        return { completed: false, evidence: null, protected_effect_count: 1 }
+      }
+      return {
+        completed: true,
+        evidence: { checkout_path: mutable.current_intent.checkout_path, session: mutable.current_intent.session, port: mutable.current_intent.port, reconciled: true },
+        protected_effect_count: 1,
+      }
     }
     return { completed: false, evidence: null, protected_effect_count: PROTECTED_PHASES.has(phase) ? 1 : 0 }
   }
@@ -1158,6 +1761,15 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       duplicate_effect_count: 0,
       unauthorized_effect_count: 0,
     }
+    const boundReceipt = receipt as FleetRuntimeEffectReceipt & Record<string, unknown>
+    boundReceipt.subject_digest = sha256(canonicalFleetRuntimeJson(request.subject))
+    boundReceipt.predecessor_receipt_sha256 = request.predecessor_receipt.sha256
+    boundReceipt.target_repository = 'watchout/kodama'
+    if (merge) {
+      boundReceipt.merge_commit = merge.merge_commit
+      boundReceipt.merge_tree = merge.merge_tree
+      boundReceipt.pr_url = merge.pr_url
+    }
     if (request.operation === 'ROLLBACK') {
       receipt.forward_effect_receipt_sha256 = request.predecessor_receipt.sha256
       receipt.target_repository = 'watchout/kodama'
@@ -1177,6 +1789,12 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       receipt.postimage = clone(image)
     }
     receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt)
+    validateFleetRuntimeLocalReceipt(receipt as FleetRuntimeEffectReceipt & Record<string, unknown>, {
+      subjectDigest: sha256(canonicalFleetRuntimeJson(request.subject)),
+      operation: request.operation,
+      target: 'watchout/kodama',
+      predecessorSha256: request.predecessor_receipt.sha256,
+    })
     return receipt
   }
 }
