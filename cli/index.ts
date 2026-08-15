@@ -32,6 +32,12 @@ import { execFileSync } from 'node:child_process'
 import { fetchReplyChain, parseReplyChainDepth } from '../core/reply-chain'
 import { fanoutToRecipients } from '../core/send-fanout'
 import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from '../core/outbound-projection'
+import {
+  PROVIDER_EFFECTS_FORBIDDEN_CODE,
+  PROVIDER_EFFECTS_FORBIDDEN_REASON,
+  providerEffectsControlAuditEvidence,
+  readProviderEffectsControl,
+} from '../core/provider-effects-control'
 import { decorateProjectedContent } from '../core/projection-text-decorator'
 import { diagnoseInboundQueueRow, diagnoseOutboundQueueRow } from '../core/delivery-diagnostics'
 import { buildQueueDoctorReport, formatQueueDoctorText } from '../core/queue-doctor'
@@ -394,6 +400,20 @@ async function enqueueOutboundProjection(input: {
   content: string
   recipients: string[]
 }): Promise<{ outboundQueued: boolean; outboundSkipReason: string | null }> {
+  const providerEffectsControl = readProviderEffectsControl()
+  if (!providerEffectsControl.allowsProviderEffects) {
+    await auditLog(input.db, 'outbound.enqueue_skipped', input.agentId, input.channelId, {
+      code: PROVIDER_EFFECTS_FORBIDDEN_CODE,
+      message_id: input.messageId,
+      provider_effects_control: providerEffectsControlAuditEvidence(providerEffectsControl),
+      reason: PROVIDER_EFFECTS_FORBIDDEN_REASON,
+    })
+    return {
+      outboundQueued: false,
+      outboundSkipReason: PROVIDER_EFFECTS_FORBIDDEN_REASON,
+    }
+  }
+
   const projection = await resolveOutboundProjectionDecision(input.db as any, {
     channelId: input.channelId,
     threadId: input.threadId,

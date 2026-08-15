@@ -160,6 +160,10 @@ import { startQueueTtlSweeper } from './core/queue-ttl'
 import { startClaimTtlSweeper } from './core/claim-ttl'
 import { truncateForDiscord } from './core/truncate'
 import { outboundProjectionSkipCode, outboundProjectionSkipReason, resolveOutboundProjectionDecision } from './core/outbound-projection'
+import {
+  providerEffectsControlAuditEvidence,
+  readProviderEffectsControl,
+} from './core/provider-effects-control'
 import { decorateProjectedContent } from './core/projection-text-decorator'
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './core/channel-policy'
 import {
@@ -3015,7 +3019,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         senderAgentId: agentId,
         recipientAgentIds: mentions,
       })
-      outboundSkipReason = outboundProjectionSkipReason(projection)
+      const providerEffectsControl = readProviderEffectsControl()
+      outboundSkipReason = outboundProjectionSkipReason(projection, providerEffectsControl)
       if (outboundSkipReason) {
         await writeAuditLog('outbound.enqueue_skipped', agentId, dest.channelId, {
           code: outboundProjectionSkipCode(outboundSkipReason),
@@ -3026,6 +3031,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projection_source: projection.projectionSource,
           delivery_fallback_reason: projection.deliveryFallbackReason,
           delivery_diagnostics: projection.deliveryDiagnostics,
+          ...(!providerEffectsControl.allowsProviderEffects
+            ? { provider_effects_control: providerEffectsControlAuditEvidence(providerEffectsControl) }
+            : {}),
           reason: outboundSkipReason,
         })
       } else {
@@ -3501,7 +3509,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       recipientAgentIds: mentions,
     })
     let outboundQueued = false
-    const outboundSkipReason = outboundProjectionSkipReason(projection)
+    const providerEffectsControl = readProviderEffectsControl()
+    const outboundSkipReason = outboundProjectionSkipReason(projection, providerEffectsControl)
     if (outboundSkipReason) {
       await writeAuditLog('outbound.enqueue_skipped', agentId, dest.channelId, {
         code: outboundProjectionSkipCode(outboundSkipReason),
@@ -3512,6 +3521,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           projection_source: projection.projectionSource,
           delivery_fallback_reason: projection.deliveryFallbackReason,
           delivery_diagnostics: projection.deliveryDiagnostics,
+          ...(!providerEffectsControl.allowsProviderEffects
+            ? { provider_effects_control: providerEffectsControlAuditEvidence(providerEffectsControl) }
+            : {}),
           reason: outboundSkipReason,
         })
     } else {

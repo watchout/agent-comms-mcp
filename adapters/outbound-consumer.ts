@@ -44,6 +44,10 @@
  */
 import { discordClients } from './discord-client'
 import { isDiscord40062RateLimit, isDuplicateNonceError } from '../core/outbound-delivery'
+import {
+  readProviderEffectsControl,
+  type ProviderEffectsControlDecision,
+} from '../core/provider-effects-control'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -351,7 +355,46 @@ let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
 let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
 let outboundConsumerInFlight = false
 
-export async function consumeOneOutboundRow(): Promise<void> {
+export interface ConsumeOneOutboundRowOptions {
+  readProviderEffectsControl?: () => ProviderEffectsControlDecision
+}
+
+function logProviderEffectsFence(
+  operation: 'claim' | 'send',
+  control: ProviderEffectsControlDecision,
+  priorAttestation?: string,
+): void {
+  process.stderr.write(
+    `agent-comms: outbound ${operation} blocked by provider-effects control`
+    + ` (reason=${control.reason}, epoch=${control.epoch ?? 'none'}, attestation=${control.attestation}`
+    + `${priorAttestation ? `, prior_attestation=${priorAttestation}` : ''})\n`,
+  )
+}
+
+async function releaseProviderEffectsFencedClaim(
+  client: DbLike,
+  rowId: string | number,
+  control: ProviderEffectsControlDecision,
+  priorAttestation: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE outbound_queue
+        SET status = 'pending',
+            attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+            claimed_at = NULL,
+            next_retry_at = NULL,
+            last_error = $1
+      WHERE id = $2
+        AND status = 'claimed'
+        AND discord_message_id IS NULL`,
+    [`provider_effects_fenced:${control.reason}:${control.epoch ?? 'none'}`, rowId],
+  ).catch(err => {
+    process.stderr.write(`agent-comms: outbound provider-effects claim release failed for id=${rowId}: ${err}\n`)
+  })
+  logProviderEffectsFence('send', control, priorAttestation)
+}
+
+export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOptions = {}): Promise<void> {
   if (outboundConsumerInFlight) return
   outboundConsumerInFlight = true
   const guardTimeout = setTimeout(() => {
@@ -361,6 +404,12 @@ export async function consumeOneOutboundRow(): Promise<void> {
     )
   }, OUTBOUND_TICK_TIMEOUT_MS)
   try {
+    const readControl = options.readProviderEffectsControl ?? readProviderEffectsControl
+    const providerEffectsAtClaim = readControl()
+    if (!providerEffectsAtClaim.allowsProviderEffects) {
+      logProviderEffectsFence('claim', providerEffectsAtClaim)
+      return
+    }
     const fence = readOutboundQueueExactFence()
     if (fence.kind === 'invalid') {
       logInvalidExactFence('consumer', fence)
@@ -437,6 +486,23 @@ export async function consumeOneOutboundRow(): Promise<void> {
     }
     if (!clientForAgent.isConnected()) {
       await recordOutboundDeliveryFailure(client, row, 'discord_client_not_ready')
+      return
+    }
+
+    // Re-read the shared epoch immediately before the provider call. A deny,
+    // invalid/expired file, or any attestation change after claim releases the
+    // row without consuming an attempt and makes zero provider calls.
+    const providerEffectsAtSend = readControl()
+    if (
+      !providerEffectsAtSend.allowsProviderEffects
+      || providerEffectsAtSend.attestation !== providerEffectsAtClaim.attestation
+    ) {
+      await releaseProviderEffectsFencedClaim(
+        client,
+        row.id,
+        providerEffectsAtSend,
+        providerEffectsAtClaim.attestation,
+      )
       return
     }
 

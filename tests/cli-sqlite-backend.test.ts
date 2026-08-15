@@ -131,6 +131,43 @@ function allowOutboundAgents(...agentIds: string[]): void {
   }
 }
 
+function enableDiscordProjection(consumerAgentId: string): void {
+  const db = new Database(dbPath)
+  try {
+    const connectorId = randomUUID()
+    db.prepare(`INSERT INTO channel_adapters (channel_id, platform, external_id, metadata)
+      VALUES ('probe-f-ch', 'discord', 'probe-f-external', '{}')`).run()
+    db.prepare(`INSERT INTO connector_instances
+      (connector_instance_id, agent_id, provider, status, trust_status, metadata)
+      VALUES (?, ?, 'discord', 'active', 'local', '{}')`).run(connectorId, consumerAgentId)
+    db.prepare(`INSERT INTO connector_credentials
+      (credential_id, provider, agent_id, connector_instance_id, secret_ref, status, trust_status, metadata)
+      VALUES (?, 'discord', ?, ?, 'env:TEST_PROVIDER_EFFECTS_TOKEN', 'active', 'local', '{}')`)
+      .run(randomUUID(), consumerAgentId, connectorId)
+    db.prepare(`INSERT INTO channel_connector_bindings
+      (channel_binding_id, channel_id, provider, connector_instance_id, binding_role, priority, status, metadata)
+      VALUES (?, 'probe-f-ch', 'discord', ?, 'outbound', 1, 'active', '{}')`)
+      .run(randomUUID(), connectorId)
+    db.prepare(`INSERT INTO provider_channel_access
+      (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, capabilities, status, trust_status, metadata)
+      VALUES (?, 'discord', 'probe-f-external', ?, ?, '{"message_create":true}', 'active', 'local', '{}')`)
+      .run(randomUUID(), connectorId, consumerAgentId)
+  } finally {
+    db.close()
+  }
+}
+
+function writeProviderEffectsControl(mode: 'allowed' | 'forbidden', epoch: string): string {
+  const path = join(tmpDir, `provider-effects-${epoch}.json`)
+  writeFileSync(path, JSON.stringify({
+    schema_version: 'agent-comms/provider-effects-control/v1',
+    epoch,
+    provider_effects: mode,
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), { mode: 0o600 })
+  return path
+}
+
 function authorizeQueueWorkDone(
   queueId: number,
   reply: string,
@@ -2075,5 +2112,61 @@ describe('F5 — agent-com notify (SQLite)', () => {
       outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
       violations: ['cto'],
     })
+  })
+
+  test('host provider-forbidden epoch keeps notify internal with zero outbound projection', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    enableDiscordProjection('cto')
+    const controlPath = writeProviderEffectsControl('forbidden', 'cli-notify-deny')
+
+    const r = runCli(
+      ['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'internal notify only'],
+      { AGENT_COM_PROVIDER_EFFECTS_CONTROL_FILE: controlPath },
+    )
+
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({
+      ok: true,
+      outbound_queued: false,
+      outbound_skip_reason: 'provider effects forbidden by host control',
+    })
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
+    const audit = dbRead(`SELECT detail FROM audit_log WHERE event_type = 'outbound.enqueue_skipped'`)
+    expect(audit).toHaveLength(1)
+    expect(JSON.parse(audit[0].detail)).toMatchObject({
+      code: 'PROVIDER_EFFECTS_FORBIDDEN',
+      provider_effects_control: {
+        mode: 'forbidden',
+        epoch: 'cli-notify-deny',
+        reason: 'control_forbidden',
+      },
+    })
+  })
+})
+
+describe('F5b — provider-forbidden anchored reply (SQLite)', () => {
+  test('next/send closes the internal queue lifecycle with zero outbound projection', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    enableDiscordProjection('cto')
+    const { messageId, queueId } = seedPendingMessage('provider-forbidden reply source')
+    expect(runCli(['next']).status).toBe(0)
+    const controlPath = writeProviderEffectsControl('forbidden', 'cli-send-deny')
+
+    const r = runCli(
+      ['send', '--content', 'internal evidence reply', '--mentions', 'cto', '--queue-id', String(queueId), '--message-id', messageId, '--close'],
+      { AGENT_COM_PROVIDER_EFFECTS_CONTROL_FILE: controlPath },
+    )
+
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({
+      ok: true,
+      outbound_queued: false,
+      outbound_skip_reason: 'provider effects forbidden by host control',
+      work_closed: true,
+    })
+    expect(dbRead(`SELECT status FROM message_queue WHERE id = ?`, [queueId])).toEqual([{ status: 'replied' }])
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
   })
 })

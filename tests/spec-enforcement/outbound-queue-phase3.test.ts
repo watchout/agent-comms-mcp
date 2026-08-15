@@ -37,6 +37,12 @@ import {
   reclaimOrphanOutboundRows,
   setDbGetter,
 } from '../../adapters/outbound-consumer'
+import { discordClients } from '../../adapters/discord-client'
+import {
+  PROVIDER_EFFECTS_CONTROL_FILE_ENV,
+  PROVIDER_EFFECTS_CONTROL_SCHEMA,
+  parseProviderEffectsControl,
+} from '../../core/provider-effects-control'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
@@ -209,6 +215,7 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
 describe('T2b — exact outbound correlation fence', () => {
   const ROOT_MESSAGE_ID = '10000000-0000-4000-8000-000000000001'
   const priorFence = process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+  const priorProviderControl = process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
 
   type QueryCall = { sql: string; params?: any[] }
 
@@ -231,11 +238,14 @@ describe('T2b — exact outbound correlation fence', () => {
 
   beforeEach(() => {
     delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+    delete process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
   })
 
   afterEach(() => {
     if (priorFence === undefined) delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
     else process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = priorFence
+    if (priorProviderControl === undefined) delete process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
+    else process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV] = priorProviderControl
   })
 
   test('unset fence preserves the legacy unfiltered claim and parameter shape', async () => {
@@ -315,6 +325,121 @@ describe('T2b — exact outbound correlation fence', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// T2c: provider-effects host epoch (Issue #602 A1 Sample B)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T2c — provider-effects double fence', () => {
+  const allowed = (epoch: string) => parseProviderEffectsControl(JSON.stringify({
+    schema_version: PROVIDER_EFFECTS_CONTROL_SCHEMA,
+    epoch,
+    provider_effects: 'allowed',
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), '/tmp/provider-effects-control.json')
+  const forbidden = (epoch: string) => parseProviderEffectsControl(JSON.stringify({
+    schema_version: PROVIDER_EFFECTS_CONTROL_SCHEMA,
+    epoch,
+    provider_effects: 'forbidden',
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), '/tmp/provider-effects-control.json')
+
+  test('deny before claim performs no DB access and no provider call', async () => {
+    const calls: Array<{ sql: string; params?: any[] }> = []
+    let sends = 0
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        return { rows: [], rowCount: 0 }
+      },
+    }), 'aun')
+    discordClients.set('aun', {
+      isConnected: () => true,
+      sendAdapterMessage: async () => {
+        sends++
+        return { external_message_id: 'must-not-send' }
+      },
+    } as any)
+
+    try {
+      await consumeOneOutboundRow({ readProviderEffectsControl: () => forbidden('deny-before-claim') })
+    } finally {
+      discordClients.delete('aun')
+    }
+
+    expect(calls).toHaveLength(0)
+    expect(sends).toBe(0)
+  })
+
+  test('deny transition after claim releases the row and performs no provider call', async () => {
+    const calls: Array<{ sql: string; params?: any[] }> = []
+    let sends = 0
+    let reads = 0
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        if (sql.includes("SET status = 'claimed'")) {
+          return {
+            rows: [{
+              id: 'provider-race-row',
+              message_id: '10000000-0000-4000-8000-000000000099',
+              channel_external_id: 'provider-race-channel',
+              content: 'must remain internal',
+              mentions_display: null,
+              attachments: null,
+              reply_to_discord_id: null,
+              attempts: 1,
+              max_attempts: 5,
+              discord_message_id: null,
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 1 }
+      },
+    }), 'aun')
+    discordClients.set('aun', {
+      isConnected: () => true,
+      sendAdapterMessage: async () => {
+        sends++
+        return { external_message_id: 'must-not-send' }
+      },
+    } as any)
+
+    try {
+      await consumeOneOutboundRow({
+        readProviderEffectsControl: () => ++reads === 1
+          ? allowed('epoch-before')
+          : forbidden('epoch-after'),
+      })
+    } finally {
+      discordClients.delete('aun')
+    }
+
+    expect(sends).toBe(0)
+    expect(reads).toBe(2)
+    const release = calls.find((call) => call.sql.includes('attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END'))
+    expect(release).toBeDefined()
+    expect(release?.params).toEqual(['provider_effects_fenced:control_forbidden:epoch-after', 'provider-race-row'])
+  })
+
+  test('all three outbound producer blocks evaluate the shared control before INSERT', () => {
+    const cliHelperStart = CLI_SRC.indexOf('async function enqueueOutboundProjection')
+    const cliHelperEnd = CLI_SRC.indexOf('\nfunction ', cliHelperStart + 1)
+    const cliHelper = CLI_SRC.slice(cliHelperStart, cliHelperEnd)
+    expect(cliHelper.indexOf('readProviderEffectsControl()')).toBeGreaterThan(-1)
+    expect(cliHelper.indexOf('readProviderEffectsControl()')).toBeLessThan(cliHelper.indexOf('INSERT INTO outbound_queue'))
+    expect(cliHelper).toContain('PROVIDER_EFFECTS_FORBIDDEN_CODE')
+
+    for (const body of [serverToolBody('send'), serverToolBody('notify')]) {
+      const controlIdx = body.indexOf('readProviderEffectsControl()')
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection, providerEffectsControl)')
+      const insertIdx = body.indexOf('INSERT INTO outbound_queue')
+      expect(controlIdx).toBeGreaterThan(-1)
+      expect(skipIdx).toBeGreaterThan(controlIdx)
+      expect(insertIdx).toBeGreaterThan(skipIdx)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // T3: server.ts send-tool INSERTs into outbound_queue instead of calling
 //     getDiscordClient(...).sendAdapterMessage directly
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,8 +463,8 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
   })
   test('server send + notify skip enqueue when the resolver has no delivery consumer', () => {
     for (const body of [serverToolBody('send'), serverToolBody('notify')]) {
-      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection)')
-      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped")
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection, providerEffectsControl)')
+      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped", skipIdx)
       const insertIdx = body.indexOf('INSERT INTO outbound_queue')
       expect(skipIdx).toBeGreaterThan(-1)
       expect(skipAuditIdx).toBeGreaterThan(skipIdx)
@@ -429,7 +554,7 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('CLI send + notify skip enqueue when the resolver has no delivery consumer', () => {
     const helper = enqueueOutboundProjectionBody()
     const skipIdx = helper.indexOf('outboundProjectionSkipReason(projection)')
-    const skipAuditIdx = helper.indexOf("outbound.enqueue_skipped")
+    const skipAuditIdx = helper.indexOf("outbound.enqueue_skipped", skipIdx)
     const insertIdx = helper.indexOf('INSERT INTO outbound_queue')
     expect(skipIdx).toBeGreaterThan(-1)
     expect(skipAuditIdx).toBeGreaterThan(skipIdx)
