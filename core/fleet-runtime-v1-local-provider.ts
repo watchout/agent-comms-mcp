@@ -49,6 +49,57 @@ export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   payload_path_count: 24,
 })
 
+export const FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES = Object.freeze([
+  { bytes: 6894, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:8166ff6d42388a37ea4d170ed08c7204fc540a2bdd1a08548d1c9e378980fcf6' },
+  { bytes: 12331, path: '.shirube/runtime/rapid-lite/build-review-plan.mjs', sha256: 'sha256:e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85' },
+  { bytes: 25234, path: '.shirube/runtime/rapid-lite/check-adoption.mjs', sha256: 'sha256:80c35f811abdb2d5b5c5653a56eea189244b41c70d0195953b13a4bd6b6369b3' },
+  { bytes: 19515, path: '.shirube/runtime/rapid-lite/check-audit-checklist.mjs', sha256: 'sha256:6ac7d94098a2b77a28e52e2b99498def9e8753920604ecb89eb6752bea2c300e' },
+  { bytes: 58514, path: '.shirube/runtime/rapid-lite/check-control-state-completeness.mjs', sha256: 'sha256:7f79d27d899728941fea5ecf119c1fe68fb000351b2202eb8820d96f59413277' },
+  { bytes: 24039, path: '.shirube/runtime/rapid-lite/check-design-rules.mjs', sha256: 'sha256:42d7139410bb2e75e6e28e8a12f02700c4fca0e9b9afc8a742124aadf50646e5' },
+  { bytes: 15557, path: '.shirube/runtime/rapid-lite/check-enforcement-policy.mjs', sha256: 'sha256:1565310d6c57dd1ba3a02a2174183584fc488bed172279e95d4d2ba08f345743' },
+  { bytes: 19490, path: '.shirube/runtime/rapid-lite/check-execution-context.mjs', sha256: 'sha256:6febe7ee73ac68b8f768fad7ed9e9ff8e6c672acaa49125124d379c73eb53f1c' },
+  { bytes: 15032, path: '.shirube/runtime/rapid-lite/check-flow-safety.mjs', sha256: 'sha256:b223d2747c1265af5f29c624750811a99cf26033a0140bbbcb760e94b277ed72' },
+  { bytes: 35285, path: '.shirube/runtime/rapid-lite/check-gate-contract.mjs', sha256: 'sha256:53ef0c1292a44d867f01f306f096afcc7c31960b36017edb77b5b030c79b610d' },
+  { bytes: 30173, path: '.shirube/runtime/rapid-lite/check-lifecycle.mjs', sha256: 'sha256:5a02fc65c1dda4e73990d1ab9c50063602c4bca40379aea814e97dd7c8b2a2a2' },
+  { bytes: 11400, path: '.shirube/runtime/rapid-lite/check-review-plan.mjs', sha256: 'sha256:fba44cf2f2a03e03462ac3fe2a08cd865175774e9bfb249dd42f8bf721917578' },
+  { bytes: 11195, path: '.shirube/runtime/rapid-lite/generate-audit-checklist.mjs', sha256: 'sha256:fd7a76311345706889bcbb12a48693b0bdc957bd1b325eb215e93a76a9c60a1a' },
+  { bytes: 12493, path: '.shirube/runtime/rapid-lite/lib.mjs', sha256: 'sha256:882fd47548aac062ba72d276fb7b69e14b5ed53b98314547881f1f712549c39a' },
+  { bytes: 2373, path: '.shirube/runtime/rapid-lite/manifest.json', sha256: 'sha256:0f5bc1907847af28e96250f84289b22320e114e39a904f457e8ebce16df535b4' },
+  { bytes: 45786, path: '.shirube/runtime/rapid-lite/next-action-sequencing.mjs', sha256: 'sha256:67fe879ace62f96429b91cb23167897a6a2bbdc8d7d789cff09b1312c48ebd33' },
+  { bytes: 6879, path: '.shirube/runtime/rapid-lite/normalize-control-handoff.mjs', sha256: 'sha256:47deccdf4bc633cc0b493f0df44f017d801933430cbd16b5ff0548b3656726c4' },
+  { bytes: 22314, path: '.shirube/runtime/rapid-lite/resolve-additional-review-ref.mjs', sha256: 'sha256:faba408ce66c6d450184043076044b11899ab8a6306323f1b4dde28faa33ed28' },
+  { bytes: 14063, path: '.shirube/runtime/rapid-lite/resolve-control-handoff-ref.mjs', sha256: 'sha256:0395f6881458e22090073d2521398bcde6d777840ee30e51411ee34b1b84c579' },
+  { bytes: 18196, path: '.shirube/runtime/rapid-lite/resolve-structured-audit-ref.mjs', sha256: 'sha256:5a09843d10fe6e7ee7e4c39f8a2c810e406bb30fe99b9c626dda4efa060e17d6' },
+  { bytes: 69235, path: '.shirube/runtime/rapid-lite/run-rapid-lite-report.mjs', sha256: 'sha256:7057375536bf9c295a1b2cdc19e5cf47d2095c7c7ed128bbc626fce7123b5bf5' },
+  { bytes: 10299, path: '.shirube/runtime/rapid-lite/run-rapid-lite-workflow.mjs', sha256: 'sha256:6b097974235d15607112f30fee5e4b5cecb5cc7d399f67b9eba635cfa8a0482e' },
+  { bytes: 4931, path: '.shirube/runtime/rapid-lite/shirube-default-design-rules.yaml', sha256: 'sha256:d6a5e1ababaa6dd8b8ce7b53cde13737f204c09054f0793cb700ff74745301df' },
+  { bytes: 20091, path: '.shirube/runtime/rapid-lite/shirube-v3-rapid-lite-gate-contract-matrix.yaml', sha256: 'sha256:cc6cc4b39131847a606cd2aeec29f8e0d76ed330aae23dcadedbaf34317db049' },
+] as const)
+
+const FLEET_RUNTIME_V1_RENDERER_TARGET_POLICY = Object.freeze({
+  allowed_paths: Object.freeze(['.shirube/**', 'docs/shirube/**', '.github/workflows/shirube-rapid-lite-gates-report.yml']),
+  forbidden_paths: Object.freeze([
+    'scripts/shirube/**', 'src/**', 'app/**', 'api/**', 'lib/**', 'db/**', 'migrations/**',
+    'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.env*', 'deploy/**', 'deployment/**',
+    '.github/branch-protection/**', '.github/rulesets/**',
+  ]),
+  workflow_caller_generated: true,
+  workflow_caller_path: '.github/workflows/shirube-rapid-lite-gates-report.yml',
+  application_runtime_changes_allowed: false,
+  shirube_control_runtime_bundle_generated: true,
+  package_changes_allowed: false,
+  branch_protection_changes_allowed: false,
+  required_check_activation_allowed: false,
+  external_repo_mutation_allowed: false,
+})
+
+const FLEET_RUNTIME_V1_RENDERER_REQUIRED_ACTIONS = Object.freeze([
+  'Open a target-repo adoption PR containing only the generated overlay files.',
+  'Owner must fill exact-head decision evidence before merge if any gate would block.',
+  'The generated workflow and immutable local runtime bundle must stay report-only; update them together from an audited Shirube release.',
+  'Do not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes into the adoption PR.',
+])
+
 export const FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT = '/Users/yuji/Library/Application Support/agent-comms-mcp/fleet-runtime-v1'
 
 const STATE_SCHEMA = 'fleet-runtime-v1/local-operation-state/v1' as const
@@ -206,6 +257,7 @@ export function validateFleetRuntimeCheckoutReadback(input: {
   head: string
   tree: string
   status_porcelain: string
+  branch: string
   expected_head?: string
   expected_tree?: string
 }): void {
@@ -225,9 +277,10 @@ export function validateFleetRuntimeCheckoutReadback(input: {
     || !COMMIT.test(input.head)
     || !COMMIT.test(input.tree)
     || input.status_porcelain !== ''
+    || input.branch !== ''
     || (input.expected_head !== undefined && input.head !== input.expected_head)
     || (input.expected_tree !== undefined && input.tree !== input.expected_tree)) {
-    return providerFail('UNSAFE_CHECKOUT', 'checkout repository, head, tree, or cleanliness differs')
+    return providerFail('UNSAFE_CHECKOUT', 'checkout repository, head, tree, cleanliness, or detached state differs')
   }
 }
 
@@ -335,7 +388,8 @@ export function validateFleetRuntimeExternalMergeBinding(input: {
     || input.pr.url !== input.createdPrUrl
     || input.receipt.pushed_head !== input.pushedHead
     || input.pr.headRefOid !== input.receipt.pushed_head
-    || input.pr.state !== 'MERGED' || input.pr.mergedAt === null
+    || input.pr.state !== 'MERGED' || typeof input.pr.mergedAt !== 'string' || !Number.isFinite(Date.parse(input.pr.mergedAt))
+    || input.pr.isDraft !== false
     || input.pr.baseRefName !== input.request.preimages[0].required_base_branch
     || mergeCommit?.oid !== input.receipt.merge_commit
     || input.receipt.merge_tree !== input.observedMergeTree) {
@@ -452,6 +506,115 @@ function parseOwnerStageMatrix(body: string): FleetRuntimeRequest['owner_decisio
   })
 }
 
+const OPERATION_PREDECESSOR_BINDING_KEYS = Object.freeze([
+  'operation', 'predecessor_url', 'predecessor_raw_body_sha256', 'predecessor_self_sha256',
+  'prior_request_id', 'prior_request_digest', 'prior_idempotency_key', 'prior_operation', 'prior_result', 'subject_digest',
+  'companion_url', 'companion_raw_body_sha256', 'companion_self_sha256', 'companion_request_id',
+  'companion_request_digest', 'companion_idempotency_key', 'companion_operation', 'companion_result',
+] as const)
+
+export interface FleetRuntimeOperationPredecessorBinding {
+  operation: FleetRuntimeOperation
+  predecessor_url: string
+  predecessor_raw_body_sha256: string
+  predecessor_self_sha256: string | null
+  prior_request_id: string | null
+  prior_request_digest: string | null
+  prior_idempotency_key: string | null
+  prior_operation: FleetRuntimeOperation | null
+  prior_result: 'PASS' | 'PARTIAL'
+  subject_digest: string
+  companion_url: string | null
+  companion_raw_body_sha256: string | null
+  companion_self_sha256: string | null
+  companion_request_id: string | null
+  companion_request_digest: string | null
+  companion_idempotency_key: string | null
+  companion_operation: FleetRuntimeOperation | null
+  companion_result: 'PASS' | null
+}
+
+function nullableYamlScalar(value: string): string | null {
+  return value === 'null' ? null : value
+}
+
+export function parseFleetRuntimeOperationPredecessorBinding(
+  request: FleetRuntimeRequest,
+  ownerBody: string,
+): FleetRuntimeOperationPredecessorBinding {
+  const section = yamlSection(ownerBody, 'operation_predecessor_binding')
+  const lines = section.split('\n').filter(line => line.trim() !== '')
+  const parsed: Record<string, string> = {}
+  for (const line of lines) {
+    const match = line.match(/^  ([a-z0-9_]+):\s*(\S.*)$/)
+    if (!match || Object.hasOwn(parsed, match[1])) {
+      return providerFail('READBACK_INVALID', 'operation predecessor binding is nested, duplicate, empty, or malformed')
+    }
+    parsed[match[1]] = match[2].trim()
+  }
+  if (canonicalFleetRuntimeJson(Object.keys(parsed).sort()) !== canonicalFleetRuntimeJson([...OPERATION_PREDECESSOR_BINDING_KEYS].sort())) {
+    return providerFail('READBACK_INVALID', 'operation predecessor binding keys differ')
+  }
+  const binding = {
+    operation: parsed.operation,
+    predecessor_url: parsed.predecessor_url,
+    predecessor_raw_body_sha256: parsed.predecessor_raw_body_sha256,
+    predecessor_self_sha256: nullableYamlScalar(parsed.predecessor_self_sha256),
+    prior_request_id: nullableYamlScalar(parsed.prior_request_id),
+    prior_request_digest: nullableYamlScalar(parsed.prior_request_digest),
+    prior_idempotency_key: nullableYamlScalar(parsed.prior_idempotency_key),
+    prior_operation: nullableYamlScalar(parsed.prior_operation),
+    prior_result: parsed.prior_result,
+    subject_digest: parsed.subject_digest,
+    companion_url: nullableYamlScalar(parsed.companion_url),
+    companion_raw_body_sha256: nullableYamlScalar(parsed.companion_raw_body_sha256),
+    companion_self_sha256: nullableYamlScalar(parsed.companion_self_sha256),
+    companion_request_id: nullableYamlScalar(parsed.companion_request_id),
+    companion_request_digest: nullableYamlScalar(parsed.companion_request_digest),
+    companion_idempotency_key: nullableYamlScalar(parsed.companion_idempotency_key),
+    companion_operation: nullableYamlScalar(parsed.companion_operation),
+    companion_result: nullableYamlScalar(parsed.companion_result),
+  } as FleetRuntimeOperationPredecessorBinding
+  if (binding.operation !== request.operation || binding.predecessor_url !== request.predecessor_receipt.url
+    || binding.predecessor_raw_body_sha256 !== request.predecessor_receipt.sha256
+    || binding.prior_operation !== request.predecessor_receipt.operation
+    || binding.prior_result !== request.predecessor_receipt.result
+    || binding.subject_digest !== request.predecessor_receipt.subject_digest) {
+    return providerFail('READBACK_INVALID', 'owner predecessor binding differs from the sealed request predecessor')
+  }
+  if (request.operation === 'CANARY_COLD_START') {
+    if ([binding.predecessor_self_sha256, binding.prior_request_id, binding.prior_request_digest,
+      binding.prior_idempotency_key, binding.prior_operation, binding.companion_url,
+      binding.companion_raw_body_sha256, binding.companion_self_sha256, binding.companion_request_id,
+      binding.companion_request_digest, binding.companion_idempotency_key, binding.companion_operation,
+      binding.companion_result].some(value => value !== null)) {
+      return providerFail('READBACK_INVALID', 'canary predecessor binding must use explicit null non-operation fields')
+    }
+    return binding
+  }
+  if (!SHA256.test(String(binding.predecessor_self_sha256 ?? ''))
+    || !binding.prior_request_id?.startsWith('FRV1-N40-')
+    || !SHA256.test(String(binding.prior_request_digest ?? ''))
+    || !INVOCATION_KEY.test(String(binding.prior_idempotency_key ?? ''))) {
+    return providerFail('READBACK_INVALID', 'owner predecessor binding lacks the exact prior request tuple')
+  }
+  const companionValues = [binding.companion_url, binding.companion_raw_body_sha256, binding.companion_self_sha256,
+    binding.companion_request_id, binding.companion_request_digest, binding.companion_idempotency_key,
+    binding.companion_operation, binding.companion_result]
+  if (request.operation === 'REAPPLY') {
+    if (!/^https:\/\/github\.com\/watchout\/ai-dev-framework\/issues\/576#issuecomment-[1-9][0-9]*$/.test(String(binding.companion_url ?? ''))
+      || !SHA256.test(String(binding.companion_raw_body_sha256 ?? '')) || !SHA256.test(String(binding.companion_self_sha256 ?? ''))
+      || !binding.companion_request_id?.startsWith('FRV1-N40-') || !SHA256.test(String(binding.companion_request_digest ?? ''))
+      || !INVOCATION_KEY.test(String(binding.companion_idempotency_key ?? ''))
+      || binding.companion_operation !== 'ROLLBACK' || binding.companion_result !== 'PASS') {
+      return providerFail('READBACK_INVALID', 'reapply owner binding lacks the exact rollback companion tuple')
+    }
+  } else if (companionValues.some(value => value !== null)) {
+    return providerFail('READBACK_INVALID', `${request.operation} must explicitly bind no separate companion`)
+  }
+  return binding
+}
+
 function localReceiptExactKeys(operation: FleetRuntimeOperation): string[] {
   const common = [
     'schema_version', 'receipt_id', 'receipt_sha256', 'request_id', 'request_digest', 'idempotency_key', 'stage_id',
@@ -462,7 +625,10 @@ function localReceiptExactKeys(operation: FleetRuntimeOperation): string[] {
   const specific = operation === 'ROLLBACK'
     ? ['merge_commit', 'merge_tree', 'pr_url', 'forward_effect_receipt_sha256', 'restored_preimage', 'fresh_runtime_instance_readback', 'queue_counts_unchanged']
     : operation === 'REAPPLY'
-      ? ['merge_commit', 'merge_tree', 'pr_url', 'rollback_receipt_sha256', 'recovery_receipt_sha256', 'payload_digest', 'postimage']
+      ? [
+          'merge_commit', 'merge_tree', 'pr_url', 'rollback_receipt_sha256', 'rollback_receipt_raw_body_sha256',
+          'rollback_receipt_url', 'recovery_receipt_sha256', 'recovery_receipt_self_sha256', 'payload_digest', 'postimage',
+        ]
       : operation === 'CANARY_COLD_START'
         ? ['merge_commit', 'merge_tree', 'pr_url']
         : ['rollback_receipt_sha256']
@@ -524,7 +690,10 @@ export function validateFleetRuntimeLocalReceipt(
   }
   if (expected.operation === 'REAPPLY'
     && (!SHA256.test(String(receipt.rollback_receipt_sha256 ?? ''))
-      || receipt.recovery_receipt_sha256 !== receipt.predecessor_receipt_sha256)) {
+      || !SHA256.test(String(receipt.rollback_receipt_raw_body_sha256 ?? ''))
+      || !/^https:\/\/github\.com\/watchout\/ai-dev-framework\/issues\/576#issuecomment-[1-9][0-9]*$/.test(String(receipt.rollback_receipt_url ?? ''))
+      || receipt.recovery_receipt_sha256 !== receipt.predecessor_receipt_sha256
+      || receipt.recovery_receipt_self_sha256 !== receipt.predecessor_receipt_self_sha256)) {
     return providerFail('READBACK_INVALID', 'reapply receipt does not bind rollback and recovery predecessors')
   }
   return receipt
@@ -533,6 +702,7 @@ export function validateFleetRuntimeLocalReceipt(
 function validateFleetRuntimePredecessorReceipt(
   request: FleetRuntimeRequest,
   rawBody: string,
+  binding: FleetRuntimeOperationPredecessorBinding,
 ): Record<string, unknown> {
   const receipt = parseCanonicalJson<Record<string, unknown>>(rawBody, 'immutable predecessor receipt')
   assertPlainRecord(receipt, 'immutable predecessor receipt')
@@ -555,10 +725,12 @@ function validateFleetRuntimePredecessorReceipt(
     || receipt.stage_id !== request.predecessor_receipt.node_id
     || receipt.subject_digest !== request.predecessor_receipt.subject_digest
     || receipt.target_repository !== 'watchout/kodama' || target?.repository !== 'watchout/kodama'
-    || !String(receipt.request_id ?? '').startsWith('FRV1-N40-')
-    || !SHA256.test(String(receipt.request_digest ?? '')) || !INVOCATION_KEY.test(String(receipt.idempotency_key ?? ''))
+    || receipt.request_id !== binding.prior_request_id
+    || receipt.request_digest !== binding.prior_request_digest
+    || receipt.idempotency_key !== binding.prior_idempotency_key
     || receipt.actor_agent_id !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.actor_agent_id
     || receipt.active_function !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.active_function
+    || receipt.receipt_sha256 !== binding.predecessor_self_sha256
     || receipt.receipt_sha256 !== canonicalSelfDigest(receipt)
     || typeof postimage?.runtime_instance_id !== 'string' || postimage.runtime_instance_id.length === 0
     || !COMMIT.test(String(postimage.head_commit ?? '')) || !COMMIT.test(String(postimage.tree ?? ''))) {
@@ -575,11 +747,39 @@ function validateFleetRuntimePredecessorReceipt(
   return receipt
 }
 
+function validateFleetRuntimeRollbackCompanionReceipt(
+  request: FleetRuntimeRequest,
+  rawBody: string,
+  binding: FleetRuntimeOperationPredecessorBinding,
+  recoveryReceipt: Record<string, unknown>,
+): Record<string, unknown> {
+  if (request.operation !== 'REAPPLY') return providerFail('READBACK_INVALID', 'rollback companion is admitted only for REAPPLY')
+  if (sha256(rawBody) !== binding.companion_raw_body_sha256) {
+    return providerFail('READBACK_INVALID', 'rollback companion raw-body digest differs from owner authority')
+  }
+  const receipt = parseCanonicalJson<Record<string, unknown>>(rawBody, 'immutable rollback companion receipt')
+  assertExactKeys(receipt, localReceiptExactKeys('ROLLBACK'), 'immutable rollback companion receipt')
+  const perTarget = receipt.per_target
+  const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] as Record<string, unknown> : null
+  if (receipt.schema_version !== 'fleet-runtime-v1/rollback-receipt/v1' || receipt.operation !== 'ROLLBACK'
+    || receipt.result !== 'PASS' || receipt.subject_digest !== request.predecessor_receipt.subject_digest
+    || receipt.target_repository !== 'watchout/kodama' || target?.repository !== 'watchout/kodama'
+    || receipt.request_id !== binding.companion_request_id || receipt.request_digest !== binding.companion_request_digest
+    || receipt.idempotency_key !== binding.companion_idempotency_key
+    || receipt.receipt_sha256 !== binding.companion_self_sha256 || receipt.receipt_sha256 !== canonicalSelfDigest(receipt)
+    || recoveryReceipt.rollback_receipt_sha256 !== binding.companion_self_sha256) {
+    return providerFail('READBACK_INVALID', 'rollback companion tuple or RECOVERY link differs from owner authority')
+  }
+  return receipt
+}
+
 export function validateFleetRuntimeImmutableSemantics(
   request: FleetRuntimeRequest,
   ownerBody: string,
   predecessorBody: string,
+  companionBody?: string,
 ): void {
+  const predecessorBinding = parseFleetRuntimeOperationPredecessorBinding(request, ownerBody)
   const ownerSubject = yamlSection(ownerBody, 'subject')
   const canary = yamlSection(ownerBody, 'canary_selection')
   const release = yamlNestedSection(ownerSubject, 'release')
@@ -614,7 +814,11 @@ export function validateFleetRuntimeImmutableSemantics(
     return providerFail('READBACK_INVALID', 'owner body semantics differ from the sealed request')
   }
   if (request.operation !== 'CANARY_COLD_START') {
-    validateFleetRuntimePredecessorReceipt(request, predecessorBody)
+    const predecessorReceipt = validateFleetRuntimePredecessorReceipt(request, predecessorBody, predecessorBinding)
+    if (request.operation === 'REAPPLY') {
+      if (!companionBody) return providerFail('READBACK_INVALID', 'REAPPLY rollback companion body is absent')
+      validateFleetRuntimeRollbackCompanionReceipt(request, companionBody, predecessorBinding, predecessorReceipt)
+    }
     return
   }
   const exact = yamlSection(predecessorBody, 'exact_subject')
@@ -764,6 +968,87 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     return join(this.invocationDirectory(key), 'completed.json')
   }
 
+  private ownerWriteLockPath(key: string): string {
+    return join(this.invocationDirectory(key), 'owner-write.lock')
+  }
+
+  private assertOwnerUnlocked(key: string): OwnedFleetRuntimeInvocationState {
+    const path = this.reservationPath(key)
+    if (!existsSync(path)) return providerFail('IN_FLIGHT', 'reservation no longer exists')
+    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'reservation owner')
+    if (state.status !== 'reserved' || state.execution_owner?.owner_id !== this.owner.owner_id) {
+      return providerFail('IN_FLIGHT', 'current executor no longer owns the durable reservation')
+    }
+    return state
+  }
+
+  private withInvocationWriteLock<T>(
+    key: string,
+    action: () => T,
+    allowStaleLockBreak = true,
+  ): T {
+    const lock = this.ownerWriteLockPath(key)
+    const lockToken = randomUUID()
+    const lockOwner: FleetRuntimeExecutionOwner = {
+      ...this.owner,
+      heartbeat_at: new Date(this.nowMs()).toISOString(),
+    }
+    try {
+      atomicWrite(this.root, lock, { lock_token: lockToken, execution_owner: lockOwner }, true)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const lockState = readState<{ lock_token?: unknown; execution_owner?: FleetRuntimeExecutionOwner }>(
+        this.root,
+        lock,
+        'owner write lock',
+      )
+      const observedOwner = lockState.execution_owner
+      const heartbeat = Date.parse(String(observedOwner?.heartbeat_at ?? ''))
+      if (allowStaleLockBreak && observedOwner && !this.ownerAlive(observedOwner)
+        && Number.isFinite(heartbeat) && this.nowMs() - heartbeat >= this.staleAfterMs) {
+        try {
+          unlinkSync(lock)
+          syncDirectory(dirname(lock))
+        } catch (unlinkError) {
+          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError
+        }
+        return this.withInvocationWriteLock(key, action, false)
+      }
+      return providerFail('IN_FLIGHT', 'another executor owns the durable invocation write lock')
+    }
+    try {
+      return action()
+    } finally {
+      if (existsSync(lock)) {
+        const current = readState<{ lock_token?: unknown }>(this.root, lock, 'owner write lock release')
+        if (current.lock_token !== lockToken) {
+          return providerFail('STATE_RECORD_INVALID', 'invocation write lock token changed before release')
+        }
+        unlinkSync(lock)
+        syncDirectory(dirname(lock))
+      }
+    }
+  }
+
+  commitOwnedRecord<T>(
+    key: string,
+    path: string,
+    label: string,
+    expected: T | null,
+    next: T,
+  ): T {
+    return this.withInvocationWriteLock(key, () => {
+      this.assertOwnerUnlocked(key)
+      const current = existsSync(path) ? readState<T>(this.root, path, label) : null
+      if (canonicalFleetRuntimeJson(current) !== canonicalFleetRuntimeJson(expected)) {
+        return providerFail('STATE_RECORD_INVALID', `${label} changed before the fenced write`)
+      }
+      atomicWrite(this.root, path, next)
+      this.assertOwnerUnlocked(key)
+      return clone(next)
+    })
+  }
+
   async load(key: string): Promise<FleetRuntimeInvocationState | null> {
     const completed = this.completionPath(key)
     const reserved = this.reservationPath(key)
@@ -809,30 +1094,15 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     }
   }
 
-  private async takeover(
+  private takeover(
     state: FleetRuntimeInvocationState,
     observed: OwnedFleetRuntimeInvocationState,
-    allowStaleLockBreak = true,
   ): Promise<{ acquired: boolean; state: FleetRuntimeInvocationState }> {
-    const lock = join(this.invocationDirectory(state.idempotency_key), 'takeover.lock')
-    try {
-      atomicWrite(this.root, lock, { prior_owner: observed.execution_owner, next_owner: this.owner }, true)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        const lockState = readState<{ next_owner?: FleetRuntimeExecutionOwner }>(this.root, lock, 'takeover lock')
-        const lockOwner = lockState.next_owner
-        const heartbeat = Date.parse(String(lockOwner?.heartbeat_at ?? ''))
-        if (allowStaleLockBreak && lockOwner && !this.ownerAlive(lockOwner)
-          && Number.isFinite(heartbeat) && this.nowMs() - heartbeat >= this.staleAfterMs) {
-          unlinkSync(lock)
-          return this.takeover(state, observed, false)
-        }
-        return providerFail('IN_FLIGHT', 'another executor is taking over the stale owner')
-      }
-      throw error
-    }
-    try {
-      const latest = await this.load(state.idempotency_key) as OwnedFleetRuntimeInvocationState | null
+    return Promise.resolve(this.withInvocationWriteLock(state.idempotency_key, () => {
+      const reservation = this.reservationPath(state.idempotency_key)
+      const latest = existsSync(reservation)
+        ? readState<OwnedFleetRuntimeInvocationState>(this.root, reservation, 'takeover reservation')
+        : null
       if (!latest || latest.status !== 'reserved' || latest.request_digest !== state.request_digest
         || latest.execution_owner?.owner_id !== observed.execution_owner?.owner_id
         || this.ownerAlive(latest.execution_owner)) {
@@ -845,46 +1115,42 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
       const replaced: OwnedFleetRuntimeInvocationState = { ...state, execution_owner: clone(this.owner) }
       atomicWrite(this.root, this.reservationPath(state.idempotency_key), replaced)
       return { acquired: true, state: clone(replaced) }
-    } finally {
-      if (existsSync(lock)) unlinkSync(lock)
-    }
+    }))
   }
 
   async heartbeatOwner(key: string): Promise<void> {
-    const path = this.reservationPath(key)
-    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'reservation owner')
-    if (state.status !== 'reserved' || state.execution_owner?.owner_id !== this.owner.owner_id) {
-      return providerFail('IN_FLIGHT', 'current executor does not own the reservation')
-    }
-    state.execution_owner.heartbeat_at = new Date(this.nowMs()).toISOString()
-    atomicWrite(this.root, path, state)
+    this.withInvocationWriteLock(key, () => {
+      const state = this.assertOwnerUnlocked(key)
+      state.execution_owner!.heartbeat_at = new Date(this.nowMs()).toISOString()
+      atomicWrite(this.root, this.reservationPath(key), state)
+      this.assertOwnerUnlocked(key)
+    })
   }
 
   assertOwner(key: string): void {
-    const path = this.reservationPath(key)
-    if (!existsSync(path)) return providerFail('IN_FLIGHT', 'reservation no longer exists')
-    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'reservation owner')
-    if (state.status !== 'reserved' || state.execution_owner?.owner_id !== this.owner.owner_id) {
-      return providerFail('IN_FLIGHT', 'current executor no longer owns the durable reservation')
-    }
+    this.assertOwnerUnlocked(key)
   }
 
   async complete_once(state: FleetRuntimeInvocationState): Promise<FleetRuntimeInvocationState> {
     assertInvocationStateShape(state)
     if (state.status !== 'completed') return providerFail('STATE_RECORD_INVALID', 'completion must use completed state')
-    const existing = await this.load(state.idempotency_key)
-    if (!existing) return providerFail('STATE_RECORD_INVALID', 'cannot complete an unreserved invocation')
-    if (existing.request_digest !== state.request_digest) return providerFail('STATE_COLLISION', 'completion request digest differs')
-    if (existing.status === 'completed') {
-      if (canonicalFleetRuntimeJson(existing) !== canonicalFleetRuntimeJson(state)) {
-        return providerFail('STATE_COLLISION', 'completed receipt is immutable')
+    return this.withInvocationWriteLock(state.idempotency_key, () => {
+      const completedPath = this.completionPath(state.idempotency_key)
+      if (existsSync(completedPath)) {
+        const completed = readState<FleetRuntimeInvocationState>(this.root, completedPath, 'completed invocation')
+        if (canonicalFleetRuntimeJson(completed) !== canonicalFleetRuntimeJson(state)) {
+          return providerFail('STATE_COLLISION', 'completed receipt is immutable')
+        }
+        return completed
       }
-      return existing
-    }
-    this.assertOwner(state.idempotency_key)
-    atomicWrite(this.root, this.completionPath(state.idempotency_key), state)
-    this.assertOwner(state.idempotency_key)
-    return clone(state)
+      const existing = this.assertOwnerUnlocked(state.idempotency_key)
+      if (existing.request_digest !== state.request_digest) {
+        return providerFail('STATE_COLLISION', 'completion request digest differs')
+      }
+      atomicWrite(this.root, completedPath, state)
+      this.assertOwnerUnlocked(state.idempotency_key)
+      return clone(state)
+    })
   }
 }
 
@@ -947,6 +1213,7 @@ export interface FleetRuntimeLocalOperationState {
   idempotency_key: string
   operation: FleetRuntimeOperation
   execution_owner_id: string
+  phase_sequence: FleetRuntimeLocalPhase[]
   phases: Partial<Record<FleetRuntimeLocalPhase, FleetRuntimeLocalPhaseState>>
 }
 
@@ -955,6 +1222,8 @@ export interface FleetRuntimeLocalPhaseContext {
   invocation_directory: string
   prior_evidence: Partial<Record<FleetRuntimeLocalPhase, Record<string, unknown>>>
   current_intent: Record<string, unknown>
+  execution_owner_id: string
+  owner_decision_raw_body: string
   predecessor_receipt_raw_body: string
 }
 
@@ -995,34 +1264,372 @@ export interface FleetRuntimeLocalSystem {
   ): Promise<FleetRuntimeEffectReceipt>
 }
 
-function assertJournal(state: FleetRuntimeLocalOperationState, request: FleetRuntimeRequest, ownerId: string): void {
+const PHASE_BINDING_KEYS = Object.freeze([
+  'execution_owner_id', 'operation', 'phase', 'request_digest', 'request_id',
+] as const)
+
+const PHASE_INTENT_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, readonly string[]>> = Object.freeze({
+  PREPARE_CLEAN_CHECKOUT: Object.freeze(['expected_head', 'expected_tree']),
+  STAGE_EXACT_PAYLOAD: Object.freeze(['payload_digest', 'path_count', 'raw_output_path', 'release_commit', 'release_tree', 'selected_payload_path']),
+  VERIFY_EXACT_PAYLOAD: Object.freeze(['payload_digest', 'path_count', 'selected_payload_path']),
+  CREATE_LOCAL_COMMIT: Object.freeze(['payload_digest', 'path_count']),
+  PUSH_NORMAL_BRANCH: Object.freeze(['branch', 'force', 'head']),
+  CREATE_DRAFT_PR: Object.freeze(['base', 'branch', 'draft', 'head', 'repository']),
+  CREATE_LOCAL_REVERT: Object.freeze(['expected_tree', 'merge_commit']),
+  VERIFY_EXTERNAL_MERGE: Object.freeze(['base', 'pr_url', 'pushed_head', 'repository']),
+  PREPARE_MERGED_CHECKOUT: Object.freeze(['expected_head', 'expected_tree']),
+  VERIFY_EXACT_PREIMAGE: Object.freeze(['expected_head', 'expected_tree']),
+  COLD_START_DISCORD_KODAMA: Object.freeze(['checkout_path', 'expected_head', 'expected_tree', 'port', 'session']),
+  VERIFY_LIVE_IDENTITY: Object.freeze(['checkout_path', 'expected_head', 'expected_tree', 'port', 'session']),
+})
+
+const PHASE_EVIDENCE_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, readonly string[]>> = Object.freeze({
+  PREPARE_CLEAN_CHECKOUT: Object.freeze([
+    'baseline_runtime_instance_id', 'checkout_path', 'clean', 'detached', 'head', 'remote', 'tree',
+  ]),
+  STAGE_EXACT_PAYLOAD: Object.freeze([
+    'path_count', 'payload_digest', 'payload_paths', 'raw_output_path', 'raw_path_count', 'raw_paths',
+    'release_checkout_after', 'release_checkout_before', 'renderer_report_sha256', 'selected_blobs', 'selected_payload_path',
+  ]),
+  VERIFY_EXACT_PAYLOAD: Object.freeze(['checkout_blobs', 'path_count', 'payload_digest', 'payload_paths', 'selected_payload_path']),
+  CREATE_LOCAL_COMMIT: Object.freeze(['branch', 'commit_blobs', 'head', 'index_blobs', 'payload_paths']),
+  PUSH_NORMAL_BRANCH: Object.freeze(['branch', 'force', 'head']),
+  CREATE_DRAFT_PR: Object.freeze(['branch', 'draft', 'pr_url']),
+  CREATE_LOCAL_REVERT: Object.freeze(['branch', 'head', 'reverted_merge']),
+  VERIFY_EXTERNAL_MERGE: Object.freeze(
+    EXTERNAL_MERGE_RECEIPT_KEYS.filter(key => !(PHASE_BINDING_KEYS as readonly string[]).includes(key)),
+  ),
+  PREPARE_MERGED_CHECKOUT: Object.freeze(['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree']),
+  VERIFY_EXACT_PREIMAGE: Object.freeze(['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree']),
+  COLD_START_DISCORD_KODAMA: Object.freeze(['checkout_path', 'clean', 'detached', 'head', 'port', 'remote', 'session', 'tree']),
+  VERIFY_LIVE_IDENTITY: Object.freeze([
+    'duplicate_effect_count', 'inventory', 'local_checkout', 'queue_unchanged', 'remote_image',
+    'runtime_instance_id', 'unauthorized_effect_count',
+  ]),
+})
+
+function phaseBoundRecord(
+  request: FleetRuntimeRequest,
+  phase: FleetRuntimeLocalPhase,
+  ownerId: string,
+  value: Record<string, unknown>,
+  label: 'intent' | 'evidence',
+): Record<string, unknown> {
+  const specific = clone(value)
+  const expectedBindings: Record<string, unknown> = {
+    execution_owner_id: ownerId,
+    operation: request.operation,
+    phase,
+    request_digest: request.request_digest,
+    request_id: request.request_id,
+  }
+  for (const key of PHASE_BINDING_KEYS) {
+    if (!Object.hasOwn(specific, key)) continue
+    if (specific[key] !== expectedBindings[key]) {
+      return providerFail('STATE_RECORD_INVALID', `${phase} ${label} attempted to replace ${key}`)
+    }
+    delete specific[key]
+  }
+  return {
+    ...expectedBindings,
+    ...specific,
+  }
+}
+
+function assertCommit(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !COMMIT.test(value)) return providerFail('STATE_RECORD_INVALID', `${label} must be an exact commit`)
+  return value
+}
+
+function assertSha(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !SHA256.test(value)) return providerFail('STATE_RECORD_INVALID', `${label} must be an exact sha256`)
+  return value
+}
+
+function assertString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) return providerFail('STATE_RECORD_INVALID', `${label} must be a nonempty string`)
+  return value
+}
+
+function assertCheckoutEvidence(value: Record<string, unknown>, intent: Record<string, unknown>, label: string): void {
+  assertString(value.checkout_path, `${label} checkout path`)
+  if (value.checkout_path !== intent.checkout_path && Object.hasOwn(intent, 'checkout_path')) {
+    return providerFail('STATE_RECORD_INVALID', `${label} checkout path differs from intent`)
+  }
+  if (value.head !== intent.expected_head || value.tree !== intent.expected_tree
+    || value.clean !== true || value.detached !== true
+    || !new Set(['https://github.com/watchout/kodama.git', 'git@github.com:watchout/kodama.git']).has(String(value.remote))) {
+    return providerFail('STATE_RECORD_INVALID', `${label} checkout evidence differs from exact detached intent`)
+  }
+}
+
+function assertReleaseCheckoutEvidence(value: unknown, label: string): void {
+  assertPlainRecord(value, label)
+  assertExactKeys(value, ['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree'], label)
+  assertString(value.checkout_path, `${label} checkout path`)
+  if (!new Set(['https://github.com/watchout/ai-dev-framework.git', 'git@github.com:watchout/ai-dev-framework.git']).has(String(value.remote))
+    || value.head !== FLEET_RUNTIME_V1_CONTRACT.release_commit || value.tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+    || value.clean !== true || value.detached !== true) {
+    return providerFail('STATE_RECORD_INVALID', `${label} differs from the exact detached release image`)
+  }
+}
+
+function assertPathRows(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length !== 24 || value.some(path => typeof path !== 'string') || new Set(value).size !== 24) {
+    return providerFail('STATE_RECORD_INVALID', `${label} must contain the exact unique 24 paths`)
+  }
+  return value as string[]
+}
+
+function assertBlobMap(value: unknown, paths: readonly string[], label: string): void {
+  assertPlainRecord(value, label)
+  assertExactKeys(value, paths, label)
+  for (const path of paths) {
+    const row = value[path]
+    assertPlainRecord(row, `${label}.${path}`)
+    assertExactKeys(row, ['bytes', 'sha256'], `${label}.${path}`)
+    if (!Number.isSafeInteger(row.bytes) || Number(row.bytes) < 0 || !SHA256.test(String(row.sha256 ?? ''))) {
+      return providerFail('STATE_RECORD_INVALID', `${label}.${path} byte binding differs`)
+    }
+  }
+}
+
+function validatePhaseSemantics(
+  request: FleetRuntimeRequest,
+  phaseName: FleetRuntimeLocalPhase,
+  phase: FleetRuntimeLocalPhaseState,
+  priorEvidence: Partial<Record<FleetRuntimeLocalPhase, Record<string, unknown>>>,
+  ownerId: string,
+): void {
+  assertPlainRecord(phase.intent, `${phaseName} intent`)
+  const intentKeys = [...PHASE_BINDING_KEYS, ...PHASE_INTENT_SPECIFIC_KEYS[phaseName]]
+  assertExactKeys(phase.intent, intentKeys, `${phaseName} intent`)
+  if (phase.intent.execution_owner_id !== ownerId || phase.intent.operation !== request.operation
+    || phase.intent.phase !== phaseName || phase.intent.request_digest !== request.request_digest
+    || phase.intent.request_id !== request.request_id) {
+    return providerFail('STATE_RECORD_INVALID', `${phaseName} intent has a foreign request or owner binding`)
+  }
+  const commitIntentFields = ['expected_head', 'expected_tree', 'head', 'merge_commit']
+  for (const field of commitIntentFields) {
+    if (Object.hasOwn(phase.intent, field)) assertCommit(phase.intent[field], `${phaseName}.intent.${field}`)
+  }
+  if (Object.hasOwn(phase.intent, 'payload_digest') && phase.intent.payload_digest !== request.payload_digest) {
+    return providerFail('STATE_RECORD_INVALID', `${phaseName} intent payload digest differs`)
+  }
+  if (Object.hasOwn(phase.intent, 'path_count') && phase.intent.path_count !== 24) {
+    return providerFail('STATE_RECORD_INVALID', `${phaseName} intent path count differs`)
+  }
+  if (phaseName === 'PREPARE_CLEAN_CHECKOUT'
+    && (request.operation === 'CANARY_COLD_START' || request.operation === 'REAPPLY')
+    && (phase.intent.expected_head !== request.preimages[0].head_commit || phase.intent.expected_tree !== request.preimages[0].tree)) {
+    return providerFail('STATE_RECORD_INVALID', 'prepare intent differs from the frozen canary/reapply preimage')
+  }
+  if (phaseName === 'STAGE_EXACT_PAYLOAD'
+    && (phase.intent.release_commit !== request.subject.release_commit || phase.intent.release_tree !== request.subject.release_tree
+      || typeof phase.intent.raw_output_path !== 'string' || typeof phase.intent.selected_payload_path !== 'string'
+      || phase.intent.raw_output_path === phase.intent.selected_payload_path)) {
+    return providerFail('STATE_RECORD_INVALID', 'stage intent differs from the exact release or separate output roots')
+  }
+  if (phaseName === 'VERIFY_EXACT_PAYLOAD' && typeof phase.intent.selected_payload_path !== 'string') {
+    return providerFail('STATE_RECORD_INVALID', 'verify payload intent omits the selected payload root')
+  }
+  if (phaseName === 'CREATE_LOCAL_REVERT' && phase.intent.expected_tree !== request.preimages[0].tree) {
+    return providerFail('STATE_RECORD_INVALID', 'revert intent differs from the frozen preimage tree')
+  }
+  if (phaseName === 'PUSH_NORMAL_BRANCH') {
+    assertString(phase.intent.branch, 'push branch')
+    if (phase.intent.force !== false) return providerFail('STATE_RECORD_INVALID', 'push intent must be non-force')
+  }
+  if (phaseName === 'CREATE_DRAFT_PR') {
+    assertString(phase.intent.branch, 'Draft PR branch')
+    if (phase.intent.repository !== 'watchout/kodama' || phase.intent.base !== request.preimages[0].required_base_branch
+      || phase.intent.draft !== true) return providerFail('STATE_RECORD_INVALID', 'Draft PR intent differs')
+  }
+  if (phaseName === 'VERIFY_EXTERNAL_MERGE') {
+    if (phase.intent.repository !== 'watchout/kodama' || phase.intent.base !== request.preimages[0].required_base_branch
+      || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(phase.intent.pr_url ?? ''))
+      || !COMMIT.test(String(phase.intent.pushed_head ?? ''))) {
+      return providerFail('STATE_RECORD_INVALID', 'external merge intent differs from the created exact PR/head')
+    }
+  }
+  if (phaseName === 'PREPARE_MERGED_CHECKOUT') {
+    const merge = priorEvidence.VERIFY_EXTERNAL_MERGE
+    if (phase.intent.expected_head !== merge?.merge_commit || phase.intent.expected_tree !== merge?.merge_tree) {
+      return providerFail('STATE_RECORD_INVALID', 'merged checkout intent differs from external merge evidence')
+    }
+  }
+  if (phaseName === 'COLD_START_DISCORD_KODAMA' || phaseName === 'VERIFY_LIVE_IDENTITY') {
+    assertString(phase.intent.checkout_path, `${phaseName} checkout path`)
+    if (phase.intent.session !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
+      || phase.intent.port !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port) {
+      return providerFail('STATE_RECORD_INVALID', `${phaseName} intent differs from the frozen local runtime binding`)
+    }
+  }
+  if (phase.status !== 'completed') return
+  assertPlainRecord(phase.evidence, `${phaseName} evidence`)
+  const reapplyPrepareKeys = phaseName === 'PREPARE_CLEAN_CHECKOUT' && request.operation === 'REAPPLY'
+    ? ['rollback_receipt_raw_body_sha256', 'rollback_receipt_self_sha256', 'rollback_receipt_url'] : []
+  const evidenceKeys = [...PHASE_BINDING_KEYS, 'intent_sha256', ...PHASE_EVIDENCE_SPECIFIC_KEYS[phaseName], ...reapplyPrepareKeys]
+  assertExactKeys(phase.evidence, evidenceKeys, `${phaseName} evidence`)
+  const evidence = phase.evidence
+  if (evidence.execution_owner_id !== ownerId || evidence.operation !== request.operation
+    || evidence.phase !== phaseName || evidence.request_digest !== request.request_digest
+    || evidence.request_id !== request.request_id || evidence.intent_sha256 !== phase.intent_sha256) {
+    return providerFail('STATE_RECORD_INVALID', `${phaseName} evidence has a foreign request, owner, or intent binding`)
+  }
+  if (phaseName === 'PREPARE_CLEAN_CHECKOUT') {
+    assertCheckoutEvidence(evidence, { ...phase.intent, checkout_path: evidence.checkout_path }, phaseName)
+    if (evidence.baseline_runtime_instance_id !== null && typeof evidence.baseline_runtime_instance_id !== 'string') {
+      return providerFail('STATE_RECORD_INVALID', 'prepare evidence runtime baseline is invalid')
+    }
+    for (const key of reapplyPrepareKeys) assertString(evidence[key], `prepare evidence ${key}`)
+    if (request.operation === 'REAPPLY') {
+      assertSha(evidence.rollback_receipt_raw_body_sha256, 'rollback raw digest')
+      assertSha(evidence.rollback_receipt_self_sha256, 'rollback self digest')
+    }
+  } else if (phaseName === 'STAGE_EXACT_PAYLOAD') {
+    const paths = assertPathRows(evidence.payload_paths, 'stage payload paths')
+    const rawPaths = evidence.raw_paths
+    if (!Array.isArray(rawPaths) || rawPaths.length !== 34 || rawPaths.some(path => typeof path !== 'string')
+      || new Set(rawPaths).size !== 34 || evidence.raw_path_count !== 34
+      || paths.some(path => !(rawPaths as string[]).includes(path)) || evidence.path_count !== 24
+      || evidence.payload_digest !== request.payload_digest || evidence.raw_output_path !== phase.intent.raw_output_path
+      || evidence.selected_payload_path !== phase.intent.selected_payload_path) {
+      return providerFail('STATE_RECORD_INVALID', 'stage evidence does not bind the full raw 34 and selected 24 outputs')
+    }
+    assertSha(evidence.renderer_report_sha256, 'renderer report digest')
+    assertBlobMap(evidence.selected_blobs, paths, 'selected blobs')
+    const manifestRows = paths.map(path => ({ path, ...(evidence.selected_blobs as Record<string, { bytes: number; sha256: string }>)[path] }))
+    if (sha256(canonicalFleetRuntimeJson(manifestRows)) !== request.payload_digest) {
+      return providerFail('STATE_RECORD_INVALID', 'selected blob manifest does not equal the sealed payload digest')
+    }
+    assertReleaseCheckoutEvidence(evidence.release_checkout_before, 'release checkout before renderer')
+    assertReleaseCheckoutEvidence(evidence.release_checkout_after, 'release checkout after renderer')
+    if (canonicalFleetRuntimeJson(evidence.release_checkout_before) !== canonicalFleetRuntimeJson(evidence.release_checkout_after)) {
+      return providerFail('STATE_RECORD_INVALID', 'release checkout changed across renderer execution')
+    }
+  } else if (phaseName === 'VERIFY_EXACT_PAYLOAD') {
+    const paths = assertPathRows(evidence.payload_paths, 'verified payload paths')
+    if (evidence.payload_digest !== request.payload_digest || evidence.path_count !== 24
+      || evidence.selected_payload_path !== phase.intent.selected_payload_path
+      || canonicalFleetRuntimeJson(paths) !== canonicalFleetRuntimeJson(priorEvidence.STAGE_EXACT_PAYLOAD?.payload_paths)) {
+      return providerFail('STATE_RECORD_INVALID', 'verified payload evidence differs from selected stage output')
+    }
+    assertBlobMap(evidence.checkout_blobs, paths, 'checkout blobs')
+    if (canonicalFleetRuntimeJson(evidence.checkout_blobs) !== canonicalFleetRuntimeJson(priorEvidence.STAGE_EXACT_PAYLOAD?.selected_blobs)) {
+      return providerFail('STATE_RECORD_INVALID', 'checkout blobs differ from the selected renderer blobs')
+    }
+  } else if (phaseName === 'CREATE_LOCAL_COMMIT') {
+    const paths = assertPathRows(evidence.payload_paths, 'commit payload paths')
+    assertCommit(evidence.head, 'local commit head')
+    assertString(evidence.branch, 'local commit branch')
+    assertBlobMap(evidence.index_blobs, paths, 'index blobs')
+    assertBlobMap(evidence.commit_blobs, paths, 'commit blobs')
+    if (canonicalFleetRuntimeJson(evidence.index_blobs) !== canonicalFleetRuntimeJson(evidence.commit_blobs)
+      || canonicalFleetRuntimeJson(evidence.index_blobs) !== canonicalFleetRuntimeJson(priorEvidence.VERIFY_EXACT_PAYLOAD?.checkout_blobs)
+      || canonicalFleetRuntimeJson(paths) !== canonicalFleetRuntimeJson(priorEvidence.VERIFY_EXACT_PAYLOAD?.payload_paths)) {
+      return providerFail('STATE_RECORD_INVALID', 'commit blobs or paths differ from verified index evidence')
+    }
+  } else if (phaseName === 'PUSH_NORMAL_BRANCH') {
+    if (evidence.branch !== phase.intent.branch || evidence.head !== phase.intent.head || evidence.force !== false) {
+      return providerFail('STATE_RECORD_INVALID', 'push evidence differs from immutable non-force intent')
+    }
+  } else if (phaseName === 'CREATE_DRAFT_PR') {
+    if (evidence.branch !== phase.intent.branch || evidence.draft !== true
+      || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(evidence.pr_url ?? ''))) {
+      return providerFail('STATE_RECORD_INVALID', 'Draft PR evidence differs from intent')
+    }
+  } else if (phaseName === 'CREATE_LOCAL_REVERT') {
+    assertCommit(evidence.head, 'revert head')
+    if (evidence.reverted_merge !== phase.intent.merge_commit) return providerFail('STATE_RECORD_INVALID', 'revert evidence differs from intent')
+  } else if (phaseName === 'VERIFY_EXTERNAL_MERGE') {
+    const receipt = Object.fromEntries(EXTERNAL_MERGE_RECEIPT_KEYS.map(key => [key, evidence[key]]))
+    validateFleetRuntimeExternalMergeReceipt(request, receipt, {
+      createdPrUrl: String(phase.intent.pr_url), pushedHead: String(phase.intent.pushed_head),
+    })
+  } else if (phaseName === 'PREPARE_MERGED_CHECKOUT' || phaseName === 'VERIFY_EXACT_PREIMAGE') {
+    assertCheckoutEvidence(evidence, phase.intent, phaseName)
+  } else if (phaseName === 'COLD_START_DISCORD_KODAMA') {
+    assertCheckoutEvidence(evidence, phase.intent, phaseName)
+    if (evidence.session !== phase.intent.session || evidence.port !== phase.intent.port) {
+      return providerFail('STATE_RECORD_INVALID', 'cold-start evidence session or port differs')
+    }
+  } else if (phaseName === 'VERIFY_LIVE_IDENTITY') {
+    assertString(evidence.runtime_instance_id, 'live runtime instance')
+    assertPlainRecord(evidence.local_checkout, 'live local checkout')
+    assertExactKeys(evidence.local_checkout, ['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree'], 'live local checkout')
+    assertCheckoutEvidence(evidence.local_checkout, phase.intent, 'live local checkout')
+    assertPlainRecord(evidence.remote_image, 'live remote image')
+    assertExactKeys(evidence.remote_image, [
+      'distribution_surface_entry_count', 'distribution_surface_sha256', 'head_commit',
+      'runtime_surface_entry_count', 'runtime_surface_sha256', 'tree',
+    ], 'live remote image')
+    if (evidence.remote_image.head_commit !== phase.intent.expected_head || evidence.remote_image.tree !== phase.intent.expected_tree
+      || evidence.queue_unchanged !== true || evidence.duplicate_effect_count !== 0 || evidence.unauthorized_effect_count !== 0) {
+      return providerFail('STATE_RECORD_INVALID', 'live evidence image, queue, or effect counters differ')
+    }
+  }
+}
+
+function assertJournal(
+  state: FleetRuntimeLocalOperationState,
+  request: FleetRuntimeRequest,
+  ownerId: string,
+  requireComplete = false,
+): void {
   assertPlainRecord(state, 'operation state')
-  if (state.schema_version !== STATE_SCHEMA
-    || state.request_id !== request.request_id
-    || state.request_digest !== request.request_digest
-    || state.idempotency_key !== request.idempotency_key
+  assertExactKeys(state, [
+    'execution_owner_id', 'idempotency_key', 'operation', 'phase_sequence', 'phases',
+    'request_digest', 'request_id', 'schema_version',
+  ], 'operation state')
+  if (state.schema_version !== STATE_SCHEMA || state.request_id !== request.request_id
+    || state.request_digest !== request.request_digest || state.idempotency_key !== request.idempotency_key
     || state.operation !== request.operation || state.execution_owner_id !== ownerId) {
     return providerFail('OPERATION_STATE_MISMATCH', 'operation journal is not bound to this exact request')
   }
   const expectedOrder = OPERATION_PHASES[request.operation as keyof typeof OPERATION_PHASES] ?? []
-  const actualKeys = Object.keys(state.phases)
-  const admittedPrefix = expectedOrder.slice(0, actualKeys.length)
-  if (actualKeys.length !== new Set(actualKeys).size || actualKeys.some(key => !admittedPrefix.includes(key as FleetRuntimeLocalPhase))
-    || admittedPrefix.some(key => !Object.hasOwn(state.phases, key))) {
-    return providerFail('STATE_RECORD_INVALID', 'operation phases are missing, extra, duplicate, or out of order')
+  if (!Array.isArray(state.phase_sequence) || new Set(state.phase_sequence).size !== state.phase_sequence.length
+    || canonicalFleetRuntimeJson(state.phase_sequence) !== canonicalFleetRuntimeJson(expectedOrder.slice(0, state.phase_sequence.length))
+    || (requireComplete && state.phase_sequence.length !== expectedOrder.length)) {
+    return providerFail('STATE_RECORD_INVALID', 'operation phase sequence is missing, extra, duplicate, or reordered')
   }
-  for (const phaseName of admittedPrefix) {
+  assertPlainRecord(state.phases, 'operation phases')
+  if (Object.keys(state.phases).length !== state.phase_sequence.length
+    || state.phase_sequence.some(phase => !Object.hasOwn(state.phases, phase))) {
+    return providerFail('STATE_RECORD_INVALID', 'operation phase map differs from its exact sequence')
+  }
+  const priorEvidence: Partial<Record<FleetRuntimeLocalPhase, Record<string, unknown>>> = {}
+  for (const phaseName of state.phase_sequence) {
     const phase = state.phases[phaseName]!
-    if (!phase || phase.intent === null || typeof phase.intent !== 'object' || Array.isArray(phase.intent)) {
-      return providerFail('STATE_RECORD_INVALID', 'operation phase lacks an immutable intent')
-    }
-    if (phase.intent_sha256 !== sha256(canonicalFleetRuntimeJson(phase.intent))
+    assertPlainRecord(phase, `${phaseName} state`)
+    assertExactKeys(phase, [
+      'completed_at', 'evidence', 'evidence_sha256', 'intent', 'intent_sha256',
+      'protected_effect_count', 'started_at', 'status',
+    ], `${phaseName} state`)
+    const started = Date.parse(String(phase.started_at ?? ''))
+    const completed = phase.completed_at === null ? null : Date.parse(String(phase.completed_at))
+    if (!Number.isFinite(started) || (completed !== null && (!Number.isFinite(completed) || completed < started))
+      || phase.intent_sha256 !== sha256(canonicalFleetRuntimeJson(phase.intent))
       || (phase.status === 'started' && (phase.completed_at !== null || phase.evidence !== null || phase.evidence_sha256 !== null))
-      || (phase.status === 'completed' && (!phase.completed_at || !phase.evidence || phase.evidence_sha256 !== sha256(canonicalFleetRuntimeJson(phase.evidence))))
+      || (phase.status === 'completed' && (!phase.completed_at || !phase.evidence
+        || phase.evidence_sha256 !== sha256(canonicalFleetRuntimeJson(phase.evidence))))
+      || !['started', 'completed'].includes(phase.status)
       || phase.protected_effect_count !== (phase.status === 'completed' && PROTECTED_PHASES.has(phaseName) ? 1 : 0)) {
-      return providerFail('STATE_RECORD_INVALID', 'operation phase intent, evidence, status, or protected-effect count is invalid')
+      return providerFail('STATE_RECORD_INVALID', `${phaseName} intent, evidence, timestamps, status, or protected count differs`)
     }
+    validatePhaseSemantics(request, phaseName, phase, priorEvidence, ownerId)
+    if (phase.status === 'completed') priorEvidence[phaseName] = clone(phase.evidence!)
+    else if (phaseName !== state.phase_sequence.at(-1)) return providerFail('STATE_RECORD_INVALID', 'only the final journal phase may remain started')
   }
+}
+
+export function validateFleetRuntimeLocalOperationState(
+  state: FleetRuntimeLocalOperationState,
+  request: FleetRuntimeRequest,
+  ownerId: string,
+  requireComplete = true,
+): void {
+  assertJournal(state, request, ownerId, requireComplete)
 }
 
 class FleetRuntimeLocalEffectPort {
@@ -1046,23 +1653,44 @@ class FleetRuntimeLocalEffectPort {
         idempotency_key: request.idempotency_key,
         operation: request.operation,
         execution_owner_id: this.persistence.owner.owner_id,
+        phase_sequence: [],
         phases: {},
       }
     }
     const state = readState<FleetRuntimeLocalOperationState>(this.persistence.root, path, 'operation state')
     assertJournal(state, request, state.execution_owner_id)
     if (state.execution_owner_id !== this.persistence.owner.owner_id) {
-      this.persistence.assertOwner(request.idempotency_key)
+      const expected = clone(state)
       state.execution_owner_id = this.persistence.owner.owner_id
-      atomicWrite(this.persistence.root, path, state)
+      for (const phase of state.phase_sequence) {
+        const entry = state.phases[phase]!
+        entry.intent.execution_owner_id = this.persistence.owner.owner_id
+        entry.intent_sha256 = sha256(canonicalFleetRuntimeJson(entry.intent))
+        if (entry.evidence) {
+          entry.evidence.execution_owner_id = this.persistence.owner.owner_id
+          entry.evidence.intent_sha256 = entry.intent_sha256
+          entry.evidence_sha256 = sha256(canonicalFleetRuntimeJson(entry.evidence))
+        }
+      }
+      this.persistence.commitOwnedRecord(request.idempotency_key, path, 'operation state', expected, state)
     }
     return state
+  }
+
+  private commitJournal(
+    request: FleetRuntimeRequest,
+    expected: FleetRuntimeLocalOperationState | null,
+    next: FleetRuntimeLocalOperationState,
+  ): void {
+    assertJournal(next, request, this.persistence.owner.owner_id)
+    this.persistence.commitOwnedRecord(request.idempotency_key, this.journalPath(request), 'operation state', expected, next)
   }
 
   private context(
     request: FleetRuntimeRequest,
     state: FleetRuntimeLocalOperationState,
     currentIntent: Record<string, unknown> = {},
+    ownerRawBody = '',
     predecessorRawBody = '',
   ): FleetRuntimeLocalPhaseContext {
     return {
@@ -1074,6 +1702,8 @@ class FleetRuntimeLocalEffectPort {
           .map(([phase, entry]) => [phase, clone(entry.evidence ?? {})]),
       ),
       current_intent: clone(currentIntent),
+      execution_owner_id: this.persistence.owner.owner_id,
+      owner_decision_raw_body: ownerRawBody,
       predecessor_receipt_raw_body: predecessorRawBody,
     }
   }
@@ -1098,23 +1728,29 @@ class FleetRuntimeLocalEffectPort {
       if (prior?.status === 'completed') continue
       if (prior?.status === 'started') {
         await this.persistence.heartbeatOwner(request.idempotency_key)
-        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(request, state, prior.intent, preflight.predecessor_receipt_raw_body))
+        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(
+          request, state, prior.intent, preflight.owner_decision_raw_body, preflight.predecessor_receipt_raw_body,
+        ))
         if (!reconciled.completed || !reconciled.evidence) {
           return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', `${phase} started but cannot be proven complete; it will not be repeated`)
         }
+        const expected = clone(state)
         prior.status = 'completed'
         prior.completed_at = this.now()
-        prior.evidence = clone(reconciled.evidence)
+        prior.evidence = phaseBoundRecord(request, phase, this.persistence.owner.owner_id, {
+          intent_sha256: prior.intent_sha256,
+          ...clone(reconciled.evidence),
+        }, 'evidence')
         prior.evidence_sha256 = sha256(canonicalFleetRuntimeJson(prior.evidence))
         prior.protected_effect_count = reconciled.protected_effect_count
-        this.persistence.assertOwner(request.idempotency_key)
-        atomicWrite(this.persistence.root, this.journalPath(request), state)
-        this.persistence.assertOwner(request.idempotency_key)
+        this.commitJournal(request, expected, state)
         continue
       }
 
-      const intentContext = this.context(request, state, {}, preflight.predecessor_receipt_raw_body)
-      const intent = this.system.phaseIntent ? await this.system.phaseIntent(request, phase, intentContext) : {}
+      const expected = state.phase_sequence.length === 0 && !existsSync(this.journalPath(request)) ? null : clone(state)
+      const intentContext = this.context(request, state, {}, preflight.owner_decision_raw_body, preflight.predecessor_receipt_raw_body)
+      const systemIntent = this.system.phaseIntent ? await this.system.phaseIntent(request, phase, intentContext) : {}
+      const intent = phaseBoundRecord(request, phase, this.persistence.owner.owner_id, systemIntent, 'intent')
       state.phases[phase] = {
         status: 'started',
         started_at: this.now(),
@@ -1125,31 +1761,36 @@ class FleetRuntimeLocalEffectPort {
         intent_sha256: sha256(canonicalFleetRuntimeJson(intent)),
         evidence_sha256: null,
       }
-      this.persistence.assertOwner(request.idempotency_key)
-      atomicWrite(this.persistence.root, this.journalPath(request), state)
-      this.persistence.assertOwner(request.idempotency_key)
+      state.phase_sequence.push(phase)
+      this.commitJournal(request, expected, state)
       await this.persistence.heartbeatOwner(request.idempotency_key)
-      const result = await this.system.performPhase(request, preflight, phase, this.context(request, state, intent, preflight.predecessor_receipt_raw_body))
-      this.persistence.assertOwner(request.idempotency_key)
+      const result = await this.system.performPhase(request, preflight, phase, this.context(
+        request, state, intent, preflight.owner_decision_raw_body, preflight.predecessor_receipt_raw_body,
+      ))
       if (PROTECTED_PHASES.has(phase) && result.protected_effect_count !== 1) {
         return providerFail('STATE_RECORD_INVALID', `${phase} must report exactly one protected subeffect`)
       }
       if (!PROTECTED_PHASES.has(phase) && result.protected_effect_count !== 0) {
         return providerFail('STATE_RECORD_INVALID', `${phase} reported an unauthorized protected subeffect`)
       }
+      const started = clone(state)
       state.phases[phase] = {
         status: 'completed',
         started_at: state.phases[phase]!.started_at,
         completed_at: this.now(),
-        evidence: clone(result.evidence),
+        evidence: phaseBoundRecord(request, phase, this.persistence.owner.owner_id, {
+          intent_sha256: state.phases[phase]!.intent_sha256,
+          ...clone(result.evidence),
+        }, 'evidence'),
         intent: clone(intent),
         protected_effect_count: result.protected_effect_count,
         intent_sha256: sha256(canonicalFleetRuntimeJson(intent)),
-        evidence_sha256: sha256(canonicalFleetRuntimeJson(result.evidence)),
+        evidence_sha256: null,
       }
-      atomicWrite(this.persistence.root, this.journalPath(request), state)
-      this.persistence.assertOwner(request.idempotency_key)
+      state.phases[phase]!.evidence_sha256 = sha256(canonicalFleetRuntimeJson(state.phases[phase]!.evidence))
+      this.commitJournal(request, started, state)
     }
+    assertJournal(state, request, this.persistence.owner.owner_id, true)
     return this.system.buildReceipt(request, preflight, state)
   }
 }
@@ -1317,6 +1958,170 @@ function commandError(argv: readonly string[], result: FleetRuntimeArgvResult): 
   return providerFail('COMMAND_FAILED', `${argv[0]} exited ${result.exitCode}${diagnostic ? `: ${diagnostic}` : ''}`)
 }
 
+function readSafeRegularFile(root: string, path: string, label: string): Buffer {
+  assertSafeStatePath(root, path)
+  const before = lstatSync(path)
+  if (before.isSymbolicLink() || !before.isFile() || realpathSync(path) !== resolve(path)) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} must be a real contained regular file`)
+  }
+  const bytes = readFileSync(path)
+  assertSafeStatePath(root, path)
+  const after = lstatSync(path)
+  if (after.isSymbolicLink() || !after.isFile() || realpathSync(path) !== resolve(path)
+    || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} changed during readback`)
+  }
+  return bytes
+}
+
+export function validateFleetRuntimePayloadDirectory(input: {
+  state_directory: string
+  directory: string
+  manifest: readonly { path: string; bytes: number; sha256: string }[]
+  label: string
+  exact_path_set?: boolean
+}): Record<string, { bytes: number; sha256: string }> {
+  const directory = assertSafeStatePath(input.state_directory, input.directory)
+  if (!existsSync(directory) || lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()
+    || realpathSync(directory) !== directory) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.label} directory is not a real state descendant`)
+  }
+  const paths = input.manifest.map(file => file.path)
+  assertExactFleetRuntimePathSet([...paths].sort(), paths, `${input.label} manifest`)
+  if (input.exact_path_set) assertExactFleetRuntimePathSet(paths, recursiveRelativeFiles(directory), input.label)
+  const blobs: Record<string, { bytes: number; sha256: string }> = {}
+  for (const file of input.manifest) {
+    const bytes = readSafeRegularFile(input.state_directory, join(directory, file.path), `${input.label} ${file.path}`)
+    if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.label} bytes differ at ${file.path}`)
+    }
+    blobs[file.path] = { bytes: bytes.byteLength, sha256: sha256(bytes) }
+  }
+  return blobs
+}
+
+export function selectFleetRuntimePayloadFromRenderer(input: {
+  state_directory: string
+  raw_output_path: string
+  selected_payload_path: string
+  renderer_report_raw: string
+  manifest: { files: Array<{ path: string; bytes: number; sha256: string }> }
+}): {
+  raw_paths: string[]
+  selected_blobs: Record<string, { bytes: number; sha256: string }>
+  renderer_report_sha256: string
+} {
+  const rawRoot = assertSafeStatePath(input.state_directory, input.raw_output_path)
+  const selectedRoot = assertSafeStatePath(input.state_directory, input.selected_payload_path)
+  if (!existsSync(rawRoot) || lstatSync(rawRoot).isSymbolicLink() || !lstatSync(rawRoot).isDirectory() || realpathSync(rawRoot) !== rawRoot) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer raw output must be a real state-root directory')
+  }
+  if (existsSync(selectedRoot)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'selected payload directory must be newly absent')
+  const report = parseJson<Record<string, unknown>>(input.renderer_report_raw, 'renderer report')
+  assertExactKeys(report, [
+    'framework_ref', 'generated_files', 'mode', 'output_root', 'product', 'profile', 'required_next_actions',
+    'schema', 'source_control', 'target_change_policy', 'target_repo', 'verdict',
+  ], 'renderer report')
+  if (report.schema !== 'shirube-adoption-pack-render/v1' || report.verdict !== 'PASS'
+    || report.profile !== 'hotel-lite' || report.mode !== 'render' || report.target_repo !== 'watchout/kodama'
+    || report.product !== 'Kodama' || report.source_control !== 'watchout/ai-dev-framework#576'
+    || report.framework_ref !== `watchout/ai-dev-framework@${FLEET_RUNTIME_V1_CONTRACT.release_commit}`
+    || report.output_root !== rawRoot || !Array.isArray(report.generated_files) || report.generated_files.length !== 34
+    || canonicalFleetRuntimeJson(report.target_change_policy) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_RENDERER_TARGET_POLICY)
+    || canonicalFleetRuntimeJson(report.required_next_actions) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_RENDERER_REQUIRED_ACTIONS)) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer report provenance or exact 34-file output differs')
+  }
+  const reportPaths: string[] = []
+  for (const [index, unknownRow] of report.generated_files.entries()) {
+    assertPlainRecord(unknownRow, `renderer report generated_files[${index}]`)
+    assertExactKeys(unknownRow, ['bytes', 'output_path', 'path', 'sha256'], `renderer report generated_files[${index}]`)
+    const path = assertString(unknownRow.path, `renderer report generated_files[${index}].path`)
+    const outputPath = assertSafeStatePath(input.state_directory, join(rawRoot, path))
+    const bytes = readSafeRegularFile(input.state_directory, outputPath, `renderer output ${path}`)
+    if (unknownRow.output_path !== outputPath || unknownRow.bytes !== bytes.byteLength
+      || unknownRow.sha256 !== sha256(bytes).replace(/^sha256:/, '')) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `renderer report file binding differs at ${path}`)
+    }
+    reportPaths.push(path)
+  }
+  const rawPaths = recursiveRelativeFiles(rawRoot)
+  if (new Set(reportPaths).size !== 34
+    || canonicalFleetRuntimeJson([...reportPaths].sort()) !== canonicalFleetRuntimeJson(rawPaths)) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer report paths differ from the complete raw output')
+  }
+  const payloadPaths = input.manifest.files.map(file => file.path)
+  assertExactFleetRuntimePathSet([...payloadPaths].sort(), payloadPaths, 'selected payload manifest')
+  if (payloadPaths.some(path => !rawPaths.includes(path)) || rawPaths.length - payloadPaths.length !== 10) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', 'raw renderer output does not contain the selected 24 plus exact ten extras')
+  }
+  safeMkdir(input.state_directory, selectedRoot)
+  const selectedBlobs: Record<string, { bytes: number; sha256: string }> = {}
+  for (const file of input.manifest.files) {
+    const source = assertSafeStatePath(input.state_directory, join(rawRoot, file.path))
+    const target = assertSafeStatePath(input.state_directory, join(selectedRoot, file.path))
+    const bytes = readSafeRegularFile(input.state_directory, source, `renderer source ${file.path}`)
+    if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `renderer source bytes differ at ${file.path}`)
+    }
+    safeMkdir(input.state_directory, dirname(target))
+    copyFileSync(source, target)
+    const selected = readSafeRegularFile(input.state_directory, target, `selected payload ${file.path}`)
+    if (selected.byteLength !== file.bytes || sha256(selected) !== file.sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `selected payload bytes differ at ${file.path}`)
+    }
+    selectedBlobs[file.path] = { bytes: selected.byteLength, sha256: sha256(selected) }
+  }
+  const verifiedSelected = validateFleetRuntimePayloadDirectory({
+    state_directory: input.state_directory,
+    directory: selectedRoot,
+    manifest: input.manifest.files,
+    label: 'selected payload directory',
+    exact_path_set: true,
+  })
+  if (canonicalFleetRuntimeJson(verifiedSelected) !== canonicalFleetRuntimeJson(selectedBlobs)) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', 'selected payload changed after copy')
+  }
+  return { raw_paths: rawPaths, selected_blobs: verifiedSelected, renderer_report_sha256: sha256(input.renderer_report_raw) }
+}
+
+export async function validateFleetRuntimeGitPayloadLayer(input: {
+  runner: FleetRuntimeArgvRunner
+  checkout: string
+  manifest: readonly { path: string; bytes: number; sha256: string }[]
+  layer: 'index' | 'commit'
+  commit?: string
+  expected_object_ids?: Record<string, string>
+}): Promise<{
+  blobs: Record<string, { bytes: number; sha256: string }>
+  object_ids: Record<string, string>
+}> {
+  const run = async (argv: readonly string[]): Promise<string> => {
+    const result = await input.runner.run(argv, { cwd: input.checkout })
+    if (result.exitCode !== 0) return commandError(argv, result)
+    return result.stdout
+  }
+  const paths = input.manifest.map(file => file.path)
+  const actual = input.layer === 'index'
+    ? (await run(['git', 'diff', '--cached', '--name-only'])).trim().split('\n').filter(Boolean).sort()
+    : (await run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', assertCommit(input.commit, 'commit layer head')])).trim().split('\n').filter(Boolean).sort()
+  assertExactFleetRuntimePathSet(paths, actual, `${input.layer} paths`)
+  const blobs: Record<string, { bytes: number; sha256: string }> = {}
+  const objectIds: Record<string, string> = {}
+  for (const file of input.manifest) {
+    const spec = input.layer === 'index' ? `:${file.path}` : `${input.commit}:${file.path}`
+    const objectId = (await run(['git', 'rev-parse', spec])).trim()
+    const bytes = Buffer.from(await run(['git', 'cat-file', 'blob', objectId]))
+    if (!COMMIT.test(objectId) || bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256
+      || (input.expected_object_ids && objectId !== input.expected_object_ids[file.path])) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.layer} blob differs at ${file.path}`)
+    }
+    objectIds[file.path] = objectId
+    blobs[file.path] = { bytes: bytes.byteLength, sha256: sha256(bytes) }
+  }
+  validateFleetRuntimePayloadBlobLayer(input.manifest, paths.map(path => ({ path, ...blobs[path] })), `${input.layer} blobs`)
+  return { blobs, object_ids: objectIds }
+}
+
 /**
  * The production system is intentionally argv-only. Protected execution is
  * unreachable unless the caller supplies the explicit flag and the adapter
@@ -1404,7 +2209,14 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (sha256(predecessor.body) !== request.predecessor_receipt.sha256) {
       return providerFail('READBACK_INVALID', 'predecessor raw-body digest differs')
     }
-    validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body)
+    const predecessorBinding = parseFleetRuntimeOperationPredecessorBinding(request, owner.body)
+    const companion = predecessorBinding.companion_url
+      ? await this.comment(predecessorBinding.companion_url)
+      : null
+    if (companion && sha256(companion.body) !== predecessorBinding.companion_raw_body_sha256) {
+      return providerFail('READBACK_INVALID', 'immutable rollback companion raw-body digest differs')
+    }
+    validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body, companion?.body)
     const queue = this.queueFromStatus(parseJson(statusRaw, 'official queue status'), request)
     if (canonicalFleetRuntimeJson(queue) !== canonicalFleetRuntimeJson(request.queue_precheck)) {
       return providerFail('READBACK_INVALID', 'fresh official queue receipt differs from request')
@@ -1442,7 +2254,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     return assertSafeStatePath(context.state_directory, join(context.invocation_directory, 'checkout'))
   }
 
-  private async verifyCheckout(
+  async verifyCheckout(
     path: string,
     stateDirectory: string,
     expectedHead?: string,
@@ -1455,6 +2267,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const head = (await this.run(['git', 'rev-parse', 'HEAD'], path)).trim()
     const tree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], path)).trim()
     const status = await this.run(['git', 'status', '--porcelain=v1'], path)
+    const branch = (await this.run(['git', 'branch', '--show-current'], path)).trim()
     validateFleetRuntimeCheckoutReadback({
       checkout_path: path,
       state_directory: stateDirectory,
@@ -1463,13 +2276,14 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       head,
       tree,
       status_porcelain: status,
+      branch,
       expected_head: expectedHead,
       expected_tree: expectedTree,
     })
-    return { checkout_path: path, remote, head, tree, clean: true }
+    return { checkout_path: path, remote, head, tree, clean: true, detached: true }
   }
 
-  private async verifyReleaseCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
+  async verifyReleaseCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
     assertSafeStatePath(stateDirectory, path)
     if (!existsSync(path) || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path
       || path === '/Users/yuji/Developer/ai-dev-framework') {
@@ -1496,6 +2310,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const request = readonlyRequest as FleetRuntimeRequest
     const context = readonlyContext as FleetRuntimeLocalPhaseContext
     const prepared = context.prior_evidence.PREPARE_CLEAN_CHECKOUT
+    const staged = context.prior_evidence.STAGE_EXACT_PAYLOAD
     const merged = context.prior_evidence.VERIFY_EXTERNAL_MERGE
     const local = context.prior_evidence.CREATE_LOCAL_COMMIT ?? context.prior_evidence.CREATE_LOCAL_REVERT
     const pushed = context.prior_evidence.PUSH_NORMAL_BRANCH
@@ -1509,6 +2324,28 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           ? String(input?.merge_tree ?? '') : request.preimages[0].tree,
       }
     }
+    if (phase === 'STAGE_EXACT_PAYLOAD') {
+      return {
+        payload_digest: request.payload_digest,
+        path_count: 24,
+        raw_output_path: join(context.invocation_directory, 'renderer-raw-output'),
+        release_commit: request.subject.release_commit,
+        release_tree: request.subject.release_tree,
+        selected_payload_path: join(context.invocation_directory, 'selected-payload'),
+      }
+    }
+    if (phase === 'VERIFY_EXACT_PAYLOAD') {
+      return {
+        payload_digest: request.payload_digest,
+        path_count: 24,
+        selected_payload_path: staged?.selected_payload_path,
+      }
+    }
+    if (phase === 'CREATE_LOCAL_COMMIT') return { payload_digest: request.payload_digest, path_count: 24 }
+    if (phase === 'CREATE_LOCAL_REVERT') {
+      const input = this.operationInputReceipt(request, context)
+      return { merge_commit: input?.merge_commit, expected_tree: request.preimages[0].tree }
+    }
     if (phase === 'PREPARE_MERGED_CHECKOUT') {
       return { expected_head: merged?.merge_commit, expected_tree: merged?.merge_tree }
     }
@@ -1519,12 +2356,15 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
     if (phase === 'PUSH_NORMAL_BRANCH') return { branch: local?.branch, head: local?.head, force: false }
     if (phase === 'CREATE_DRAFT_PR') {
-      return { repository: 'watchout/kodama', base: request.preimages[0].required_base_branch, branch: pushed?.branch, head: pushed?.head }
+      return {
+        repository: 'watchout/kodama', base: request.preimages[0].required_base_branch,
+        branch: pushed?.branch, head: pushed?.head, draft: true,
+      }
     }
     if (phase === 'VERIFY_EXTERNAL_MERGE') {
       return {
-        repository: 'watchout/kodama', operation: request.operation, request_digest: request.request_digest,
-        pr_url: created?.pr_url, pushed_head: pushed?.head, base: request.preimages[0].required_base_branch,
+        repository: 'watchout/kodama', pr_url: created?.pr_url,
+        pushed_head: pushed?.head, base: request.preimages[0].required_base_branch,
       }
     }
     if (phase === 'COLD_START_DISCORD_KODAMA' || phase === 'VERIFY_LIVE_IDENTITY') {
@@ -1546,7 +2386,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (!context.predecessor_receipt_raw_body) {
       return providerFail('READBACK_INVALID', `${request.operation} requires immutable predecessor bytes`)
     }
-    return validateFleetRuntimePredecessorReceipt(request, context.predecessor_receipt_raw_body)
+    const binding = parseFleetRuntimeOperationPredecessorBinding(request, context.owner_decision_raw_body)
+    return validateFleetRuntimePredecessorReceipt(request, context.predecessor_receipt_raw_body, binding)
   }
 
   private async prepareCheckout(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
@@ -1570,10 +2411,19 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
     ], this.providerRepositoryRoot), 'baseline runtime inventory')
     const baseline = findAgentRecord(inventory, 'kodama')
+    const companionEvidence: Record<string, unknown> = {}
+    if (request.operation === 'REAPPLY') {
+      const binding = parseFleetRuntimeOperationPredecessorBinding(request, context.owner_decision_raw_body)
+      const companion = await this.comment(String(binding.companion_url))
+      const rollback = validateFleetRuntimeRollbackCompanionReceipt(request, companion.body, binding, operationInput!)
+      companionEvidence.rollback_receipt_url = binding.companion_url
+      companionEvidence.rollback_receipt_raw_body_sha256 = binding.companion_raw_body_sha256
+      companionEvidence.rollback_receipt_self_sha256 = rollback.receipt_sha256
+    }
     return {
       ...evidence,
       baseline_runtime_instance_id: baseline?.latest_runtime_instance_id ?? baseline?.runtime_instance_id ?? null,
-      ...(request.operation === 'REAPPLY' ? { rollback_receipt_sha256: operationInput!.rollback_receipt_sha256 } : {}),
+      ...companionEvidence,
     }
   }
 
@@ -1581,16 +2431,25 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const path = join(context.invocation_directory, 'external-merge-receipt.json')
     if (!existsSync(path)) return providerFail('WAITING_INDEPENDENT_MERGE', 'exact external merge receipt is not present')
     assertSafeStatePath(context.state_directory, path)
+    const before = lstatSync(path)
+    if (before.isSymbolicLink() || !before.isFile() || realpathSync(path) !== path) {
+      return providerFail('READBACK_INVALID', 'external merge receipt must be a real regular file')
+    }
     const raw = readFileSync(path, 'utf8')
+    assertSafeStatePath(context.state_directory, path)
+    const after = lstatSync(path)
+    if (after.isSymbolicLink() || !after.isFile() || realpathSync(path) !== path
+      || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      return providerFail('READBACK_INVALID', 'external merge receipt changed during readback')
+    }
     const receipt = parseJson<Record<string, unknown>>(raw, 'external merge receipt')
     if (raw !== `${canonicalFleetRuntimeJson(receipt)}\n`) {
       return providerFail('READBACK_INVALID', 'external merge receipt bytes are not canonical JSON plus LF')
     }
-    if (receipt.request_digest !== request.request_digest || receipt.operation !== request.operation
-      || receipt.repository !== 'watchout/kodama' || receipt.base !== request.preimages[0].required_base_branch
-      || typeof receipt.pr_url !== 'string' || !COMMIT.test(String(receipt.merge_commit)) || !COMMIT.test(String(receipt.merge_tree))) {
-      return providerFail('READBACK_INVALID', 'external merge receipt binding is invalid')
-    }
+    validateFleetRuntimeExternalMergeReceipt(request, receipt, {
+      createdPrUrl: String(context.current_intent.pr_url ?? ''),
+      pushedHead: String(context.current_intent.pushed_head ?? ''),
+    })
     const pr = parseJson<Record<string, unknown>>(await this.run([
       'gh', 'pr', 'view', String(receipt.pr_url), '--repo', 'watchout/kodama',
       '--json', 'url,state,mergedAt,mergeCommit,headRefOid,baseRefName,isDraft',
@@ -1621,7 +2480,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (!Array.isArray(manifest.files)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest files are absent')
     const paths = manifest.files.map(file => file.path)
     assertExactFleetRuntimePathSet([...paths].sort(), paths, 'manifest ordering')
-    if (manifest.path_count !== 24 || manifest.files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256))
+    if (manifest.path_count !== 24
+      || canonicalFleetRuntimeJson(manifest.files) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES)
+      || manifest.files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256))
       || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest) {
       return providerFail('PAYLOAD_VERIFICATION_FAILED', 'aggregate payload manifest differs')
     }
@@ -1658,7 +2519,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       // The released renderer is the sole byte source. It is invoked with its
       // frozen argv contract; the selected 24 records are then checked by the
       // immutable payload manifest before any push is admitted.
-      const out = join(context.invocation_directory, 'rendered')
+      const rawOutput = join(context.invocation_directory, 'renderer-raw-output')
+      const selectedPayload = join(context.invocation_directory, 'selected-payload')
       if (phase === 'STAGE_EXACT_PAYLOAD') {
         const manifest = await this.payloadManifest(request)
         const payloadPaths = manifest.files.map(file => file.path)
@@ -1668,41 +2530,60 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           await this.run(['git', 'checkout', '--detach', FLEET_RUNTIME_V1_CONTRACT.release_commit], releaseCheckout)
         }
         const releaseBefore = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
-        safeMkdir(context.state_directory, out)
-        await this.run([
+        if (existsSync(rawOutput) || existsSync(selectedPayload)) {
+          return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer raw and selected payload directories must be newly absent')
+        }
+        safeMkdir(context.state_directory, rawOutput)
+        const rendererReportRaw = await this.run([
           'node', 'scripts/shirube/render-adoption-pack.mjs', '--profile', 'hotel-lite',
           '--target-repo', 'watchout/kodama', '--product', 'Kodama',
           '--source-control', 'watchout/ai-dev-framework#576',
           '--framework-ref', `watchout/ai-dev-framework@${FLEET_RUNTIME_V1_CONTRACT.release_commit}`,
           '--owner-actor', 'watchout',
           '--owner-confirmation-ref', 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-5260213858',
-          '--cell-id', 'N40-P4-CANARY-VERIFY', '--mode', 'render', '--out', out, '--format', 'json',
+          '--cell-id', 'N40-P4-CANARY-VERIFY', '--mode', 'render', '--out', rawOutput, '--format', 'json',
           '--generated-at', '2026-08-12T00:00:00.000Z', '--fetched-at', '2026-08-12T00:00:00.000Z',
           '--generated-by', 'codex-cto', '--include-workflow-caller',
         ], releaseCheckout)
         const releaseAfter = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
-        if (realpathSync(out) !== out) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'render output path is not real')
-        assertExactFleetRuntimePathSet(payloadPaths, recursiveRelativeFiles(out), 'renderer output')
-        const renderedBlobs: Record<string, { bytes: number; sha256: string }> = {}
-        const renderedRows: Array<{ path: string; bytes: number; sha256: string }> = []
+        const selection = selectFleetRuntimePayloadFromRenderer({
+          state_directory: context.state_directory,
+          raw_output_path: rawOutput,
+          selected_payload_path: selectedPayload,
+          renderer_report_raw: rendererReportRaw,
+          manifest,
+        })
         for (const file of manifest.files) {
           const payloadPath = file.path
-          const source = assertSafeStatePath(context.state_directory, join(out, payloadPath))
+          const source = assertSafeStatePath(context.state_directory, join(selectedPayload, payloadPath))
           const target = assertSafeStatePath(context.state_directory, join(checkout, payloadPath))
-          const bytes = readFileSync(source)
+          const bytes = readSafeRegularFile(context.state_directory, source, `selected source ${payloadPath}`)
           if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
-            return providerFail('PAYLOAD_VERIFICATION_FAILED', `renderer bytes differ at ${payloadPath}`)
+            return providerFail('PAYLOAD_VERIFICATION_FAILED', `selected bytes differ at ${payloadPath}`)
+          }
+          if (existsSync(target) && (lstatSync(target).isSymbolicLink() || !lstatSync(target).isFile() || realpathSync(target) !== target)) {
+            return providerFail('PAYLOAD_VERIFICATION_FAILED', `checkout target is unsafe at ${payloadPath}`)
           }
           safeMkdir(context.state_directory, dirname(target))
           copyFileSync(source, target)
-          renderedBlobs[payloadPath] = { bytes: bytes.byteLength, sha256: sha256(bytes) }
-          renderedRows.push({ path: payloadPath, bytes: bytes.byteLength, sha256: sha256(bytes) })
+          const copied = readSafeRegularFile(context.state_directory, target, `checkout target ${payloadPath}`)
+          if (copied.byteLength !== file.bytes || sha256(copied) !== file.sha256) {
+            return providerFail('PAYLOAD_VERIFICATION_FAILED', `checkout copy differs at ${payloadPath}`)
+          }
         }
-        validateFleetRuntimePayloadBlobLayer(manifest.files, renderedRows, 'renderer output blobs')
         return {
           evidence: {
-            rendered_path: out, release_checkout_before: releaseBefore, release_checkout_after: releaseAfter,
-            checkout_path: checkout, path_count: 24, payload_paths: payloadPaths, rendered_blobs: renderedBlobs,
+            raw_output_path: rawOutput,
+            selected_payload_path: selectedPayload,
+            release_checkout_before: releaseBefore,
+            release_checkout_after: releaseAfter,
+            renderer_report_sha256: selection.renderer_report_sha256,
+            raw_path_count: selection.raw_paths.length,
+            raw_paths: selection.raw_paths,
+            payload_digest: request.payload_digest,
+            path_count: 24,
+            payload_paths: payloadPaths,
+            selected_blobs: selection.selected_blobs,
           },
           protected_effect_count: 0,
         }
@@ -1714,16 +2595,22 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         return providerFail('PAYLOAD_VERIFICATION_FAILED', 'stage evidence lacks exact payload paths')
       }
       assertExactFleetRuntimePathSet(expectedPaths, stagedPaths as string[], 'stage evidence')
-      const checkoutRows: Array<{ path: string; bytes: number; sha256: string }> = []
-      for (const file of manifest.files) {
-        const bytes = readFileSync(join(checkout, file.path))
-        if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
-          return providerFail('PAYLOAD_VERIFICATION_FAILED', `payload bytes differ at ${file.path}`)
-        }
-        checkoutRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
+      const checkoutBlobs = validateFleetRuntimePayloadDirectory({
+        state_directory: context.state_directory,
+        directory: checkout,
+        manifest: manifest.files,
+        label: 'checkout payload',
+      })
+      return {
+        evidence: {
+          selected_payload_path: String(context.prior_evidence.STAGE_EXACT_PAYLOAD?.selected_payload_path ?? ''),
+          payload_digest: request.payload_digest,
+          path_count: 24,
+          payload_paths: expectedPaths,
+          checkout_blobs: checkoutBlobs,
+        },
+        protected_effect_count: 0,
       }
-      validateFleetRuntimePayloadBlobLayer(manifest.files, checkoutRows, 'checkout payload blobs')
-      return { evidence: { payload_digest: request.payload_digest, path_count: 24, payload_paths: expectedPaths }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_COMMIT') {
       const branch = `shirube-v41-${request.operation.toLowerCase().replaceAll('_', '-')}-${request.request_digest.slice(-12)}`
@@ -1734,36 +2621,28 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       assertExactFleetRuntimePathSet([...paths as string[]].sort(), paths as string[], 'commit path evidence')
       await this.run(['git', 'switch', '-c', branch], checkout)
       await this.run(['git', 'add', '--', ...paths as string[]], checkout)
-      const staged = (await this.run(['git', 'diff', '--cached', '--name-only'], checkout)).trim().split('\n').filter(Boolean).sort()
-      assertExactFleetRuntimePathSet(paths as string[], staged, 'staged index')
       const manifest = await this.payloadManifest(request)
-      const indexBlobs: Record<string, string> = {}
-      const indexRows: Array<{ path: string; bytes: number; sha256: string }> = []
-      for (const file of manifest.files) {
-        const blob = (await this.run(['git', 'rev-parse', `:${file.path}`], checkout)).trim()
-        const bytes = Buffer.from(await this.run(['git', 'cat-file', 'blob', blob], checkout))
-        if (!COMMIT.test(blob) || bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
-          return providerFail('PAYLOAD_VERIFICATION_FAILED', `staged blob differs at ${file.path}`)
-        }
-        indexBlobs[file.path] = blob
-        indexRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
-      }
-      validateFleetRuntimePayloadBlobLayer(manifest.files, indexRows, 'staged index blobs')
+      const index = await validateFleetRuntimeGitPayloadLayer({ runner: this.runner, checkout, manifest: manifest.files, layer: 'index' })
       await this.run(['git', 'commit', '-m', `chore(shirube): ${request.operation.toLowerCase().replaceAll('_', ' ')}`], checkout)
       const head = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
-      const committed = (await this.run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', head], checkout)).trim().split('\n').filter(Boolean).sort()
-      assertExactFleetRuntimePathSet(paths as string[], committed, 'commit diff')
-      const commitRows: Array<{ path: string; bytes: number; sha256: string }> = []
-      for (const file of manifest.files) {
-        const committedBlob = (await this.run(['git', 'rev-parse', `${head}:${file.path}`], checkout)).trim()
-        if (committedBlob !== indexBlobs[file.path]) {
-          return providerFail('PAYLOAD_VERIFICATION_FAILED', `committed blob differs from index at ${file.path}`)
-        }
-        const bytes = Buffer.from(await this.run(['git', 'cat-file', 'blob', committedBlob], checkout))
-        commitRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
+      const committed = await validateFleetRuntimeGitPayloadLayer({
+        runner: this.runner,
+        checkout,
+        manifest: manifest.files,
+        layer: 'commit',
+        commit: head,
+        expected_object_ids: index.object_ids,
+      })
+      return {
+        evidence: {
+          branch,
+          head,
+          payload_paths: paths,
+          index_blobs: index.blobs,
+          commit_blobs: committed.blobs,
+        },
+        protected_effect_count: 0,
       }
-      validateFleetRuntimePayloadBlobLayer(manifest.files, commitRows, 'committed payload blobs')
-      return { evidence: { branch, head, payload_paths: paths, index_blobs: indexBlobs }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_REVERT') {
       const prior = this.operationInputReceipt(request, mutableContext)!
@@ -1819,7 +2698,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         '-c', 'mcp_servers.aun.env.WEBHOOK_PORT="8803"',
       ]
       await this.run(['tmux', 'new-session', '-d', '-s', session, '-c', checkout, ...command])
-      return { evidence: { ...clean, session, port: 8803, argv: command }, protected_effect_count: 1 }
+      return { evidence: { ...clean, session, port: 8803 }, protected_effect_count: 1 }
     }
     if (phase === 'VERIFY_LIVE_IDENTITY') {
       const checkoutImage = await this.verifyCheckout(
@@ -1900,7 +2779,30 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', `${phase} persisted intent lacks exact head/tree`)
       }
       const evidence = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
-      return { completed: true, evidence, protected_effect_count: 0 }
+      if (phase !== 'PREPARE_CLEAN_CHECKOUT') return { completed: true, evidence, protected_effect_count: 0 }
+      const inventory = parseJson<Record<string, unknown>>(await this.run([
+        process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
+      ], this.providerRepositoryRoot), 'reconciled baseline runtime inventory')
+      const baseline = findAgentRecord(inventory, 'kodama')
+      const companionEvidence: Record<string, unknown> = {}
+      if (request.operation === 'REAPPLY') {
+        const binding = parseFleetRuntimeOperationPredecessorBinding(request as FleetRuntimeRequest, mutable.owner_decision_raw_body)
+        const recovery = this.operationInputReceipt(request as FleetRuntimeRequest, mutable)!
+        const companion = await this.comment(String(binding.companion_url))
+        const rollback = validateFleetRuntimeRollbackCompanionReceipt(request as FleetRuntimeRequest, companion.body, binding, recovery)
+        companionEvidence.rollback_receipt_url = binding.companion_url
+        companionEvidence.rollback_receipt_raw_body_sha256 = binding.companion_raw_body_sha256
+        companionEvidence.rollback_receipt_self_sha256 = rollback.receipt_sha256
+      }
+      return {
+        completed: true,
+        evidence: {
+          ...evidence,
+          baseline_runtime_instance_id: baseline?.latest_runtime_instance_id ?? baseline?.runtime_instance_id ?? null,
+          ...companionEvidence,
+        },
+        protected_effect_count: 0,
+      }
     }
     if (phase === 'VERIFY_EXACT_PAYLOAD' || phase === 'VERIFY_LIVE_IDENTITY') {
       const result = await this.performPhase(request, preflight, phase, context)
@@ -1912,7 +2814,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       if (!branch || !COMMIT.test(head)) return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'push intent is incomplete')
       const observed = (await this.run(['git', 'ls-remote', '--heads', 'https://github.com/watchout/kodama.git', `refs/heads/${branch}`])).trim()
       if (observed !== `${head}\trefs/heads/${branch}`) return { completed: false, evidence: null, protected_effect_count: 1 }
-      return { completed: true, evidence: { branch, head, force: false, reconciled: true }, protected_effect_count: 1 }
+      return { completed: true, evidence: { branch, head, force: false }, protected_effect_count: 1 }
     }
     if (phase === 'CREATE_DRAFT_PR') {
       const branch = String(context.current_intent.branch ?? '')
@@ -1925,7 +2827,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       const exact = rows.filter(row => row.isDraft === true && row.headRefOid === head && row.baseRefName === base
         && /^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(row.url)))
       if (exact.length !== 1) return { completed: false, evidence: null, protected_effect_count: 1 }
-      return { completed: true, evidence: { pr_url: exact[0].url, branch, draft: true, reconciled: true }, protected_effect_count: 1 }
+      return { completed: true, evidence: { pr_url: exact[0].url, branch, draft: true }, protected_effect_count: 1 }
     }
     if (phase === 'COLD_START_DISCORD_KODAMA') {
       const mutable = context as FleetRuntimeLocalPhaseContext
@@ -1934,7 +2836,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       if (!COMMIT.test(expectedHead) || !COMMIT.test(expectedTree)) {
         return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'cold-start intent lacks exact checkout image')
       }
-      await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
+      const checkoutImage = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
       const inventory = parseJson<Record<string, unknown>>(await this.run([
         process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
       ], this.providerRepositoryRoot), 'cold-start reconciliation inventory')
@@ -1946,7 +2848,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       }
       return {
         completed: true,
-        evidence: { checkout_path: mutable.current_intent.checkout_path, session: mutable.current_intent.session, port: mutable.current_intent.port, reconciled: true },
+        evidence: {
+          ...checkoutImage,
+          session: mutable.current_intent.session,
+          port: mutable.current_intent.port,
+        },
         protected_effect_count: 1,
       }
     }
@@ -1959,6 +2865,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     state: Readonly<FleetRuntimeLocalOperationState>,
   ): Promise<FleetRuntimeEffectReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
+    assertJournal(state as FleetRuntimeLocalOperationState, request, state.execution_owner_id, true)
+    const predecessorBinding = parseFleetRuntimeOperationPredecessorBinding(request, preflight.owner_decision_raw_body)
     const live = state.phases.VERIFY_LIVE_IDENTITY?.evidence
     const inventory = live?.inventory ?? null
     const remoteImage = live?.remote_image as Record<string, unknown> | undefined
@@ -2020,7 +2928,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const boundReceipt = receipt as FleetRuntimeEffectReceipt & Record<string, unknown>
     const predecessorSelf = request.operation === 'CANARY_COLD_START'
       ? null
-      : validateFleetRuntimePredecessorReceipt(request, preflight.predecessor_receipt_raw_body).receipt_sha256 as string
+      : validateFleetRuntimePredecessorReceipt(
+          request,
+          preflight.predecessor_receipt_raw_body,
+          predecessorBinding,
+        ).receipt_sha256 as string
     boundReceipt.subject_digest = sha256(canonicalFleetRuntimeJson(request.subject))
     boundReceipt.predecessor_receipt_sha256 = request.predecessor_receipt.sha256
     boundReceipt.predecessor_receipt_raw_body_sha256 = request.predecessor_receipt.sha256
@@ -2042,15 +2954,20 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       boundReceipt.rollback_receipt_sha256 = predecessorSelf
     }
     if (request.operation === 'REAPPLY') {
-      const rollbackDigest = state.phases.PREPARE_CLEAN_CHECKOUT?.evidence?.rollback_receipt_sha256
-      if (!SHA256.test(String(rollbackDigest ?? ''))) {
-        return providerFail('READBACK_INVALID', 'reapply journal lacks the exact rollback receipt digest')
+      const prepare = state.phases.PREPARE_CLEAN_CHECKOUT?.evidence
+      if (prepare?.rollback_receipt_url !== predecessorBinding.companion_url
+        || prepare?.rollback_receipt_raw_body_sha256 !== predecessorBinding.companion_raw_body_sha256
+        || prepare?.rollback_receipt_self_sha256 !== predecessorBinding.companion_self_sha256) {
+        return providerFail('READBACK_INVALID', 'reapply journal lacks the owner-bound rollback companion')
       }
-      receipt.rollback_receipt_sha256 = String(rollbackDigest)
+      receipt.rollback_receipt_sha256 = String(predecessorBinding.companion_self_sha256)
       receipt.recovery_receipt_sha256 = request.predecessor_receipt.sha256
       receipt.target_repository = 'watchout/kodama'
       receipt.payload_digest = request.payload_digest
       receipt.postimage = clone(image)
+      boundReceipt.rollback_receipt_raw_body_sha256 = predecessorBinding.companion_raw_body_sha256
+      boundReceipt.rollback_receipt_url = predecessorBinding.companion_url
+      boundReceipt.recovery_receipt_self_sha256 = predecessorBinding.predecessor_self_sha256
     }
     receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt)
     validateFleetRuntimeLocalReceipt(receipt as FleetRuntimeEffectReceipt & Record<string, unknown>, {

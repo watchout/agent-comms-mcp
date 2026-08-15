@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -20,9 +20,11 @@ import {
 } from '../../core/fleet-runtime-v1-adapter'
 import {
   ConcreteFleetRuntimeV1LocalSystem,
+  FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES,
   FileFleetRuntimeV1Persistence,
   FleetRuntimeLocalProviderError,
   buildFleetRuntimeV1DryRunReceipt,
+  bunFleetRuntimeArgvRunner,
   executeLocalFleetRuntimeV1,
   assertExactFleetRuntimePathSet,
   validateFleetRuntimePayloadBlobLayer,
@@ -30,14 +32,20 @@ import {
   parseFleetRuntimeRootGoalReadback,
   validateFleetRuntimeCheckoutReadback,
   validateFleetRuntimeExternalMergeBinding,
+  validateFleetRuntimeGitPayloadLayer,
   validateFleetRuntimeImmutableSemantics,
+  validateFleetRuntimeLocalOperationState,
   validateFleetRuntimeLocalReceipt,
+  validateFleetRuntimePayloadDirectory,
+  parseFleetRuntimeOperationPredecessorBinding,
+  selectFleetRuntimePayloadFromRenderer,
   type FleetRuntimeLocalOperationState,
   type FleetRuntimeLocalPhase,
   type FleetRuntimeLocalPhaseContext,
   type FleetRuntimeLocalPhaseResult,
   type FleetRuntimeLocalReconcileResult,
   type FleetRuntimeLocalSystem,
+  type FleetRuntimeArgvRunner,
 } from '../../core/fleet-runtime-v1-local-provider'
 
 const temporaryRoots: string[] = []
@@ -146,7 +154,48 @@ function resign(request: FleetRuntimeRequest): FleetRuntimeRequest {
   return request
 }
 
-function semanticOwnerBody(request: FleetRuntimeRequest): string {
+function operationPredecessorBinding(
+  request: FleetRuntimeRequest,
+  overrides: Partial<Record<string, string>> = {},
+): string[] {
+  const effect = request.operation !== 'CANARY_COLD_START'
+  const reapply = request.operation === 'REAPPLY'
+  const values: Record<string, string> = {
+    operation: request.operation,
+    predecessor_url: request.predecessor_receipt.url,
+    predecessor_raw_body_sha256: request.predecessor_receipt.sha256,
+    predecessor_self_sha256: effect ? SHA_B : 'null',
+    prior_request_id: effect ? 'FRV1-N40-PRIOR-FIXTURE' : 'null',
+    prior_request_digest: effect ? SHA_B : 'null',
+    prior_idempotency_key: effect ? `frv1:N40:${'b'.repeat(64)}` : 'null',
+    prior_operation: request.predecessor_receipt.operation ?? 'null',
+    prior_result: request.predecessor_receipt.result,
+    subject_digest: request.predecessor_receipt.subject_digest,
+    companion_url: reapply ? 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-9999999997' : 'null',
+    companion_raw_body_sha256: reapply ? SHA_A : 'null',
+    companion_self_sha256: reapply ? SHA_B : 'null',
+    companion_request_id: reapply ? 'FRV1-N40-ROLLBACK-FIXTURE' : 'null',
+    companion_request_digest: reapply ? SHA_A : 'null',
+    companion_idempotency_key: reapply ? `frv1:N40:${'c'.repeat(64)}` : 'null',
+    companion_operation: reapply ? 'ROLLBACK' : 'null',
+    companion_result: reapply ? 'PASS' : 'null',
+    ...overrides,
+  }
+  return [
+    'operation_predecessor_binding:',
+    ...[
+      'operation', 'predecessor_url', 'predecessor_raw_body_sha256', 'predecessor_self_sha256',
+      'prior_request_id', 'prior_request_digest', 'prior_idempotency_key', 'prior_operation', 'prior_result', 'subject_digest',
+      'companion_url', 'companion_raw_body_sha256', 'companion_self_sha256', 'companion_request_id',
+      'companion_request_digest', 'companion_idempotency_key', 'companion_operation', 'companion_result',
+    ].map(key => `  ${key}: ${values[key]}`),
+  ]
+}
+
+function semanticOwnerBody(
+  request: FleetRuntimeRequest,
+  bindingOverrides: Partial<Record<string, string>> = {},
+): string {
   const matrix = request.owner_decision.stage_authority_matrix.map(entry => [
     `  - stage_id: ${entry.stage_id}`,
     `    actor_agent_id: ${entry.actor_agent_id}`,
@@ -187,6 +236,7 @@ function semanticOwnerBody(request: FleetRuntimeRequest): string {
     `    tree: ${request.preimages[0].tree}`,
     `    runtime_surface_sha256: ${request.preimages[0].runtime_surface_sha256}`,
     `    distribution_surface_sha256: ${request.preimages[0].distribution_surface_sha256}`,
+    ...operationPredecessorBinding(request, bindingOverrides),
     'stage_authority_matrix:',
     matrix,
   ].join('\n')
@@ -297,11 +347,17 @@ function receiptFor(request: FleetRuntimeRequest, preflight: FleetRuntimePreflig
     bound.pr_url = 'https://github.com/watchout/kodama/pull/123'
   }
   if (request.operation === 'ROLLBACK') {
+    bound.merge_commit = 'c'.repeat(40)
+    bound.merge_tree = request.preimages[0].tree
+    bound.pr_url = 'https://github.com/watchout/kodama/pull/124'
     receipt.forward_effect_receipt_sha256 = request.predecessor_receipt.sha256
     receipt.target_repository = 'watchout/kodama'
     receipt.restored_preimage = structuredClone(request.preimages[0])
     receipt.fresh_runtime_instance_readback = true
     receipt.queue_counts_unchanged = true
+  }
+  if (request.operation === 'RECOVERY') {
+    bound.rollback_receipt_sha256 = SHA_B
   }
   if (request.operation === 'REAPPLY') {
     receipt.rollback_receipt_sha256 = SHA_B
@@ -312,6 +368,221 @@ function receiptFor(request: FleetRuntimeRequest, preflight: FleetRuntimePreflig
   }
   receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt)
   return receipt
+}
+
+const FIXTURE_PAYLOAD_PATHS = FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES.map(file => file.path)
+const FIXTURE_RAW_PATHS = [...FIXTURE_PAYLOAD_PATHS, ...Array.from({ length: 10 }, (_, index) => `control/extra-${index}.txt`)].sort()
+const SYNTHETIC_PAYLOAD_PATHS = Array.from({ length: 24 }, (_, index) => `payload/${String(index).padStart(2, '0')}.txt`)
+const SYNTHETIC_RAW_PATHS = [...SYNTHETIC_PAYLOAD_PATHS, ...Array.from({ length: 10 }, (_, index) => `control/extra-${index}.txt`)].sort()
+
+function fixtureBlobMap(): Record<string, { bytes: number; sha256: string }> {
+  return Object.fromEntries(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES.map(file => [file.path, { bytes: file.bytes, sha256: file.sha256 }]))
+}
+
+function concreteRendererFixture(name: string) {
+  const stateDirectory = temporary(name)
+  const rawOutputPath = join(stateDirectory, 'renderer-raw-output')
+  const selectedPayloadPath = join(stateDirectory, 'selected-payload')
+  mkdirSync(rawOutputPath, { recursive: true })
+  const manifest = {
+    files: SYNTHETIC_PAYLOAD_PATHS.map((path, index) => {
+      const content = `selected-payload-${String(index).padStart(2, '0')}\n`
+      const outputPath = join(rawOutputPath, path)
+      mkdirSync(join(outputPath, '..'), { recursive: true })
+      writeFileSync(outputPath, content)
+      return { path, bytes: Buffer.byteLength(content), sha256: rawDigest(content) }
+    }),
+  }
+  const extras = Array.from({ length: 10 }, (_, index) => {
+    const path = `control/extra-${index}.txt`
+    const content = `renderer-extra-${index}\n`
+    const outputPath = join(rawOutputPath, path)
+    mkdirSync(join(outputPath, '..'), { recursive: true })
+    writeFileSync(outputPath, content)
+    return { path, bytes: Buffer.byteLength(content), sha256: rawDigest(content) }
+  })
+  const generatedFiles = [...manifest.files, ...extras]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map(file => ({
+      path: file.path,
+      output_path: join(rawOutputPath, file.path),
+      bytes: file.bytes,
+      sha256: file.sha256.replace(/^sha256:/, ''),
+    }))
+  const rendererReport = {
+    schema: 'shirube-adoption-pack-render/v1',
+    verdict: 'PASS',
+    profile: 'hotel-lite',
+    mode: 'render',
+    target_repo: 'watchout/kodama',
+    product: 'Kodama',
+    source_control: 'watchout/ai-dev-framework#576',
+    framework_ref: `watchout/ai-dev-framework@${FLEET_RUNTIME_V1_CONTRACT.release_commit}`,
+    output_root: rawOutputPath,
+    generated_files: generatedFiles,
+    target_change_policy: {
+      allowed_paths: ['.shirube/**', 'docs/shirube/**', '.github/workflows/shirube-rapid-lite-gates-report.yml'],
+      forbidden_paths: [
+        'scripts/shirube/**', 'src/**', 'app/**', 'api/**', 'lib/**', 'db/**', 'migrations/**',
+        'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.env*', 'deploy/**', 'deployment/**',
+        '.github/branch-protection/**', '.github/rulesets/**',
+      ],
+      workflow_caller_generated: true,
+      workflow_caller_path: '.github/workflows/shirube-rapid-lite-gates-report.yml',
+      application_runtime_changes_allowed: false,
+      shirube_control_runtime_bundle_generated: true,
+      package_changes_allowed: false,
+      branch_protection_changes_allowed: false,
+      required_check_activation_allowed: false,
+      external_repo_mutation_allowed: false,
+    },
+    required_next_actions: [
+      'Open a target-repo adoption PR containing only the generated overlay files.',
+      'Owner must fill exact-head decision evidence before merge if any gate would block.',
+      'The generated workflow and immutable local runtime bundle must stay report-only; update them together from an audited Shirube release.',
+      'Do not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes into the adoption PR.',
+    ],
+  }
+  return { stateDirectory, rawOutputPath, selectedPayloadPath, manifest, rendererReport }
+}
+
+function runTempGit(argv: string[], cwd: string): string {
+  const result = Bun.spawnSync(argv, { cwd, stdout: 'pipe', stderr: 'pipe' })
+  expect(result.exitCode, `${argv.join(' ')}: ${result.stderr.toString()}`).toBe(0)
+  return result.stdout.toString().trim()
+}
+
+function fixtureCheckout(intent: Record<string, unknown>): Record<string, unknown> {
+  return {
+    checkout_path: intent.checkout_path ?? '/fixture/state/invocations/key/checkout',
+    remote: 'https://github.com/watchout/kodama.git',
+    head: intent.expected_head,
+    tree: intent.expected_tree,
+    clean: true,
+    detached: true,
+  }
+}
+
+function fixtureReleaseCheckout(context: Readonly<FleetRuntimeLocalPhaseContext>): Record<string, unknown> {
+  return {
+    checkout_path: join(context.invocation_directory, 'adf-release'),
+    remote: 'https://github.com/watchout/ai-dev-framework.git',
+    head: FLEET_RUNTIME_V1_CONTRACT.release_commit,
+    tree: FLEET_RUNTIME_V1_CONTRACT.release_tree,
+    clean: true,
+    detached: true,
+  }
+}
+
+function fixtureIntent(
+  request: FleetRuntimeRequest,
+  phase: FleetRuntimeLocalPhase,
+  context: Readonly<FleetRuntimeLocalPhaseContext>,
+): Record<string, unknown> {
+  const prepared = context.prior_evidence.PREPARE_CLEAN_CHECKOUT
+  const staged = context.prior_evidence.STAGE_EXACT_PAYLOAD
+  const local = context.prior_evidence.CREATE_LOCAL_COMMIT ?? context.prior_evidence.CREATE_LOCAL_REVERT
+  const pushed = context.prior_evidence.PUSH_NORMAL_BRANCH
+  const created = context.prior_evidence.CREATE_DRAFT_PR
+  const merged = context.prior_evidence.VERIFY_EXTERNAL_MERGE
+  const checkoutPath = join(context.invocation_directory, 'checkout')
+  if (phase === 'PREPARE_CLEAN_CHECKOUT') {
+    return {
+      expected_head: request.operation === 'ROLLBACK' || request.operation === 'RECOVERY' ? 'c'.repeat(40) : request.preimages[0].head_commit,
+      expected_tree: request.operation === 'ROLLBACK' || request.operation === 'RECOVERY' ? 'd'.repeat(40) : request.preimages[0].tree,
+    }
+  }
+  if (phase === 'STAGE_EXACT_PAYLOAD') return {
+    payload_digest: request.payload_digest, path_count: 24,
+    raw_output_path: join(context.invocation_directory, 'renderer-raw-output'),
+    release_commit: request.subject.release_commit, release_tree: request.subject.release_tree,
+    selected_payload_path: join(context.invocation_directory, 'selected-payload'),
+  }
+  if (phase === 'VERIFY_EXACT_PAYLOAD') return {
+    payload_digest: request.payload_digest, path_count: 24, selected_payload_path: staged?.selected_payload_path,
+  }
+  if (phase === 'CREATE_LOCAL_COMMIT') return { payload_digest: request.payload_digest, path_count: 24 }
+  if (phase === 'CREATE_LOCAL_REVERT') return { merge_commit: 'c'.repeat(40), expected_tree: request.preimages[0].tree }
+  if (phase === 'PUSH_NORMAL_BRANCH') return { branch: local?.branch, head: local?.head, force: false }
+  if (phase === 'CREATE_DRAFT_PR') return {
+    repository: 'watchout/kodama', base: 'main', branch: pushed?.branch, head: pushed?.head, draft: true,
+  }
+  if (phase === 'VERIFY_EXTERNAL_MERGE') return {
+    repository: 'watchout/kodama', base: 'main', pr_url: created?.pr_url, pushed_head: pushed?.head,
+  }
+  if (phase === 'PREPARE_MERGED_CHECKOUT') return { expected_head: merged?.merge_commit, expected_tree: merged?.merge_tree }
+  if (phase === 'VERIFY_EXACT_PREIMAGE') return request.operation === 'ROLLBACK'
+    ? { expected_head: merged?.merge_commit, expected_tree: request.preimages[0].tree }
+    : { expected_head: prepared?.head, expected_tree: request.preimages[0].tree }
+  if (phase === 'COLD_START_DISCORD_KODAMA' || phase === 'VERIFY_LIVE_IDENTITY') return {
+    checkout_path: checkoutPath, session: 'discord-kodama', port: 8803,
+    expected_head: merged?.merge_commit ?? prepared?.head,
+    expected_tree: merged?.merge_tree ?? (request.operation === 'RECOVERY' ? request.preimages[0].tree : prepared?.tree),
+  }
+  throw new Error(`unsupported fixture intent ${phase}`)
+}
+
+function fixtureExternalMergeReceipt(request: FleetRuntimeRequest, intent: Record<string, unknown>): Record<string, unknown> {
+  const receipt: Record<string, unknown> = {
+    schema_version: 'fleet-runtime-v1/external-merge-receipt/v1', receipt_sha256: SHA_A,
+    subject_digest: digest(request.subject), request_id: request.request_id, request_digest: request.request_digest,
+    idempotency_key: request.idempotency_key, operation: request.operation, target_repository: 'watchout/kodama',
+    base: 'main', pr_url: intent.pr_url, pushed_head: intent.pushed_head,
+    merge_commit: 'c'.repeat(40), merge_tree: request.operation === 'ROLLBACK' ? request.preimages[0].tree : 'd'.repeat(40),
+    result: 'PASS', predecessor_receipt_sha256: request.predecessor_receipt.sha256,
+  }
+  receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)
+  return receipt
+}
+
+function fixtureEvidence(
+  request: FleetRuntimeRequest,
+  phase: FleetRuntimeLocalPhase,
+  context: Readonly<FleetRuntimeLocalPhaseContext>,
+): Record<string, unknown> {
+  const intent = context.current_intent
+  if (phase === 'PREPARE_CLEAN_CHECKOUT') return {
+    ...fixtureCheckout({ ...intent, checkout_path: join(context.invocation_directory, 'checkout') }),
+    baseline_runtime_instance_id: null,
+    ...(request.operation === 'REAPPLY' ? {
+      rollback_receipt_url: 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-9999999997',
+      rollback_receipt_raw_body_sha256: SHA_A,
+      rollback_receipt_self_sha256: SHA_B,
+    } : {}),
+  }
+  if (phase === 'STAGE_EXACT_PAYLOAD') return {
+    path_count: 24, payload_digest: request.payload_digest, payload_paths: FIXTURE_PAYLOAD_PATHS,
+    raw_output_path: intent.raw_output_path, raw_path_count: 34, raw_paths: FIXTURE_RAW_PATHS,
+    release_checkout_after: fixtureReleaseCheckout(context), release_checkout_before: fixtureReleaseCheckout(context), renderer_report_sha256: SHA_A,
+    selected_blobs: fixtureBlobMap(), selected_payload_path: intent.selected_payload_path,
+  }
+  if (phase === 'VERIFY_EXACT_PAYLOAD') return {
+    checkout_blobs: fixtureBlobMap(), path_count: 24, payload_digest: request.payload_digest,
+    payload_paths: FIXTURE_PAYLOAD_PATHS, selected_payload_path: intent.selected_payload_path,
+  }
+  if (phase === 'CREATE_LOCAL_COMMIT') return {
+    branch: 'fixture-branch', head: 'e'.repeat(40), payload_paths: FIXTURE_PAYLOAD_PATHS,
+    index_blobs: fixtureBlobMap(), commit_blobs: fixtureBlobMap(),
+  }
+  if (phase === 'CREATE_LOCAL_REVERT') return { branch: 'fixture-rollback', head: 'e'.repeat(40), reverted_merge: intent.merge_commit }
+  if (phase === 'PUSH_NORMAL_BRANCH') return { branch: intent.branch, head: intent.head, force: false }
+  if (phase === 'CREATE_DRAFT_PR') return { pr_url: 'https://github.com/watchout/kodama/pull/123', branch: intent.branch, draft: true }
+  if (phase === 'VERIFY_EXTERNAL_MERGE') return fixtureExternalMergeReceipt(request, intent)
+  if (phase === 'PREPARE_MERGED_CHECKOUT' || phase === 'VERIFY_EXACT_PREIMAGE') return {
+    ...fixtureCheckout({ ...intent, checkout_path: join(context.invocation_directory, 'checkout') }),
+  }
+  if (phase === 'COLD_START_DISCORD_KODAMA') return { ...fixtureCheckout(intent), session: intent.session, port: intent.port }
+  if (phase === 'VERIFY_LIVE_IDENTITY') return {
+    duplicate_effect_count: 0, inventory: { agent_id: 'kodama' }, local_checkout: fixtureCheckout(intent),
+    queue_unchanged: true,
+    remote_image: {
+      distribution_surface_entry_count: 1, distribution_surface_sha256: request.preimages[0].distribution_surface_sha256,
+      head_commit: intent.expected_head, runtime_surface_entry_count: 1,
+      runtime_surface_sha256: request.preimages[0].runtime_surface_sha256, tree: intent.expected_tree,
+    },
+    runtime_instance_id: `runtime-${request.operation}`, unauthorized_effect_count: 0,
+  }
+  throw new Error(`unsupported fixture evidence ${phase}`)
 }
 
 class FixtureSystem implements FleetRuntimeLocalSystem {
@@ -326,11 +597,19 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
     return preflightFor(request as FleetRuntimeRequest)
   }
 
+  phaseIntent(
+    request: Readonly<FleetRuntimeRequest>,
+    phase: FleetRuntimeLocalPhase,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Record<string, unknown> {
+    return fixtureIntent(request as FleetRuntimeRequest, phase, context)
+  }
+
   async performPhase(
-    _request: Readonly<FleetRuntimeRequest>,
+    request: Readonly<FleetRuntimeRequest>,
     _preflight: Readonly<FleetRuntimePreflightReceipt>,
     phase: FleetRuntimeLocalPhase,
-    _context: Readonly<FleetRuntimeLocalPhaseContext>,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<FleetRuntimeLocalPhaseResult> {
     this.calls.set(phase, (this.calls.get(phase) ?? 0) + 1)
     if (phase === 'VERIFY_EXTERNAL_MERGE' && !this.mergeAvailable) {
@@ -341,20 +620,20 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
       throw new Error(`fixture interruption at ${phase}`)
     }
     const protectedPhase = ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase)
-    return { evidence: { phase, exact: true }, protected_effect_count: protectedPhase ? 1 : 0 }
+    return { evidence: fixtureEvidence(request as FleetRuntimeRequest, phase, context), protected_effect_count: protectedPhase ? 1 : 0 }
   }
 
   async reconcilePhase(
-    _request: Readonly<FleetRuntimeRequest>,
+    request: Readonly<FleetRuntimeRequest>,
     _preflight: Readonly<FleetRuntimePreflightReceipt>,
     phase: FleetRuntimeLocalPhase,
-    _context: Readonly<FleetRuntimeLocalPhaseContext>,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<FleetRuntimeLocalReconcileResult> {
     if (phase === 'VERIFY_EXTERNAL_MERGE' && !this.mergeAvailable) {
       throw new FleetRuntimeLocalProviderError('WAITING_INDEPENDENT_MERGE', 'fixture merge pending')
     }
     return this.reconcileInterrupted
-      ? { completed: true, evidence: { phase, reconciled: true }, protected_effect_count: ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase) ? 1 : 0 }
+      ? { completed: true, evidence: fixtureEvidence(request as FleetRuntimeRequest, phase, context), protected_effect_count: ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase) ? 1 : 0 }
       : { completed: false, evidence: null, protected_effect_count: 0 }
   }
 
@@ -397,6 +676,26 @@ class BlockingProtectedFixtureSystem extends FixtureSystem {
       this.protectedActive -= 1
     }
     return super.performPhase(request, preflight, phase, context)
+  }
+}
+
+class PersistedConcreteReconcileFixtureSystem extends FixtureSystem {
+  private readonly concrete: ConcreteFleetRuntimeV1LocalSystem
+
+  constructor(readonly targetPhase: FleetRuntimeLocalPhase, runner: FleetRuntimeArgvRunner) {
+    super()
+    this.interruptOnceAt = targetPhase
+    this.concrete = new ConcreteFleetRuntimeV1LocalSystem(runner)
+  }
+
+  override async reconcilePhase(
+    request: Readonly<FleetRuntimeRequest>,
+    preflight: Readonly<FleetRuntimePreflightReceipt>,
+    phase: FleetRuntimeLocalPhase,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Promise<FleetRuntimeLocalReconcileResult> {
+    if (phase === this.targetPhase) return this.concrete.reconcilePhase(request, preflight, phase, context)
+    return super.reconcilePhase(request, preflight, phase, context)
   }
 }
 
@@ -595,6 +894,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       head: 'a'.repeat(40),
       tree: 'b'.repeat(40),
       status_porcelain: '',
+      branch: '',
     }
     expect(() => validateFleetRuntimeCheckoutReadback(exact)).not.toThrow()
     expect(() => validateFleetRuntimeCheckoutReadback({ ...exact, checkout_path: exact.canonical_path })).toThrow('UNSAFE_CHECKOUT')
@@ -654,6 +954,60 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(readFileSync(marker, 'utf8')).toMatch(/^[1-9][0-9]*$/)
   })
 
+  test.each(['heartbeat', 'journal', 'completion'] as const)(
+    'a real displaced child process cannot perform fenced %s mutation after stale takeover',
+    async mode => {
+      const root = temporary(`frv1-displaced-${mode}`)
+      const stateDirectory = join(root, 'state')
+      const ready = join(root, 'ready')
+      const proceed = join(root, 'proceed')
+      const modulePath = join(resolveRepo(), 'core/fleet-runtime-v1-local-provider.ts')
+      const key = `frv1:N40:${createHash('sha256').update(mode).digest('hex')}`
+      const program = `
+        import { existsSync, writeFileSync } from 'node:fs';
+        import { join } from 'node:path';
+        import { FileFleetRuntimeV1Persistence } from ${JSON.stringify(modulePath)};
+        const [stateDirectory, key, ready, proceed, mode] = process.argv.slice(1);
+        const store = new FileFleetRuntimeV1Persistence(stateDirectory, {
+          approvedRoot: stateDirectory, ownerId: 'displaced-child', staleAfterMs: 1,
+        });
+        await store.reserve_once({ idempotency_key: key, request_digest: ${JSON.stringify(SHA_A)}, status: 'reserved', receipt: null });
+        writeFileSync(ready, 'ready', { flag: 'wx' });
+        while (!existsSync(proceed)) await Bun.sleep(5);
+        try {
+          if (mode === 'heartbeat') await store.heartbeatOwner(key);
+          if (mode === 'journal') store.commitOwnedRecord(key, join(stateDirectory, 'invocations', key, 'operation-state.json'), 'operation state', null, { owner: 'displaced-child' });
+          if (mode === 'completion') await store.complete_once({ idempotency_key: key, request_digest: ${JSON.stringify(SHA_A)}, status: 'completed', receipt: { result: 'PASS' } });
+          console.log('UNEXPECTED_SUCCESS');
+        } catch (error) { console.log(error.code ?? 'ERROR'); }
+      `
+      const child = Bun.spawn([process.execPath, '-e', program, '--', stateDirectory, key, ready, proceed, mode], {
+        stdout: 'pipe', stderr: 'pipe',
+      })
+      for (let attempt = 0; attempt < 200 && !existsSync(ready); attempt += 1) await Bun.sleep(5)
+      expect(existsSync(ready)).toBe(true)
+      const takeover = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory,
+        ownerId: 'takeover-parent',
+        nowMs: () => Date.now() + 120_000,
+        staleAfterMs: 1,
+        ownerAlive: () => false,
+      })
+      expect((await takeover.reserve_once({
+        idempotency_key: key, request_digest: SHA_A, status: 'reserved', receipt: null,
+      })).acquired).toBe(true)
+      writeFileSync(proceed, 'go', { flag: 'wx' })
+      const stdout = await new Response(child.stdout).text()
+      const stderr = await new Response(child.stderr).text()
+      expect(await child.exited, stderr).toBe(0)
+      expect(stdout.trim()).toBe('IN_FLIGHT')
+      const durable = await takeover.load(key) as FleetRuntimeInvocationState & { execution_owner: { owner_id: string } }
+      expect(durable.execution_owner.owner_id).toBe('takeover-parent')
+      expect(existsSync(join(stateDirectory, 'invocations', key, 'operation-state.json'))).toBe(false)
+      expect(existsSync(join(stateDirectory, 'invocations', key, 'completed.json'))).toBe(false)
+    },
+  )
+
   test('two real provider calls never overlap a protected phase for the same invocation', async () => {
     const stateDirectory = join(temporary('frv1-concurrent-provider'), 'state')
     const request = requestFor()
@@ -703,10 +1057,10 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       approvedRoot: stateDirectory, ownerId: 'dead-original', nowMs: () => now, ownerAlive: () => false, staleAfterMs: 1_000,
     })
     await original.reserve_once(state)
-    const lock = join(stateDirectory, 'invocations', state.idempotency_key, 'takeover.lock')
+    const lock = join(stateDirectory, 'invocations', state.idempotency_key, 'owner-write.lock')
     writeFileSync(lock, `${canonicalFleetRuntimeJson({
-      prior_owner: original.owner,
-      next_owner: { ...original.owner, owner_id: 'dead-lock-owner' },
+      lock_token: 'dead-lock-token',
+      execution_owner: { ...original.owner, owner_id: 'dead-lock-owner' },
     })}\n`)
     now += 5_000
     const contender = new FileFleetRuntimeV1Persistence(stateDirectory, {
@@ -755,6 +1109,95 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimeImmutableSemantics(request, owner.replace('result: PASS', 'result: PASS\nresult: PASS'), predecessor)).toThrow('READBACK_INVALID')
   })
 
+  test('owner-bound exact prior request tuple rejects the audit same-subject foreign predecessor probe', () => {
+    const priorRequest = requestFor('CANARY_COLD_START')
+    const priorReceipt = receiptFor(priorRequest, preflightFor(priorRequest)) as FleetRuntimeEffectReceipt & Record<string, unknown>
+    const priorRaw = canonicalFleetRuntimeJson(priorReceipt)
+    const request = requestFor('ROLLBACK')
+    request.predecessor_receipt.sha256 = rawDigest(priorRaw)
+    resign(request)
+    const binding = {
+      predecessor_raw_body_sha256: request.predecessor_receipt.sha256,
+      predecessor_self_sha256: String(priorReceipt.receipt_sha256),
+      prior_request_id: priorRequest.request_id,
+      prior_request_digest: priorRequest.request_digest,
+      prior_idempotency_key: priorRequest.idempotency_key,
+    }
+    const owner = semanticOwnerBody(request, binding)
+    expect(parseFleetRuntimeOperationPredecessorBinding(request, owner)).toMatchObject(binding)
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner, priorRaw)).not.toThrow()
+
+    const foreign = structuredClone(priorReceipt)
+    foreign.request_id = 'FRV1-N40-FOREIGN'
+    foreign.request_digest = SHA_B
+    foreign.idempotency_key = `frv1:N40:${'9'.repeat(64)}`
+    foreign.receipt_sha256 = computeFleetRuntimeReceiptDigest(foreign as FleetRuntimeEffectReceipt)
+    const foreignRaw = canonicalFleetRuntimeJson(foreign)
+    const rebound = structuredClone(request)
+    rebound.predecessor_receipt.sha256 = rawDigest(foreignRaw)
+    resign(rebound)
+    expect(() => validateFleetRuntimeImmutableSemantics(rebound, owner, foreignRaw)).toThrow('READBACK_INVALID')
+
+    for (const override of [
+      { prior_request_id: 'FRV1-N40-FOREIGN' },
+      { prior_request_digest: SHA_A },
+      { prior_idempotency_key: `frv1:N40:${'8'.repeat(64)}` },
+      { predecessor_self_sha256: SHA_A },
+    ]) {
+      expect(() => validateFleetRuntimeImmutableSemantics(request, semanticOwnerBody(request, { ...binding, ...override }), priorRaw)).toThrow('READBACK_INVALID')
+    }
+  })
+
+  test('REAPPLY binds the exact RECOVERY predecessor and exact ROLLBACK raw/self/request companion chain', () => {
+    const rollbackRequest = requestFor('ROLLBACK')
+    const rollbackReceipt = receiptFor(rollbackRequest, preflightFor(rollbackRequest)) as FleetRuntimeEffectReceipt & Record<string, unknown>
+    rollbackReceipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(rollbackReceipt as FleetRuntimeEffectReceipt)
+    const rollbackRaw = canonicalFleetRuntimeJson(rollbackReceipt)
+
+    const recoveryRequest = requestFor('RECOVERY')
+    const recoveryReceipt = receiptFor(recoveryRequest, preflightFor(recoveryRequest)) as FleetRuntimeEffectReceipt & Record<string, unknown>
+    recoveryReceipt.rollback_receipt_sha256 = rollbackReceipt.receipt_sha256
+    recoveryReceipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(recoveryReceipt as FleetRuntimeEffectReceipt)
+    const recoveryRaw = canonicalFleetRuntimeJson(recoveryReceipt)
+
+    const request = requestFor('REAPPLY')
+    request.predecessor_receipt.sha256 = rawDigest(recoveryRaw)
+    resign(request)
+    const binding = {
+      predecessor_raw_body_sha256: request.predecessor_receipt.sha256,
+      predecessor_self_sha256: String(recoveryReceipt.receipt_sha256),
+      prior_request_id: recoveryRequest.request_id,
+      prior_request_digest: recoveryRequest.request_digest,
+      prior_idempotency_key: recoveryRequest.idempotency_key,
+      companion_raw_body_sha256: rawDigest(rollbackRaw),
+      companion_self_sha256: String(rollbackReceipt.receipt_sha256),
+      companion_request_id: rollbackRequest.request_id,
+      companion_request_digest: rollbackRequest.request_digest,
+      companion_idempotency_key: rollbackRequest.idempotency_key,
+    }
+    const owner = semanticOwnerBody(request, binding)
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner, recoveryRaw, rollbackRaw)).not.toThrow()
+
+    const brokenRecovery = structuredClone(recoveryReceipt)
+    brokenRecovery.rollback_receipt_sha256 = SHA_A
+    brokenRecovery.receipt_sha256 = computeFleetRuntimeReceiptDigest(brokenRecovery as FleetRuntimeEffectReceipt)
+    const brokenRecoveryRaw = canonicalFleetRuntimeJson(brokenRecovery)
+    const brokenRequest = structuredClone(request)
+    brokenRequest.predecessor_receipt.sha256 = rawDigest(brokenRecoveryRaw)
+    resign(brokenRequest)
+    const brokenOwner = semanticOwnerBody(brokenRequest, {
+      ...binding,
+      predecessor_raw_body_sha256: brokenRequest.predecessor_receipt.sha256,
+      predecessor_self_sha256: String(brokenRecovery.receipt_sha256),
+    })
+    expect(() => validateFleetRuntimeImmutableSemantics(brokenRequest, brokenOwner, brokenRecoveryRaw, rollbackRaw)).toThrow('READBACK_INVALID')
+
+    const foreignRollback = structuredClone(rollbackReceipt)
+    foreignRollback.request_id = 'FRV1-N40-ROLLBACK-FOREIGN'
+    foreignRollback.receipt_sha256 = computeFleetRuntimeReceiptDigest(foreignRollback as FleetRuntimeEffectReceipt)
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner, recoveryRaw, canonicalFleetRuntimeJson(foreignRollback))).toThrow('READBACK_INVALID')
+  })
+
   test('external merge requires the created PR URL and exact pushed head', () => {
     const request = requestFor()
     const receipt: Record<string, unknown> = {
@@ -783,6 +1226,60 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       })).toThrow('READBACK_INVALID')
     }
     expect(() => validateFleetRuntimeExternalMergeBinding({ ...input, observedMergeTree: 'f'.repeat(40) })).toThrow('READBACK_INVALID')
+  })
+
+  test('schema-correct external merge receipt succeeds through the concrete file and injected GitHub readback path', async () => {
+    const request = requestFor()
+    const stateDirectory = temporary('frv1-concrete-external-merge')
+    const invocationDirectory = join(stateDirectory, 'invocations', request.idempotency_key)
+    mkdirSync(invocationDirectory, { recursive: true })
+    const currentIntent = {
+      pr_url: 'https://github.com/watchout/kodama/pull/123',
+      pushed_head: 'e'.repeat(40),
+    }
+    const receipt = fixtureExternalMergeReceipt(request, currentIntent)
+    writeFileSync(join(invocationDirectory, 'external-merge-receipt.json'), `${canonicalFleetRuntimeJson(receipt)}\n`)
+    const calls: string[][] = []
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        calls.push([...argv])
+        if (argv[0] === 'gh' && argv[1] === 'pr') return {
+          exitCode: 0, stderr: '', stdout: JSON.stringify({
+            url: receipt.pr_url, state: 'MERGED', mergedAt: '2026-08-15T09:00:00Z',
+            mergeCommit: { oid: receipt.merge_commit }, headRefOid: receipt.pushed_head,
+            baseRefName: 'main', isDraft: false,
+          }),
+        }
+        if (argv[0] === 'gh' && argv[1] === 'api') return {
+          exitCode: 0, stderr: '', stdout: JSON.stringify({ tree: { sha: receipt.merge_tree } }),
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected argv ${argv.join(' ')}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+    const context: FleetRuntimeLocalPhaseContext = {
+      state_directory: stateDirectory,
+      invocation_directory: invocationDirectory,
+      prior_evidence: {},
+      current_intent: currentIntent,
+      execution_owner_id: 'fixture-owner',
+      owner_decision_raw_body: semanticOwnerBody(request),
+      predecessor_receipt_raw_body: semanticPredecessorBody(request),
+    }
+    const result = await system.performPhase(request, preflightFor(request), 'VERIFY_EXTERNAL_MERGE', context)
+    expect(result).toEqual({ evidence: receipt, protected_effect_count: 0 })
+    expect(calls).toHaveLength(2)
+
+    const legacy = structuredClone(receipt)
+    delete legacy.target_repository
+    legacy.repository = 'watchout/kodama'
+    legacy.receipt_sha256 = computeFleetRuntimeReceiptDigest(legacy as unknown as FleetRuntimeEffectReceipt)
+    writeFileSync(join(invocationDirectory, 'external-merge-receipt.json'), `${canonicalFleetRuntimeJson(legacy)}\n`)
+    await expectProviderCode(
+      () => system.performPhase(request, preflightFor(request), 'VERIFY_EXTERNAL_MERGE', context),
+      'READBACK_INVALID',
+    )
+    expect(calls).toHaveLength(2)
   })
 
   test('local receipt validates its self-digest, subject, operation, target, predecessor, and runtime image', () => {
@@ -838,6 +1335,13 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(new ConcreteFleetRuntimeV1LocalSystem().phaseIntent(request, 'VERIFY_EXACT_PREIMAGE', context)).toEqual({
       expected_head: 'c'.repeat(40), expected_tree: request.preimages[0].tree,
     })
+    expect(new ConcreteFleetRuntimeV1LocalSystem().phaseIntent(request, 'CREATE_DRAFT_PR', {
+      ...context,
+      prior_evidence: { PUSH_NORMAL_BRANCH: { branch: 'fixture-branch', head: 'e'.repeat(40) } },
+    })).toEqual({
+      repository: 'watchout/kodama', base: request.preimages[0].required_base_branch,
+      branch: 'fixture-branch', head: 'e'.repeat(40), draft: true,
+    })
   })
 
   test('root-goal parsing has no defaults and admits only exact zero-effect states', () => {
@@ -859,41 +1363,112 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
   test('the concrete receipt builder emits the complete self-digested operation chain', async () => {
     const request = requestFor()
     const preflight = preflightFor(request)
-    const timestamp = '2026-08-15T08:30:00Z'
-    const phases: FleetRuntimeLocalOperationState['phases'] = {}
-    for (const phase of [
-      'PREPARE_CLEAN_CHECKOUT', 'STAGE_EXACT_PAYLOAD', 'VERIFY_EXACT_PAYLOAD', 'CREATE_LOCAL_COMMIT',
-      'PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'VERIFY_EXTERNAL_MERGE', 'PREPARE_MERGED_CHECKOUT',
-      'COLD_START_DISCORD_KODAMA', 'VERIFY_LIVE_IDENTITY',
-    ] as FleetRuntimeLocalPhase[]) {
-      phases[phase] = {
-        status: 'completed', started_at: timestamp, completed_at: timestamp, evidence: {}, intent: {},
-        protected_effect_count: ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase) ? 1 : 0,
-        intent_sha256: digest({}), evidence_sha256: digest({}),
-      }
-    }
-    phases.VERIFY_EXTERNAL_MERGE!.evidence = {
-      pr_url: 'https://github.com/watchout/kodama/pull/123', merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40),
-    }
-    phases.VERIFY_LIVE_IDENTITY!.evidence = {
-      runtime_instance_id: 'runtime-fresh', inventory: { agent_id: 'kodama' },
-      remote_image: {
-        head_commit: 'c'.repeat(40), tree: 'd'.repeat(40),
-        runtime_surface_sha256: request.preimages[0].runtime_surface_sha256,
-        distribution_surface_sha256: request.preimages[0].distribution_surface_sha256,
-      },
-    }
-    const state: FleetRuntimeLocalOperationState = {
-      schema_version: 'fleet-runtime-v1/local-operation-state/v1', request_id: request.request_id,
-      request_digest: request.request_digest, idempotency_key: request.idempotency_key, operation: request.operation,
-      execution_owner_id: 'fixture-owner', phases,
-    }
+    preflight.owner_decision_raw_body = semanticOwnerBody(request)
+    preflight.predecessor_receipt_raw_body = semanticPredecessorBody(request)
+    const stateDirectory = join(temporary('frv1-concrete-receipt'), 'state')
+    await executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request, stateDirectory, executeProtectedEffects: true, system: new FixtureSystem(), now: () => '2026-08-15T08:30:00Z',
+    }))
+    const state = JSON.parse(readFileSync(join(
+      stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json',
+    ), 'utf8')) as FleetRuntimeLocalOperationState
     const receipt = await new ConcreteFleetRuntimeV1LocalSystem().buildReceipt(request, preflight, state)
     expect(receipt.receipt_sha256).toBe(computeFleetRuntimeReceiptDigest(receipt))
     expect(receipt).toMatchObject({
       subject_digest: digest(request.subject), predecessor_receipt_sha256: request.predecessor_receipt.sha256,
       target_repository: 'watchout/kodama', merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40),
     })
+    const emptyEvidence = structuredClone(state)
+    emptyEvidence.phases.PREPARE_CLEAN_CHECKOUT!.evidence = {}
+    emptyEvidence.phases.PREPARE_CLEAN_CHECKOUT!.evidence_sha256 = digest({})
+    await expectProviderCode(
+      () => new ConcreteFleetRuntimeV1LocalSystem().buildReceipt(request, preflight, emptyEvidence),
+      'READBACK_INVALID',
+    )
+  })
+
+  test('every completed phase rejects empty, missing, extra, foreign, digest-only, count, order, and semantic tamper', async () => {
+    const journals: Array<{ request: FleetRuntimeRequest; state: FleetRuntimeLocalOperationState }> = []
+    for (const operation of ['CANARY_COLD_START', 'ROLLBACK', 'RECOVERY', 'REAPPLY'] as const) {
+      const request = requestFor(operation)
+      const stateDirectory = join(temporary(`frv1-full-journal-matrix-${operation}`), 'state')
+      await executeLocalFleetRuntimeV1(protectedFixtureInput({
+        request, stateDirectory, executeProtectedEffects: true, system: new FixtureSystem(), now: () => '2026-08-15T08:30:00Z',
+      }))
+      journals.push({
+        request,
+        state: JSON.parse(readFileSync(join(
+          stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json',
+        ), 'utf8')) as FleetRuntimeLocalOperationState,
+      })
+    }
+    const common = new Set(['execution_owner_id', 'operation', 'phase', 'request_digest', 'request_id', 'intent_sha256'])
+    const covered = new Set<FleetRuntimeLocalPhase>()
+    for (const { request, state } of journals) {
+      validateFleetRuntimeLocalOperationState(state, request, state.execution_owner_id)
+      const expectInvalid = (mutate: (copy: FleetRuntimeLocalOperationState, phase: FleetRuntimeLocalPhase) => void, phase: FleetRuntimeLocalPhase) => {
+        const copy = structuredClone(state)
+        mutate(copy, phase)
+        expect(() => validateFleetRuntimeLocalOperationState(copy, request, state.execution_owner_id), `${request.operation}:${phase}`).toThrow()
+      }
+      for (const phase of state.phase_sequence) {
+        covered.add(phase)
+        expectInvalid((copy, selected) => {
+          copy.phases[selected]!.evidence = {}
+          copy.phases[selected]!.evidence_sha256 = digest({})
+        }, phase)
+        expectInvalid((copy, selected) => {
+          const evidence = copy.phases[selected]!.evidence!
+          const key = Object.keys(evidence).find(candidate => !common.has(candidate))!
+          delete evidence[key]
+          copy.phases[selected]!.evidence_sha256 = digest(evidence)
+        }, phase)
+        expectInvalid((copy, selected) => {
+          copy.phases[selected]!.evidence!.unexpected = true
+          copy.phases[selected]!.evidence_sha256 = digest(copy.phases[selected]!.evidence)
+        }, phase)
+        expectInvalid((copy, selected) => {
+          copy.phases[selected]!.evidence!.execution_owner_id = 'foreign-owner'
+          copy.phases[selected]!.evidence_sha256 = digest(copy.phases[selected]!.evidence)
+        }, phase)
+        expectInvalid((copy, selected) => {
+          const entry = copy.phases[selected]!
+          entry.intent.request_id = 'FRV1-N40-FOREIGN'
+          entry.intent_sha256 = digest(entry.intent)
+          entry.evidence!.intent_sha256 = entry.intent_sha256
+          entry.evidence_sha256 = digest(entry.evidence)
+        }, phase)
+        expectInvalid((copy, selected) => { copy.phases[selected]!.evidence_sha256 = SHA_B }, phase)
+        expectInvalid((copy, selected) => {
+          copy.phases[selected]!.protected_effect_count = copy.phases[selected]!.protected_effect_count === 0 ? 1 : 0
+        }, phase)
+        expectInvalid((copy, selected) => {
+          const evidence = copy.phases[selected]!.evidence!
+          if (selected === 'PREPARE_CLEAN_CHECKOUT' || selected === 'PREPARE_MERGED_CHECKOUT' || selected === 'VERIFY_EXACT_PREIMAGE') evidence.head = 'f'.repeat(40)
+          else if (selected === 'STAGE_EXACT_PAYLOAD') (evidence.release_checkout_after as Record<string, unknown>).remote = 'https://github.com/watchout/foreign.git'
+          else if (selected === 'VERIFY_EXACT_PAYLOAD') (evidence.checkout_blobs as Record<string, unknown>)[FIXTURE_PAYLOAD_PATHS[0]] = { bytes: 99, sha256: SHA_A }
+          else if (selected === 'CREATE_LOCAL_COMMIT') {
+            ;(evidence.index_blobs as Record<string, unknown>)[FIXTURE_PAYLOAD_PATHS[0]] = { bytes: 99, sha256: SHA_A }
+            ;(evidence.commit_blobs as Record<string, unknown>)[FIXTURE_PAYLOAD_PATHS[0]] = { bytes: 99, sha256: SHA_A }
+          }
+          else if (selected === 'CREATE_LOCAL_REVERT') evidence.reverted_merge = 'f'.repeat(40)
+          else if (selected === 'PUSH_NORMAL_BRANCH') evidence.force = true
+          else if (selected === 'CREATE_DRAFT_PR') evidence.draft = false
+          else if (selected === 'VERIFY_EXTERNAL_MERGE') evidence.target_repository = 'watchout/misell'
+          else if (selected === 'COLD_START_DISCORD_KODAMA') evidence.port = 1
+          else if (selected === 'VERIFY_LIVE_IDENTITY') evidence.queue_unchanged = false
+          copy.phases[selected]!.evidence_sha256 = digest(evidence)
+        }, phase)
+      }
+      const reordered = structuredClone(state)
+      ;[reordered.phase_sequence[0], reordered.phase_sequence[1]] = [reordered.phase_sequence[1], reordered.phase_sequence[0]]
+      expect(() => validateFleetRuntimeLocalOperationState(reordered, request, state.execution_owner_id)).toThrow('STATE_RECORD_INVALID')
+    }
+    expect([...covered].sort()).toEqual([
+      'COLD_START_DISCORD_KODAMA', 'CREATE_DRAFT_PR', 'CREATE_LOCAL_COMMIT', 'CREATE_LOCAL_REVERT',
+      'PREPARE_CLEAN_CHECKOUT', 'PREPARE_MERGED_CHECKOUT', 'PUSH_NORMAL_BRANCH', 'STAGE_EXACT_PAYLOAD',
+      'VERIFY_EXACT_PAYLOAD', 'VERIFY_EXACT_PREIMAGE', 'VERIFY_EXTERNAL_MERGE', 'VERIFY_LIVE_IDENTITY',
+    ])
   })
 
   test('payload path set blocks omissions, extras, reordering, and duplicates', () => {
@@ -918,10 +1493,182 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimePayloadBlobLayer(rows, wrongBytes, layer)).toThrow('PAYLOAD_VERIFICATION_FAILED')
   })
 
+  test('the concrete renderer raw 34 are verified before a separate exact selected 24 directory is admitted', () => {
+    const fixture = concreteRendererFixture('frv1-renderer-selection')
+    const result = selectFleetRuntimePayloadFromRenderer({
+      state_directory: fixture.stateDirectory,
+      raw_output_path: fixture.rawOutputPath,
+      selected_payload_path: fixture.selectedPayloadPath,
+      renderer_report_raw: JSON.stringify(fixture.rendererReport),
+      manifest: fixture.manifest,
+    })
+    expect(result.raw_paths).toEqual(SYNTHETIC_RAW_PATHS)
+    expect(Object.keys(result.selected_blobs)).toEqual(SYNTHETIC_PAYLOAD_PATHS)
+    expect(validateFleetRuntimePayloadDirectory({
+      state_directory: fixture.stateDirectory,
+      directory: fixture.selectedPayloadPath,
+      manifest: fixture.manifest.files,
+      label: 'selected fixture',
+      exact_path_set: true,
+    })).toEqual(result.selected_blobs)
+    for (const extra of SYNTHETIC_RAW_PATHS.filter(path => !SYNTHETIC_PAYLOAD_PATHS.includes(path))) {
+      expect(existsSync(join(fixture.selectedPayloadPath, extra))).toBe(false)
+    }
+
+    const first = fixture.manifest.files[0]
+    const selectedFirst = join(fixture.selectedPayloadPath, first.path)
+    const exactBytes = readFileSync(join(fixture.rawOutputPath, first.path))
+    rmSync(selectedFirst)
+    expect(() => validateFleetRuntimePayloadDirectory({
+      state_directory: fixture.stateDirectory, directory: fixture.selectedPayloadPath,
+      manifest: fixture.manifest.files, label: 'selected omission', exact_path_set: true,
+    })).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    writeFileSync(selectedFirst, exactBytes)
+    writeFileSync(join(fixture.selectedPayloadPath, 'payload/extra.txt'), 'extra\n')
+    expect(() => validateFleetRuntimePayloadDirectory({
+      state_directory: fixture.stateDirectory, directory: fixture.selectedPayloadPath,
+      manifest: fixture.manifest.files, label: 'selected extra', exact_path_set: true,
+    })).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    rmSync(join(fixture.selectedPayloadPath, 'payload/extra.txt'))
+    writeFileSync(selectedFirst, 'changed\n')
+    expect(() => validateFleetRuntimePayloadDirectory({
+      state_directory: fixture.stateDirectory, directory: fixture.selectedPayloadPath,
+      manifest: fixture.manifest.files, label: 'selected changed bytes', exact_path_set: true,
+    })).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    rmSync(selectedFirst)
+    symlinkSync(join(fixture.rawOutputPath, fixture.manifest.files[1].path), selectedFirst)
+    expect(() => validateFleetRuntimePayloadDirectory({
+      state_directory: fixture.stateDirectory, directory: fixture.selectedPayloadPath,
+      manifest: fixture.manifest.files, label: 'selected symlink', exact_path_set: true,
+    })).toThrow('PAYLOAD_VERIFICATION_FAILED')
+  })
+
+  test('renderer report and source negatives reject omission, extra, duplicate, reorder, changed bytes, and symlinks', () => {
+    const reportMutations: Array<(fixture: ReturnType<typeof concreteRendererFixture>) => void> = [
+      fixture => { fixture.rendererReport.generated_files.pop() },
+      fixture => { fixture.rendererReport.generated_files.push(structuredClone(fixture.rendererReport.generated_files[0])) },
+      fixture => { fixture.rendererReport.generated_files[33] = structuredClone(fixture.rendererReport.generated_files[0]) },
+      fixture => {
+        ;[fixture.manifest.files[0], fixture.manifest.files[1]] = [fixture.manifest.files[1], fixture.manifest.files[0]]
+      },
+      fixture => { fixture.rendererReport.target_change_policy.external_repo_mutation_allowed = true },
+      fixture => { fixture.rendererReport.required_next_actions.pop() },
+      fixture => { writeFileSync(join(fixture.rawOutputPath, fixture.manifest.files[0].path), 'changed-renderer-bytes\n') },
+      fixture => {
+        const first = join(fixture.rawOutputPath, fixture.manifest.files[0].path)
+        rmSync(first)
+        symlinkSync(join(fixture.rawOutputPath, fixture.manifest.files[1].path), first)
+      },
+    ]
+    for (const [index, mutate] of reportMutations.entries()) {
+      const fixture = concreteRendererFixture(`frv1-renderer-negative-${index}`)
+      mutate(fixture)
+      expect(() => selectFleetRuntimePayloadFromRenderer({
+        state_directory: fixture.stateDirectory,
+        raw_output_path: fixture.rawOutputPath,
+        selected_payload_path: fixture.selectedPayloadPath,
+        renderer_report_raw: JSON.stringify(fixture.rendererReport),
+        manifest: fixture.manifest,
+      }), `renderer mutation ${index}`).toThrow(index === reportMutations.length - 1 ? 'STATE_DIRECTORY_INVALID' : 'PAYLOAD_VERIFICATION_FAILED')
+      expect(existsSync(fixture.selectedPayloadPath)).toBe(false)
+    }
+  })
+
+  test('real temp-git index and commit objects reject exact-path and byte tampering', async () => {
+    const createRepository = (name: string, mutateBeforeAdd?: (repo: string, manifest: Array<{ path: string; bytes: number; sha256: string }>) => void) => {
+      const repo = join(temporary(name), 'repo')
+      mkdirSync(repo)
+      runTempGit(['git', 'init', '--quiet'], repo)
+      runTempGit(['git', 'config', 'user.name', 'Fleet Runtime Fixture'], repo)
+      runTempGit(['git', 'config', 'user.email', 'fleet-runtime@example.invalid'], repo)
+      writeFileSync(join(repo, 'README.md'), 'base\n')
+      runTempGit(['git', 'add', 'README.md'], repo)
+      runTempGit(['git', 'commit', '--quiet', '-m', 'base'], repo)
+      const manifest = SYNTHETIC_PAYLOAD_PATHS.map((path, index) => {
+        const content = `git-payload-${String(index).padStart(2, '0')}\n`
+        const fullPath = join(repo, path)
+        mkdirSync(join(fullPath, '..'), { recursive: true })
+        writeFileSync(fullPath, content)
+        return { path, bytes: Buffer.byteLength(content), sha256: rawDigest(content) }
+      })
+      mutateBeforeAdd?.(repo, manifest)
+      runTempGit(['git', 'add', '--', ...manifest.map(file => file.path)], repo)
+      return { repo, manifest }
+    }
+
+    const valid = createRepository('frv1-temp-git-valid')
+    const index = await validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'index',
+    })
+    const reordered = structuredClone(valid.manifest)
+    ;[reordered[0], reordered[1]] = [reordered[1], reordered[0]]
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: reordered, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    const duplicate = structuredClone(valid.manifest)
+    duplicate[1] = structuredClone(duplicate[0])
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: duplicate, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    runTempGit(['git', 'reset', '--quiet', '--', valid.manifest[0].path], valid.repo)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    runTempGit(['git', 'add', '--', valid.manifest[0].path], valid.repo)
+    writeFileSync(join(valid.repo, 'payload/extra.txt'), 'extra\n')
+    runTempGit(['git', 'add', 'payload/extra.txt'], valid.repo)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    runTempGit(['git', 'reset', '--quiet', '--', 'payload/extra.txt'], valid.repo)
+    rmSync(join(valid.repo, 'payload/extra.txt'))
+    writeFileSync(join(valid.repo, valid.manifest[0].path), 'changed-index-bytes\n')
+    runTempGit(['git', 'add', '--', valid.manifest[0].path], valid.repo)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    writeFileSync(join(valid.repo, valid.manifest[0].path), readFileSync(join(valid.repo, valid.manifest[1].path), 'utf8').replace('01', '00'))
+    runTempGit(['git', 'add', '--', valid.manifest[0].path], valid.repo)
+    await validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'index',
+    })
+    runTempGit(['git', 'commit', '--quiet', '-m', 'valid payload'], valid.repo)
+    const validCommit = runTempGit(['git', 'rev-parse', 'HEAD'], valid.repo)
+    await validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: valid.manifest, layer: 'commit',
+      commit: validCommit, expected_object_ids: index.object_ids,
+    })
+    for (const manifestMutation of [reordered, duplicate]) {
+      await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+        runner: bunFleetRuntimeArgvRunner, checkout: valid.repo, manifest: manifestMutation,
+        layer: 'commit', commit: validCommit,
+      }), 'PAYLOAD_VERIFICATION_FAILED')
+    }
+
+    const changed = createRepository('frv1-temp-git-changed', (repo, manifest) => {
+      writeFileSync(join(repo, manifest[0].path), 'changed-commit-bytes\n')
+    })
+    runTempGit(['git', 'commit', '--quiet', '-m', 'changed payload'], changed.repo)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: changed.repo, manifest: changed.manifest,
+      layer: 'commit', commit: runTempGit(['git', 'rev-parse', 'HEAD'], changed.repo),
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+
+    const extra = createRepository('frv1-temp-git-extra')
+    writeFileSync(join(extra.repo, 'payload/extra.txt'), 'extra\n')
+    runTempGit(['git', 'add', 'payload/extra.txt'], extra.repo)
+    runTempGit(['git', 'commit', '--quiet', '-m', 'extra payload'], extra.repo)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: extra.repo, manifest: extra.manifest,
+      layer: 'commit', commit: runTempGit(['git', 'rev-parse', 'HEAD'], extra.repo),
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+  })
+
   test('remote suffix lookalikes and local paths containing github.com are rejected', () => {
     const exact = {
       checkout_path: '/safe/state/invocations/key/checkout', state_directory: '/safe/state', canonical_path: '/Users/yuji/Developer/kodama',
       remote: 'https://github.com/watchout/kodama.git', head: 'a'.repeat(40), tree: 'b'.repeat(40), status_porcelain: '',
+      branch: '',
     }
     expect(() => validateFleetRuntimeCheckoutReadback({ ...exact, remote: 'https://evil.example/watchout/kodama.git' })).toThrow('UNSAFE_CHECKOUT')
     expect(() => validateFleetRuntimeCheckoutReadback({ ...exact, remote: '/tmp/github.com/watchout/kodama.git' })).toThrow('UNSAFE_CHECKOUT')
@@ -930,12 +1677,159 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimeCheckoutReadback({ ...exact, expected_tree: 'c'.repeat(40) })).toThrow('UNSAFE_CHECKOUT')
   })
 
+  test('concrete Kodama checkout readback enforces exact origin/head/tree/clean/detached/realpath matrix', async () => {
+    const stateDirectory = temporary('frv1-kodama-checkout-matrix')
+    const checkout = join(stateDirectory, 'invocations/key/checkout')
+    mkdirSync(checkout, { recursive: true })
+    const exact = {
+      remote: 'https://github.com/watchout/kodama.git',
+      head: 'a'.repeat(40),
+      tree: 'b'.repeat(40),
+      status: '',
+      branch: '',
+    }
+    const observed = { ...exact }
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        const command = argv.join(' ')
+        if (command === 'git remote get-url origin') return { exitCode: 0, stdout: observed.remote, stderr: '' }
+        if (command === 'git rev-parse HEAD') return { exitCode: 0, stdout: observed.head, stderr: '' }
+        if (command === 'git rev-parse HEAD^{tree}') return { exitCode: 0, stdout: observed.tree, stderr: '' }
+        if (command === 'git status --porcelain=v1') return { exitCode: 0, stdout: observed.status, stderr: '' }
+        if (command === 'git branch --show-current') return { exitCode: 0, stdout: observed.branch, stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+    await expect(system.verifyCheckout(checkout, stateDirectory, exact.head, exact.tree)).resolves.toMatchObject({
+      remote: exact.remote, head: exact.head, tree: exact.tree, clean: true, detached: true,
+    })
+    const mutations: Array<[keyof typeof observed, string]> = [
+      ['remote', 'https://github.com/watchout/kodama-lookalike.git'],
+      ['head', 'c'.repeat(40)],
+      ['tree', 'd'.repeat(40)],
+      ['status', ' M payload/file.txt'],
+      ['branch', 'main'],
+    ]
+    for (const [key, value] of mutations) {
+      Object.assign(observed, exact, { [key]: value })
+      await expectProviderCode(() => system.verifyCheckout(checkout, stateDirectory, exact.head, exact.tree), 'UNSAFE_CHECKOUT')
+    }
+    Object.assign(observed, exact)
+    const realCheckout = join(stateDirectory, 'real-checkout')
+    const linkedCheckout = join(stateDirectory, 'linked-checkout')
+    mkdirSync(realCheckout)
+    symlinkSync(realCheckout, linkedCheckout)
+    await expectProviderCode(() => system.verifyCheckout(linkedCheckout, stateDirectory, exact.head, exact.tree), 'UNSAFE_CHECKOUT')
+  })
+
+  test('concrete adf-release readback enforces exact origin/head/tree/clean/detached/realpath matrix', async () => {
+    const stateDirectory = temporary('frv1-adf-release-matrix')
+    const checkout = join(stateDirectory, 'adf-release')
+    mkdirSync(checkout)
+    const exact = {
+      remote: 'https://github.com/watchout/ai-dev-framework.git',
+      head: FLEET_RUNTIME_V1_CONTRACT.release_commit,
+      tree: FLEET_RUNTIME_V1_CONTRACT.release_tree,
+      status: '',
+      branch: '',
+    }
+    const observed = { ...exact }
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        const command = argv.join(' ')
+        if (command === 'git remote get-url origin') return { exitCode: 0, stdout: observed.remote, stderr: '' }
+        if (command === 'git rev-parse HEAD') return { exitCode: 0, stdout: observed.head, stderr: '' }
+        if (command === 'git rev-parse HEAD^{tree}') return { exitCode: 0, stdout: observed.tree, stderr: '' }
+        if (command === 'git status --porcelain=v1') return { exitCode: 0, stdout: observed.status, stderr: '' }
+        if (command === 'git branch --show-current') return { exitCode: 0, stdout: observed.branch, stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+    await expect(system.verifyReleaseCheckout(checkout, stateDirectory)).resolves.toMatchObject({
+      remote: exact.remote, head: exact.head, tree: exact.tree, clean: true, detached: true,
+    })
+    const mutations: Array<[keyof typeof observed, string]> = [
+      ['remote', 'https://github.com/watchout/not-ai-dev-framework.git'],
+      ['head', 'c'.repeat(40)],
+      ['tree', 'd'.repeat(40)],
+      ['status', ' M scripts/shirube/render-adoption-pack.mjs'],
+      ['branch', 'main'],
+    ]
+    for (const [key, value] of mutations) {
+      Object.assign(observed, exact, { [key]: value })
+      await expectProviderCode(() => system.verifyReleaseCheckout(checkout, stateDirectory), 'PAYLOAD_VERIFICATION_FAILED')
+    }
+    Object.assign(observed, exact)
+    const realCheckout = join(stateDirectory, 'real-adf-release')
+    const linkedCheckout = join(stateDirectory, 'linked-adf-release')
+    mkdirSync(realCheckout)
+    symlinkSync(realCheckout, linkedCheckout)
+    await expectProviderCode(() => system.verifyReleaseCheckout(linkedCheckout, stateDirectory), 'STATE_DIRECTORY_INVALID')
+  })
+
+  test('a concrete Kodama checkout payload-file symlink is rejected by the full no-symlink readback', () => {
+    const stateDirectory = temporary('frv1-kodama-file-symlink')
+    const checkout = join(stateDirectory, 'invocations/key/checkout')
+    mkdirSync(join(checkout, 'payload'), { recursive: true })
+    const outside = join(stateDirectory, 'outside.txt')
+    writeFileSync(outside, 'exact\n')
+    symlinkSync(outside, join(checkout, 'payload/00.txt'))
+    expect(() => validateFleetRuntimePayloadDirectory({
+      state_directory: stateDirectory,
+      directory: checkout,
+      manifest: [{ path: 'payload/00.txt', bytes: 6, sha256: rawDigest('exact\n') }],
+      label: 'Kodama checkout payload',
+      exact_path_set: true,
+    })).toThrow('PAYLOAD_VERIFICATION_FAILED')
+  })
+
+  test.each([
+    ['COLD_START_DISCORD_KODAMA', 'stale'],
+    ['COLD_START_DISCORD_KODAMA', 'attached'],
+    ['VERIFY_LIVE_IDENTITY', 'stale'],
+    ['VERIFY_LIVE_IDENTITY', 'attached'],
+  ] as const)('persisted concrete %s reconciliation rejects a %s checkout without repeating the interrupted phase', async (phase, mutation) => {
+    const request = requestFor()
+    const stateDirectory = join(temporary(`frv1-persisted-${phase}-${mutation}`), 'state')
+    const exactHead = 'c'.repeat(40)
+    const exactTree = 'd'.repeat(40)
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        const command = argv.join(' ')
+        if (command === 'git remote get-url origin') return { exitCode: 0, stdout: 'https://github.com/watchout/kodama.git', stderr: '' }
+        if (command === 'git rev-parse HEAD') return { exitCode: 0, stdout: mutation === 'stale' ? 'f'.repeat(40) : exactHead, stderr: '' }
+        if (command === 'git rev-parse HEAD^{tree}') return { exitCode: 0, stdout: exactTree, stderr: '' }
+        if (command === 'git status --porcelain=v1') return { exitCode: 0, stdout: '', stderr: '' }
+        if (command === 'git branch --show-current') return { exitCode: 0, stdout: mutation === 'attached' ? 'main' : '', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+      },
+    }
+    const system = new PersistedConcreteReconcileFixtureSystem(phase, runner)
+    await expect(executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request, stateDirectory, executeProtectedEffects: true, system,
+    }))).rejects.toThrow(`fixture interruption at ${phase}`)
+    const journalPath = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
+    const interrupted = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(interrupted.phases[phase]?.status).toBe('started')
+    const checkout = join(stateDirectory, 'invocations', request.idempotency_key, 'checkout')
+    mkdirSync(checkout, { recursive: true })
+    await expectProviderCode(() => executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request, stateDirectory, executeProtectedEffects: true, system,
+    })), 'UNSAFE_CHECKOUT')
+    const after = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(after.phases[phase]?.status).toBe('started')
+    expect(system.calls.get(phase)).toBe(1)
+  })
+
   test.each(['PREPARE_MERGED_CHECKOUT', 'VERIFY_EXACT_PREIMAGE', 'COLD_START_DISCORD_KODAMA', 'VERIFY_LIVE_IDENTITY'] as const)(
     '%s crash readback rejects a clean but stale exact-repository checkout',
     phase => {
       const stale = {
         checkout_path: '/safe/state/invocations/key/checkout', state_directory: '/safe/state', canonical_path: '/Users/yuji/Developer/kodama',
         remote: 'https://github.com/watchout/kodama.git', head: 'a'.repeat(40), tree: 'b'.repeat(40), status_porcelain: '',
+        branch: '',
         expected_head: 'c'.repeat(40), expected_tree: 'd'.repeat(40),
       }
       expect(() => validateFleetRuntimeCheckoutReadback(stale), phase).toThrow('UNSAFE_CHECKOUT')
