@@ -22,6 +22,32 @@ export const FLEET_RUNTIME_V1_CONTRACT = {
   precondition_build_decision_sha256: 'sha256:6464a7c19b2fae09d95bb3f6ed9d07a030c38e1b42bc263745065b45c460c6c9',
 } as const
 
+export const FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT = {
+  amendment_id: 'FLEET-RUNTIME-V1-PREIMAGE-AMENDMENT-20260815-001',
+  artifact_state: 'FINAL_IMMUTABLE',
+  schema_version: 'shirube-v4.1/fleet-runtime-v1-preimage-amendment/v1',
+  repository: 'watchout/ai-dev-framework',
+  merge_commit: '810981f049311cb2fede4f72fff651b1d4e8e04e',
+  merge_tree: 'ea48787485b5f4bca35d9788f46ede2424b09eb0',
+  path: 'releases/shirube-v4.1/fleet-runtime-v1-preimage-amendment-20260815-001.json',
+  amendment_sha256: 'sha256:92b4ce3630c2f58476240c84b5b794adc5263e23e07064aabd4ee12f54213567',
+  amendment_byte_sha256: 'sha256:00b323018d0219bcd2869d3700e54be06a25d62f921f2755d13e2454cd6ea285',
+  original_contract_sha256: FLEET_RUNTIME_V1_CONTRACT.contract_sha256,
+  original_contract_byte_sha256: 'sha256:7936bd8d92c73f54f71c67c744a4e8fb5339f69c7070f709449fba178dd73ebd',
+  original_payload_byte_sha256: 'sha256:6a7bce4ab348d3cd4ccc290aed06fe41dff7db4b7c690cd0b031b7ddc30b63a9',
+  effective_view_mode: 'EXACT_ORDERED_COMPLETE_PREIMAGE_RECORD_SUBSTITUTION_ONLY',
+  required_record_fields_in_order: [
+    'repository',
+    'required_base_branch',
+    'head_commit',
+    'tree',
+    'runtime_surface_entry_count',
+    'runtime_surface_sha256',
+    'distribution_surface_entry_count',
+    'distribution_surface_sha256',
+  ],
+} as const
+
 export const FLEET_RUNTIME_V1_TARGETS = [
   'watchout/agent-comms-mcp',
   'watchout/agent-memory',
@@ -101,9 +127,12 @@ export interface FleetRuntimeTargetScope {
 
 export interface FleetRuntimePreimage {
   repository: FleetRuntimeTarget
+  required_base_branch: string
   head_commit: string
   tree: string
+  runtime_surface_entry_count: number
   runtime_surface_sha256: string
+  distribution_surface_entry_count: number
   distribution_surface_sha256: string
 }
 
@@ -338,23 +367,23 @@ const TARGET_BINDINGS: Record<FleetRuntimeTarget, {
 }> = {
   'watchout/agent-comms-mcp': {
     classification: 'REGISTERED_RUNTIME', agent_id: 'aun', checkout_path: '/Users/yuji/Developer/agent-comms-mcp',
-    frozen_preimage: { head_commit: 'e1d2cf316b2a8bdf5e4d2e7d73b570d29e2968d0', tree: '667bc355b978a9924f09528e9d9ee600b061d38f', runtime_surface_sha256: 'sha256:371d9c5b08047a072e97a8feb83a6d9ae8f837062061f9b0050bba6724087235', distribution_surface_sha256: 'sha256:4d303ed6b479b7019b153bce76e35101a6f4df7b063333cdbae920282b71da97' },
+    frozen_preimage: { required_base_branch: 'main', head_commit: '933a14ac92605aa10698136b54276cad689aab91', tree: '9086c5d2967064839d538e9b53922f2bb600e329', runtime_surface_entry_count: 26, runtime_surface_sha256: 'sha256:371d9c5b08047a072e97a8feb83a6d9ae8f837062061f9b0050bba6724087235', distribution_surface_entry_count: 136, distribution_surface_sha256: 'sha256:4d303ed6b479b7019b153bce76e35101a6f4df7b063333cdbae920282b71da97' },
   },
   'watchout/agent-memory': {
     classification: 'REGISTERED_RUNTIME', agent_id: 'kusabi', checkout_path: '/Users/yuji/Developer/agent-memory',
-    frozen_preimage: { head_commit: 'a9ae4b29e2e5739a903926a27cb83a34593f0b44', tree: '44fd6ba56230380d7b07f4d36d3557457b7f3e48', runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56', distribution_surface_sha256: 'sha256:1c60eff2322f700dd195cfb57e3e6a4b56af365ae2023f6271f3b1f0e3e98bf0' },
+    frozen_preimage: { required_base_branch: 'main', head_commit: 'fdda199c7d686b0a8b9b90a7621ee6fdaab35621', tree: '25f450565cd9cd981adf1c33e38ee21d82f6402d', runtime_surface_entry_count: 0, runtime_surface_sha256: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945', distribution_surface_entry_count: 0, distribution_surface_sha256: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' },
   },
   'watchout/aun-platform': {
     classification: 'PLACEMENT_ONLY_CURRENT_N35_PREPARATION', agent_id: null, checkout_path: '/Users/yuji/Developer/aun-platform',
-    frozen_preimage: { head_commit: 'ce1a9fcc32b191286585a5c3cb47f2edf7a23568', tree: '7a83ad8d947b48b7e89e69c4e9c13beca2b32433', runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56', distribution_surface_sha256: 'sha256:a2c465bfc007a4d27d1d9caecac2c3e84f4510fe4daf11718563e9045c58fd19' },
+    frozen_preimage: { required_base_branch: 'feat/channel-ux-v2-2-sidebar-thread', head_commit: 'ce1a9fcc32b191286585a5c3cb47f2edf7a23568', tree: '7a83ad8d947b48b7e89e69c4e9c13beca2b32433', runtime_surface_entry_count: 24, runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56', distribution_surface_entry_count: 54, distribution_surface_sha256: 'sha256:a2c465bfc007a4d27d1d9caecac2c3e84f4510fe4daf11718563e9045c58fd19' },
   },
   'watchout/kodama': {
     classification: 'REGISTERED_RUNTIME', agent_id: 'kodama', checkout_path: '/Users/yuji/Developer/kodama',
-    frozen_preimage: { head_commit: '3c85d6f7a3c83e31c90fe4e3172c111c7541978f', tree: '47d992a5c709cf65ef15f4aab5e60887be1aa45a', runtime_surface_sha256: 'sha256:b90aa1438ef152b36bb988e946c3272e8099c18a4d59dba966c1b8a054ea2212', distribution_surface_sha256: 'sha256:b1233c486d5921bc928318c4497dba8093ba0a62db0ee4e3e9ab3432ba6302e5' },
+    frozen_preimage: { required_base_branch: 'main', head_commit: '3c85d6f7a3c83e31c90fe4e3172c111c7541978f', tree: '47d992a5c709cf65ef15f4aab5e60887be1aa45a', runtime_surface_entry_count: 24, runtime_surface_sha256: 'sha256:b90aa1438ef152b36bb988e946c3272e8099c18a4d59dba966c1b8a054ea2212', distribution_surface_entry_count: 63, distribution_surface_sha256: 'sha256:b1233c486d5921bc928318c4497dba8093ba0a62db0ee4e3e9ab3432ba6302e5' },
   },
   'watchout/misell': {
     classification: 'REGISTERED_RUNTIME', agent_id: 'misell', checkout_path: '/Users/yuji/Developer/misell',
-    frozen_preimage: { head_commit: '640dc4d475cb3670d85579845ecaafae198e895e', tree: '8661e8cf569f4bf27a0a736f3f5379d0cfa5df16', runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56', distribution_surface_sha256: 'sha256:d41879bf3a6ce1d1aab725bd5f939b4973c3d5e68b75edb39b514e74164c539a' },
+    frozen_preimage: { required_base_branch: 'main', head_commit: '640dc4d475cb3670d85579845ecaafae198e895e', tree: '8661e8cf569f4bf27a0a736f3f5379d0cfa5df16', runtime_surface_entry_count: 24, runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56', distribution_surface_entry_count: 251, distribution_surface_sha256: 'sha256:d41879bf3a6ce1d1aab725bd5f939b4973c3d5e68b75edb39b514e74164c539a' },
   },
 }
 
@@ -588,15 +617,27 @@ function assertPreimages(request: FleetRuntimeRequest): void {
     return fail('PREIMAGE_MISMATCH', 'one preimage is required for every target in order')
   }
   request.preimages.forEach((preimage, index) => {
-    assertExactKeys(preimage, ['repository', 'head_commit', 'tree', 'runtime_surface_sha256', 'distribution_surface_sha256'], `preimages[${index}]`)
+    if (!isRecord(preimage)
+      || !exact(Object.keys(preimage), FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT.required_record_fields_in_order)) {
+      return fail('PREIMAGE_MISMATCH', `preimages[${index}] fields or field order differ from the effective-view contract`)
+    }
     if (preimage.repository !== request.target_scope.repositories[index]) return fail('PREIMAGE_MISMATCH', 'preimage target order differs')
+    if (typeof preimage.required_base_branch !== 'string'
+      || preimage.required_base_branch.length === 0
+      || preimage.required_base_branch !== preimage.required_base_branch.trim()) {
+      return fail('PREIMAGE_MISMATCH', 'preimage required base branch is invalid')
+    }
     if (!COMMIT.test(preimage.head_commit) || !COMMIT.test(preimage.tree)) return fail('PREIMAGE_MISMATCH', 'preimage head or tree is invalid')
+    if (!Number.isInteger(preimage.runtime_surface_entry_count) || preimage.runtime_surface_entry_count < 0
+      || !Number.isInteger(preimage.distribution_surface_entry_count) || preimage.distribution_surface_entry_count < 0) {
+      return fail('PREIMAGE_MISMATCH', 'preimage surface entry count is invalid')
+    }
     assertSha256(preimage.runtime_surface_sha256, `preimages[${index}].runtime_surface_sha256`)
     assertSha256(preimage.distribution_surface_sha256, `preimages[${index}].distribution_surface_sha256`)
   })
-  if (request.stage_id === 'N40-P4-CANARY-VERIFY' && request.operation === 'CANARY_COLD_START') {
-    const expected = request.target_scope.repositories.map(frozenFleetRuntimePreimage)
-    if (!exact(request.preimages, expected)) return fail('PREIMAGE_MISMATCH', 'initial canary must bind the frozen rollback preimage')
+  const expected = request.target_scope.repositories.map(frozenFleetRuntimePreimage)
+  if (!exact(request.preimages, expected)) {
+    return fail('PREIMAGE_MISMATCH', 'request must bind the complete effective preimage view')
   }
 }
 
