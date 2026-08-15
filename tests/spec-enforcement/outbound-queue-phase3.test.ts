@@ -412,7 +412,15 @@ describe('T2c — provider-effects double fence', () => {
     } as any)
 
     try {
-      await consumeOneOutboundRow({ readProviderEffectsControl: () => forbidden('deny-before-claim') })
+      await consumeOneOutboundRow({
+        readProviderEffectsControl: () => forbidden('deny-before-claim'),
+        refreshProviderEffectsConsumerAttestation: () => ({
+          ok: true,
+          required: false,
+          path: null,
+          record: null,
+        }),
+      })
     } finally {
       discordClients.delete('aun')
     }
@@ -461,6 +469,12 @@ describe('T2c — provider-effects double fence', () => {
         readProviderEffectsControl: () => ++reads === 1
           ? allowed('epoch-before')
           : forbidden('epoch-after'),
+        refreshProviderEffectsConsumerAttestation: () => ({
+          ok: true,
+          required: false,
+          path: null,
+          record: null,
+        }),
       })
     } finally {
       discordClients.delete('aun')
@@ -722,7 +736,7 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
 
   test('consumer persists discord_message_id on mark-sent', () => {
     const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 12000)
     expect(fnBody).toMatch(
       /UPDATE outbound_queue SET status = 'sent'[^`]*discord_message_id\s*=\s*\$1/,
     )

@@ -48,6 +48,11 @@ import {
   readProviderEffectsControl,
   type ProviderEffectsControlDecision,
 } from '../core/provider-effects-control'
+import {
+  refreshProviderEffectsConsumerAttestation,
+  removeProviderEffectsConsumerAttestation,
+  type ProviderEffectsConsumerAttestationRefreshResult,
+} from '../core/provider-effects-consumer-attestation'
 
 // ---- Dependency injection -------------------------------------------------
 
@@ -391,9 +396,29 @@ export const pollingDriver = new PollingDriver()
 let outboundConsumerInterval: ReturnType<typeof setInterval> | null = null
 let outboundOrphanInterval: ReturnType<typeof setInterval> | null = null
 let outboundConsumerInFlight = false
+let outboundConsumerAttestationPath: string | null = null
 
 export interface ConsumeOneOutboundRowOptions {
   readProviderEffectsControl?: () => ProviderEffectsControlDecision
+  refreshProviderEffectsConsumerAttestation?: (
+    decision: ProviderEffectsControlDecision,
+    agentId: string,
+  ) => ProviderEffectsConsumerAttestationRefreshResult
+}
+
+function refreshConsumerAttestation(
+  decision: ProviderEffectsControlDecision,
+  refresh: NonNullable<ConsumeOneOutboundRowOptions['refreshProviderEffectsConsumerAttestation']>
+    = refreshProviderEffectsConsumerAttestation,
+): ProviderEffectsConsumerAttestationRefreshResult {
+  const result = refresh(decision, AGENT_ID)
+  if (result.ok && result.required) outboundConsumerAttestationPath = result.path
+  if (!result.ok) {
+    process.stderr.write(
+      `agent-comms: outbound consumer disabled — provider-effects attestation failed closed (${result.reason})\n`,
+    )
+  }
+  return result
 }
 
 function logProviderEffectsFence(
@@ -413,6 +438,7 @@ async function releaseProviderEffectsFencedClaim(
   rowId: string | number,
   control: ProviderEffectsControlDecision,
   priorAttestation: string,
+  lastError = `provider_effects_fenced:${control.reason}:${control.epoch ?? 'none'}`,
 ): Promise<void> {
   await client.query(
     `UPDATE outbound_queue
@@ -424,7 +450,7 @@ async function releaseProviderEffectsFencedClaim(
       WHERE id = $2
         AND status = 'claimed'
         AND discord_message_id IS NULL`,
-    [`provider_effects_fenced:${control.reason}:${control.epoch ?? 'none'}`, rowId],
+    [lastError, rowId],
   ).catch(err => {
     process.stderr.write(`agent-comms: outbound provider-effects claim release failed for id=${rowId}: ${err}\n`)
   })
@@ -442,7 +468,11 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
   }, OUTBOUND_TICK_TIMEOUT_MS)
   try {
     const readControl = options.readProviderEffectsControl ?? readProviderEffectsControl
+    const refreshAttestation = options.refreshProviderEffectsConsumerAttestation
+      ?? refreshProviderEffectsConsumerAttestation
     const providerEffectsAtClaim = readControl()
+    const attestationAtClaim = refreshConsumerAttestation(providerEffectsAtClaim, refreshAttestation)
+    if (!attestationAtClaim.ok) return
     if (!providerEffectsAtClaim.allowsProviderEffects) {
       logProviderEffectsFence('claim', providerEffectsAtClaim)
       return
@@ -530,6 +560,17 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
     // invalid/expired file, or any attestation change after claim releases the
     // row without consuming an attempt and makes zero provider calls.
     const providerEffectsAtSend = readControl()
+    const attestationAtSend = refreshConsumerAttestation(providerEffectsAtSend, refreshAttestation)
+    if (!attestationAtSend.ok) {
+      await releaseProviderEffectsFencedClaim(
+        client,
+        row.id,
+        providerEffectsAtSend,
+        providerEffectsAtClaim.attestation,
+        `provider_effects_attestation_failed:${attestationAtSend.reason}`,
+      )
+      return
+    }
     if (
       !providerEffectsAtSend.allowsProviderEffects
       || providerEffectsAtSend.attestation !== providerEffectsAtClaim.attestation
@@ -736,6 +777,9 @@ export function startOutboundConsumer(): void {
     return
   }
   if (outboundConsumerInterval !== null) return
+  const providerEffectsControl = readProviderEffectsControl()
+  const attestation = refreshConsumerAttestation(providerEffectsControl)
+  if (!attestation.ok) return
   outboundConsumerInterval = setInterval(() => {
     consumeOneOutboundRow().catch(err => {
       process.stderr.write(`agent-comms: outbound consumer tick error: ${err}\n`)
@@ -759,5 +803,12 @@ export function stopOutboundConsumer(): void {
   if (outboundOrphanInterval !== null) {
     clearInterval(outboundOrphanInterval)
     outboundOrphanInterval = null
+  }
+  if (outboundConsumerAttestationPath !== null) {
+    removeProviderEffectsConsumerAttestation({
+      path: outboundConsumerAttestationPath,
+      agentId: AGENT_ID,
+    })
+    outboundConsumerAttestationPath = null
   }
 }
