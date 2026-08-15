@@ -33,6 +33,12 @@ import {
   type FleetRuntimeRequest,
   type FleetRuntimeRootGoalReadback,
 } from './fleet-runtime-v1-adapter'
+import {
+  assertFleetRuntimePreToPostObservation,
+  assertFleetRuntimeQueueObservationV2,
+  assertFleetRuntimeSealToPreObservation,
+  type FleetRuntimeQueueObservationV2,
+} from './fleet-runtime-v1-queue-observation'
 
 export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   schema_version: 'fleet-runtime-v1/local-provider/v1',
@@ -118,7 +124,7 @@ const FLEET_RUNTIME_V1_RENDERER_REQUIRED_ACTIONS = Object.freeze([
 
 export const FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT = '/Users/yuji/Library/Application Support/agent-comms-mcp/fleet-runtime-v1'
 
-const STATE_SCHEMA = 'fleet-runtime-v1/local-operation-state/v1' as const
+const STATE_SCHEMA = 'fleet-runtime-v1/local-operation-state/v2' as const
 const INVOCATION_KEY = /^frv1:N40:[a-f0-9]{64}$/
 const SHA256 = /^sha256:[a-f0-9]{64}$/
 const COMMIT = /^[a-f0-9]{40}$/
@@ -194,24 +200,6 @@ function canonicalSelfDigest(value: Record<string, unknown>, digestField = 'rece
   const material = clone(value)
   delete material[digestField]
   return sha256(canonicalFleetRuntimeJson(material))
-}
-
-function findAgentRecord(value: unknown, agentId: string): Record<string, unknown> | null {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findAgentRecord(item, agentId)
-      if (found) return found
-    }
-    return null
-  }
-  if (value === null || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  if (record.agent_id === agentId) return record
-  for (const item of Object.values(record)) {
-    const found = findAgentRecord(item, agentId)
-    if (found) return found
-  }
-  return null
 }
 
 function assertNoSymlinkComponents(path: string): void {
@@ -300,44 +288,21 @@ export function validateFleetRuntimeCheckoutReadback(input: {
   }
 }
 
-function exactCounter(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    return providerFail('READBACK_INVALID', `${label} must be an explicit nonnegative integer`)
-  }
-  return value
-}
-
 export function parseFleetRuntimeQueueStatus(
   report: unknown,
   observedNowMs: number,
   maxAgeMs = 5 * 60_000,
-): FleetRuntimeRequest['queue_precheck'] {
-  assertPlainRecord(report, 'agent-com status')
-  if (typeof report.observed_at !== 'string') return providerFail('READBACK_INVALID', 'official status omitted observed_at')
+): FleetRuntimeQueueObservationV2 {
+  try {
+    assertFleetRuntimeQueueObservationV2(report)
+  } catch (error) {
+    return providerFail('READBACK_INVALID', `official v2 observation is invalid: ${(error as Error).message}`)
+  }
   const observedAtMs = Date.parse(report.observed_at)
-  if (!Number.isFinite(observedAtMs) || observedAtMs > observedNowMs + 30_000 || observedNowMs - observedAtMs > maxAgeMs) {
+  if (observedAtMs > observedNowMs + 30_000 || observedNowMs - observedAtMs > maxAgeMs) {
     return providerFail('READBACK_INVALID', 'official queue observed_at is invalid or stale')
   }
-  const agents = Array.isArray(report.agents) ? report.agents : Array.isArray(report.rows) ? report.rows : null
-  if (!agents) return providerFail('READBACK_INVALID', 'official status omitted agents')
-  const kodama = agents.find(candidate => candidate !== null && typeof candidate === 'object'
-    && (candidate as Record<string, unknown>).agent_id === 'kodama')
-  if (!kodama) return providerFail('READBACK_INVALID', 'official status omitted kodama')
-  const agent = kodama as Record<string, unknown>
-  const queue = agent.queue !== null && typeof agent.queue === 'object' && !Array.isArray(agent.queue)
-    ? agent.queue as Record<string, unknown> : agent
-  const counted = ['pending_count', 'received_count', 'in_progress_count'].every(key => Object.hasOwn(queue, key))
-  const official = ['pending', 'received', 'in_progress'].every(key => Object.hasOwn(queue, key))
-  if (counted === official) return providerFail('READBACK_INVALID', 'queue counters must use exactly one complete official field set')
-  const pending = exactCounter(queue[counted ? 'pending_count' : 'pending'], counted ? 'pending_count' : 'pending')
-  const received = exactCounter(queue[counted ? 'received_count' : 'received'], counted ? 'received_count' : 'received')
-  const inProgress = exactCounter(queue[counted ? 'in_progress_count' : 'in_progress'], counted ? 'in_progress_count' : 'in_progress')
-  const material = { observed_at: report.observed_at, agent_id: 'kodama', pending, received, in_progress: inProgress }
-  return {
-    source_receipt_sha256: sha256(canonicalFleetRuntimeJson(material)),
-    observed_at: report.observed_at,
-    entries: [{ repository: 'watchout/kodama', agent_id: 'kodama', pending_count: pending, active_count: received + inProgress }],
-  }
+  return clone(report)
 }
 
 export function parseFleetRuntimeRootGoalReadback(raw: unknown): FleetRuntimeRootGoalReadback {
@@ -720,15 +685,15 @@ export function validateFleetRuntimeLocalReceipt(
   assertPlainRecord(receipt, 'local receipt')
   const request = expected.request
   const expectedSchema = expected.operation === 'ROLLBACK'
-    ? 'fleet-runtime-v1/rollback-receipt/v1'
+    ? 'fleet-runtime-v1/rollback-receipt/v2'
     : expected.operation === 'REAPPLY'
-      ? 'fleet-runtime-v1/reapply-receipt/v1'
-      : 'fleet-runtime-v1/effect-receipt/v1'
+      ? 'fleet-runtime-v1/reapply-receipt/v2'
+      : 'fleet-runtime-v1/effect-receipt/v2'
   assertExactKeys(receipt, localReceiptExactKeys(expected.operation), 'local receipt')
   const perTarget = receipt.per_target
   const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] : null
   assertPlainRecord(target, 'local receipt target')
-  assertExactKeys(target, ['repository', 'preimage', 'postimage', 'queue_precheck', 'root_goal_readback'], 'local receipt target')
+  assertExactKeys(target, ['repository', 'preimage', 'postimage', 'queue_observation', 'root_goal_readback'], 'local receipt target')
   const postimage = target.postimage
   assertPlainRecord(postimage, 'local receipt postimage')
   assertExactKeys(postimage, [
@@ -780,10 +745,10 @@ function validateFleetRuntimePredecessorReceipt(
   const operation = request.predecessor_receipt.operation
   if (!operation) return providerFail('READBACK_INVALID', 'effect predecessor operation is absent')
   const expectedSchema = operation === 'ROLLBACK'
-    ? 'fleet-runtime-v1/rollback-receipt/v1'
+    ? 'fleet-runtime-v1/rollback-receipt/v2'
     : operation === 'REAPPLY'
-      ? 'fleet-runtime-v1/reapply-receipt/v1'
-      : 'fleet-runtime-v1/effect-receipt/v1'
+      ? 'fleet-runtime-v1/reapply-receipt/v2'
+      : 'fleet-runtime-v1/effect-receipt/v2'
   const expectedKind = operation === 'ROLLBACK' ? 'ROLLBACK_RECEIPT'
     : operation === 'RECOVERY' ? 'RECOVERY_RECEIPT' : 'EFFECT_RECEIPT'
   assertExactKeys(receipt, localReceiptExactKeys(operation), 'immutable predecessor receipt')
@@ -832,7 +797,7 @@ function validateFleetRuntimeRollbackCompanionReceipt(
   assertExactKeys(receipt, localReceiptExactKeys('ROLLBACK'), 'immutable rollback companion receipt')
   const perTarget = receipt.per_target
   const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] as Record<string, unknown> : null
-  if (receipt.schema_version !== 'fleet-runtime-v1/rollback-receipt/v1' || receipt.operation !== 'ROLLBACK'
+  if (receipt.schema_version !== 'fleet-runtime-v1/rollback-receipt/v2' || receipt.operation !== 'ROLLBACK'
     || receipt.result !== 'PASS' || receipt.subject_digest !== request.predecessor_receipt.subject_digest
     || receipt.target_repository !== 'watchout/kodama' || target?.repository !== 'watchout/kodama'
     || receipt.request_id !== binding.companion_request_id || receipt.request_digest !== binding.companion_request_digest
@@ -2012,7 +1977,7 @@ export function buildFleetRuntimeV1DryRunReceipt(untrustedRequest: FleetRuntimeR
     database_write_count: 0,
     queue_write_count: 0,
     protected_effect_count: 0,
-    observed_at: request.queue_precheck.observed_at,
+    observed_at: request.queue_observation.observed_at,
   }
 }
 
@@ -2412,10 +2377,17 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     private readonly providerRepositoryRoot: string = resolve(import.meta.dir, '..'),
     private readonly nowMs: () => number = Date.now,
     private readonly adfReleaseReader: FleetRuntimeAdfReleaseReader = readFleetRuntimeAdfRelease,
+    private readonly databaseUrl: string | undefined = process.env.DATABASE_URL,
   ) {}
 
-  private async run(argv: readonly string[], cwd?: string): Promise<string> {
-    const result = await this.runner.run(argv, { cwd })
+  private databaseEnvironment(): Record<string, string> {
+    if (!this.databaseUrl) return providerFail('READBACK_INVALID', 'DATABASE_URL environment binding is absent')
+    const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    return { ...env, AGENT_COM_DB: 'postgres', DATABASE_URL: this.databaseUrl }
+  }
+
+  private async run(argv: readonly string[], cwd?: string, env?: Record<string, string>): Promise<string> {
+    const result = await this.runner.run(argv, { cwd, env })
     if (result.exitCode !== 0) return commandError(argv, result)
     return result.stdout
   }
@@ -2478,27 +2450,22 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
   }
 
-  private queueFromStatus(report: unknown, request: FleetRuntimeRequest): FleetRuntimeRequest['queue_precheck'] {
-    const parsed = parseFleetRuntimeQueueStatus(report, this.nowMs())
-    if (parsed.observed_at !== request.queue_precheck.observed_at) {
-      return providerFail('READBACK_INVALID', 'official queue timestamp differs from the sealed request')
-    }
-    return parsed
+  private async queueObservation(): Promise<FleetRuntimeQueueObservationV2> {
+    const raw = await this.run([
+      process.execPath, 'cli/index.ts', 'fleet-runtime', 'queue-observation', '--format', 'json',
+    ], this.providerRepositoryRoot, this.databaseEnvironment())
+    const parsed = parseCanonicalJson<FleetRuntimeQueueObservationV2>(raw.trim(), 'official queue observation')
+    return parseFleetRuntimeQueueStatus(parsed, this.nowMs())
   }
 
   async inspect(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
-    const [owner, predecessor, preimage, statusRaw, rootRaw, inventoryRaw, executorProfileRaw] = await Promise.all([
+    const [owner, predecessor, preimage, observation, rootRaw] = await Promise.all([
       this.comment(request.owner_decision.url),
       this.comment(request.predecessor_receipt.url),
       this.remotePreimage(request),
-      this.run([process.execPath, 'cli/index.ts', 'status', '--format', 'json'], this.providerRepositoryRoot),
+      this.queueObservation(),
       this.readAdfRootGoalStatus(),
-      this.run([process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json'], this.providerRepositoryRoot),
-      this.run([
-        process.execPath, 'cli/index.ts', 'agent', 'profile', 'get',
-        FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.actor_agent_id,
-      ], this.providerRepositoryRoot),
     ])
     if (owner.user.login !== request.owner_decision.actor
       || owner.created_at !== request.owner_decision.created_at
@@ -2517,31 +2484,21 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return providerFail('READBACK_INVALID', 'immutable rollback companion raw-body digest differs')
     }
     validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body, companion?.body)
-    const queue = this.queueFromStatus(parseJson(statusRaw, 'official queue status'), request)
-    if (canonicalFleetRuntimeJson(queue) !== canonicalFleetRuntimeJson(request.queue_precheck)) {
-      return providerFail('READBACK_INVALID', 'fresh official queue receipt differs from request')
-    }
-    const inventory = parseJson<Record<string, unknown>>(inventoryRaw, 'runtime inventory')
-    if (!canonicalFleetRuntimeJson(inventory).includes('kodama')) {
-      return providerFail('READBACK_INVALID', 'runtime inventory omitted kodama')
-    }
-    const executorProfileEnvelope = parseJson<Record<string, unknown>>(executorProfileRaw, 'executor profile')
-    const executorProfile = executorProfileEnvelope.profile as Record<string, unknown> | undefined
-    if (executorProfileEnvelope.ok !== true
-      || executorProfile?.agent_id !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.actor_agent_id
-      || executorProfile.profile_enabled !== true || executorProfile.status === 'disabled') {
-      return providerFail('EXECUTOR_BINDING_MISMATCH', 'registered executor profile is absent, disabled, or drifted')
+    try {
+      assertFleetRuntimeSealToPreObservation(request.queue_observation, observation, this.nowMs())
+    } catch (error) {
+      return providerFail('READBACK_INVALID', `sealed observation preflight differs: ${(error as Error).message}`)
     }
     return {
-      schema_version: 'fleet-runtime-v1/preflight-receipt/v1',
+      schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
       request_digest: request.request_digest,
-      observed_at: request.queue_precheck.observed_at,
+      observed_at: observation.observed_at,
       owner_decision_readback: clone(request.owner_decision),
       owner_decision_raw_body: owner.body,
       predecessor_receipt_readback: clone(request.predecessor_receipt),
       predecessor_receipt_raw_body: predecessor.body,
       target_preimages: [preimage],
-      queue_precheck: queue,
+      queue_observation: observation,
       root_goal_readbacks: [parseFleetRuntimeRootGoalReadback(parseJson(rootRaw, 'root-goal status'))],
       filesystem_write_count: 0,
       database_write_count: 0,
@@ -2707,10 +2664,6 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (request.operation === 'RECOVERY' && inputTree !== request.preimages[0].tree) {
       return providerFail('READBACK_INVALID', 'recovery input tree is not the exact frozen preimage tree')
     }
-    const inventory = parseJson<Record<string, unknown>>(await this.run([
-      process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
-    ], this.providerRepositoryRoot), 'baseline runtime inventory')
-    const baseline = findAgentRecord(inventory, 'kodama')
     const companionEvidence: Record<string, unknown> = {}
     if (request.operation === 'REAPPLY') {
       const binding = parseFleetRuntimeOperationPredecessorBinding(request, context.owner_decision_raw_body)
@@ -2722,7 +2675,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
     return {
       ...evidence,
-      baseline_runtime_instance_id: baseline?.latest_runtime_instance_id ?? baseline?.runtime_instance_id ?? null,
+      baseline_runtime_instance_id: request.queue_observation.runtime_inventory.latest_instance?.runtime_instance_id ?? null,
       ...companionEvidence,
     }
   }
@@ -2997,7 +2950,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         '-c', 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="kodama"',
         '-c', 'mcp_servers.aun.env.WEBHOOK_PORT="8803"',
       ]
-      await this.run(['tmux', 'new-session', '-d', '-s', session, '-c', checkout, ...command])
+      await this.run(['tmux', 'new-session', '-d', '-s', session, '-c', checkout, ...command], undefined, this.databaseEnvironment())
       return { evidence: { ...clean, session, port: 8803 }, protected_effect_count: 1 }
     }
     if (phase === 'VERIFY_LIVE_IDENTITY') {
@@ -3007,26 +2960,19 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         String(context.current_intent.expected_head ?? '') || undefined,
         String(context.current_intent.expected_tree ?? '') || undefined,
       )
-      const inventory = parseJson<Record<string, unknown>>(await this.run([
-        process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
-      ], this.providerRepositoryRoot), 'runtime inventory')
-      const status = parseJson<Record<string, unknown>>(await this.run([
-        process.execPath, 'cli/index.ts', 'status', '--format', 'json',
-      ], this.providerRepositoryRoot), 'official queue status')
-      const queue = this.queueFromStatus(status, request)
-      if (queue.entries[0].pending_count !== 0 || queue.entries[0].active_count !== 0) {
-        return providerFail('READBACK_INVALID', 'queue changed during the protected operation')
+      const postObservation = await this.queueObservation()
+      try {
+        assertFleetRuntimePreToPostObservation(preflight.queue_observation, postObservation, {
+          approvedStateRoot: FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
+          canonicalCheckout: '/Users/yuji/Developer/kodama',
+          nowMs: this.nowMs(),
+        })
+      } catch (error) {
+        return providerFail('READBACK_INVALID', `post-effect observation differs: ${(error as Error).message}`)
       }
-      const live = findAgentRecord(inventory, 'kodama')
-      if (!live) return providerFail('READBACK_INVALID', 'live inventory lacks Kodama')
-      const runtimeInstance = String(live.latest_runtime_instance_id ?? live.runtime_instance_id ?? '')
-      const session = String(live.session_name ?? live.tmux_session ?? '')
-      const port = Number(live.port ?? live.channel_port ?? 0)
-      const checkoutPath = String(live.checkout_path ?? live.workspace ?? '')
-      if (!runtimeInstance || session !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
-        || port !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port || checkoutPath !== checkout) {
-        return providerFail('READBACK_INVALID', 'live runtime instance, session, port, or checkout differs')
-      }
+      const latest = postObservation.runtime_inventory.latest_instance!
+      const runtimeInstance = latest.runtime_instance_id
+      const inventory = postObservation.runtime_inventory
       const remoteImage = await this.remoteSurface(request.preimages[0].required_base_branch)
       const merged = context.prior_evidence.VERIFY_EXTERNAL_MERGE
       const prepared = context.prior_evidence.PREPARE_CLEAN_CHECKOUT
@@ -3036,9 +2982,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       const expectedTree = request.operation === 'RECOVERY'
         ? request.preimages[0].tree
         : String(merged?.merge_tree ?? '')
-      const baselineInstance = prepared?.baseline_runtime_instance_id
-      if (typeof baselineInstance === 'string' && baselineInstance === runtimeInstance) {
-        return providerFail('READBACK_INVALID', 'cold start did not create a fresh runtime_instance_id')
+      if (latest.checkout_path !== checkout || latest.commit_sha !== expectedHead
+        || checkoutImage.head !== expectedHead || checkoutImage.tree !== expectedTree) {
+        return providerFail('READBACK_INVALID', 'post runtime inventory is not bound to the operation-indexed checkout image')
       }
       if (remoteImage.head_commit !== expectedHead || remoteImage.tree !== expectedTree) {
         return providerFail('READBACK_INVALID', 'live default-branch head/tree differs from the admitted operation image')
@@ -3049,7 +2995,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           local_checkout: checkoutImage,
           runtime_instance_id: runtimeInstance,
           remote_image: remoteImage,
-          queue_unchanged: true,
+          queue_unchanged: postObservation.queue.queue_observation_id === preflight.queue_observation.queue.queue_observation_id,
           duplicate_effect_count: 0,
           unauthorized_effect_count: 0,
         },
@@ -3080,10 +3026,6 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       }
       const evidence = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
       if (phase !== 'PREPARE_CLEAN_CHECKOUT') return { completed: true, evidence, protected_effect_count: 0 }
-      const inventory = parseJson<Record<string, unknown>>(await this.run([
-        process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
-      ], this.providerRepositoryRoot), 'reconciled baseline runtime inventory')
-      const baseline = findAgentRecord(inventory, 'kodama')
       const companionEvidence: Record<string, unknown> = {}
       if (request.operation === 'REAPPLY') {
         const binding = parseFleetRuntimeOperationPredecessorBinding(request as FleetRuntimeRequest, mutable.owner_decision_raw_body)
@@ -3098,7 +3040,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         completed: true,
         evidence: {
           ...evidence,
-          baseline_runtime_instance_id: baseline?.latest_runtime_instance_id ?? baseline?.runtime_instance_id ?? null,
+          baseline_runtime_instance_id: request.queue_observation.runtime_inventory.latest_instance?.runtime_instance_id ?? null,
           ...companionEvidence,
         },
         protected_effect_count: 0,
@@ -3137,13 +3079,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'cold-start intent lacks exact checkout image')
       }
       const checkoutImage = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
-      const inventory = parseJson<Record<string, unknown>>(await this.run([
-        process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
-      ], this.providerRepositoryRoot), 'cold-start reconciliation inventory')
-      const live = findAgentRecord(inventory, 'kodama')
-      if (String(live?.session_name ?? live?.tmux_session ?? '') !== mutable.current_intent.session
-        || Number(live?.port ?? live?.channel_port ?? 0) !== mutable.current_intent.port
-        || String(live?.checkout_path ?? live?.workspace ?? '') !== mutable.current_intent.checkout_path) {
+      const observation = await this.queueObservation()
+      const live = observation.runtime_inventory.latest_instance
+      if (live?.session_name !== mutable.current_intent.session
+        || live?.port !== mutable.current_intent.port
+        || live?.checkout_path !== mutable.current_intent.checkout_path) {
         return { completed: false, evidence: null, protected_effect_count: 1 }
       }
       return {
@@ -3198,10 +3138,10 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const completed = Object.values(state.phases).map(item => item!.completed_at!).sort().at(-1)!
     const receipt: FleetRuntimeEffectReceipt = {
       schema_version: request.operation === 'ROLLBACK'
-        ? 'fleet-runtime-v1/rollback-receipt/v1'
+        ? 'fleet-runtime-v1/rollback-receipt/v2'
         : request.operation === 'REAPPLY'
-          ? 'fleet-runtime-v1/reapply-receipt/v1'
-          : 'fleet-runtime-v1/effect-receipt/v1',
+          ? 'fleet-runtime-v1/reapply-receipt/v2'
+          : 'fleet-runtime-v1/effect-receipt/v2',
       receipt_id: `LOCAL-${request.request_id}`,
       receipt_sha256: `sha256:${'0'.repeat(64)}`,
       request_id: request.request_id,
@@ -3219,7 +3159,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         repository: 'watchout/kodama',
         preimage: clone(request.preimages[0]),
         postimage: image,
-        queue_precheck: clone(request.queue_precheck.entries[0]),
+        queue_observation: clone(request.queue_observation),
         root_goal_readback: clone(preflight.root_goal_readbacks[0]),
       }],
       duplicate_effect_count: 0,

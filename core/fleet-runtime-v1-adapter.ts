@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto'
+import {
+  assertFleetRuntimeQueueObservationV2,
+  assertFleetRuntimeSealToPreObservation,
+  type FleetRuntimeQueueObservationV2,
+} from './fleet-runtime-v1-queue-observation'
 
 export const FLEET_RUNTIME_V1_CONTRACT = {
   adapter_id: 'FLEET_RUNTIME_V1',
@@ -136,21 +141,10 @@ export interface FleetRuntimePreimage {
   distribution_surface_sha256: string
 }
 
-export interface FleetRuntimeQueueEntry {
-  repository: FleetRuntimeTarget
-  agent_id: string
-  pending_count: number
-  active_count: number
-}
-
-export interface FleetRuntimeQueuePrecheck {
-  source_receipt_sha256: string
-  observed_at: string
-  entries: FleetRuntimeQueueEntry[]
-}
+export type FleetRuntimeQueuePrecheck = FleetRuntimeQueueObservationV2
 
 export interface FleetRuntimeRequest {
-  schema_version: 'fleet-runtime-v1/request/v1'
+  schema_version: 'fleet-runtime-v1/request/v2'
   request_id: string
   request_digest: string
   subject: FleetRuntimeSubject
@@ -162,7 +156,7 @@ export interface FleetRuntimeRequest {
   idempotency_key: string
   target_scope: FleetRuntimeTargetScope
   payload_digest: string
-  queue_precheck: FleetRuntimeQueuePrecheck
+  queue_observation: FleetRuntimeQueueObservationV2
   preimages: FleetRuntimePreimage[]
 }
 
@@ -179,7 +173,7 @@ export interface FleetRuntimeRootGoalReadback {
 }
 
 export interface FleetRuntimePreflightReceipt {
-  schema_version: 'fleet-runtime-v1/preflight-receipt/v1'
+  schema_version: 'fleet-runtime-v1/preflight-receipt/v2'
   request_digest: string
   observed_at: string
   owner_decision_readback: FleetRuntimeOwnerDecision
@@ -187,7 +181,7 @@ export interface FleetRuntimePreflightReceipt {
   predecessor_receipt_readback: FleetRuntimePredecessorReceipt
   predecessor_receipt_raw_body: string
   target_preimages: FleetRuntimePreimage[]
-  queue_precheck: FleetRuntimeQueuePrecheck
+  queue_observation: FleetRuntimeQueueObservationV2
   root_goal_readbacks: FleetRuntimeRootGoalReadback[]
   filesystem_write_count: 0
   database_write_count: 0
@@ -213,15 +207,15 @@ export interface FleetRuntimeTargetReceipt {
   repository: FleetRuntimeTarget
   preimage: FleetRuntimePreimage
   postimage: FleetRuntimeImage
-  queue_precheck: FleetRuntimeQueueEntry | null
+  queue_observation: FleetRuntimeQueueObservationV2 | null
   root_goal_readback: FleetRuntimeRootGoalReadback
 }
 
 export interface FleetRuntimeEffectReceipt {
   schema_version:
-    | 'fleet-runtime-v1/effect-receipt/v1'
-    | 'fleet-runtime-v1/rollback-receipt/v1'
-    | 'fleet-runtime-v1/reapply-receipt/v1'
+    | 'fleet-runtime-v1/effect-receipt/v2'
+    | 'fleet-runtime-v1/rollback-receipt/v2'
+    | 'fleet-runtime-v1/reapply-receipt/v2'
   receipt_id: string
   receipt_sha256: string
   request_id: string
@@ -641,31 +635,21 @@ function assertPreimages(request: FleetRuntimeRequest): void {
   }
 }
 
-function registeredTargets(targets: FleetRuntimeTarget[]): FleetRuntimeTarget[] {
-  return targets.filter(target => TARGET_BINDINGS[target].classification === 'REGISTERED_RUNTIME')
-}
-
-function assertQueuePrecheck(precheck: FleetRuntimeQueuePrecheck, targets: FleetRuntimeTarget[]): void {
-  assertExactKeys(precheck, ['source_receipt_sha256', 'observed_at', 'entries'], 'queue_precheck')
-  assertSha256(precheck.source_receipt_sha256, 'queue_precheck.source_receipt_sha256')
-  assertTimestamp(precheck.observed_at, 'queue_precheck.observed_at')
-  const required = registeredTargets(targets)
-  if (!Array.isArray(precheck.entries) || precheck.entries.length !== required.length) {
-    return fail('QUEUE_PRECHECK_NOT_ZERO', 'queue precheck must cover every registered runtime in scope')
+function assertQueueObservation(observation: FleetRuntimeQueueObservationV2, targets: FleetRuntimeTarget[]): void {
+  try {
+    assertFleetRuntimeQueueObservationV2(observation)
+  } catch (error) {
+    return fail('QUEUE_PRECHECK_NOT_ZERO', `queue observation is invalid: ${(error as Error).message}`)
   }
-  precheck.entries.forEach((entry, index) => {
-    assertExactKeys(entry, ['repository', 'agent_id', 'pending_count', 'active_count'], `queue_precheck.entries[${index}]`)
-    const repository = required[index]
-    if (entry.repository !== repository || entry.agent_id !== TARGET_BINDINGS[repository].agent_id) {
-      return fail('QUEUE_PRECHECK_NOT_ZERO', 'queue entry does not match the frozen runtime binding')
-    }
-    if (entry.pending_count !== 0 || entry.active_count !== 0) return fail('QUEUE_PRECHECK_NOT_ZERO', 'queue is not zero')
-  })
+  if (targets.includes('watchout/kodama') && (observation.queue.pending_count !== 0
+    || observation.queue.received_count !== 0 || observation.queue.in_progress_count !== 0)) {
+    return fail('QUEUE_PRECHECK_NOT_ZERO', 'Kodama queue observation is not zero')
+  }
 }
 
 export function prepareFleetRuntimeV1Request(request: FleetRuntimeRequest): FleetRuntimeRequest {
-  assertExactKeys(request, ['schema_version', 'request_id', 'request_digest', 'subject', 'owner_decision', 'executor_identity', 'stage_id', 'operation', 'predecessor_receipt', 'idempotency_key', 'target_scope', 'payload_digest', 'queue_precheck', 'preimages'], 'request')
-  if (request.schema_version !== 'fleet-runtime-v1/request/v1') return fail('INVALID_REQUEST', 'request schema mismatch')
+  assertExactKeys(request, ['schema_version', 'request_id', 'request_digest', 'subject', 'owner_decision', 'executor_identity', 'stage_id', 'operation', 'predecessor_receipt', 'idempotency_key', 'target_scope', 'payload_digest', 'queue_observation', 'preimages'], 'request')
+  if (request.schema_version !== 'fleet-runtime-v1/request/v2') return fail('INVALID_REQUEST', 'request schema mismatch')
   assertTrimmed(request.request_id, 'request_id')
   assertSha256(request.request_digest, 'request_digest')
   assertSubject(request.subject)
@@ -674,7 +658,7 @@ export function prepareFleetRuntimeV1Request(request: FleetRuntimeRequest): Flee
   assertExecutorAuthority(request)
   assertTargetScope(request)
   if (request.payload_digest !== FLEET_RUNTIME_V1_CONTRACT.payload_digest) return fail('PAYLOAD_MISMATCH', 'target payload digest mismatch')
-  assertQueuePrecheck(request.queue_precheck, request.target_scope.repositories)
+  assertQueueObservation(request.queue_observation, request.target_scope.repositories)
   assertPreimages(request)
   if (request.request_digest !== computeFleetRuntimeRequestDigest(request)) return fail('REQUEST_DIGEST_MISMATCH', 'request digest mismatch')
   if (request.idempotency_key !== computeFleetRuntimeIdempotencyKey(request)) return fail('IDEMPOTENCY_KEY_MISMATCH', 'idempotency key mismatch')
@@ -697,8 +681,8 @@ function assertRootGoalReadbacks(readbacks: FleetRuntimeRootGoalReadback[], targ
 }
 
 function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
-  assertExactKeys(receipt, ['schema_version', 'request_digest', 'observed_at', 'owner_decision_readback', 'owner_decision_raw_body', 'predecessor_receipt_readback', 'predecessor_receipt_raw_body', 'target_preimages', 'queue_precheck', 'root_goal_readbacks', 'filesystem_write_count', 'database_write_count', 'queue_write_count', 'protected_effect_count'], 'preflight receipt')
-  if (receipt.schema_version !== 'fleet-runtime-v1/preflight-receipt/v1' || receipt.request_digest !== request.request_digest) {
+  assertExactKeys(receipt, ['schema_version', 'request_digest', 'observed_at', 'owner_decision_readback', 'owner_decision_raw_body', 'predecessor_receipt_readback', 'predecessor_receipt_raw_body', 'target_preimages', 'queue_observation', 'root_goal_readbacks', 'filesystem_write_count', 'database_write_count', 'queue_write_count', 'protected_effect_count'], 'preflight receipt')
+  if (receipt.schema_version !== 'fleet-runtime-v1/preflight-receipt/v2' || receipt.request_digest !== request.request_digest) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'preflight receipt is not bound to the request')
   }
   assertTimestamp(receipt.observed_at, 'preflight.observed_at')
@@ -713,8 +697,13 @@ function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePref
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'predecessor receipt raw body digest differs')
   }
   if (!exact(receipt.target_preimages, request.preimages)) return fail('PREFLIGHT_RECEIPT_MISMATCH', 'live preimages differ from the request')
-  if (!exact(receipt.queue_precheck, request.queue_precheck)) return fail('PREFLIGHT_RECEIPT_MISMATCH', 'fresh queue readback differs from the request')
-  assertQueuePrecheck(receipt.queue_precheck, request.target_scope.repositories)
+  try {
+    const comparisonNow = Math.max(Date.parse(request.queue_observation.observed_at), Date.parse(receipt.queue_observation.observed_at))
+    assertFleetRuntimeSealToPreObservation(request.queue_observation, receipt.queue_observation, comparisonNow)
+  } catch (error) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', `fresh queue observation differs from the request: ${(error as Error).message}`)
+  }
+  assertQueueObservation(receipt.queue_observation, request.target_scope.repositories)
   assertRootGoalReadbacks(receipt.root_goal_readbacks, request.target_scope.repositories)
   if (receipt.filesystem_write_count !== 0 || receipt.database_write_count !== 0 || receipt.queue_write_count !== 0 || receipt.protected_effect_count !== 0) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'preflight performed a mutation or protected effect')
@@ -732,9 +721,9 @@ export function computeFleetRuntimeReceiptDigest(receipt: FleetRuntimeEffectRece
 }
 
 function expectedReceiptSchema(operation: FleetRuntimeOperation): FleetRuntimeEffectReceipt['schema_version'] {
-  if (operation === 'ROLLBACK') return 'fleet-runtime-v1/rollback-receipt/v1'
-  if (operation === 'REAPPLY') return 'fleet-runtime-v1/reapply-receipt/v1'
-  return 'fleet-runtime-v1/effect-receipt/v1'
+  if (operation === 'ROLLBACK') return 'fleet-runtime-v1/rollback-receipt/v2'
+  if (operation === 'REAPPLY') return 'fleet-runtime-v1/reapply-receipt/v2'
+  return 'fleet-runtime-v1/effect-receipt/v2'
 }
 
 function assertReceiptImage(image: FleetRuntimeImage, label: string): void {
@@ -778,8 +767,8 @@ function assertEffectReceipt(request: FleetRuntimeRequest, receipt: FleetRuntime
     const target = request.target_scope.repositories[index]
     if (entry.repository !== target || !exact(entry.preimage, request.preimages[index])) return fail('EFFECT_RECEIPT_INVALID', 'receipt preimage binding differs')
     assertReceiptImage(entry.postimage, `per_target[${index}].postimage`)
-    const expectedQueue = request.queue_precheck.entries.find(candidate => candidate.repository === target) ?? null
-    if (!exact(entry.queue_precheck, expectedQueue)) return fail('EFFECT_RECEIPT_INVALID', 'receipt queue precheck differs')
+    const expectedQueue = target === 'watchout/kodama' ? request.queue_observation : null
+    if (!exact(entry.queue_observation, expectedQueue)) return fail('EFFECT_RECEIPT_INVALID', 'receipt queue observation differs')
     assertRootGoalReadbacks([entry.root_goal_readback], [target])
   })
 

@@ -22,6 +22,12 @@ import {
   type FleetRuntimeStage,
   type FleetRuntimeTarget,
 } from '../../core/fleet-runtime-v1-adapter'
+import {
+  digestFleetRuntimeObservationMaterial,
+  fleetRuntimeProfileBindingMaterial,
+  fleetRuntimeQueueObservationIdMaterial,
+  type FleetRuntimeQueueObservationV2,
+} from '../../core/fleet-runtime-v1-queue-observation'
 
 const SHA_A = `sha256:${'a'.repeat(64)}`
 const OWNER_BODY = '{"decision":"N35 PASS","actor":"watchout","fixture":true}'
@@ -181,6 +187,49 @@ function resignRequest(request: FleetRuntimeRequest): FleetRuntimeRequest {
   return request
 }
 
+function queueObservation(): FleetRuntimeQueueObservationV2 {
+  const sourceBase = {
+    dialect: 'postgres' as const,
+    database_name: 'agent_comms',
+    database_oid: '16384',
+    database_user: 'yuji',
+    system_identifier: '7612345678901234567',
+  }
+  const source = {
+    ...sourceBase,
+    profile_binding_digest: digestFleetRuntimeObservationMaterial(fleetRuntimeProfileBindingMaterial(sourceBase)),
+    migration_epoch: '1',
+  }
+  const queueBase = {
+    agent_id: 'kodama' as const,
+    revision: '0',
+    active_rows: [],
+    active_rows_sha256: digestFleetRuntimeObservationMaterial([]),
+    pending_count: 0,
+    received_count: 0,
+    in_progress_count: 0,
+  }
+  return {
+    schema_version: 'fleet-runtime-v1/observation/v2',
+    contract_revision: 2,
+    observed_at: '2026-08-12T01:00:01.000Z',
+    source,
+    queue: {
+      ...queueBase,
+      queue_observation_id: digestFleetRuntimeObservationMaterial(fleetRuntimeQueueObservationIdMaterial(source, queueBase)),
+    },
+    executor_profile: {
+      agent_id: 'aun-runtime-executor', agent_type: 'system', runtime: 'local_process', status: 'offline',
+      profile_enabled: true, profile_revision: 1, profile_source: 'agent.register',
+    },
+    kodama_registry: {
+      agent_id: 'kodama', agent_type: 'dev', runtime: 'TUI', status: 'offline', profile_enabled: true,
+      profile_revision: 1, home_directory: '/Users/yuji/Developer/kodama',
+    },
+    runtime_inventory: { latest_instance: null },
+  }
+}
+
 function requestFor(
   stage: FleetRuntimeStage = 'N40-P4-CANARY-VERIFY',
   operation: FleetRuntimeOperation = 'CANARY_COLD_START',
@@ -189,7 +238,7 @@ function requestFor(
   const exactSubject = subject()
   const targets = targetsFor(stage, canary)
   const request: FleetRuntimeRequest = {
-    schema_version: 'fleet-runtime-v1/request/v1',
+    schema_version: 'fleet-runtime-v1/request/v2',
     request_id: `FRV1-${stage}-${operation}-001`,
     request_digest: SHA_A,
     subject: exactSubject,
@@ -214,24 +263,7 @@ function requestFor(
       canonical_digest: digest(targets),
     },
     payload_digest: FLEET_RUNTIME_V1_CONTRACT.payload_digest,
-    queue_precheck: {
-      source_receipt_sha256: SHA_A,
-      observed_at: '2026-08-12T01:00:01Z',
-      entries: targets
-        .filter(target => target !== 'watchout/aun-platform')
-        .map(target => ({
-          repository: target,
-          agent_id: target === 'watchout/agent-comms-mcp'
-            ? 'aun'
-            : target === 'watchout/agent-memory'
-              ? 'kusabi'
-              : target === 'watchout/kodama'
-                ? 'kodama'
-                : 'misell',
-          pending_count: 0,
-          active_count: 0,
-        })),
-    },
+    queue_observation: queueObservation(),
     preimages: targets.map(frozenFleetRuntimePreimage),
   }
   return resignRequest(request)
@@ -262,7 +294,7 @@ function rootGoalReadback(target: FleetRuntimeTarget): FleetRuntimeRootGoalReadb
 
 function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceipt {
   return {
-    schema_version: 'fleet-runtime-v1/preflight-receipt/v1',
+    schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
     request_digest: request.request_digest,
     observed_at: '2026-08-12T01:00:02Z',
     owner_decision_readback: structuredClone(request.owner_decision),
@@ -270,7 +302,7 @@ function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceip
     predecessor_receipt_readback: structuredClone(request.predecessor_receipt),
     predecessor_receipt_raw_body: PREDECESSOR_BODY,
     target_preimages: structuredClone(request.preimages),
-    queue_precheck: structuredClone(request.queue_precheck),
+    queue_observation: structuredClone(request.queue_observation),
     root_goal_readbacks: request.target_scope.repositories.map(rootGoalReadback),
     filesystem_write_count: 0,
     database_write_count: 0,
@@ -299,10 +331,10 @@ function postimage(request: FleetRuntimeRequest, index: number) {
 function receiptFor(request: FleetRuntimeRequest): FleetRuntimeEffectReceipt {
   const receipt: FleetRuntimeEffectReceipt = {
     schema_version: request.operation === 'ROLLBACK'
-      ? 'fleet-runtime-v1/rollback-receipt/v1'
+      ? 'fleet-runtime-v1/rollback-receipt/v2'
       : request.operation === 'REAPPLY'
-        ? 'fleet-runtime-v1/reapply-receipt/v1'
-        : 'fleet-runtime-v1/effect-receipt/v1',
+        ? 'fleet-runtime-v1/reapply-receipt/v2'
+        : 'fleet-runtime-v1/effect-receipt/v2',
     receipt_id: `RCP-${request.request_id}`,
     receipt_sha256: SHA_A,
     request_id: request.request_id,
@@ -320,7 +352,7 @@ function receiptFor(request: FleetRuntimeRequest): FleetRuntimeEffectReceipt {
       repository: target,
       preimage: structuredClone(request.preimages[index]),
       postimage: postimage(request, index),
-      queue_precheck: request.queue_precheck.entries.find(entry => entry.repository === target) ?? null,
+      queue_observation: target === 'watchout/kodama' ? structuredClone(request.queue_observation) : null,
       root_goal_readback: rootGoalReadback(target),
     })),
     duplicate_effect_count: 0,
@@ -509,7 +541,7 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     const receipt = await executeFleetRuntimeV1(request, portsFor(counters))
 
     expect(receipt.per_target).toHaveLength(5)
-    expect(request.queue_precheck.entries).toHaveLength(4)
+    expect(request.queue_observation.schema_version).toBe('fleet-runtime-v1/observation/v2')
     expect(counters.effect_port_calls).toBe(1)
     expect(counters.protected_effects).toBe(0)
   })
@@ -519,7 +551,7 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     const request = requestFor('N40-P4-CANARY-VERIFY', 'ROLLBACK', 'watchout/agent-memory')
     const receipt = await executeFleetRuntimeV1(request, portsFor(counters))
 
-    expect(receipt.schema_version).toBe('fleet-runtime-v1/rollback-receipt/v1')
+    expect(receipt.schema_version).toBe('fleet-runtime-v1/rollback-receipt/v2')
     expect(receipt.forward_effect_receipt_sha256).toBe(request.predecessor_receipt.sha256)
     expect(receipt.restored_preimage).toEqual(EFFECTIVE_PREIMAGES[1])
     expect(receipt.restored_preimage).toEqual(request.preimages[0])
@@ -532,7 +564,7 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     const request = requestFor('N40-P4-CANARY-VERIFY', 'REAPPLY')
     const receipt = await executeFleetRuntimeV1(request, portsFor(counters))
 
-    expect(receipt.schema_version).toBe('fleet-runtime-v1/reapply-receipt/v1')
+    expect(receipt.schema_version).toBe('fleet-runtime-v1/reapply-receipt/v2')
     expect(receipt.rollback_receipt_sha256).toBe(SHA_A)
     expect(receipt.recovery_receipt_sha256).toBe(request.predecessor_receipt.sha256)
     expect(receipt.payload_digest).toBe(FLEET_RUNTIME_V1_CONTRACT.payload_digest)
@@ -540,6 +572,7 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
   })
 
   test.each([
+    ['v1 request revision', 'INVALID_REQUEST', (request: FleetRuntimeRequest) => { (request as any).schema_version = 'fleet-runtime-v1/request/v1' }],
     ['subject drift', 'SUBJECT_MISMATCH', (request: FleetRuntimeRequest) => { request.subject.graph_digest = SHA_A }],
     ['precondition decision replay', 'PRECONDITION_BUILD_NOT_OPERATIONAL_AUTHORITY', (request: FleetRuntimeRequest) => {
       request.owner_decision.url = FLEET_RUNTIME_V1_CONTRACT.precondition_build_decision_url
@@ -556,7 +589,7 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     }],
     ['target expansion', 'TARGET_SCOPE_MISMATCH', (request: FleetRuntimeRequest) => { (request.target_scope.repositories as string[]).push('watchout/not-frozen') }],
     ['payload mismatch', 'PAYLOAD_MISMATCH', (request: FleetRuntimeRequest) => { request.payload_digest = SHA_A }],
-    ['nonzero queue', 'QUEUE_PRECHECK_NOT_ZERO', (request: FleetRuntimeRequest) => { request.queue_precheck.entries[0].pending_count = 1 }],
+    ['nonzero queue', 'QUEUE_PRECHECK_NOT_ZERO', (request: FleetRuntimeRequest) => { request.queue_observation.queue.pending_count = 1 }],
     ['preimage branch drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].required_base_branch = 'develop' }],
     ['preimage runtime count drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].runtime_surface_entry_count += 1 }],
     ['preimage distribution count drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].distribution_surface_entry_count += 1 }],

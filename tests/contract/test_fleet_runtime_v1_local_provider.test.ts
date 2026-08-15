@@ -49,6 +49,13 @@ import {
   type FleetRuntimeArgvRunner,
   type FleetRuntimeAdfReleaseReadback,
 } from '../../core/fleet-runtime-v1-local-provider'
+import {
+  canonicalFleetRuntimeObservationJson,
+  digestFleetRuntimeObservationMaterial,
+  fleetRuntimeProfileBindingMaterial,
+  fleetRuntimeQueueObservationIdMaterial,
+  type FleetRuntimeQueueObservationV2,
+} from '../../core/fleet-runtime-v1-queue-observation'
 
 const temporaryRoots: string[] = []
 const SHA_A = `sha256:${'a'.repeat(64)}`
@@ -166,10 +173,40 @@ function predecessor(operation: FleetRuntimeOperation, exactSubject: FleetRuntim
   return { ...base, kind: 'NODE_RESULT', node_id: FLEET_RUNTIME_V1_CONTRACT.node_id, operation: null, result: 'PASS' }
 }
 
+function queueObservation(observedAt = '2026-08-15T08:23:59.000Z'): FleetRuntimeQueueObservationV2 {
+  const sourceBase = {
+    dialect: 'postgres' as const, database_name: 'agent_comms', database_oid: '16384',
+    database_user: 'yuji', system_identifier: '7612345678901234567',
+  }
+  const source = {
+    ...sourceBase,
+    profile_binding_digest: digestFleetRuntimeObservationMaterial(fleetRuntimeProfileBindingMaterial(sourceBase)),
+    migration_epoch: '1',
+  }
+  const queueBase = {
+    agent_id: 'kodama' as const, revision: '0', active_rows: [],
+    active_rows_sha256: digestFleetRuntimeObservationMaterial([]),
+    pending_count: 0, received_count: 0, in_progress_count: 0,
+  }
+  return {
+    schema_version: 'fleet-runtime-v1/observation/v2', contract_revision: 2, observed_at: observedAt, source,
+    queue: { ...queueBase, queue_observation_id: digestFleetRuntimeObservationMaterial(fleetRuntimeQueueObservationIdMaterial(source, queueBase)) },
+    executor_profile: {
+      agent_id: 'aun-runtime-executor', agent_type: 'system', runtime: 'local_process', status: 'offline',
+      profile_enabled: true, profile_revision: 1, profile_source: 'agent.register',
+    },
+    kodama_registry: {
+      agent_id: 'kodama', agent_type: 'dev', runtime: 'TUI', status: 'offline', profile_enabled: true,
+      profile_revision: 1, home_directory: '/Users/yuji/Developer/kodama',
+    },
+    runtime_inventory: { latest_instance: null },
+  }
+}
+
 function requestFor(operation: 'CANARY_COLD_START' | 'ROLLBACK' | 'RECOVERY' | 'REAPPLY' = 'CANARY_COLD_START'): FleetRuntimeRequest {
   const exactSubject = subject()
   const request: FleetRuntimeRequest = {
-    schema_version: 'fleet-runtime-v1/request/v1',
+    schema_version: 'fleet-runtime-v1/request/v2',
     request_id: `FRV1-N40-${operation}-FIXTURE`,
     request_digest: SHA_A,
     subject: exactSubject,
@@ -196,11 +233,7 @@ function requestFor(operation: 'CANARY_COLD_START' | 'ROLLBACK' | 'RECOVERY' | '
     idempotency_key: `frv1:N40:${'0'.repeat(64)}`,
     target_scope: { repositories: ['watchout/kodama'], canonical_digest: digest(['watchout/kodama']) },
     payload_digest: FLEET_RUNTIME_V1_CONTRACT.payload_digest,
-    queue_precheck: {
-      source_receipt_sha256: SHA_A,
-      observed_at: '2026-08-15T08:23:59Z',
-      entries: [{ repository: 'watchout/kodama', agent_id: 'kodama', pending_count: 0, active_count: 0 }],
-    },
+    queue_observation: queueObservation(),
     preimages: [frozenFleetRuntimePreimage('watchout/kodama')],
   }
   request.request_digest = computeFleetRuntimeRequestDigest(request)
@@ -321,15 +354,15 @@ function semanticPredecessorBody(request: FleetRuntimeRequest): string {
 
 function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceipt {
   return {
-    schema_version: 'fleet-runtime-v1/preflight-receipt/v1',
+    schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
     request_digest: request.request_digest,
-    observed_at: request.queue_precheck.observed_at,
+    observed_at: request.queue_observation.observed_at,
     owner_decision_readback: structuredClone(request.owner_decision),
     owner_decision_raw_body: OWNER_BODY,
     predecessor_receipt_readback: structuredClone(request.predecessor_receipt),
     predecessor_receipt_raw_body: PREDECESSOR_BODY,
     target_preimages: structuredClone(request.preimages),
-    queue_precheck: structuredClone(request.queue_precheck),
+    queue_observation: structuredClone(request.queue_observation),
     root_goal_readbacks: [{
       repository: 'watchout/kodama',
       store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
@@ -368,10 +401,10 @@ function image(request: FleetRuntimeRequest, instance = `runtime-${request.opera
 function receiptFor(request: FleetRuntimeRequest, preflight: FleetRuntimePreflightReceipt): FleetRuntimeEffectReceipt {
   const receipt: FleetRuntimeEffectReceipt = {
     schema_version: request.operation === 'ROLLBACK'
-      ? 'fleet-runtime-v1/rollback-receipt/v1'
+      ? 'fleet-runtime-v1/rollback-receipt/v2'
       : request.operation === 'REAPPLY'
-        ? 'fleet-runtime-v1/reapply-receipt/v1'
-        : 'fleet-runtime-v1/effect-receipt/v1',
+        ? 'fleet-runtime-v1/reapply-receipt/v2'
+        : 'fleet-runtime-v1/effect-receipt/v2',
     receipt_id: `fixture-${request.request_id}`,
     receipt_sha256: SHA_A,
     request_id: request.request_id,
@@ -389,7 +422,7 @@ function receiptFor(request: FleetRuntimeRequest, preflight: FleetRuntimePreflig
       repository: 'watchout/kodama',
       preimage: structuredClone(request.preimages[0]),
       postimage: image(request),
-      queue_precheck: structuredClone(request.queue_precheck.entries[0]),
+      queue_observation: structuredClone(request.queue_observation),
       root_goal_readback: structuredClone(preflight.root_goal_readbacks[0]),
     }],
     duplicate_effect_count: 0,
@@ -987,6 +1020,36 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     }
   })
 
+  test('one official observation command receives the locator only through child environment', async () => {
+    const secretSentinel = ['N40', 'LOCATOR', 'SECRET', 'SENTINEL'].join('_')
+    const locator = ['postgresql:', '/', '/', 'fixture.invalid', '/', 'agent_comms', '?sentinel=', secretSentinel].join('')
+    const observed = queueObservation('2026-08-15T08:23:59.000Z')
+    const calls: Array<{ argv: readonly string[]; options?: { cwd?: string; env?: Record<string, string> } }> = []
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv, options) {
+        calls.push({ argv, options })
+        return { exitCode: 0, stdout: `${canonicalFleetRuntimeObservationJson(observed)}\n`, stderr: '' }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(
+      runner,
+      resolveRepo(),
+      () => Date.parse('2026-08-15T08:24:00.000Z'),
+      async () => { throw new Error('unused') },
+      locator,
+    )
+    const readback = await (system as any).queueObservation()
+    expect(readback.queue.queue_observation_id).toBe(observed.queue.queue_observation_id)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].argv).toEqual([
+      process.execPath, 'cli/index.ts', 'fleet-runtime', 'queue-observation', '--format', 'json',
+    ])
+    expect(calls[0].argv.join(' ')).not.toContain(locator)
+    expect(calls[0].options?.env?.DATABASE_URL).toBe(locator)
+    expect(calls[0].options?.env?.AGENT_COM_DB).toBe('postgres')
+    expect(canonicalFleetRuntimeObservationJson(readback)).not.toContain(secretSentinel)
+  })
+
   test.each(['CANARY_COLD_START', 'ROLLBACK', 'RECOVERY', 'REAPPLY'] as const)(
     '%s completes its exact journal and produces an adapter-valid receipt',
     async operation => {
@@ -1113,7 +1176,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     resign(preimage)
     cases.push(preimage)
     const queue = requestFor()
-    queue.queue_precheck.entries[0].pending_count = 1
+    queue.queue_observation.queue.pending_count = 1
     resign(queue)
     cases.push(queue)
 
@@ -1471,31 +1534,22 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(existsSync(candidate)).toBe(true)
   })
 
-  test('queue parsing requires fresh explicit finite nonnegative integer counters', () => {
+  test('queue parsing requires an exact fresh v2 observation envelope', () => {
     const now = Date.parse('2026-08-15T08:24:00Z')
-    const valid = {
-      observed_at: '2026-08-15T08:23:59Z',
-      agents: [{ agent_id: 'kodama', queue: { pending_count: 0, received_count: 0, in_progress_count: 0 } }],
-    }
-    expect(parseFleetRuntimeQueueStatus(valid, now).entries[0]).toMatchObject({ pending_count: 0, active_count: 0 })
-    expect(parseFleetRuntimeQueueStatus({
-      observed_at: valid.observed_at,
-      agents: [{ agent_id: 'kodama', queue: { pending: 0, received: 0, in_progress: 0 } }],
-    }, now).entries[0]).toMatchObject({ pending_count: 0, active_count: 0 })
+    const valid = queueObservation()
+    expect(parseFleetRuntimeQueueStatus(valid, now).queue).toMatchObject({ pending_count: 0, received_count: 0, in_progress_count: 0 })
     const malformed: unknown[] = [
       { ...valid, observed_at: undefined },
-      { ...valid, observed_at: '2026-08-15T07:00:00Z' },
+      { ...valid, observed_at: '2026-08-15T07:00:00.000Z' },
       { ...valid, observed_at: 'not-a-timestamp' },
-      { ...valid, observed_at: '2026-08-15T08:25:00Z' },
+      { ...valid, observed_at: '2026-08-15T08:25:00.000Z' },
+      { ...valid, schema_version: 'fleet-runtime-v1/observation/v1' },
+      { ...valid, contract_revision: 1 },
+      { ...valid, unknown: true },
+      { ...valid, source: { ...valid.source, profile_binding_digest: SHA_A } },
+      { ...valid, queue: { ...valid.queue, pending_count: '0' } },
+      { ...valid, executor_profile: { ...valid.executor_profile, profile_enabled: false } },
     ]
-    for (const key of ['pending_count', 'received_count', 'in_progress_count']) {
-      for (const invalidValue of [undefined, -1, 0.5, '0', Number.NaN, Number.POSITIVE_INFINITY]) {
-        const queue: Record<string, unknown> = { pending_count: 0, received_count: 0, in_progress_count: 0 }
-        if (invalidValue === undefined) delete queue[key]
-        else queue[key] = invalidValue
-        malformed.push({ ...valid, agents: [{ agent_id: 'kodama', queue }] })
-      }
-    }
     for (const invalid of malformed) expect(() => parseFleetRuntimeQueueStatus(invalid, now)).toThrow('READBACK_INVALID')
   })
 
