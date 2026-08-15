@@ -20,25 +20,58 @@ import {
   type FleetRuntimeQueueObservationV2,
 } from '../../core/fleet-runtime-v1-queue-observation'
 
-const ISOLATED_TEST_DATABASE_NAME = /^agent_comms_n40_queue_observation(?:_[a-z0-9]+)*_test$/
+const SAFE_TEST_DATABASE_NAME = /^[a-z][a-z0-9_]*_test$/
 
-function requireIsolatedTestDatabaseName(value: string | undefined): string {
-  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()
-    || value === 'agent_comms' || !ISOLATED_TEST_DATABASE_NAME.test(value)) {
-    throw new Error('AGENT_COM_TEST_DATABASE_NAME must be an explicit isolated queue-observation test database name')
-  }
-  return value
+interface TestDatabaseBindingEnvironment {
+  AGENT_COM_TEST_DATABASE_NAME?: string
+  AGENT_COM_TEST_DATABASE_URL?: string
+  DATABASE_URL?: string
 }
 
-function requireTestDatabaseUrl(value: string | undefined): string {
-  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) {
-    throw new Error('AGENT_COM_TEST_DATABASE_URL is required alongside AGENT_COM_TEST_DATABASE_NAME')
+function resolveTestDatabaseBinding(environment: TestDatabaseBindingEnvironment): {
+  databaseName: string
+  databaseUrl: string
+} {
+  const databaseUrl = environment.AGENT_COM_TEST_DATABASE_URL ?? environment.DATABASE_URL
+  if (typeof databaseUrl !== 'string' || databaseUrl.length === 0 || databaseUrl !== databaseUrl.trim()
+    || !/^postgres(?:ql)?:\/\//.test(databaseUrl) || databaseUrl.includes('#')) {
+    throw new Error('a strict PostgreSQL test database URL is required')
   }
-  return value
+  let parsed: URL
+  try {
+    parsed = new URL(databaseUrl)
+  } catch {
+    throw new Error('a strict PostgreSQL test database URL is required')
+  }
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)
+    || parsed.searchParams.has('database') || parsed.searchParams.has('dbname') || parsed.searchParams.has('db')) {
+    throw new Error('test database URL identity is ambiguous')
+  }
+  const hierarchy = databaseUrl.slice(databaseUrl.indexOf(':') + 1)
+  const rawLocation = hierarchy.slice(2).split('?', 1)[0]
+  const pathOffset = rawLocation.indexOf('/')
+  const rawPath = pathOffset === -1 ? '' : rawLocation.slice(pathOffset)
+  if (!/^\/[^/]+$/.test(rawPath)) throw new Error('test database URL must have one exact pathname segment')
+  let databaseName: string
+  try {
+    databaseName = decodeURIComponent(rawPath.slice(1))
+  } catch {
+    throw new Error('test database URL pathname must be valid percent encoding')
+  }
+  if (!SAFE_TEST_DATABASE_NAME.test(databaseName) || databaseName === 'agent_comms' || databaseName === 'postgres') {
+    throw new Error('test database URL must identify a safe non-production _test database')
+  }
+  const explicitName = environment.AGENT_COM_TEST_DATABASE_NAME
+  if (explicitName !== undefined && (explicitName.length === 0 || explicitName !== explicitName.trim()
+    || explicitName !== databaseName)) {
+    throw new Error('AGENT_COM_TEST_DATABASE_NAME must exactly match the URL-derived database name')
+  }
+  return { databaseName, databaseUrl }
 }
 
-const TEST_DATABASE_NAME = requireIsolatedTestDatabaseName(process.env.AGENT_COM_TEST_DATABASE_NAME)
-const TEST_DATABASE_URL = requireTestDatabaseUrl(process.env.AGENT_COM_TEST_DATABASE_URL)
+const TEST_DATABASE_BINDING = resolveTestDatabaseBinding(process.env)
+const TEST_DATABASE_NAME = TEST_DATABASE_BINDING.databaseName
+const TEST_DATABASE_URL = TEST_DATABASE_BINDING.databaseUrl
 const UP_PATH = resolve(import.meta.dir, '../../db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql')
 const DOWN_PATH = resolve(import.meta.dir, '../../db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.down.sql')
 const UP_SQL = readFileSync(UP_PATH, 'utf8')
@@ -148,15 +181,38 @@ describe('fleet runtime queue observation v2 semantic core', () => {
     expect(() => assertNoProductionDestructiveMigration(DOWN_SQL, 'postgresql:///agent_comms', {})).toThrow(
       'Destructive migration targets production database',
     )
-    expect(requireIsolatedTestDatabaseName('agent_comms_n40_queue_observation_rework_test')).toBe(
-      'agent_comms_n40_queue_observation_rework_test',
-    )
-    expect(requireIsolatedTestDatabaseName('agent_comms_n40_queue_observation_independent_audit_test')).toBe(
-      'agent_comms_n40_queue_observation_independent_audit_test',
-    )
-    for (const invalid of [undefined, '', 'agent_comms', 'postgres', 'agent_comms_n40_queue_observation_rework']) {
-      expect(() => requireIsolatedTestDatabaseName(invalid)).toThrow('explicit isolated queue-observation test database name')
-    }
+    const makerName = 'agent_comms_n40_queue_observation_ci_fallback_rework_test'
+    const makerUrl = `postgresql:///${makerName}?host=/tmp`
+    expect(resolveTestDatabaseBinding({
+      AGENT_COM_TEST_DATABASE_NAME: makerName,
+      AGENT_COM_TEST_DATABASE_URL: makerUrl,
+      DATABASE_URL: 'postgresql:///agent_comms',
+    })).toEqual({ databaseName: makerName, databaseUrl: makerUrl })
+    const auditName = 'agent_comms_n40_queue_observation_ci_fallback_independent_audit_test'
+    const auditUrl = `postgresql:///${auditName}?host=/tmp`
+    expect(resolveTestDatabaseBinding({
+      AGENT_COM_TEST_DATABASE_NAME: auditName,
+      AGENT_COM_TEST_DATABASE_URL: auditUrl,
+    })).toEqual({ databaseName: auditName, databaseUrl: auditUrl })
+    const hostedUrl = ['postgresql://', 'postgres', ':', 'postgres', '@localhost:5432/agent_comms_test'].join('')
+    const credentialOnlyUrl = ['postgresql://', 'user', ':', 'password', '@localhost'].join('')
+    expect(resolveTestDatabaseBinding({ DATABASE_URL: hostedUrl })).toEqual({
+      databaseName: 'agent_comms_test', databaseUrl: hostedUrl,
+    })
+    const invalidBindings: TestDatabaseBindingEnvironment[] = [
+      {},
+      { DATABASE_URL: 'not-a-url' },
+      { DATABASE_URL: 'sqlite:///agent_comms_test' },
+      { DATABASE_URL: credentialOnlyUrl },
+      { DATABASE_URL: 'postgresql:///agent_comms' },
+      { DATABASE_URL: 'postgresql:///postgres' },
+      { DATABASE_URL: 'postgresql:///agent_comms_dev' },
+      { DATABASE_URL: 'postgresql:///agent_comms_test/other' },
+      { DATABASE_URL: 'postgresql:///agent_comms%2Ftest_test' },
+      { DATABASE_URL: 'postgresql:///agent_comms_test?database=other_test' },
+      { DATABASE_URL: hostedUrl, AGENT_COM_TEST_DATABASE_NAME: 'other_test' },
+    ]
+    for (const invalid of invalidBindings) expect(() => resolveTestDatabaseBinding(invalid)).toThrow()
   })
 
   test('exact envelope accepts only canonical nested keys, types, identities, and digests', () => {
