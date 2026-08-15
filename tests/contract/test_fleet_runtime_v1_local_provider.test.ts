@@ -79,6 +79,64 @@ function digest(value: unknown): string {
   return `sha256:${createHash('sha256').update(canonicalFleetRuntimeJson(value)).digest('hex')}`
 }
 
+function officialBlockedRootGoalStatus(): Record<string, unknown> {
+  return {
+    schema: 'shirube-goal-runtime-command/v1',
+    verdict: 'BLOCKED',
+    command: 'status',
+    store_path: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path,
+    store_code: 'STORE_NOT_CREATED',
+    runner_code: null,
+    disposition: null,
+    persisted: false,
+    write_count: 0,
+    root: null,
+    runtime_digest: null,
+    checkpoint: null,
+    proposed_effect: null,
+    counters: { state_mutations: 0, effect_count: 0, dispatch_count: 0, model_calls: 0, polling_count: 0 },
+    effect_delivery_performed: false,
+  }
+}
+
+function officialPassRootGoalStatus(): Record<string, unknown> {
+  return {
+    schema: 'shirube-goal-runtime-command/v1',
+    verdict: 'PASS',
+    command: 'status',
+    store_path: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path,
+    store_code: 'RESTORED',
+    runner_code: null,
+    disposition: null,
+    persisted: false,
+    write_count: 0,
+    root: {
+      root_goal_run_id: 'fixture-root-goal',
+      status: 'ACTIVE',
+      generation: 0,
+      objective_digest: SHA_A,
+      acceptance_digest: SHA_A,
+      target_digest: SHA_B,
+      state_digest: SHA_B,
+    },
+    runtime_digest: SHA_A,
+    checkpoint: {
+      accepted_event_count: 0,
+      idempotency_key_count: 0,
+      continuation_effect_id: null,
+      wait_event_key: null,
+      protected_pause_key: null,
+      target_evidence_count: 0,
+      delivery_ledger_digest: SHA_B,
+      watchdog_stall_count: 0,
+      watchdog_replan_count: 0,
+    },
+    proposed_effect: null,
+    counters: { state_mutations: 0, effect_count: 0, dispatch_count: 0, model_calls: 0, polling_count: 0 },
+    effect_delivery_performed: false,
+  }
+}
+
 function subject(): FleetRuntimeRequest['subject'] {
   return {
     graph_digest: FLEET_RUNTIME_V1_CONTRACT.graph_digest,
@@ -753,10 +811,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
   test('root-goal preflight verifies only the exact released ADF image before the immutable goal argv', async () => {
     const canonicalDirtyRoot = '/Users/yuji/Developer/ai-dev-framework'
     const calls: Array<{ argv: string[]; cwd?: string }> = []
-    const blocked = canonicalFleetRuntimeJson({
-      schema: 'shirube-goal-runtime-command/v1', verdict: 'BLOCKED', store_code: 'STORE_NOT_CREATED',
-      runtime_digest: null, root: null, write_count: 0, effect_delivery_performed: false,
-    })
+    const blocked = `${JSON.stringify(officialBlockedRootGoalStatus(), null, 2)}\n`
     const exact: FleetRuntimeAdfReleaseReadback = {
       root: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
       root_realpath: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
@@ -770,6 +825,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       source_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.source_sha256,
       dist_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_sha256,
     }
+    let releaseReadbackCount = 0
     const runner: FleetRuntimeArgvRunner = {
       async run(argv, options) {
         calls.push({ argv: [...argv], cwd: options?.cwd })
@@ -777,7 +833,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
         if (canonicalFleetRuntimeJson(argv) === canonicalFleetRuntimeJson([
           'node', 'dist/cli/index.js', 'goal-runtime', 'status', '--store',
           '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json', '--format', 'json',
-        ])) return { exitCode: 0, stdout: blocked, stderr: '' }
+        ])) return { exitCode: 1, stdout: blocked, stderr: '' }
         return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
       },
     }
@@ -786,11 +842,13 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       resolveRepo(),
       Date.now,
       async (_runner, root) => {
+        releaseReadbackCount += 1
         expect(root).toBe(FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
         return exact
       },
     )
     expect(await system.readAdfRootGoalStatus()).toBe(blocked)
+    expect(releaseReadbackCount).toBe(2)
     expect(calls).toHaveLength(1)
     expect(calls.every(call => call.cwd === FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)).toBe(true)
     expect(calls.some(call => call.cwd === canonicalDirtyRoot)).toBe(false)
@@ -835,6 +893,97 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       await expectProviderCode(() => rejected.readAdfRootGoalStatus(), 'READBACK_INVALID')
       expect(rejectedCalls, `${label} reached the goal command`).toHaveLength(0)
       expect(rejectedCalls.some(call => call.cwd === canonicalDirtyRoot)).toBe(false)
+    }
+
+    let changedReadbackCount = 0
+    const changedCalls: string[][] = []
+    const changedBetweenReads = new ConcreteFleetRuntimeV1LocalSystem(
+      { async run(argv) {
+        changedCalls.push([...argv])
+        return { exitCode: 1, stdout: blocked, stderr: '' }
+      } },
+      resolveRepo(),
+      Date.now,
+      async () => {
+        changedReadbackCount += 1
+        return changedReadbackCount === 1
+          ? structuredClone(exact)
+          : { ...structuredClone(exact), remote: 'git@github.com:watchout/ai-dev-framework.git' }
+      },
+    )
+    await expectProviderCode(() => changedBetweenReads.readAdfRootGoalStatus(), 'READBACK_INVALID')
+    expect(changedReadbackCount).toBe(2)
+    expect(changedCalls).toHaveLength(0)
+  })
+
+  test('root-goal command admits only exit-coupled complete official read-only reports', async () => {
+    const exactRelease: FleetRuntimeAdfReleaseReadback = {
+      root: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
+      root_realpath: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root,
+      root_is_directory: true,
+      root_is_symlink: false,
+      remote: 'https://github.com/watchout/ai-dev-framework.git',
+      head: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.head,
+      tree: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.tree,
+      status_porcelain: '',
+      branch: '',
+      source_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.source_sha256,
+      dist_sha256: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_sha256,
+    }
+    const invoke = async (result: { exitCode: number; stdout: string; stderr: string }) => {
+      let goalInvocationCount = 0
+      let identityReadbackCount = 0
+      const system = new ConcreteFleetRuntimeV1LocalSystem(
+        { async run() {
+          goalInvocationCount += 1
+          return result
+        } },
+        resolveRepo(),
+        Date.now,
+        async () => {
+          identityReadbackCount += 1
+          return structuredClone(exactRelease)
+        },
+      )
+      return { system, counts: () => ({ goalInvocationCount, identityReadbackCount }) }
+    }
+    const blocked = `${JSON.stringify(officialBlockedRootGoalStatus(), null, 2)}\n`
+    const pass = `${JSON.stringify(officialPassRootGoalStatus(), null, 2)}\n`
+    const admittedBlocked = await invoke({ exitCode: 1, stdout: blocked, stderr: '' })
+    expect(await admittedBlocked.system.readAdfRootGoalStatus()).toBe(blocked)
+    expect(admittedBlocked.counts()).toEqual({ goalInvocationCount: 1, identityReadbackCount: 2 })
+    const admittedPass = await invoke({ exitCode: 0, stdout: pass, stderr: '' })
+    expect(await admittedPass.system.readAdfRootGoalStatus()).toBe(pass)
+    expect(admittedPass.counts()).toEqual({ goalInvocationCount: 1, identityReadbackCount: 2 })
+
+    const withExtra = officialBlockedRootGoalStatus()
+    withExtra.extra = true
+    const missing = officialBlockedRootGoalStatus()
+    delete missing.checkpoint
+    const nonzeroCounter = officialBlockedRootGoalStatus()
+    ;(nonzeroCounter.counters as Record<string, unknown>).state_mutations = 1
+    const wrongPath = { ...officialBlockedRootGoalStatus(), store_path: '/tmp/foreign.json' }
+    const wrongSchema = { ...officialBlockedRootGoalStatus(), schema: 'aun.goal-runtime.v1' }
+    const crossField = { ...officialBlockedRootGoalStatus(), store_code: 'FOUND' }
+    const legacyPassCode = { ...officialPassRootGoalStatus(), store_code: 'FOUND' }
+    const cases: Array<[string, { exitCode: number; stdout: string; stderr: string }]> = [
+      ['arbitrary nonzero exit', { exitCode: 2, stdout: blocked, stderr: '' }],
+      ['malformed stdout', { exitCode: 1, stdout: '{', stderr: '' }],
+      ['unexpected stderr', { exitCode: 1, stdout: blocked, stderr: 'unexpected warning' }],
+      ['blocked report with zero exit', { exitCode: 0, stdout: blocked, stderr: '' }],
+      ['pass report with exit one', { exitCode: 1, stdout: pass, stderr: '' }],
+      ['extra field', { exitCode: 1, stdout: JSON.stringify(withExtra), stderr: '' }],
+      ['missing field', { exitCode: 1, stdout: JSON.stringify(missing), stderr: '' }],
+      ['nonzero counter', { exitCode: 1, stdout: JSON.stringify(nonzeroCounter), stderr: '' }],
+      ['wrong store path', { exitCode: 1, stdout: JSON.stringify(wrongPath), stderr: '' }],
+      ['forbidden schema alias', { exitCode: 1, stdout: JSON.stringify(wrongSchema), stderr: '' }],
+      ['inconsistent report fields', { exitCode: 1, stdout: JSON.stringify(crossField), stderr: '' }],
+      ['legacy pass store code', { exitCode: 0, stdout: JSON.stringify(legacyPassCode), stderr: '' }],
+    ]
+    for (const [label, result] of cases) {
+      const rejected = await invoke(result)
+      await expectProviderCode(() => rejected.system.readAdfRootGoalStatus(), 'READBACK_INVALID')
+      expect(rejected.counts(), label).toEqual({ goalInvocationCount: 1, identityReadbackCount: 2 })
     }
   })
 
@@ -1598,11 +1747,11 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
   })
 
   test('root-goal parsing has no defaults and admits only exact zero-effect states', () => {
-    const valid = {
-      schema: 'shirube-goal-runtime-command/v1', verdict: 'PASS', store_code: 'FOUND', runtime_digest: SHA_A,
-      root: { root_goal_id: 'fixture' }, write_count: 0, effect_delivery_performed: false,
-    }
+    const valid = officialPassRootGoalStatus()
     expect(parseFleetRuntimeRootGoalReadback(valid)).toMatchObject({ repository: 'watchout/kodama', verdict: 'PASS', write_count: 0 })
+    expect(parseFleetRuntimeRootGoalReadback(officialBlockedRootGoalStatus())).toMatchObject({
+      repository: 'watchout/kodama', verdict: 'BLOCKED', store_code: 'STORE_NOT_CREATED', runtime_digest: null,
+    })
     for (const field of Object.keys(valid)) {
       const missing = structuredClone(valid) as Record<string, unknown>
       delete missing[field]

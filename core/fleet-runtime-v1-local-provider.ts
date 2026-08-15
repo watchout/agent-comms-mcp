@@ -343,19 +343,74 @@ export function parseFleetRuntimeQueueStatus(
 export function parseFleetRuntimeRootGoalReadback(raw: unknown): FleetRuntimeRootGoalReadback {
   assertPlainRecord(raw, 'root-goal status')
   assertExactKeys(raw, [
-    'schema', 'verdict', 'store_code', 'runtime_digest', 'root', 'write_count', 'effect_delivery_performed',
+    'schema', 'verdict', 'command', 'store_path', 'store_code', 'runner_code', 'disposition',
+    'persisted', 'write_count', 'root', 'runtime_digest', 'checkpoint', 'proposed_effect', 'counters',
+    'effect_delivery_performed',
   ], 'root-goal status')
-  const pass = raw.verdict === 'PASS' && raw.store_code === 'FOUND'
+  assertPlainRecord(raw.counters, 'root-goal status counters')
+  assertExactKeys(raw.counters, [
+    'state_mutations', 'effect_count', 'dispatch_count', 'model_calls', 'polling_count',
+  ], 'root-goal status counters')
+  const countersAreZero = Object.values(raw.counters).every(value => value === 0)
+  const commonStatus = raw.schema === 'shirube-goal-runtime-command/v1'
+    && raw.command === 'status'
+    && raw.store_path === FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path
+    && raw.runner_code === null
+    && raw.disposition === null
+    && raw.persisted === false
+    && raw.write_count === 0
+    && raw.proposed_effect === null
+    && countersAreZero
+    && raw.effect_delivery_performed === false
+  if (!commonStatus) {
+    return providerFail('READBACK_INVALID', 'root-goal status identity or zero-effect proof differs')
+  }
+  const pass = raw.verdict === 'PASS' && raw.store_code === 'RESTORED'
     && SHA256.test(String(raw.runtime_digest ?? '')) && raw.root !== null && typeof raw.root === 'object' && !Array.isArray(raw.root)
+    && raw.checkpoint !== null && typeof raw.checkpoint === 'object' && !Array.isArray(raw.checkpoint)
   const blocked = raw.verdict === 'BLOCKED' && raw.store_code === 'STORE_NOT_CREATED'
-    && raw.runtime_digest === null && raw.root === null
-  if (raw.schema !== 'shirube-goal-runtime-command/v1'
-    || (!pass && !blocked) || raw.write_count !== 0 || raw.effect_delivery_performed !== false) {
+    && raw.runtime_digest === null && raw.root === null && raw.checkpoint === null
+  if (!pass && !blocked) {
     return providerFail('READBACK_INVALID', 'root-goal status schema, verdict, store state, or zero-effect proof differs')
+  }
+  if (pass) {
+    const root = raw.root as Record<string, unknown>
+    assertExactKeys(root, [
+      'root_goal_run_id', 'status', 'generation', 'objective_digest', 'acceptance_digest',
+      'target_digest', 'state_digest',
+    ], 'root-goal status root')
+    const statuses = ['DRAFT', 'ACTIVE', 'BLOCKED', 'VERIFIED_COMPLETE', 'CANCELLED', 'SUPERSEDED']
+    if (typeof root.root_goal_run_id !== 'string' || root.root_goal_run_id.length === 0
+      || !statuses.includes(String(root.status))
+      || !Number.isSafeInteger(root.generation) || Number(root.generation) < 0
+      || !SHA256.test(String(root.objective_digest ?? ''))
+      || !SHA256.test(String(root.acceptance_digest ?? ''))
+      || !SHA256.test(String(root.target_digest ?? ''))
+      || !SHA256.test(String(root.state_digest ?? ''))) {
+      return providerFail('READBACK_INVALID', 'root-goal status root differs from the released status shape')
+    }
+    const checkpoint = raw.checkpoint as Record<string, unknown>
+    assertExactKeys(checkpoint, [
+      'accepted_event_count', 'idempotency_key_count', 'continuation_effect_id', 'wait_event_key',
+      'protected_pause_key', 'target_evidence_count', 'delivery_ledger_digest', 'watchdog_stall_count',
+      'watchdog_replan_count',
+    ], 'root-goal status checkpoint')
+    const nullableString = (value: unknown): boolean => value === null || (typeof value === 'string' && value.length > 0)
+    if (!Number.isSafeInteger(checkpoint.accepted_event_count) || Number(checkpoint.accepted_event_count) < 0
+      || !Number.isSafeInteger(checkpoint.idempotency_key_count) || Number(checkpoint.idempotency_key_count) < 0
+      || !nullableString(checkpoint.continuation_effect_id)
+      || !nullableString(checkpoint.wait_event_key)
+      || !nullableString(checkpoint.protected_pause_key)
+      || !Number.isSafeInteger(checkpoint.target_evidence_count) || Number(checkpoint.target_evidence_count) < 0
+      || !SHA256.test(String(checkpoint.delivery_ledger_digest ?? ''))
+      || !Number.isSafeInteger(checkpoint.watchdog_stall_count) || Number(checkpoint.watchdog_stall_count) < 0
+      || !Number.isSafeInteger(checkpoint.watchdog_replan_count) || Number(checkpoint.watchdog_replan_count) < 0) {
+      return providerFail('READBACK_INVALID', 'root-goal status checkpoint differs from the released status shape')
+    }
   }
   return {
     repository: 'watchout/kodama',
-    store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
+    store_path: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path,
     schema: raw.schema,
     verdict: raw.verdict,
     store_code: raw.store_code,
@@ -2374,12 +2429,26 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   async readAdfRootGoalStatus(): Promise<string> {
-    const release = await this.adfReleaseReader(this.runner, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
-    validateFleetRuntimeAdfReleaseReadback(release)
-    return this.run([
+    const first = await this.adfReleaseReader(this.runner, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+    validateFleetRuntimeAdfReleaseReadback(first)
+    const second = await this.adfReleaseReader(this.runner, FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+    validateFleetRuntimeAdfReleaseReadback(second)
+    if (canonicalFleetRuntimeJson(first) !== canonicalFleetRuntimeJson(second)) {
+      return providerFail('READBACK_INVALID', 'ADF readback release changed between the two complete pre-spawn readbacks')
+    }
+    const result = await this.runner.run([
       'node', FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.dist_path, 'goal-runtime', 'status', '--store',
       FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.store_path, '--format', 'json',
-    ], FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root)
+    ], { cwd: FLEET_RUNTIME_V1_ADF_READBACK_RELEASE.root })
+    const report = parseFleetRuntimeRootGoalReadback(parseJson(result.stdout, 'root-goal status'))
+    if (result.stderr !== '') {
+      return providerFail('READBACK_INVALID', 'root-goal status emitted unexpected stderr')
+    }
+    const expectedExit = report.verdict === 'BLOCKED' ? 1 : 0
+    if (result.exitCode !== expectedExit) {
+      return providerFail('READBACK_INVALID', 'root-goal status exit and validated report disagree')
+    }
+    return result.stdout
   }
 
   private async remotePreimage(request: FleetRuntimeRequest) {
