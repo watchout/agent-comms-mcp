@@ -25,7 +25,9 @@ import {
   buildFleetRuntimeV1DryRunReceipt,
   executeLocalFleetRuntimeV1,
   assertExactFleetRuntimePathSet,
+  validateFleetRuntimePayloadBlobLayer,
   parseFleetRuntimeQueueStatus,
+  parseFleetRuntimeRootGoalReadback,
   validateFleetRuntimeCheckoutReadback,
   validateFleetRuntimeExternalMergeBinding,
   validateFleetRuntimeImmutableSemantics,
@@ -283,6 +285,17 @@ function receiptFor(request: FleetRuntimeRequest, preflight: FleetRuntimePreflig
     duplicate_effect_count: 0,
     unauthorized_effect_count: 0,
   }
+  const bound = receipt as FleetRuntimeEffectReceipt & Record<string, unknown>
+  bound.subject_digest = digest(request.subject)
+  bound.target_repository = 'watchout/kodama'
+  bound.predecessor_receipt_sha256 = request.predecessor_receipt.sha256
+  bound.predecessor_receipt_raw_body_sha256 = request.predecessor_receipt.sha256
+  bound.predecessor_receipt_self_sha256 = request.operation === 'CANARY_COLD_START' ? null : SHA_B
+  if (request.operation === 'CANARY_COLD_START') {
+    bound.merge_commit = 'c'.repeat(40)
+    bound.merge_tree = 'd'.repeat(40)
+    bound.pr_url = 'https://github.com/watchout/kodama/pull/123'
+  }
   if (request.operation === 'ROLLBACK') {
     receipt.forward_effect_receipt_sha256 = request.predecessor_receipt.sha256
     receipt.target_repository = 'watchout/kodama'
@@ -520,6 +533,36 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(system.calls.get('CREATE_LOCAL_COMMIT')).toBe(1)
   })
 
+  test('journal rejects malformed phase sets, intent/evidence digests, and protected counts', async () => {
+    const mutations: Array<(state: FleetRuntimeLocalOperationState) => void> = [
+      state => { state.phases.PREPARE_CLEAN_CHECKOUT!.intent_sha256 = SHA_B },
+      state => { state.phases.PREPARE_CLEAN_CHECKOUT!.evidence_sha256 = SHA_B },
+      state => { state.phases.PUSH_NORMAL_BRANCH!.protected_effect_count = 0 },
+      state => { delete state.phases.PREPARE_CLEAN_CHECKOUT },
+      state => {
+        state.phases.VERIFY_EXACT_PREIMAGE = {
+          status: 'started', started_at: '2026-08-15T08:30:00Z', completed_at: null, evidence: null,
+          intent: {}, protected_effect_count: 0, intent_sha256: digest({}), evidence_sha256: null,
+        }
+      },
+    ]
+    for (const [index, mutate] of mutations.entries()) {
+      const request = requestFor()
+      const stateDirectory = join(temporary(`frv1-journal-tamper-${index}`), 'state')
+      const system = new FixtureSystem()
+      system.interruptOnceAt = 'CREATE_DRAFT_PR'
+      await expect(executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))).rejects.toThrow('fixture interruption')
+      const path = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
+      const state = JSON.parse(readFileSync(path, 'utf8')) as FleetRuntimeLocalOperationState
+      mutate(state)
+      writeFileSync(path, `${canonicalFleetRuntimeJson(state)}\n`)
+      await expectProviderCode(
+        () => executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system })),
+        'STATE_RECORD_INVALID',
+      )
+    }
+  })
+
   test('wrong executor, preimage drift, and nonzero queue fail before state or effect', async () => {
     const cases: FleetRuntimeRequest[] = []
     const wrongActor = requestFor()
@@ -586,6 +629,31 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(blocked.reason).toMatchObject({ code: 'IN_FLIGHT' })
   })
 
+  test('two independent child processes admit one reservation and one simulated protected marker', async () => {
+    const stateDirectory = join(temporary('frv1-child-owner'), 'state')
+    const marker = join(temporary('frv1-child-marker'), 'marker')
+    const modulePath = join(resolveRepo(), 'core/fleet-runtime-v1-local-provider.ts')
+    const key = `frv1:N40:${'8'.repeat(64)}`
+    const program = `
+      import { writeFileSync } from 'node:fs';
+      import { FileFleetRuntimeV1Persistence } from ${JSON.stringify(modulePath)};
+      const [stateDirectory, key, marker] = process.argv.slice(1);
+      const store = new FileFleetRuntimeV1Persistence(stateDirectory, { approvedRoot: stateDirectory });
+      try {
+        const result = await store.reserve_once({ idempotency_key: key, request_digest: ${JSON.stringify(SHA_A)}, status: 'reserved', receipt: null });
+        if (result.acquired) { writeFileSync(marker, String(process.pid), { flag: 'wx' }); await Bun.sleep(250); console.log('ACQUIRED'); }
+      } catch (error) { console.log(error.code ?? 'ERROR'); }
+    `
+    const children = [0, 1].map(() => Bun.spawn([process.execPath, '-e', program, '--', stateDirectory, key, marker], { stdout: 'pipe', stderr: 'pipe' }))
+    const outputs = await Promise.all(children.map(async child => ({
+      stdout: await new Response(child.stdout).text(), stderr: await new Response(child.stderr).text(), exit: await child.exited,
+    })))
+    expect(outputs.every(output => output.exit === 0), JSON.stringify(outputs)).toBe(true)
+    expect(outputs.filter(output => output.stdout.includes('ACQUIRED'))).toHaveLength(1)
+    expect(outputs.filter(output => output.stdout.includes('IN_FLIGHT'))).toHaveLength(1)
+    expect(readFileSync(marker, 'utf8')).toMatch(/^[1-9][0-9]*$/)
+  })
+
   test('two real provider calls never overlap a protected phase for the same invocation', async () => {
     const stateDirectory = join(temporary('frv1-concurrent-provider'), 'state')
     const request = requestFor()
@@ -622,6 +690,29 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     })
     expect((await takeover.reserve_once(state)).acquired).toBe(true)
     expect(((await takeover.load(state.idempotency_key)) as FleetRuntimeInvocationState & { execution_owner: { owner_id: string } }).execution_owner.owner_id).toBe('owner-takeover')
+    await expectProviderCode(() => first.complete_once({ ...state, status: 'completed', receipt: receiptFor(requestFor(), preflightFor(requestFor())) }), 'IN_FLIGHT')
+  })
+
+  test('a stale dead takeover lock is reclaimed without stealing a live lock', async () => {
+    const stateDirectory = join(temporary('frv1-stale-takeover-lock'), 'state')
+    let now = Date.parse('2026-08-15T08:00:00Z')
+    const state: FleetRuntimeInvocationState = {
+      idempotency_key: `frv1:N40:${'7'.repeat(64)}`, request_digest: SHA_A, status: 'reserved', receipt: null,
+    }
+    const original = new FileFleetRuntimeV1Persistence(stateDirectory, {
+      approvedRoot: stateDirectory, ownerId: 'dead-original', nowMs: () => now, ownerAlive: () => false, staleAfterMs: 1_000,
+    })
+    await original.reserve_once(state)
+    const lock = join(stateDirectory, 'invocations', state.idempotency_key, 'takeover.lock')
+    writeFileSync(lock, `${canonicalFleetRuntimeJson({
+      prior_owner: original.owner,
+      next_owner: { ...original.owner, owner_id: 'dead-lock-owner' },
+    })}\n`)
+    now += 5_000
+    const contender = new FileFleetRuntimeV1Persistence(stateDirectory, {
+      approvedRoot: stateDirectory, ownerId: 'new-owner', nowMs: () => now, ownerAlive: () => false, staleAfterMs: 1_000,
+    })
+    expect((await contender.reserve_once(state)).acquired).toBe(true)
   })
 
   test('queue parsing requires fresh explicit finite nonnegative integer counters', () => {
@@ -659,14 +750,22 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimeImmutableSemantics(request, owner, predecessor)).not.toThrow()
     expect(() => validateFleetRuntimeImmutableSemantics(request, owner.replace('target_count: 1', 'target_count: 2'), predecessor)).toThrow('READBACK_INVALID')
     expect(() => validateFleetRuntimeImmutableSemantics(request, owner, predecessor.replace('release_tag: v4.1.0', 'release_tag: v4.1.1'))).toThrow('READBACK_INVALID')
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner.replace('    actor_agent_id:', '    actor_agent_id: duplicate\n    actor_agent_id:'), predecessor)).toThrow('READBACK_INVALID')
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner.replace('    active_function:', '    unknown_key: denied\n    active_function:'), predecessor)).toThrow('READBACK_INVALID')
+    expect(() => validateFleetRuntimeImmutableSemantics(request, owner.replace('result: PASS', 'result: PASS\nresult: PASS'), predecessor)).toThrow('READBACK_INVALID')
   })
 
   test('external merge requires the created PR URL and exact pushed head', () => {
     const request = requestFor()
-    const receipt = {
-      repository: 'watchout/kodama', base: 'main', operation: request.operation, request_digest: request.request_digest,
-      pr_url: 'https://github.com/watchout/kodama/pull/123', merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40),
+    const receipt: Record<string, unknown> = {
+      schema_version: 'fleet-runtime-v1/external-merge-receipt/v1', receipt_sha256: SHA_A,
+      subject_digest: digest(request.subject), request_id: request.request_id, request_digest: request.request_digest,
+      idempotency_key: request.idempotency_key, operation: request.operation, target_repository: 'watchout/kodama',
+      base: 'main', pr_url: 'https://github.com/watchout/kodama/pull/123', pushed_head: 'e'.repeat(40),
+      merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40), result: 'PASS',
+      predecessor_receipt_sha256: request.predecessor_receipt.sha256,
     }
+    receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)
     const pr = {
       url: receipt.pr_url, state: 'MERGED', mergedAt: '2026-08-15T09:00:00Z', mergeCommit: { oid: receipt.merge_commit },
       headRefOid: 'e'.repeat(40), baseRefName: 'main', isDraft: false,
@@ -675,9 +774,12 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimeExternalMergeBinding(input)).not.toThrow()
     expect(() => validateFleetRuntimeExternalMergeBinding({ ...input, createdPrUrl: 'https://github.com/watchout/kodama/pull/124' })).toThrow('READBACK_INVALID')
     expect(() => validateFleetRuntimeExternalMergeBinding({ ...input, pushedHead: 'f'.repeat(40) })).toThrow('READBACK_INVALID')
-    for (const field of ['repository', 'base', 'operation', 'request_digest'] as const) {
+    const missingHead = structuredClone(receipt)
+    delete missingHead.pushed_head
+    expect(() => validateFleetRuntimeExternalMergeBinding({ ...input, receipt: missingHead })).toThrow('READBACK_INVALID')
+    for (const field of ['target_repository', 'base', 'operation', 'request_digest'] as const) {
       expect(() => validateFleetRuntimeExternalMergeBinding({
-        ...input, receipt: { ...receipt, [field]: field === 'repository' ? 'watchout/misell' : 'substituted' },
+        ...input, receipt: { ...receipt, [field]: field === 'target_repository' ? 'watchout/misell' : 'substituted' },
       })).toThrow('READBACK_INVALID')
     }
     expect(() => validateFleetRuntimeExternalMergeBinding({ ...input, observedMergeTree: 'f'.repeat(40) })).toThrow('READBACK_INVALID')
@@ -686,13 +788,10 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
   test('local receipt validates its self-digest, subject, operation, target, predecessor, and runtime image', () => {
     const request = requestFor()
     const receipt = receiptFor(request, preflightFor(request)) as FleetRuntimeEffectReceipt & Record<string, unknown>
-    receipt.subject_digest = digest(request.subject)
-    receipt.target_repository = 'watchout/kodama'
-    receipt.predecessor_receipt_sha256 = request.predecessor_receipt.sha256
     receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt)
     const expected = {
-      subjectDigest: digest(request.subject), operation: request.operation, target: 'watchout/kodama',
-      predecessorSha256: request.predecessor_receipt.sha256,
+      request, operation: request.operation, target: 'watchout/kodama',
+      predecessorRawBodySha256: request.predecessor_receipt.sha256, predecessorSelfSha256: null,
     }
     expect(() => validateFleetRuntimeLocalReceipt(receipt, expected)).not.toThrow()
     const foreign = structuredClone(receipt)
@@ -701,10 +800,20 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => validateFleetRuntimeLocalReceipt(foreign, expected)).toThrow('READBACK_INVALID')
     const brokenSelf = { ...receipt, receipt_sha256: SHA_B }
     expect(() => validateFleetRuntimeLocalReceipt(brokenSelf, expected)).toThrow('READBACK_INVALID')
+    const duplicateJson = canonicalFleetRuntimeJson(receipt).replace('{', '{"request_id":"FRV1-N40-FOREIGN",')
+    expect(() => validateFleetRuntimeLocalReceipt(duplicateJson, expected)).toThrow('READBACK_INVALID')
+    for (const field of ['request_id', 'request_digest', 'idempotency_key'] as const) {
+      const foreign = structuredClone(receipt)
+      foreign[field] = field === 'request_id' ? 'FRV1-N40-FOREIGN' : field === 'idempotency_key' ? `frv1:N40:${'9'.repeat(64)}` : SHA_B
+      foreign.receipt_sha256 = computeFleetRuntimeReceiptDigest(foreign as FleetRuntimeEffectReceipt)
+      expect(() => validateFleetRuntimeLocalReceipt(foreign, expected)).toThrow('READBACK_INVALID')
+    }
     for (const mutate of [
       (value: Record<string, unknown>) => { value.operation = 'ROLLBACK' },
       (value: Record<string, unknown>) => { value.target_repository = 'watchout/misell' },
       (value: Record<string, unknown>) => { value.predecessor_receipt_sha256 = SHA_B },
+      (value: Record<string, unknown>) => { value.predecessor_receipt_raw_body_sha256 = SHA_B },
+      (value: Record<string, unknown>) => { value.predecessor_receipt_self_sha256 = SHA_B },
       (value: Record<string, unknown>) => {
         ((value.per_target as Array<Record<string, unknown>>)[0].postimage as Record<string, unknown>).runtime_instance_id = ''
       },
@@ -714,6 +823,37 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       invalid.receipt_sha256 = computeFleetRuntimeReceiptDigest(invalid as unknown as FleetRuntimeEffectReceipt)
       expect(() => validateFleetRuntimeLocalReceipt(invalid, expected)).toThrow('READBACK_INVALID')
     }
+  })
+
+  test('rollback exact-preimage intent uses the rollback merge head, not the prepared canary head', () => {
+    const request = requestFor('ROLLBACK')
+    const context: FleetRuntimeLocalPhaseContext = {
+      state_directory: '/safe/state', invocation_directory: '/safe/state/invocations/key', current_intent: {},
+      predecessor_receipt_raw_body: '',
+      prior_evidence: {
+        PREPARE_CLEAN_CHECKOUT: { head: 'a'.repeat(40), tree: 'b'.repeat(40) },
+        VERIFY_EXTERNAL_MERGE: { merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40) },
+      },
+    }
+    expect(new ConcreteFleetRuntimeV1LocalSystem().phaseIntent(request, 'VERIFY_EXACT_PREIMAGE', context)).toEqual({
+      expected_head: 'c'.repeat(40), expected_tree: request.preimages[0].tree,
+    })
+  })
+
+  test('root-goal parsing has no defaults and admits only exact zero-effect states', () => {
+    const valid = {
+      schema: 'shirube-goal-runtime-command/v1', verdict: 'PASS', store_code: 'FOUND', runtime_digest: SHA_A,
+      root: { root_goal_id: 'fixture' }, write_count: 0, effect_delivery_performed: false,
+    }
+    expect(parseFleetRuntimeRootGoalReadback(valid)).toMatchObject({ repository: 'watchout/kodama', verdict: 'PASS', write_count: 0 })
+    for (const field of Object.keys(valid)) {
+      const missing = structuredClone(valid) as Record<string, unknown>
+      delete missing[field]
+      expect(() => parseFleetRuntimeRootGoalReadback(missing), field).toThrow('READBACK_INVALID')
+    }
+    expect(() => parseFleetRuntimeRootGoalReadback({ ...valid, write_count: '0' })).toThrow('READBACK_INVALID')
+    expect(() => parseFleetRuntimeRootGoalReadback({ ...valid, effect_delivery_performed: true })).toThrow('READBACK_INVALID')
+    expect(() => parseFleetRuntimeRootGoalReadback({ ...valid, extra: true })).toThrow('READBACK_INVALID')
   })
 
   test('the concrete receipt builder emits the complete self-digested operation chain', async () => {
@@ -726,7 +866,11 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       'PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'VERIFY_EXTERNAL_MERGE', 'PREPARE_MERGED_CHECKOUT',
       'COLD_START_DISCORD_KODAMA', 'VERIFY_LIVE_IDENTITY',
     ] as FleetRuntimeLocalPhase[]) {
-      phases[phase] = { status: 'completed', started_at: timestamp, completed_at: timestamp, evidence: {}, intent: {}, protected_effect_count: 0 }
+      phases[phase] = {
+        status: 'completed', started_at: timestamp, completed_at: timestamp, evidence: {}, intent: {},
+        protected_effect_count: ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase) ? 1 : 0,
+        intent_sha256: digest({}), evidence_sha256: digest({}),
+      }
     }
     phases.VERIFY_EXTERNAL_MERGE!.evidence = {
       pr_url: 'https://github.com/watchout/kodama/pull/123', merge_commit: 'c'.repeat(40), merge_tree: 'd'.repeat(40),
@@ -741,7 +885,8 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     }
     const state: FleetRuntimeLocalOperationState = {
       schema_version: 'fleet-runtime-v1/local-operation-state/v1', request_id: request.request_id,
-      request_digest: request.request_digest, idempotency_key: request.idempotency_key, operation: request.operation, phases,
+      request_digest: request.request_digest, idempotency_key: request.idempotency_key, operation: request.operation,
+      execution_owner_id: 'fixture-owner', phases,
     }
     const receipt = await new ConcreteFleetRuntimeV1LocalSystem().buildReceipt(request, preflight, state)
     expect(receipt.receipt_sha256).toBe(computeFleetRuntimeReceiptDigest(receipt))
@@ -758,6 +903,19 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => assertExactFleetRuntimePathSet(paths, [...paths, 'payload/extra.txt'], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
     expect(() => assertExactFleetRuntimePathSet(paths, [paths[1], paths[0], ...paths.slice(2)], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
     expect(() => assertExactFleetRuntimePathSet(paths, [paths[0], paths[0], ...paths.slice(2)], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
+  })
+
+  test.each(['renderer', 'index', 'commit'])('%s payload layer binds all 24 paths and byte digests', layer => {
+    const rows = Array.from({ length: 24 }, (_, index) => ({
+      path: `payload/${String(index).padStart(2, '0')}.txt`, bytes: index + 1, sha256: `sha256:${index.toString(16).padStart(64, '0')}`,
+    }))
+    expect(() => validateFleetRuntimePayloadBlobLayer(rows, structuredClone(rows), layer)).not.toThrow()
+    const wrongBlob = structuredClone(rows)
+    wrongBlob[12].sha256 = SHA_A
+    expect(() => validateFleetRuntimePayloadBlobLayer(rows, wrongBlob, layer)).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    const wrongBytes = structuredClone(rows)
+    wrongBytes[12].bytes += 1
+    expect(() => validateFleetRuntimePayloadBlobLayer(rows, wrongBytes, layer)).toThrow('PAYLOAD_VERIFICATION_FAILED')
   })
 
   test('remote suffix lookalikes and local paths containing github.com are rejected', () => {

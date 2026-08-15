@@ -101,10 +101,32 @@ function parseJson<T>(raw: string, label: string): T {
   }
 }
 
+function parseCanonicalJson<T>(raw: string, label: string): T {
+  const parsed = parseJson<T>(raw, label)
+  if (canonicalFleetRuntimeJson(parsed) !== raw) {
+    return providerFail('READBACK_INVALID', `${label} must be canonical JSON without duplicate or ambiguous keys`)
+  }
+  return parsed
+}
+
 function assertPlainRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return providerFail('READBACK_INVALID', `${label} must be an object`)
   }
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
+  const actual = Object.keys(value).sort()
+  const wanted = [...expected].sort()
+  if (canonicalFleetRuntimeJson(actual) !== canonicalFleetRuntimeJson(wanted)) {
+    return providerFail('READBACK_INVALID', `${label} keys differ: expected ${wanted.join(',')}; got ${actual.join(',')}`)
+  }
+}
+
+function canonicalSelfDigest(value: Record<string, unknown>, digestField = 'receipt_sha256'): string {
+  const material = clone(value)
+  delete material[digestField]
+  return sha256(canonicalFleetRuntimeJson(material))
 }
 
 function findAgentRecord(value: unknown, agentId: string): Record<string, unknown> | null {
@@ -249,11 +271,50 @@ export function parseFleetRuntimeQueueStatus(
   }
 }
 
+export function parseFleetRuntimeRootGoalReadback(raw: unknown): FleetRuntimeRootGoalReadback {
+  assertPlainRecord(raw, 'root-goal status')
+  assertExactKeys(raw, [
+    'schema', 'verdict', 'store_code', 'runtime_digest', 'root', 'write_count', 'effect_delivery_performed',
+  ], 'root-goal status')
+  const pass = raw.verdict === 'PASS' && raw.store_code === 'FOUND'
+    && SHA256.test(String(raw.runtime_digest ?? '')) && raw.root !== null && typeof raw.root === 'object' && !Array.isArray(raw.root)
+  const blocked = raw.verdict === 'BLOCKED' && raw.store_code === 'STORE_NOT_CREATED'
+    && raw.runtime_digest === null && raw.root === null
+  if (raw.schema !== 'shirube-goal-runtime-command/v1'
+    || (!pass && !blocked) || raw.write_count !== 0 || raw.effect_delivery_performed !== false) {
+    return providerFail('READBACK_INVALID', 'root-goal status schema, verdict, store state, or zero-effect proof differs')
+  }
+  return {
+    repository: 'watchout/kodama',
+    store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
+    schema: raw.schema,
+    verdict: raw.verdict,
+    store_code: raw.store_code,
+    runtime_digest: raw.runtime_digest as string | null,
+    root: raw.root,
+    write_count: 0,
+    effect_delivery_performed: false,
+  }
+}
+
 export function assertExactFleetRuntimePathSet(expected: readonly string[], actual: readonly string[], label: string): void {
   if (expected.length !== 24 || actual.length !== expected.length
     || new Set(expected).size !== expected.length || new Set(actual).size !== actual.length
     || expected.some((path, index) => path !== actual[index])) {
     return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} differs from the exact ordered 24-path manifest`)
+  }
+}
+
+export function validateFleetRuntimePayloadBlobLayer(
+  expected: readonly { path: string; bytes: number; sha256: string }[],
+  actual: readonly { path: string; bytes: number; sha256: string }[],
+  label: string,
+): void {
+  assertExactFleetRuntimePathSet(expected.map(file => file.path), actual.map(file => file.path), label)
+  for (let index = 0; index < expected.length; index += 1) {
+    if (actual[index].bytes !== expected[index].bytes || actual[index].sha256 !== expected[index].sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} blob differs at ${expected[index].path}`)
+    }
   }
 }
 
@@ -265,20 +326,52 @@ export function validateFleetRuntimeExternalMergeBinding(input: {
   pushedHead: string
   observedMergeTree: string
 }): void {
+  validateFleetRuntimeExternalMergeReceipt(input.request, input.receipt, {
+    createdPrUrl: input.createdPrUrl,
+    pushedHead: input.pushedHead,
+  })
   const mergeCommit = input.pr.mergeCommit as Record<string, unknown> | null
-  if (input.receipt.repository !== 'watchout/kodama'
-    || input.receipt.base !== input.request.preimages[0].required_base_branch
-    || input.receipt.operation !== input.request.operation
-    || input.receipt.request_digest !== input.request.request_digest
-    || input.receipt.pr_url !== input.createdPrUrl
+  if (input.receipt.pr_url !== input.createdPrUrl
     || input.pr.url !== input.createdPrUrl
-    || input.pr.headRefOid !== input.pushedHead
+    || input.receipt.pushed_head !== input.pushedHead
+    || input.pr.headRefOid !== input.receipt.pushed_head
     || input.pr.state !== 'MERGED' || input.pr.mergedAt === null
     || input.pr.baseRefName !== input.request.preimages[0].required_base_branch
     || mergeCommit?.oid !== input.receipt.merge_commit
     || input.receipt.merge_tree !== input.observedMergeTree) {
     return providerFail('READBACK_INVALID', 'external merge is not bound to the created PR and exact pushed head')
   }
+}
+
+const EXTERNAL_MERGE_RECEIPT_KEYS = Object.freeze([
+  'schema_version', 'receipt_sha256', 'subject_digest', 'request_id', 'request_digest', 'idempotency_key',
+  'operation', 'target_repository', 'base', 'pr_url', 'pushed_head', 'merge_commit', 'merge_tree', 'result',
+  'predecessor_receipt_sha256',
+] as const)
+
+export function validateFleetRuntimeExternalMergeReceipt(
+  request: FleetRuntimeRequest,
+  rawReceipt: Record<string, unknown>,
+  expected: { createdPrUrl: string; pushedHead: string },
+): Record<string, unknown> {
+  const receipt = clone(rawReceipt)
+  assertPlainRecord(receipt, 'external merge receipt')
+  assertExactKeys(receipt, EXTERNAL_MERGE_RECEIPT_KEYS, 'external merge receipt')
+  if (receipt.schema_version !== 'fleet-runtime-v1/external-merge-receipt/v1'
+    || receipt.receipt_sha256 !== canonicalSelfDigest(receipt)
+    || receipt.subject_digest !== sha256(canonicalFleetRuntimeJson(request.subject))
+    || receipt.request_id !== request.request_id || receipt.request_digest !== request.request_digest
+    || receipt.idempotency_key !== request.idempotency_key || receipt.operation !== request.operation
+    || receipt.target_repository !== 'watchout/kodama'
+    || receipt.base !== request.preimages[0].required_base_branch
+    || receipt.pr_url !== expected.createdPrUrl || receipt.pushed_head !== expected.pushedHead
+    || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(receipt.pr_url ?? ''))
+    || !COMMIT.test(String(receipt.pushed_head ?? '')) || !COMMIT.test(String(receipt.merge_commit ?? ''))
+    || !COMMIT.test(String(receipt.merge_tree ?? '')) || receipt.result !== 'PASS'
+    || receipt.predecessor_receipt_sha256 !== request.predecessor_receipt.sha256) {
+    return providerFail('READBACK_INVALID', 'external merge receipt tuple or canonical self digest differs')
+  }
+  return receipt
 }
 
 function yamlTopScalar(body: string, key: string): string {
@@ -335,6 +428,11 @@ function parseOwnerStageMatrix(body: string): FleetRuntimeRequest['owner_decisio
   const chunks = section.split(/(?=^  - stage_id: )/m).filter(chunk => chunk.trim())
   if (chunks.length !== 4) return providerFail('READBACK_INVALID', 'owner stage matrix must contain exactly four entries')
   return chunks.map(chunk => {
+    const semanticKeys = [...chunk.matchAll(/^\s{2,4}(?:- )?([a-z_]+):/gm)].map(match => match[1])
+    const expectedKeys = ['stage_id', 'actor_agent_id', 'active_function', 'allowed_operations', 'target_repositories']
+    if (semanticKeys.length !== expectedKeys.length || semanticKeys.some((key, index) => key !== expectedKeys[index])) {
+      return providerFail('READBACK_INVALID', 'owner stage matrix entry has duplicate, unknown, missing, or reordered keys')
+    }
     const stage = chunk.match(/^  - stage_id:\s*(\S+)$/m)?.[1]
     const scalar = (key: string) => chunk.match(new RegExp(`^    ${key}:\\s*(\\S.*)$`, 'm'))?.[1]
     const actor = scalar('actor_agent_id')
@@ -354,36 +452,66 @@ function parseOwnerStageMatrix(body: string): FleetRuntimeRequest['owner_decisio
   })
 }
 
+function localReceiptExactKeys(operation: FleetRuntimeOperation): string[] {
+  const common = [
+    'schema_version', 'receipt_id', 'receipt_sha256', 'request_id', 'request_digest', 'idempotency_key', 'stage_id',
+    'operation', 'effect_id', 'actor_agent_id', 'active_function', 'started_at', 'completed_at', 'result', 'per_target',
+    'duplicate_effect_count', 'unauthorized_effect_count', 'subject_digest', 'predecessor_receipt_sha256',
+    'predecessor_receipt_raw_body_sha256', 'predecessor_receipt_self_sha256', 'target_repository',
+  ]
+  const specific = operation === 'ROLLBACK'
+    ? ['merge_commit', 'merge_tree', 'pr_url', 'forward_effect_receipt_sha256', 'restored_preimage', 'fresh_runtime_instance_readback', 'queue_counts_unchanged']
+    : operation === 'REAPPLY'
+      ? ['merge_commit', 'merge_tree', 'pr_url', 'rollback_receipt_sha256', 'recovery_receipt_sha256', 'payload_digest', 'postimage']
+      : operation === 'CANARY_COLD_START'
+        ? ['merge_commit', 'merge_tree', 'pr_url']
+        : ['rollback_receipt_sha256']
+  return [...common, ...specific]
+}
+
 export function validateFleetRuntimeLocalReceipt(
   raw: string | Record<string, unknown>,
   expected: {
-    subjectDigest: string
+    request: FleetRuntimeRequest
     operation: FleetRuntimeOperation
     target: string
-    receiptSha256?: string
-    predecessorSha256?: string
+    predecessorRawBodySha256: string
+    predecessorSelfSha256: string | null
   },
 ): Record<string, unknown> {
-  const receipt = typeof raw === 'string' ? parseJson<Record<string, unknown>>(raw, 'local receipt') : clone(raw)
+  const receipt = typeof raw === 'string' ? parseCanonicalJson<Record<string, unknown>>(raw, 'local receipt') : clone(raw)
   assertPlainRecord(receipt, 'local receipt')
+  const request = expected.request
   const expectedSchema = expected.operation === 'ROLLBACK'
     ? 'fleet-runtime-v1/rollback-receipt/v1'
     : expected.operation === 'REAPPLY'
       ? 'fleet-runtime-v1/reapply-receipt/v1'
       : 'fleet-runtime-v1/effect-receipt/v1'
+  assertExactKeys(receipt, localReceiptExactKeys(expected.operation), 'local receipt')
   const perTarget = receipt.per_target
   const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] : null
   assertPlainRecord(target, 'local receipt target')
+  assertExactKeys(target, ['repository', 'preimage', 'postimage', 'queue_precheck', 'root_goal_readback'], 'local receipt target')
   const postimage = target.postimage
   assertPlainRecord(postimage, 'local receipt postimage')
+  assertExactKeys(postimage, [
+    'head_commit', 'tree', 'runtime_surface_sha256', 'distribution_surface_sha256', 'release', 'config', 'policy',
+    'root', 'goal', 'runtime_digest', 'runtime_instance_id',
+  ], 'local receipt postimage')
   if (receipt.schema_version !== expectedSchema || receipt.operation !== expected.operation
-    || receipt.stage_id !== 'N40-P4-CANARY-VERIFY' || receipt.result !== 'PASS'
-    || receipt.subject_digest !== expected.subjectDigest || receipt.target_repository !== expected.target
-    || target.repository !== expected.target || !SHA256.test(String(receipt.request_digest ?? ''))
-    || !INVOCATION_KEY.test(String(receipt.idempotency_key ?? ''))
+    || receipt.request_id !== request.request_id || receipt.request_digest !== request.request_digest
+    || receipt.idempotency_key !== request.idempotency_key
+    || receipt.actor_agent_id !== request.executor_identity.actor_agent_id
+    || receipt.active_function !== request.executor_identity.active_function
+    || receipt.stage_id !== request.stage_id || receipt.result !== 'PASS'
+    || receipt.subject_digest !== sha256(canonicalFleetRuntimeJson(request.subject)) || receipt.target_repository !== expected.target
+    || receipt.predecessor_receipt_sha256 !== expected.predecessorRawBodySha256
+    || receipt.predecessor_receipt_raw_body_sha256 !== expected.predecessorRawBodySha256
+    || receipt.predecessor_receipt_self_sha256 !== expected.predecessorSelfSha256
+    || target.repository !== expected.target
     || typeof postimage.runtime_instance_id !== 'string' || postimage.runtime_instance_id.length === 0
     || !COMMIT.test(String(postimage.head_commit ?? '')) || !COMMIT.test(String(postimage.tree ?? ''))
-    || (expected.predecessorSha256 !== undefined && receipt.predecessor_receipt_sha256 !== expected.predecessorSha256)) {
+    || receipt.duplicate_effect_count !== 0 || receipt.unauthorized_effect_count !== 0) {
     return providerFail('READBACK_INVALID', 'local receipt schema, subject, operation, target, predecessor, or postimage differs')
   }
   const selfDigest = computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)
@@ -391,10 +519,58 @@ export function validateFleetRuntimeLocalReceipt(
   if (expected.operation === 'ROLLBACK' && receipt.forward_effect_receipt_sha256 !== receipt.predecessor_receipt_sha256) {
     return providerFail('READBACK_INVALID', 'rollback receipt does not bind its forward effect predecessor')
   }
+  if (expected.operation === 'RECOVERY' && receipt.rollback_receipt_sha256 !== expected.predecessorSelfSha256) {
+    return providerFail('READBACK_INVALID', 'recovery receipt does not bind its rollback predecessor self digest')
+  }
   if (expected.operation === 'REAPPLY'
     && (!SHA256.test(String(receipt.rollback_receipt_sha256 ?? ''))
       || receipt.recovery_receipt_sha256 !== receipt.predecessor_receipt_sha256)) {
     return providerFail('READBACK_INVALID', 'reapply receipt does not bind rollback and recovery predecessors')
+  }
+  return receipt
+}
+
+function validateFleetRuntimePredecessorReceipt(
+  request: FleetRuntimeRequest,
+  rawBody: string,
+): Record<string, unknown> {
+  const receipt = parseCanonicalJson<Record<string, unknown>>(rawBody, 'immutable predecessor receipt')
+  assertPlainRecord(receipt, 'immutable predecessor receipt')
+  const operation = request.predecessor_receipt.operation
+  if (!operation) return providerFail('READBACK_INVALID', 'effect predecessor operation is absent')
+  const expectedSchema = operation === 'ROLLBACK'
+    ? 'fleet-runtime-v1/rollback-receipt/v1'
+    : operation === 'REAPPLY'
+      ? 'fleet-runtime-v1/reapply-receipt/v1'
+      : 'fleet-runtime-v1/effect-receipt/v1'
+  const expectedKind = operation === 'ROLLBACK' ? 'ROLLBACK_RECEIPT'
+    : operation === 'RECOVERY' ? 'RECOVERY_RECEIPT' : 'EFFECT_RECEIPT'
+  assertExactKeys(receipt, localReceiptExactKeys(operation), 'immutable predecessor receipt')
+  const perTarget = receipt.per_target
+  const target = Array.isArray(perTarget) && perTarget.length === 1 ? perTarget[0] as Record<string, unknown> : null
+  const postimage = target?.postimage as Record<string, unknown> | undefined
+  if (request.predecessor_receipt.kind !== expectedKind
+    || request.predecessor_receipt.node_id !== 'N40-P4-CANARY-VERIFY'
+    || receipt.schema_version !== expectedSchema || receipt.operation !== operation || receipt.result !== request.predecessor_receipt.result
+    || receipt.stage_id !== request.predecessor_receipt.node_id
+    || receipt.subject_digest !== request.predecessor_receipt.subject_digest
+    || receipt.target_repository !== 'watchout/kodama' || target?.repository !== 'watchout/kodama'
+    || !String(receipt.request_id ?? '').startsWith('FRV1-N40-')
+    || !SHA256.test(String(receipt.request_digest ?? '')) || !INVOCATION_KEY.test(String(receipt.idempotency_key ?? ''))
+    || receipt.actor_agent_id !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.actor_agent_id
+    || receipt.active_function !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.required_executor.active_function
+    || receipt.receipt_sha256 !== canonicalSelfDigest(receipt)
+    || typeof postimage?.runtime_instance_id !== 'string' || postimage.runtime_instance_id.length === 0
+    || !COMMIT.test(String(postimage.head_commit ?? '')) || !COMMIT.test(String(postimage.tree ?? ''))) {
+    return providerFail('READBACK_INVALID', 'immutable predecessor receipt kind, node, operation, subject, tuple, or digest differs')
+  }
+  if ((operation === 'CANARY_COLD_START' || operation === 'ROLLBACK')
+    && (!COMMIT.test(String(receipt.merge_commit ?? '')) || !COMMIT.test(String(receipt.merge_tree ?? ''))
+      || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(receipt.pr_url ?? '')))) {
+    return providerFail('READBACK_INVALID', 'immutable predecessor merge image is incomplete')
+  }
+  if (operation === 'RECOVERY' && !SHA256.test(String(receipt.rollback_receipt_sha256 ?? ''))) {
+    return providerFail('READBACK_INVALID', 'immutable recovery predecessor lacks rollback self digest')
   }
   return receipt
 }
@@ -438,11 +614,7 @@ export function validateFleetRuntimeImmutableSemantics(
     return providerFail('READBACK_INVALID', 'owner body semantics differ from the sealed request')
   }
   if (request.operation !== 'CANARY_COLD_START') {
-    validateFleetRuntimeLocalReceipt(predecessorBody, {
-      subjectDigest: request.predecessor_receipt.subject_digest,
-      operation: request.predecessor_receipt.operation!,
-      target: 'watchout/kodama',
-    })
+    validateFleetRuntimePredecessorReceipt(request, predecessorBody)
     return
   }
   const exact = yamlSection(predecessorBody, 'exact_subject')
@@ -640,12 +812,21 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
   private async takeover(
     state: FleetRuntimeInvocationState,
     observed: OwnedFleetRuntimeInvocationState,
+    allowStaleLockBreak = true,
   ): Promise<{ acquired: boolean; state: FleetRuntimeInvocationState }> {
     const lock = join(this.invocationDirectory(state.idempotency_key), 'takeover.lock')
     try {
       atomicWrite(this.root, lock, { prior_owner: observed.execution_owner, next_owner: this.owner }, true)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        const lockState = readState<{ next_owner?: FleetRuntimeExecutionOwner }>(this.root, lock, 'takeover lock')
+        const lockOwner = lockState.next_owner
+        const heartbeat = Date.parse(String(lockOwner?.heartbeat_at ?? ''))
+        if (allowStaleLockBreak && lockOwner && !this.ownerAlive(lockOwner)
+          && Number.isFinite(heartbeat) && this.nowMs() - heartbeat >= this.staleAfterMs) {
+          unlinkSync(lock)
+          return this.takeover(state, observed, false)
+        }
         return providerFail('IN_FLIGHT', 'another executor is taking over the stale owner')
       }
       throw error
@@ -679,6 +860,15 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     atomicWrite(this.root, path, state)
   }
 
+  assertOwner(key: string): void {
+    const path = this.reservationPath(key)
+    if (!existsSync(path)) return providerFail('IN_FLIGHT', 'reservation no longer exists')
+    const state = readState<OwnedFleetRuntimeInvocationState>(this.root, path, 'reservation owner')
+    if (state.status !== 'reserved' || state.execution_owner?.owner_id !== this.owner.owner_id) {
+      return providerFail('IN_FLIGHT', 'current executor no longer owns the durable reservation')
+    }
+  }
+
   async complete_once(state: FleetRuntimeInvocationState): Promise<FleetRuntimeInvocationState> {
     assertInvocationStateShape(state)
     if (state.status !== 'completed') return providerFail('STATE_RECORD_INVALID', 'completion must use completed state')
@@ -691,7 +881,9 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
       }
       return existing
     }
+    this.assertOwner(state.idempotency_key)
     atomicWrite(this.root, this.completionPath(state.idempotency_key), state)
+    this.assertOwner(state.idempotency_key)
     return clone(state)
   }
 }
@@ -744,6 +936,8 @@ export interface FleetRuntimeLocalPhaseState {
   evidence: Record<string, unknown> | null
   intent: Record<string, unknown>
   protected_effect_count: number
+  intent_sha256: string
+  evidence_sha256: string | null
 }
 
 export interface FleetRuntimeLocalOperationState {
@@ -752,6 +946,7 @@ export interface FleetRuntimeLocalOperationState {
   request_digest: string
   idempotency_key: string
   operation: FleetRuntimeOperation
+  execution_owner_id: string
   phases: Partial<Record<FleetRuntimeLocalPhase, FleetRuntimeLocalPhaseState>>
 }
 
@@ -760,6 +955,7 @@ export interface FleetRuntimeLocalPhaseContext {
   invocation_directory: string
   prior_evidence: Partial<Record<FleetRuntimeLocalPhase, Record<string, unknown>>>
   current_intent: Record<string, unknown>
+  predecessor_receipt_raw_body: string
 }
 
 export interface FleetRuntimeLocalPhaseResult {
@@ -799,18 +995,32 @@ export interface FleetRuntimeLocalSystem {
   ): Promise<FleetRuntimeEffectReceipt>
 }
 
-function assertJournal(state: FleetRuntimeLocalOperationState, request: FleetRuntimeRequest): void {
+function assertJournal(state: FleetRuntimeLocalOperationState, request: FleetRuntimeRequest, ownerId: string): void {
   assertPlainRecord(state, 'operation state')
   if (state.schema_version !== STATE_SCHEMA
     || state.request_id !== request.request_id
     || state.request_digest !== request.request_digest
     || state.idempotency_key !== request.idempotency_key
-    || state.operation !== request.operation) {
+    || state.operation !== request.operation || state.execution_owner_id !== ownerId) {
     return providerFail('OPERATION_STATE_MISMATCH', 'operation journal is not bound to this exact request')
   }
-  for (const phase of Object.values(state.phases)) {
+  const expectedOrder = OPERATION_PHASES[request.operation as keyof typeof OPERATION_PHASES] ?? []
+  const actualKeys = Object.keys(state.phases)
+  const admittedPrefix = expectedOrder.slice(0, actualKeys.length)
+  if (actualKeys.length !== new Set(actualKeys).size || actualKeys.some(key => !admittedPrefix.includes(key as FleetRuntimeLocalPhase))
+    || admittedPrefix.some(key => !Object.hasOwn(state.phases, key))) {
+    return providerFail('STATE_RECORD_INVALID', 'operation phases are missing, extra, duplicate, or out of order')
+  }
+  for (const phaseName of admittedPrefix) {
+    const phase = state.phases[phaseName]!
     if (!phase || phase.intent === null || typeof phase.intent !== 'object' || Array.isArray(phase.intent)) {
       return providerFail('STATE_RECORD_INVALID', 'operation phase lacks an immutable intent')
+    }
+    if (phase.intent_sha256 !== sha256(canonicalFleetRuntimeJson(phase.intent))
+      || (phase.status === 'started' && (phase.completed_at !== null || phase.evidence !== null || phase.evidence_sha256 !== null))
+      || (phase.status === 'completed' && (!phase.completed_at || !phase.evidence || phase.evidence_sha256 !== sha256(canonicalFleetRuntimeJson(phase.evidence))))
+      || phase.protected_effect_count !== (phase.status === 'completed' && PROTECTED_PHASES.has(phaseName) ? 1 : 0)) {
+      return providerFail('STATE_RECORD_INVALID', 'operation phase intent, evidence, status, or protected-effect count is invalid')
     }
   }
 }
@@ -835,11 +1045,17 @@ class FleetRuntimeLocalEffectPort {
         request_digest: request.request_digest,
         idempotency_key: request.idempotency_key,
         operation: request.operation,
+        execution_owner_id: this.persistence.owner.owner_id,
         phases: {},
       }
     }
     const state = readState<FleetRuntimeLocalOperationState>(this.persistence.root, path, 'operation state')
-    assertJournal(state, request)
+    assertJournal(state, request, state.execution_owner_id)
+    if (state.execution_owner_id !== this.persistence.owner.owner_id) {
+      this.persistence.assertOwner(request.idempotency_key)
+      state.execution_owner_id = this.persistence.owner.owner_id
+      atomicWrite(this.persistence.root, path, state)
+    }
     return state
   }
 
@@ -847,6 +1063,7 @@ class FleetRuntimeLocalEffectPort {
     request: FleetRuntimeRequest,
     state: FleetRuntimeLocalOperationState,
     currentIntent: Record<string, unknown> = {},
+    predecessorRawBody = '',
   ): FleetRuntimeLocalPhaseContext {
     return {
       state_directory: this.persistence.root,
@@ -857,6 +1074,7 @@ class FleetRuntimeLocalEffectPort {
           .map(([phase, entry]) => [phase, clone(entry.evidence ?? {})]),
       ),
       current_intent: clone(currentIntent),
+      predecessor_receipt_raw_body: predecessorRawBody,
     }
   }
 
@@ -873,26 +1091,29 @@ class FleetRuntimeLocalEffectPort {
     const phases = OPERATION_PHASES[request.operation as keyof typeof OPERATION_PHASES]
     if (!phases) return providerFail('TARGET_NOT_ADMITTED', 'local provider admits only the four N40 operations')
     const state = this.loadJournal(request)
-    assertJournal(state, request)
+    assertJournal(state, request, this.persistence.owner.owner_id)
 
     for (const phase of phases) {
       const prior = state.phases[phase]
       if (prior?.status === 'completed') continue
       if (prior?.status === 'started') {
         await this.persistence.heartbeatOwner(request.idempotency_key)
-        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(request, state, prior.intent))
+        const reconciled = await this.system.reconcilePhase(request, preflight, phase, this.context(request, state, prior.intent, preflight.predecessor_receipt_raw_body))
         if (!reconciled.completed || !reconciled.evidence) {
           return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', `${phase} started but cannot be proven complete; it will not be repeated`)
         }
         prior.status = 'completed'
         prior.completed_at = this.now()
         prior.evidence = clone(reconciled.evidence)
+        prior.evidence_sha256 = sha256(canonicalFleetRuntimeJson(prior.evidence))
         prior.protected_effect_count = reconciled.protected_effect_count
+        this.persistence.assertOwner(request.idempotency_key)
         atomicWrite(this.persistence.root, this.journalPath(request), state)
+        this.persistence.assertOwner(request.idempotency_key)
         continue
       }
 
-      const intentContext = this.context(request, state)
+      const intentContext = this.context(request, state, {}, preflight.predecessor_receipt_raw_body)
       const intent = this.system.phaseIntent ? await this.system.phaseIntent(request, phase, intentContext) : {}
       state.phases[phase] = {
         status: 'started',
@@ -901,10 +1122,15 @@ class FleetRuntimeLocalEffectPort {
         evidence: null,
         intent: clone(intent),
         protected_effect_count: 0,
+        intent_sha256: sha256(canonicalFleetRuntimeJson(intent)),
+        evidence_sha256: null,
       }
+      this.persistence.assertOwner(request.idempotency_key)
       atomicWrite(this.persistence.root, this.journalPath(request), state)
+      this.persistence.assertOwner(request.idempotency_key)
       await this.persistence.heartbeatOwner(request.idempotency_key)
-      const result = await this.system.performPhase(request, preflight, phase, this.context(request, state, intent))
+      const result = await this.system.performPhase(request, preflight, phase, this.context(request, state, intent, preflight.predecessor_receipt_raw_body))
+      this.persistence.assertOwner(request.idempotency_key)
       if (PROTECTED_PHASES.has(phase) && result.protected_effect_count !== 1) {
         return providerFail('STATE_RECORD_INVALID', `${phase} must report exactly one protected subeffect`)
       }
@@ -918,8 +1144,11 @@ class FleetRuntimeLocalEffectPort {
         evidence: clone(result.evidence),
         intent: clone(intent),
         protected_effect_count: result.protected_effect_count,
+        intent_sha256: sha256(canonicalFleetRuntimeJson(intent)),
+        evidence_sha256: sha256(canonicalFleetRuntimeJson(result.evidence)),
       }
       atomicWrite(this.persistence.root, this.journalPath(request), state)
+      this.persistence.assertOwner(request.idempotency_key)
     }
     return this.system.buildReceipt(request, preflight, state)
   }
@@ -1149,21 +1378,6 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     return parsed
   }
 
-  private rootGoalReadback(raw: unknown): FleetRuntimeRootGoalReadback {
-    assertPlainRecord(raw, 'root-goal status')
-    return {
-      repository: 'watchout/kodama',
-      store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
-      schema: String(raw.schema ?? raw.schema_version ?? 'shirube-goal-runtime-command/v1'),
-      verdict: String(raw.verdict ?? 'BLOCKED'),
-      store_code: String(raw.store_code ?? raw.code ?? 'UNKNOWN'),
-      runtime_digest: typeof raw.runtime_digest === 'string' ? raw.runtime_digest : null,
-      root: raw.root ?? null,
-      write_count: Number(raw.write_count ?? 0),
-      effect_delivery_performed: raw.effect_delivery_performed === true,
-    }
-  }
-
   async inspect(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
     const [owner, predecessor, preimage, statusRaw, rootRaw, inventoryRaw, executorProfileRaw] = await Promise.all([
@@ -1216,7 +1430,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       predecessor_receipt_raw_body: predecessor.body,
       target_preimages: [preimage],
       queue_precheck: queue,
-      root_goal_readbacks: [this.rootGoalReadback(parseJson(rootRaw, 'root-goal status'))],
+      root_goal_readbacks: [parseFleetRuntimeRootGoalReadback(parseJson(rootRaw, 'root-goal status'))],
       filesystem_write_count: 0,
       database_write_count: 0,
       queue_write_count: 0,
@@ -1255,6 +1469,25 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     return { checkout_path: path, remote, head, tree, clean: true }
   }
 
+  private async verifyReleaseCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
+    assertSafeStatePath(stateDirectory, path)
+    if (!existsSync(path) || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path
+      || path === '/Users/yuji/Developer/ai-dev-framework') {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release checkout must be a dedicated real state descendant')
+    }
+    const remote = (await this.run(['git', 'remote', 'get-url', 'origin'], path)).trim()
+    const head = (await this.run(['git', 'rev-parse', 'HEAD'], path)).trim()
+    const tree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], path)).trim()
+    const status = await this.run(['git', 'status', '--porcelain=v1'], path)
+    const branch = (await this.run(['git', 'branch', '--show-current'], path)).trim()
+    if (!new Set(['https://github.com/watchout/ai-dev-framework.git', 'git@github.com:watchout/ai-dev-framework.git']).has(remote)
+      || head !== FLEET_RUNTIME_V1_CONTRACT.release_commit || tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+      || status !== '' || branch !== '') {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release checkout origin, image, detached state, or cleanliness differs')
+    }
+    return { checkout_path: path, remote, head, tree, clean: true, detached: true }
+  }
+
   phaseIntent(
     readonlyRequest: Readonly<FleetRuntimeRequest>,
     phase: FleetRuntimeLocalPhase,
@@ -1280,7 +1513,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { expected_head: merged?.merge_commit, expected_tree: merged?.merge_tree }
     }
     if (phase === 'VERIFY_EXACT_PREIMAGE') {
-      return { expected_head: prepared?.head, expected_tree: request.preimages[0].tree }
+      return request.operation === 'ROLLBACK'
+        ? { expected_head: merged?.merge_commit, expected_tree: request.preimages[0].tree }
+        : { expected_head: prepared?.head, expected_tree: request.preimages[0].tree }
     }
     if (phase === 'PUSH_NORMAL_BRANCH') return { branch: local?.branch, head: local?.head, force: false }
     if (phase === 'CREATE_DRAFT_PR') {
@@ -1307,37 +1542,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     request: FleetRuntimeRequest,
     context: FleetRuntimeLocalPhaseContext,
   ): Record<string, unknown> | null {
-    const name = request.operation === 'ROLLBACK'
-      ? 'completed-canary-merge-receipt.json'
-      : request.operation === 'RECOVERY'
-        ? 'completed-rollback-merge-receipt.json'
-        : request.operation === 'REAPPLY'
-          ? 'completed-rollback-effect-receipt.json'
-          : null
-    if (!name) return null
-    const path = join(context.state_directory, name)
-    if (!existsSync(path)) return providerFail('READBACK_INVALID', `${request.operation} requires ${name}`)
-    const receipt = readState<Record<string, unknown>>(context.state_directory, path, `${request.operation} input receipt`)
-    if (request.operation === 'REAPPLY') {
-      return validateFleetRuntimeLocalReceipt(receipt, {
-        subjectDigest: sha256(canonicalFleetRuntimeJson(request.subject)),
-        operation: 'ROLLBACK',
-        target: 'watchout/kodama',
-      })
+    if (request.operation === 'CANARY_COLD_START') return null
+    if (!context.predecessor_receipt_raw_body) {
+      return providerFail('READBACK_INVALID', `${request.operation} requires immutable predecessor bytes`)
     }
-    const sourceOperation = request.operation === 'ROLLBACK' ? 'CANARY_COLD_START' : 'ROLLBACK'
-    if (receipt.schema_version !== 'fleet-runtime-v1/external-merge-receipt/v1'
-      || receipt.operation !== sourceOperation || receipt.result !== 'PASS'
-      || receipt.subject_digest !== sha256(canonicalFleetRuntimeJson(request.subject))
-      || receipt.target_repository !== 'watchout/kodama'
-      || receipt.predecessor_receipt_sha256 !== request.predecessor_receipt.sha256
-      || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(receipt.pr_url ?? ''))
-      || !COMMIT.test(String(receipt.pushed_head ?? ''))
-      || !COMMIT.test(String(receipt.merge_commit ?? '')) || !COMMIT.test(String(receipt.merge_tree ?? ''))
-      || receipt.receipt_sha256 !== computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)) {
-      return providerFail('READBACK_INVALID', `${request.operation} merge receipt chain is invalid`)
-    }
-    return receipt
+    return validateFleetRuntimePredecessorReceipt(request, context.predecessor_receipt_raw_body)
   }
 
   private async prepareCheckout(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
@@ -1364,14 +1573,19 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     return {
       ...evidence,
       baseline_runtime_instance_id: baseline?.latest_runtime_instance_id ?? baseline?.runtime_instance_id ?? null,
-      ...(request.operation === 'REAPPLY' ? { rollback_receipt_sha256: operationInput!.receipt_sha256 } : {}),
+      ...(request.operation === 'REAPPLY' ? { rollback_receipt_sha256: operationInput!.rollback_receipt_sha256 } : {}),
     }
   }
 
   private async externalMerge(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
     const path = join(context.invocation_directory, 'external-merge-receipt.json')
     if (!existsSync(path)) return providerFail('WAITING_INDEPENDENT_MERGE', 'exact external merge receipt is not present')
-    const receipt = readState<Record<string, unknown>>(context.state_directory, path, 'external merge receipt')
+    assertSafeStatePath(context.state_directory, path)
+    const raw = readFileSync(path, 'utf8')
+    const receipt = parseJson<Record<string, unknown>>(raw, 'external merge receipt')
+    if (raw !== `${canonicalFleetRuntimeJson(receipt)}\n`) {
+      return providerFail('READBACK_INVALID', 'external merge receipt bytes are not canonical JSON plus LF')
+    }
     if (receipt.request_digest !== request.request_digest || receipt.operation !== request.operation
       || receipt.repository !== 'watchout/kodama' || receipt.base !== request.preimages[0].required_base_branch
       || typeof receipt.pr_url !== 'string' || !COMMIT.test(String(receipt.merge_commit)) || !COMMIT.test(String(receipt.merge_tree))) {
@@ -1438,7 +1652,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { evidence: await this.verifyCheckout(checkout, context.state_directory, mergeCommit, mergeTree), protected_effect_count: 0 }
     }
     if (phase === 'VERIFY_EXACT_PREIMAGE') {
-      return { evidence: await this.verifyCheckout(checkout, context.state_directory, String(context.current_intent.expected_head ?? '') || undefined, request.preimages[0].tree), protected_effect_count: 0 }
+      return { evidence: await this.verifyCheckout(checkout, context.state_directory, String(context.current_intent.expected_head ?? '') || undefined, String(context.current_intent.expected_tree ?? '') || undefined), protected_effect_count: 0 }
     }
     if (phase === 'STAGE_EXACT_PAYLOAD' || phase === 'VERIFY_EXACT_PAYLOAD') {
       // The released renderer is the sole byte source. It is invoked with its
@@ -1453,13 +1667,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           await this.run(['git', 'clone', '--no-checkout', 'https://github.com/watchout/ai-dev-framework.git', releaseCheckout])
           await this.run(['git', 'checkout', '--detach', FLEET_RUNTIME_V1_CONTRACT.release_commit], releaseCheckout)
         }
-        const releaseHead = (await this.run(['git', 'rev-parse', 'HEAD'], releaseCheckout)).trim()
-        const releaseTree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], releaseCheckout)).trim()
-        const releaseStatus = await this.run(['git', 'status', '--porcelain=v1'], releaseCheckout)
-        if (releaseHead !== FLEET_RUNTIME_V1_CONTRACT.release_commit
-          || releaseTree !== FLEET_RUNTIME_V1_CONTRACT.release_tree || releaseStatus !== '') {
-          return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release renderer checkout differs from the frozen release')
-        }
+        const releaseBefore = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
         safeMkdir(context.state_directory, out)
         await this.run([
           'node', 'scripts/shirube/render-adoption-pack.mjs', '--profile', 'hotel-lite',
@@ -1472,15 +1680,30 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           '--generated-at', '2026-08-12T00:00:00.000Z', '--fetched-at', '2026-08-12T00:00:00.000Z',
           '--generated-by', 'codex-cto', '--include-workflow-caller',
         ], releaseCheckout)
+        const releaseAfter = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
+        if (realpathSync(out) !== out) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'render output path is not real')
         assertExactFleetRuntimePathSet(payloadPaths, recursiveRelativeFiles(out), 'renderer output')
-        for (const payloadPath of payloadPaths) {
+        const renderedBlobs: Record<string, { bytes: number; sha256: string }> = {}
+        const renderedRows: Array<{ path: string; bytes: number; sha256: string }> = []
+        for (const file of manifest.files) {
+          const payloadPath = file.path
           const source = assertSafeStatePath(context.state_directory, join(out, payloadPath))
           const target = assertSafeStatePath(context.state_directory, join(checkout, payloadPath))
+          const bytes = readFileSync(source)
+          if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
+            return providerFail('PAYLOAD_VERIFICATION_FAILED', `renderer bytes differ at ${payloadPath}`)
+          }
           safeMkdir(context.state_directory, dirname(target))
           copyFileSync(source, target)
+          renderedBlobs[payloadPath] = { bytes: bytes.byteLength, sha256: sha256(bytes) }
+          renderedRows.push({ path: payloadPath, bytes: bytes.byteLength, sha256: sha256(bytes) })
         }
+        validateFleetRuntimePayloadBlobLayer(manifest.files, renderedRows, 'renderer output blobs')
         return {
-          evidence: { rendered_path: out, release_checkout: releaseCheckout, checkout_path: checkout, path_count: 24, payload_paths: payloadPaths },
+          evidence: {
+            rendered_path: out, release_checkout_before: releaseBefore, release_checkout_after: releaseAfter,
+            checkout_path: checkout, path_count: 24, payload_paths: payloadPaths, rendered_blobs: renderedBlobs,
+          },
           protected_effect_count: 0,
         }
       }
@@ -1491,12 +1714,15 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         return providerFail('PAYLOAD_VERIFICATION_FAILED', 'stage evidence lacks exact payload paths')
       }
       assertExactFleetRuntimePathSet(expectedPaths, stagedPaths as string[], 'stage evidence')
+      const checkoutRows: Array<{ path: string; bytes: number; sha256: string }> = []
       for (const file of manifest.files) {
         const bytes = readFileSync(join(checkout, file.path))
         if (bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
           return providerFail('PAYLOAD_VERIFICATION_FAILED', `payload bytes differ at ${file.path}`)
         }
+        checkoutRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
       }
+      validateFleetRuntimePayloadBlobLayer(manifest.files, checkoutRows, 'checkout payload blobs')
       return { evidence: { payload_digest: request.payload_digest, path_count: 24, payload_paths: expectedPaths }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_COMMIT') {
@@ -1510,11 +1736,34 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       await this.run(['git', 'add', '--', ...paths as string[]], checkout)
       const staged = (await this.run(['git', 'diff', '--cached', '--name-only'], checkout)).trim().split('\n').filter(Boolean).sort()
       assertExactFleetRuntimePathSet(paths as string[], staged, 'staged index')
+      const manifest = await this.payloadManifest(request)
+      const indexBlobs: Record<string, string> = {}
+      const indexRows: Array<{ path: string; bytes: number; sha256: string }> = []
+      for (const file of manifest.files) {
+        const blob = (await this.run(['git', 'rev-parse', `:${file.path}`], checkout)).trim()
+        const bytes = Buffer.from(await this.run(['git', 'cat-file', 'blob', blob], checkout))
+        if (!COMMIT.test(blob) || bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256) {
+          return providerFail('PAYLOAD_VERIFICATION_FAILED', `staged blob differs at ${file.path}`)
+        }
+        indexBlobs[file.path] = blob
+        indexRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
+      }
+      validateFleetRuntimePayloadBlobLayer(manifest.files, indexRows, 'staged index blobs')
       await this.run(['git', 'commit', '-m', `chore(shirube): ${request.operation.toLowerCase().replaceAll('_', ' ')}`], checkout)
       const head = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
       const committed = (await this.run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', head], checkout)).trim().split('\n').filter(Boolean).sort()
       assertExactFleetRuntimePathSet(paths as string[], committed, 'commit diff')
-      return { evidence: { branch, head, payload_paths: paths }, protected_effect_count: 0 }
+      const commitRows: Array<{ path: string; bytes: number; sha256: string }> = []
+      for (const file of manifest.files) {
+        const committedBlob = (await this.run(['git', 'rev-parse', `${head}:${file.path}`], checkout)).trim()
+        if (committedBlob !== indexBlobs[file.path]) {
+          return providerFail('PAYLOAD_VERIFICATION_FAILED', `committed blob differs from index at ${file.path}`)
+        }
+        const bytes = Buffer.from(await this.run(['git', 'cat-file', 'blob', committedBlob], checkout))
+        commitRows.push({ path: file.path, bytes: bytes.byteLength, sha256: sha256(bytes) })
+      }
+      validateFleetRuntimePayloadBlobLayer(manifest.files, commitRows, 'committed payload blobs')
+      return { evidence: { branch, head, payload_paths: paths, index_blobs: indexBlobs }, protected_effect_count: 0 }
     }
     if (phase === 'CREATE_LOCAL_REVERT') {
       const prior = this.operationInputReceipt(request, mutableContext)!
@@ -1573,6 +1822,12 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { evidence: { ...clean, session, port: 8803, argv: command }, protected_effect_count: 1 }
     }
     if (phase === 'VERIFY_LIVE_IDENTITY') {
+      const checkoutImage = await this.verifyCheckout(
+        checkout,
+        context.state_directory,
+        String(context.current_intent.expected_head ?? '') || undefined,
+        String(context.current_intent.expected_tree ?? '') || undefined,
+      )
       const inventory = parseJson<Record<string, unknown>>(await this.run([
         process.execPath, 'cli/index.ts', 'runtime', 'inventory', '--format', 'json',
       ], this.providerRepositoryRoot), 'runtime inventory')
@@ -1612,6 +1867,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return {
         evidence: {
           inventory,
+          local_checkout: checkoutImage,
           runtime_instance_id: runtimeInstance,
           remote_image: remoteImage,
           queue_unchanged: true,
@@ -1762,8 +2018,13 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       unauthorized_effect_count: 0,
     }
     const boundReceipt = receipt as FleetRuntimeEffectReceipt & Record<string, unknown>
+    const predecessorSelf = request.operation === 'CANARY_COLD_START'
+      ? null
+      : validateFleetRuntimePredecessorReceipt(request, preflight.predecessor_receipt_raw_body).receipt_sha256 as string
     boundReceipt.subject_digest = sha256(canonicalFleetRuntimeJson(request.subject))
     boundReceipt.predecessor_receipt_sha256 = request.predecessor_receipt.sha256
+    boundReceipt.predecessor_receipt_raw_body_sha256 = request.predecessor_receipt.sha256
+    boundReceipt.predecessor_receipt_self_sha256 = predecessorSelf
     boundReceipt.target_repository = 'watchout/kodama'
     if (merge) {
       boundReceipt.merge_commit = merge.merge_commit
@@ -1776,6 +2037,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       receipt.restored_preimage = clone(request.preimages[0])
       receipt.fresh_runtime_instance_readback = true
       receipt.queue_counts_unchanged = true
+    }
+    if (request.operation === 'RECOVERY') {
+      boundReceipt.rollback_receipt_sha256 = predecessorSelf
     }
     if (request.operation === 'REAPPLY') {
       const rollbackDigest = state.phases.PREPARE_CLEAN_CHECKOUT?.evidence?.rollback_receipt_sha256
@@ -1790,10 +2054,11 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
     receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt)
     validateFleetRuntimeLocalReceipt(receipt as FleetRuntimeEffectReceipt & Record<string, unknown>, {
-      subjectDigest: sha256(canonicalFleetRuntimeJson(request.subject)),
+      request,
       operation: request.operation,
       target: 'watchout/kodama',
-      predecessorSha256: request.predecessor_receipt.sha256,
+      predecessorRawBodySha256: request.predecessor_receipt.sha256,
+      predecessorSelfSha256: predecessorSelf,
     })
     return receipt
   }
