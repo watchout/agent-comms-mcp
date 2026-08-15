@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
   FLEET_RUNTIME_V1_CONTRACT,
+  FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT,
   FLEET_RUNTIME_V1_TARGETS,
   FleetRuntimeV1Error,
   canonicalFleetRuntimeJson,
@@ -14,6 +15,7 @@ import {
   type FleetRuntimeEffectReceipt,
   type FleetRuntimeOperation,
   type FleetRuntimePorts,
+  type FleetRuntimePreimage,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
   type FleetRuntimeRootGoalReadback,
@@ -25,6 +27,82 @@ const SHA_A = `sha256:${'a'.repeat(64)}`
 const OWNER_BODY = '{"decision":"N35 PASS","actor":"watchout","fixture":true}'
 const PREDECESSOR_BODY = '{"result":"PASS","fixture":true}'
 const EXECUTOR = { actor_agent_id: 'aun-runtime-executor', active_function: 'runtime_recovery_executor' }
+
+const AMENDED_FROM_PREIMAGES = {
+  'watchout/agent-comms-mcp': {
+    repository: 'watchout/agent-comms-mcp',
+    required_base_branch: 'main',
+    head_commit: 'e1d2cf316b2a8bdf5e4d2e7d73b570d29e2968d0',
+    tree: '667bc355b978a9924f09528e9d9ee600b061d38f',
+    runtime_surface_entry_count: 26,
+    runtime_surface_sha256: 'sha256:371d9c5b08047a072e97a8feb83a6d9ae8f837062061f9b0050bba6724087235',
+    distribution_surface_entry_count: 136,
+    distribution_surface_sha256: 'sha256:4d303ed6b479b7019b153bce76e35101a6f4df7b063333cdbae920282b71da97',
+  },
+  'watchout/agent-memory': {
+    repository: 'watchout/agent-memory',
+    required_base_branch: 'main',
+    head_commit: 'a9ae4b29e2e5739a903926a27cb83a34593f0b44',
+    tree: '44fd6ba56230380d7b07f4d36d3557457b7f3e48',
+    runtime_surface_entry_count: 24,
+    runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56',
+    distribution_surface_entry_count: 190,
+    distribution_surface_sha256: 'sha256:1c60eff2322f700dd195cfb57e3e6a4b56af365ae2023f6271f3b1f0e3e98bf0',
+  },
+} as const satisfies Partial<Record<FleetRuntimeTarget, FleetRuntimePreimage>>
+
+const EFFECTIVE_PREIMAGES: FleetRuntimePreimage[] = [
+  {
+    repository: 'watchout/agent-comms-mcp',
+    required_base_branch: 'main',
+    head_commit: '933a14ac92605aa10698136b54276cad689aab91',
+    tree: '9086c5d2967064839d538e9b53922f2bb600e329',
+    runtime_surface_entry_count: 26,
+    runtime_surface_sha256: 'sha256:371d9c5b08047a072e97a8feb83a6d9ae8f837062061f9b0050bba6724087235',
+    distribution_surface_entry_count: 136,
+    distribution_surface_sha256: 'sha256:4d303ed6b479b7019b153bce76e35101a6f4df7b063333cdbae920282b71da97',
+  },
+  {
+    repository: 'watchout/agent-memory',
+    required_base_branch: 'main',
+    head_commit: 'fdda199c7d686b0a8b9b90a7621ee6fdaab35621',
+    tree: '25f450565cd9cd981adf1c33e38ee21d82f6402d',
+    runtime_surface_entry_count: 0,
+    runtime_surface_sha256: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    distribution_surface_entry_count: 0,
+    distribution_surface_sha256: 'sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+  },
+  {
+    repository: 'watchout/aun-platform',
+    required_base_branch: 'feat/channel-ux-v2-2-sidebar-thread',
+    head_commit: 'ce1a9fcc32b191286585a5c3cb47f2edf7a23568',
+    tree: '7a83ad8d947b48b7e89e69c4e9c13beca2b32433',
+    runtime_surface_entry_count: 24,
+    runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56',
+    distribution_surface_entry_count: 54,
+    distribution_surface_sha256: 'sha256:a2c465bfc007a4d27d1d9caecac2c3e84f4510fe4daf11718563e9045c58fd19',
+  },
+  {
+    repository: 'watchout/kodama',
+    required_base_branch: 'main',
+    head_commit: '3c85d6f7a3c83e31c90fe4e3172c111c7541978f',
+    tree: '47d992a5c709cf65ef15f4aab5e60887be1aa45a',
+    runtime_surface_entry_count: 24,
+    runtime_surface_sha256: 'sha256:b90aa1438ef152b36bb988e946c3272e8099c18a4d59dba966c1b8a054ea2212',
+    distribution_surface_entry_count: 63,
+    distribution_surface_sha256: 'sha256:b1233c486d5921bc928318c4497dba8093ba0a62db0ee4e3e9ab3432ba6302e5',
+  },
+  {
+    repository: 'watchout/misell',
+    required_base_branch: 'main',
+    head_commit: '640dc4d475cb3670d85579845ecaafae198e895e',
+    tree: '8661e8cf569f4bf27a0a736f3f5379d0cfa5df16',
+    runtime_surface_entry_count: 24,
+    runtime_surface_sha256: 'sha256:31e1b62379e999040784f544e2ac2d1ae1b3aff8177e76332de404e3f4249a56',
+    distribution_surface_entry_count: 251,
+    distribution_surface_sha256: 'sha256:d41879bf3a6ce1d1aab725bd5f939b4973c3d5e68b75edb39b514e74164c539a',
+  },
+]
 
 interface Counters {
   preflight_reads: number
@@ -352,16 +430,70 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     expect(FLEET_RUNTIME_V1_TARGETS).toHaveLength(5)
   })
 
+  test('binds the merged amendment identity and exact ordered five-target effective view', () => {
+    expect(FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT).toEqual({
+      amendment_id: 'FLEET-RUNTIME-V1-PREIMAGE-AMENDMENT-20260815-001',
+      artifact_state: 'FINAL_IMMUTABLE',
+      schema_version: 'shirube-v4.1/fleet-runtime-v1-preimage-amendment/v1',
+      repository: 'watchout/ai-dev-framework',
+      merge_commit: '810981f049311cb2fede4f72fff651b1d4e8e04e',
+      merge_tree: 'ea48787485b5f4bca35d9788f46ede2424b09eb0',
+      path: 'releases/shirube-v4.1/fleet-runtime-v1-preimage-amendment-20260815-001.json',
+      amendment_sha256: 'sha256:92b4ce3630c2f58476240c84b5b794adc5263e23e07064aabd4ee12f54213567',
+      amendment_byte_sha256: 'sha256:00b323018d0219bcd2869d3700e54be06a25d62f921f2755d13e2454cd6ea285',
+      original_contract_sha256: FLEET_RUNTIME_V1_CONTRACT.contract_sha256,
+      original_contract_byte_sha256: 'sha256:7936bd8d92c73f54f71c67c744a4e8fb5339f69c7070f709449fba178dd73ebd',
+      original_payload_byte_sha256: 'sha256:6a7bce4ab348d3cd4ccc290aed06fe41dff7db4b7c690cd0b031b7ddc30b63a9',
+      effective_view_mode: 'EXACT_ORDERED_COMPLETE_PREIMAGE_RECORD_SUBSTITUTION_ONLY',
+      required_record_fields_in_order: [
+        'repository',
+        'required_base_branch',
+        'head_commit',
+        'tree',
+        'runtime_surface_entry_count',
+        'runtime_surface_sha256',
+        'distribution_surface_entry_count',
+        'distribution_surface_sha256',
+      ],
+    })
+    expect(FLEET_RUNTIME_V1_TARGETS.map(frozenFleetRuntimePreimage)).toEqual(EFFECTIVE_PREIMAGES)
+    for (const preimage of EFFECTIVE_PREIMAGES) {
+      expect(Object.keys(preimage)).toEqual(FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT.required_record_fields_in_order)
+    }
+  })
+
+  test('request digest and frozen idempotency tuple bind all eight effective-preimage fields', () => {
+    const baseline = requestFor('N50-P5-PLACEMENT', 'FIVE_TARGET_PLACEMENT')
+    const mutations: Array<(preimage: FleetRuntimePreimage) => void> = [
+      preimage => { preimage.repository = 'watchout/agent-memory' },
+      preimage => { preimage.required_base_branch = 'develop' },
+      preimage => { preimage.head_commit = 'f'.repeat(40) },
+      preimage => { preimage.tree = 'f'.repeat(40) },
+      preimage => { preimage.runtime_surface_entry_count += 1 },
+      preimage => { preimage.runtime_surface_sha256 = SHA_A },
+      preimage => { preimage.distribution_surface_entry_count += 1 },
+      preimage => { preimage.distribution_surface_sha256 = SHA_A },
+    ]
+
+    for (const mutate of mutations) {
+      const drifted = structuredClone(baseline)
+      mutate(drifted.preimages[0])
+      expect(computeFleetRuntimeRequestDigest(drifted)).not.toBe(baseline.request_digest)
+      expect(computeFleetRuntimeIdempotencyKey(drifted)).not.toBe(baseline.idempotency_key)
+    }
+  })
+
   test('executes one injected canary effect and suppresses an exact replay', async () => {
     const counters = emptyCounters()
     const ports = portsFor(counters)
-    const request = requestFor()
+    const request = requestFor('N40-P4-CANARY-VERIFY', 'CANARY_COLD_START', 'watchout/agent-comms-mcp')
 
     const first = await executeFleetRuntimeV1(request, ports)
     const second = await executeFleetRuntimeV1(request, ports)
 
     expect(second).toEqual(first)
     expect(first.result).toBe('PASS')
+    expect(first.per_target[0].preimage).toEqual(EFFECTIVE_PREIMAGES[0])
     expect(counters).toEqual({
       preflight_reads: 2,
       invocation_reservations: 1,
@@ -384,11 +516,12 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
 
   test('executes rollback only with its exact forward receipt and restoration fields', async () => {
     const counters = emptyCounters()
-    const request = requestFor('N40-P4-CANARY-VERIFY', 'ROLLBACK')
+    const request = requestFor('N40-P4-CANARY-VERIFY', 'ROLLBACK', 'watchout/agent-memory')
     const receipt = await executeFleetRuntimeV1(request, portsFor(counters))
 
     expect(receipt.schema_version).toBe('fleet-runtime-v1/rollback-receipt/v1')
     expect(receipt.forward_effect_receipt_sha256).toBe(request.predecessor_receipt.sha256)
+    expect(receipt.restored_preimage).toEqual(EFFECTIVE_PREIMAGES[1])
     expect(receipt.restored_preimage).toEqual(request.preimages[0])
     expect(receipt.queue_counts_unchanged).toBe(true)
     expect(counters.protected_effects).toBe(0)
@@ -424,7 +557,13 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     ['target expansion', 'TARGET_SCOPE_MISMATCH', (request: FleetRuntimeRequest) => { (request.target_scope.repositories as string[]).push('watchout/not-frozen') }],
     ['payload mismatch', 'PAYLOAD_MISMATCH', (request: FleetRuntimeRequest) => { request.payload_digest = SHA_A }],
     ['nonzero queue', 'QUEUE_PRECHECK_NOT_ZERO', (request: FleetRuntimeRequest) => { request.queue_precheck.entries[0].pending_count = 1 }],
-    ['canary preimage drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].tree = 'f'.repeat(40) }],
+    ['preimage branch drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].required_base_branch = 'develop' }],
+    ['preimage runtime count drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].runtime_surface_entry_count += 1 }],
+    ['preimage distribution count drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].distribution_surface_entry_count += 1 }],
+    ['preimage head drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].head_commit = 'f'.repeat(40) }],
+    ['preimage tree drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].tree = 'f'.repeat(40) }],
+    ['preimage runtime digest drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].runtime_surface_sha256 = SHA_A }],
+    ['preimage distribution digest drift', 'PREIMAGE_MISMATCH', (request: FleetRuntimeRequest) => { request.preimages[0].distribution_surface_sha256 = SHA_A }],
   ] as const)('rejects %s before every port with %s', async (_name, code, mutate) => {
     const counters = emptyCounters()
     const request = requestFor()
@@ -432,6 +571,37 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     resignRequest(request)
 
     await expectCode(() => executeFleetRuntimeV1(request, portsFor(counters)), code)
+    expectNoPortCalls(counters)
+  })
+
+  test.each([
+    ['order drift', (request: FleetRuntimeRequest) => { [request.preimages[0], request.preimages[1]] = [request.preimages[1], request.preimages[0]] }],
+    ['missing row', (request: FleetRuntimeRequest) => { request.preimages.pop() }],
+    ['extra row', (request: FleetRuntimeRequest) => { request.preimages.push(structuredClone(request.preimages[0])) }],
+    ['field inversion', (request: FleetRuntimeRequest) => {
+      const preimage = request.preimages[0]
+      ;[preimage.runtime_surface_entry_count, preimage.distribution_surface_entry_count] = [preimage.distribution_surface_entry_count, preimage.runtime_surface_entry_count]
+    }],
+  ] as const)('rejects preimage %s before every port', async (_name, mutate) => {
+    const counters = emptyCounters()
+    const request = requestFor('N50-P5-PLACEMENT', 'FIVE_TARGET_PLACEMENT')
+    mutate(request)
+    resignRequest(request)
+
+    await expectCode(() => executeFleetRuntimeV1(request, portsFor(counters)), 'PREIMAGE_MISMATCH')
+    expectNoPortCalls(counters)
+  })
+
+  test.each([
+    ['initial canary', 'CANARY_COLD_START', 'watchout/agent-comms-mcp'],
+    ['rollback restoration', 'ROLLBACK', 'watchout/agent-memory'],
+  ] as const)('rejects amended FROM preimage during %s before every port', async (_name, operation, target) => {
+    const counters = emptyCounters()
+    const request = requestFor('N40-P4-CANARY-VERIFY', operation, target)
+    request.preimages[0] = structuredClone(AMENDED_FROM_PREIMAGES[target])
+    resignRequest(request)
+
+    await expectCode(() => executeFleetRuntimeV1(request, portsFor(counters)), 'PREIMAGE_MISMATCH')
     expectNoPortCalls(counters)
   })
 
