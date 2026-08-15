@@ -566,7 +566,9 @@ function fixtureEvidence(
   }
   if (phase === 'CREATE_LOCAL_REVERT') return { branch: 'fixture-rollback', head: 'e'.repeat(40), reverted_merge: intent.merge_commit }
   if (phase === 'PUSH_NORMAL_BRANCH') return { branch: intent.branch, head: intent.head, force: false }
-  if (phase === 'CREATE_DRAFT_PR') return { pr_url: 'https://github.com/watchout/kodama/pull/123', branch: intent.branch, draft: true }
+  if (phase === 'CREATE_DRAFT_PR') return {
+    pr_url: 'https://github.com/watchout/kodama/pull/123', branch: intent.branch, head: intent.head, draft: true,
+  }
   if (phase === 'VERIFY_EXTERNAL_MERGE') return fixtureExternalMergeReceipt(request, intent)
   if (phase === 'PREPARE_MERGED_CHECKOUT' || phase === 'VERIFY_EXACT_PREIMAGE') return {
     ...fixtureCheckout({ ...intent, checkout_path: join(context.invocation_directory, 'checkout') }),
@@ -1058,8 +1060,9 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     })
     await original.reserve_once(state)
     const lock = join(stateDirectory, 'invocations', state.idempotency_key, 'owner-write.lock')
-    writeFileSync(lock, `${canonicalFleetRuntimeJson({
-      lock_token: 'dead-lock-token',
+    mkdirSync(lock, { mode: 0o700 })
+    writeFileSync(join(lock, 'owner.json'), `${canonicalFleetRuntimeJson({
+      lock_token: '00000000-0000-4000-8000-000000000007',
       execution_owner: { ...original.owner, owner_id: 'dead-lock-owner' },
     })}\n`)
     now += 5_000
@@ -1067,6 +1070,166 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       approvedRoot: stateDirectory, ownerId: 'new-owner', nowMs: () => now, ownerAlive: () => false, staleAfterMs: 1_000,
     })
     expect((await contender.reserve_once(state)).acquired).toBe(true)
+  })
+
+  test('barrier-controlled real processes atomically retire one stale lock generation without deleting its successor', async () => {
+    const root = temporary('frv1-dual-stale-reclaimer')
+    const stateDirectory = join(root, 'state')
+    const key = `frv1:N40:${'6'.repeat(64)}`
+    const state: FleetRuntimeInvocationState = {
+      idempotency_key: key, request_digest: SHA_A, status: 'reserved', receipt: null,
+    }
+    const staleNow = Date.parse('2026-08-15T08:00:00Z')
+    const displaced = new FileFleetRuntimeV1Persistence(stateDirectory, {
+      approvedRoot: stateDirectory, ownerId: 'displaced-original', nowMs: () => staleNow,
+    })
+    await displaced.reserve_once(state)
+    const invocation = join(stateDirectory, 'invocations', key)
+    const lock = join(invocation, 'owner-write.lock')
+    const staleToken = '00000000-0000-4000-8000-000000000006'
+    mkdirSync(lock, { mode: 0o700 })
+    writeFileSync(join(lock, 'owner.json'), `${canonicalFleetRuntimeJson({
+      lock_token: staleToken,
+      execution_owner: { ...displaced.owner, owner_id: 'dead-lock-owner' },
+    })}\n`)
+
+    const barrier = join(root, 'release-reclaimers')
+    const releaseCritical = join(root, 'release-critical')
+    const criticalReady = join(root, 'critical-ready')
+    const active = join(root, 'critical-active')
+    const entrants = join(root, 'critical-entrants')
+    const overlap = join(root, 'critical-overlap')
+    const effect = join(root, 'simulated-effect')
+    const duplicate = join(root, 'duplicate-effect')
+    const modulePath = join(resolveRepo(), 'core/fleet-runtime-v1-local-provider.ts')
+    const program = `
+      import { appendFileSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { FileFleetRuntimeV1Persistence } from ${JSON.stringify(modulePath)};
+      const [stateDirectory, key, id, ready, barrier, releaseCritical, criticalReady, active, entrants, overlap, effect, duplicate, result] = process.argv.slice(1);
+      const pause = path => { while (!existsSync(path)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); };
+      let reservationChecks = 0;
+      const store = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory,
+        ownerId: 'reclaimer-' + id,
+        staleAfterMs: 1,
+        ownerAlive: owner => {
+          if (owner.owner_id === 'dead-lock-owner') {
+            writeFileSync(ready, 'ready', { flag: 'wx' });
+            pause(barrier);
+            return false;
+          }
+          if (owner.owner_id === 'displaced-original') {
+            reservationChecks += 1;
+            if (reservationChecks > 1) {
+              let ownsActive = false;
+              try { writeFileSync(active, id, { flag: 'wx' }); ownsActive = true; }
+              catch { appendFileSync(overlap, id + '\\n'); }
+              appendFileSync(entrants, id + '\\n');
+              try { writeFileSync(effect, id, { flag: 'wx' }); }
+              catch { appendFileSync(duplicate, id + '\\n'); }
+              writeFileSync(criticalReady, id, { flag: 'a' });
+              pause(releaseCritical);
+              if (ownsActive && existsSync(active)) unlinkSync(active);
+            }
+            return false;
+          }
+          return false;
+        },
+      });
+      try {
+        const acquired = await store.reserve_once({ idempotency_key: key, request_digest: ${JSON.stringify(SHA_A)}, status: 'reserved', receipt: null });
+        writeFileSync(result, acquired.acquired ? 'ACQUIRED' : 'NOT_ACQUIRED', { flag: 'wx' });
+        console.log(acquired.acquired ? 'ACQUIRED_' + id : 'NOT_ACQUIRED_' + id);
+      } catch (error) {
+        const code = error.code ?? 'ERROR';
+        writeFileSync(result, code, { flag: 'wx' });
+        console.log(code + '_' + id);
+      }
+    `
+    const ids = ['a', 'b']
+    const ready = ids.map(id => join(root, `ready-${id}`))
+    const results = ids.map(id => join(root, `result-${id}`))
+    const children = ids.map((id, index) => Bun.spawn([
+      process.execPath, '-e', program, '--', stateDirectory, key, id, ready[index], barrier, releaseCritical,
+      criticalReady, active, entrants, overlap, effect, duplicate, results[index],
+    ], { stdout: 'pipe', stderr: 'pipe' }))
+    for (let attempt = 0; attempt < 400 && ready.some(path => !existsSync(path)); attempt += 1) await Bun.sleep(5)
+    expect(ready.every(existsSync)).toBe(true)
+    writeFileSync(barrier, 'go', { flag: 'wx' })
+    for (let attempt = 0; attempt < 400
+      && (!existsSync(criticalReady) || !results.some(existsSync))
+      && !existsSync(overlap); attempt += 1) await Bun.sleep(5)
+    expect(existsSync(criticalReady)).toBe(true)
+    expect(results.filter(existsSync)).toHaveLength(1)
+    expect(readFileSync(results.find(existsSync)!, 'utf8')).toBe('IN_FLIGHT')
+    expect(existsSync(overlap)).toBe(false)
+    expect(existsSync(duplicate)).toBe(false)
+    const successor = JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')) as {
+      lock_token: string
+      execution_owner: { owner_id: string }
+    }
+    expect(successor.execution_owner.owner_id).toMatch(/^reclaimer-[ab]$/)
+    expect(existsSync(join(invocation, `owner-write.lock.retired.${staleToken}`))).toBe(true)
+    expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).lock_token).toBe(successor.lock_token)
+    writeFileSync(releaseCritical, 'go', { flag: 'wx' })
+    const outputs = await Promise.all(children.map(async child => ({
+      stdout: await new Response(child.stdout).text(), stderr: await new Response(child.stderr).text(), exit: await child.exited,
+    })))
+    expect(outputs.every(output => output.exit === 0), JSON.stringify(outputs)).toBe(true)
+    expect(outputs.filter(output => output.stdout.includes('ACQUIRED_'))).toHaveLength(1)
+    expect(outputs.filter(output => output.stdout.includes('IN_FLIGHT_'))).toHaveLength(1)
+    const entrantRows = readFileSync(entrants, 'utf8').trim().split('\n')
+    const maxCriticalConcurrency = existsSync(overlap) ? 2 : entrantRows.length
+    expect(maxCriticalConcurrency).toBe(1)
+    expect(readFileSync(effect, 'utf8')).toMatch(/^[ab]$/)
+    expect(existsSync(lock)).toBe(false)
+    expect(existsSync(join(invocation, `owner-write.lock.retired.${successor.lock_token}`))).toBe(true)
+
+    await expectProviderCode(() => displaced.heartbeatOwner(key), 'IN_FLIGHT')
+    await expectProviderCode(
+      () => displaced.commitOwnedRecord(key, join(invocation, 'operation-state.json'), 'operation state', null, { owner: 'displaced' }),
+      'IN_FLIGHT',
+    )
+    await expectProviderCode(
+      () => displaced.complete_once({ ...state, status: 'completed', receipt: { result: 'PASS' } }),
+      'IN_FLIGHT',
+    )
+    expect(existsSync(join(invocation, 'operation-state.json'))).toBe(false)
+    expect(existsSync(join(invocation, 'completed.json'))).toBe(false)
+  })
+
+  test('an abandoned unpublished candidate and already-retired stale generation do not wedge takeover recovery', async () => {
+    const stateDirectory = join(temporary('frv1-abandoned-lock-generation'), 'state')
+    const key = `frv1:N40:${'5'.repeat(64)}`
+    const state: FleetRuntimeInvocationState = {
+      idempotency_key: key, request_digest: SHA_A, status: 'reserved', receipt: null,
+    }
+    const staleNow = Date.parse('2026-08-15T08:00:00Z')
+    const original = new FileFleetRuntimeV1Persistence(stateDirectory, {
+      approvedRoot: stateDirectory, ownerId: 'abandoned-owner', nowMs: () => staleNow,
+    })
+    await original.reserve_once(state)
+    const invocation = join(stateDirectory, 'invocations', key)
+    const abandonedToken = '00000000-0000-4000-8000-000000000005'
+    const retired = join(invocation, `owner-write.lock.retired.${abandonedToken}`)
+    const candidate = join(invocation, '.owner-write.lock.abandoned.candidate')
+    for (const directory of [retired, candidate]) {
+      mkdirSync(directory, { mode: 0o700 })
+      writeFileSync(join(directory, 'owner.json'), `${canonicalFleetRuntimeJson({
+        lock_token: abandonedToken,
+        execution_owner: { ...original.owner, owner_id: 'abandoned-reclaimer' },
+      })}\n`)
+    }
+    const contender = new FileFleetRuntimeV1Persistence(stateDirectory, {
+      approvedRoot: stateDirectory, ownerId: 'recovered-owner', nowMs: () => staleNow + 120_000,
+      staleAfterMs: 1, ownerAlive: () => false,
+    })
+    expect((await contender.reserve_once(state)).acquired).toBe(true)
+    const durable = await contender.load(key) as FleetRuntimeInvocationState & { execution_owner: { owner_id: string } }
+    expect(durable.execution_owner.owner_id).toBe('recovered-owner')
+    expect(existsSync(join(invocation, 'owner-write.lock'))).toBe(false)
+    expect(existsSync(retired)).toBe(true)
+    expect(existsSync(candidate)).toBe(true)
   })
 
   test('queue parsing requires fresh explicit finite nonnegative integer counters', () => {
@@ -1385,6 +1548,79 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       () => new ConcreteFleetRuntimeV1LocalSystem().buildReceipt(request, preflight, emptyEvidence),
       'READBACK_INVALID',
     )
+  })
+
+  test('full journal validation and receipt building reject recomputed cross-phase head, branch, and PR substitutions', async () => {
+    for (const operation of ['CANARY_COLD_START', 'ROLLBACK'] as const) {
+      const request = requestFor(operation)
+      const preflight = preflightFor(request)
+      const stateDirectory = join(temporary(`frv1-cross-phase-chain-${operation}`), 'state')
+      await executeLocalFleetRuntimeV1(protectedFixtureInput({
+        request, stateDirectory, executeProtectedEffects: true, system: new FixtureSystem(), now: () => '2026-08-15T08:30:00Z',
+      }))
+      const original = JSON.parse(readFileSync(join(
+        stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json',
+      ), 'utf8')) as FleetRuntimeLocalOperationState
+      const refreshPhase = (state: FleetRuntimeLocalOperationState, phaseName: FleetRuntimeLocalPhase): void => {
+        const phase = state.phases[phaseName]!
+        phase.intent_sha256 = digest(phase.intent)
+        phase.evidence!.intent_sha256 = phase.intent_sha256
+        if (phaseName === 'VERIFY_EXTERNAL_MERGE') {
+          const receipt = structuredClone(phase.evidence!)
+          delete receipt.execution_owner_id
+          delete receipt.phase
+          delete receipt.intent_sha256
+          receipt.receipt_sha256 = computeFleetRuntimeReceiptDigest(receipt as unknown as FleetRuntimeEffectReceipt)
+          phase.evidence!.receipt_sha256 = receipt.receipt_sha256
+        }
+        phase.evidence_sha256 = digest(phase.evidence)
+      }
+      const probes: Array<{ name: string; mutate: (state: FleetRuntimeLocalOperationState) => void }> = [
+        {
+          name: 'local e head versus downstream f head',
+          mutate: state => {
+            state.phases.PUSH_NORMAL_BRANCH!.intent.head = 'f'.repeat(40)
+            state.phases.PUSH_NORMAL_BRANCH!.evidence!.head = 'f'.repeat(40)
+            state.phases.CREATE_DRAFT_PR!.intent.head = 'f'.repeat(40)
+            state.phases.CREATE_DRAFT_PR!.evidence!.head = 'f'.repeat(40)
+            state.phases.VERIFY_EXTERNAL_MERGE!.intent.pushed_head = 'f'.repeat(40)
+            state.phases.VERIFY_EXTERNAL_MERGE!.evidence!.pushed_head = 'f'.repeat(40)
+            for (const phase of ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'VERIFY_EXTERNAL_MERGE'] as const) refreshPhase(state, phase)
+          },
+        },
+        {
+          name: 'downstream branch substitution',
+          mutate: state => {
+            state.phases.PUSH_NORMAL_BRANCH!.intent.branch = 'foreign-branch'
+            state.phases.PUSH_NORMAL_BRANCH!.evidence!.branch = 'foreign-branch'
+            state.phases.CREATE_DRAFT_PR!.intent.branch = 'foreign-branch'
+            state.phases.CREATE_DRAFT_PR!.evidence!.branch = 'foreign-branch'
+            for (const phase of ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR'] as const) refreshPhase(state, phase)
+          },
+        },
+        {
+          name: 'external merge PR URL substitution',
+          mutate: state => {
+            const substituted = 'https://github.com/watchout/kodama/pull/456'
+            state.phases.VERIFY_EXTERNAL_MERGE!.intent.pr_url = substituted
+            state.phases.VERIFY_EXTERNAL_MERGE!.evidence!.pr_url = substituted
+            refreshPhase(state, 'VERIFY_EXTERNAL_MERGE')
+          },
+        },
+      ]
+      for (const probe of probes) {
+        const state = structuredClone(original)
+        probe.mutate(state)
+        expect(
+          () => validateFleetRuntimeLocalOperationState(state, request, state.execution_owner_id),
+          `${operation}: validator accepted ${probe.name}`,
+        ).toThrow('STATE_RECORD_INVALID')
+        await expectProviderCode(
+          () => new ConcreteFleetRuntimeV1LocalSystem().buildReceipt(request, preflight, state),
+          'STATE_RECORD_INVALID',
+        )
+      }
+    }
   })
 
   test('every completed phase rejects empty, missing, extra, foreign, digest-only, count, order, and semantic tamper', async () => {

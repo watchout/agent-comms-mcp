@@ -11,6 +11,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -914,6 +915,11 @@ interface OwnedFleetRuntimeInvocationState extends FleetRuntimeInvocationState {
   execution_owner?: FleetRuntimeExecutionOwner
 }
 
+interface InvocationWriteLockRecord {
+  lock_token: string
+  execution_owner: FleetRuntimeExecutionOwner
+}
+
 export interface FleetRuntimePersistenceOptions {
   approvedRoot?: string
   ownerId?: string
@@ -972,6 +978,111 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     return join(this.invocationDirectory(key), 'owner-write.lock')
   }
 
+  private ownerWriteLockRecordPath(lockDirectory: string): string {
+    return join(lockDirectory, 'owner.json')
+  }
+
+  private readInvocationWriteLock(lockDirectory: string, label: string): InvocationWriteLockRecord {
+    assertSafeStatePath(this.root, lockDirectory)
+    if (!existsSync(lockDirectory) || !lstatSync(lockDirectory).isDirectory()) {
+      return providerFail('STATE_RECORD_INVALID', `${label} must be a nonempty lock directory`)
+    }
+    const record = readState<InvocationWriteLockRecord>(
+      this.root,
+      this.ownerWriteLockRecordPath(lockDirectory),
+      label,
+    )
+    assertPlainRecord(record, label)
+    assertExactKeys(record, ['execution_owner', 'lock_token'], label)
+    const owner = record.execution_owner
+    if (typeof record.lock_token !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(record.lock_token)
+      || owner === null || typeof owner !== 'object'
+      || typeof owner.owner_id !== 'string' || owner.owner_id.length === 0
+      || typeof owner.host !== 'string' || owner.host.length === 0
+      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || !Number.isFinite(Date.parse(owner.acquired_at)) || !Number.isFinite(Date.parse(owner.heartbeat_at))) {
+      return providerFail('STATE_RECORD_INVALID', `${label} has an invalid token or owner`)
+    }
+    return record
+  }
+
+  private discardWriteLockCandidate(candidate: string): void {
+    if (!existsSync(candidate)) return
+    const record = this.ownerWriteLockRecordPath(candidate)
+    if (existsSync(record)) unlinkSync(record)
+    rmdirSync(candidate)
+    syncDirectory(dirname(candidate))
+  }
+
+  private publishInvocationWriteLock(key: string, record: InvocationWriteLockRecord): boolean {
+    const parent = this.invocationDirectory(key)
+    const lock = this.ownerWriteLockPath(key)
+    const candidate = join(parent, `.owner-write.lock.${record.lock_token}.candidate`)
+    assertSafeStatePath(this.root, candidate)
+    mkdirSync(candidate, { mode: 0o700 })
+    try {
+      atomicWrite(this.root, this.ownerWriteLockRecordPath(candidate), record, true)
+      try {
+        renameSync(candidate, lock)
+        syncDirectory(parent)
+        const published = this.readInvocationWriteLock(lock, 'published owner write lock')
+        if (canonicalFleetRuntimeJson(published) !== canonicalFleetRuntimeJson(record)) {
+          return providerFail('STATE_RECORD_INVALID', 'published owner write lock differs from its candidate')
+        }
+        return true
+      } catch (error) {
+        if (existsSync(lock)) return false
+        throw error
+      }
+    } finally {
+      this.discardWriteLockCandidate(candidate)
+    }
+  }
+
+  private retiredOwnerWriteLockPath(key: string, lockToken: string): string {
+    return join(this.invocationDirectory(key), `owner-write.lock.retired.${lockToken}`)
+  }
+
+  private retireInvocationWriteLock(
+    key: string,
+    observed: InvocationWriteLockRecord,
+    label: string,
+  ): boolean {
+    const lock = this.ownerWriteLockPath(key)
+    if (!existsSync(lock)) return false
+    const current = this.readInvocationWriteLock(lock, label)
+    if (current.lock_token !== observed.lock_token
+      || canonicalFleetRuntimeJson(current) !== canonicalFleetRuntimeJson(observed)) return false
+    const retired = this.retiredOwnerWriteLockPath(key, observed.lock_token)
+    if (existsSync(retired)) {
+      const prior = this.readInvocationWriteLock(retired, `${label} retired generation`)
+      if (canonicalFleetRuntimeJson(prior) !== canonicalFleetRuntimeJson(observed)) {
+        return providerFail('STATE_RECORD_INVALID', `${label} retired generation differs for the same token`)
+      }
+      return false
+    }
+    try {
+      renameSync(lock, retired)
+      syncDirectory(dirname(lock))
+    } catch (error) {
+      if (existsSync(retired)) {
+        const winner = this.readInvocationWriteLock(retired, `${label} winning retired generation`)
+        if (canonicalFleetRuntimeJson(winner) !== canonicalFleetRuntimeJson(observed)) {
+          return providerFail('STATE_RECORD_INVALID', `${label} winning retired generation differs`)
+        }
+        return false
+      }
+      if (!existsSync(lock)) return false
+      throw error
+    }
+    const moved = this.readInvocationWriteLock(retired, `${label} retired generation readback`)
+    if (canonicalFleetRuntimeJson(moved) !== canonicalFleetRuntimeJson(observed)) {
+      return providerFail('STATE_RECORD_INVALID', `${label} changed across atomic retirement`)
+    }
+    return true
+  }
+
   private assertOwnerUnlocked(key: string): OwnedFleetRuntimeInvocationState {
     const path = this.reservationPath(key)
     if (!existsSync(path)) return providerFail('IN_FLIGHT', 'reservation no longer exists')
@@ -987,45 +1098,36 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     action: () => T,
     allowStaleLockBreak = true,
   ): T {
-    const lock = this.ownerWriteLockPath(key)
     const lockToken = randomUUID()
-    const lockOwner: FleetRuntimeExecutionOwner = {
-      ...this.owner,
-      heartbeat_at: new Date(this.nowMs()).toISOString(),
+    const lockRecord: InvocationWriteLockRecord = {
+      lock_token: lockToken,
+      execution_owner: {
+        ...this.owner,
+        heartbeat_at: new Date(this.nowMs()).toISOString(),
+      },
     }
-    try {
-      atomicWrite(this.root, lock, { lock_token: lockToken, execution_owner: lockOwner }, true)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const lockState = readState<{ lock_token?: unknown; execution_owner?: FleetRuntimeExecutionOwner }>(
-        this.root,
-        lock,
-        'owner write lock',
-      )
-      const observedOwner = lockState.execution_owner
+    if (!this.publishInvocationWriteLock(key, lockRecord)) {
+      const lock = this.ownerWriteLockPath(key)
+      const observed = this.readInvocationWriteLock(lock, 'owner write lock')
+      const observedOwner = observed.execution_owner
       const heartbeat = Date.parse(String(observedOwner?.heartbeat_at ?? ''))
       if (allowStaleLockBreak && observedOwner && !this.ownerAlive(observedOwner)
         && Number.isFinite(heartbeat) && this.nowMs() - heartbeat >= this.staleAfterMs) {
-        try {
-          unlinkSync(lock)
-          syncDirectory(dirname(lock))
-        } catch (unlinkError) {
-          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError
+        if (!this.retireInvocationWriteLock(key, observed, 'stale owner write lock reclaim')) {
+          return providerFail('IN_FLIGHT', 'stale invocation write lock changed before atomic retirement')
         }
-        return this.withInvocationWriteLock(key, action, false)
+        if (!this.publishInvocationWriteLock(key, lockRecord)) {
+          return providerFail('IN_FLIGHT', 'another executor published the successor invocation write lock')
+        }
+      } else {
+        return providerFail('IN_FLIGHT', 'another executor owns the durable invocation write lock')
       }
-      return providerFail('IN_FLIGHT', 'another executor owns the durable invocation write lock')
     }
     try {
       return action()
     } finally {
-      if (existsSync(lock)) {
-        const current = readState<{ lock_token?: unknown }>(this.root, lock, 'owner write lock release')
-        if (current.lock_token !== lockToken) {
-          return providerFail('STATE_RECORD_INVALID', 'invocation write lock token changed before release')
-        }
-        unlinkSync(lock)
-        syncDirectory(dirname(lock))
+      if (!this.retireInvocationWriteLock(key, lockRecord, 'owner write lock release')) {
+        return providerFail('STATE_RECORD_INVALID', 'invocation write lock changed before clean release')
       }
     }
   }
@@ -1294,7 +1396,7 @@ const PHASE_EVIDENCE_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, read
   VERIFY_EXACT_PAYLOAD: Object.freeze(['checkout_blobs', 'path_count', 'payload_digest', 'payload_paths', 'selected_payload_path']),
   CREATE_LOCAL_COMMIT: Object.freeze(['branch', 'commit_blobs', 'head', 'index_blobs', 'payload_paths']),
   PUSH_NORMAL_BRANCH: Object.freeze(['branch', 'force', 'head']),
-  CREATE_DRAFT_PR: Object.freeze(['branch', 'draft', 'pr_url']),
+  CREATE_DRAFT_PR: Object.freeze(['branch', 'draft', 'head', 'pr_url']),
   CREATE_LOCAL_REVERT: Object.freeze(['branch', 'head', 'reverted_merge']),
   VERIFY_EXTERNAL_MERGE: Object.freeze(
     EXTERNAL_MERGE_RECEIPT_KEYS.filter(key => !(PHASE_BINDING_KEYS as readonly string[]).includes(key)),
@@ -1438,14 +1540,27 @@ function validatePhaseSemantics(
   }
   if (phaseName === 'PUSH_NORMAL_BRANCH') {
     assertString(phase.intent.branch, 'push branch')
+    const local = priorEvidence.CREATE_LOCAL_COMMIT ?? priorEvidence.CREATE_LOCAL_REVERT
+    if (!local || phase.intent.branch !== local.branch || phase.intent.head !== local.head) {
+      return providerFail('STATE_RECORD_INVALID', 'push intent differs from the exact local commit or revert branch/head')
+    }
     if (phase.intent.force !== false) return providerFail('STATE_RECORD_INVALID', 'push intent must be non-force')
   }
   if (phaseName === 'CREATE_DRAFT_PR') {
     assertString(phase.intent.branch, 'Draft PR branch')
+    const pushed = priorEvidence.PUSH_NORMAL_BRANCH
+    if (!pushed || phase.intent.branch !== pushed.branch || phase.intent.head !== pushed.head) {
+      return providerFail('STATE_RECORD_INVALID', 'Draft PR intent differs from the exact pushed branch/head')
+    }
     if (phase.intent.repository !== 'watchout/kodama' || phase.intent.base !== request.preimages[0].required_base_branch
       || phase.intent.draft !== true) return providerFail('STATE_RECORD_INVALID', 'Draft PR intent differs')
   }
   if (phaseName === 'VERIFY_EXTERNAL_MERGE') {
+    const pushed = priorEvidence.PUSH_NORMAL_BRANCH
+    const created = priorEvidence.CREATE_DRAFT_PR
+    if (!pushed || !created || phase.intent.pushed_head !== pushed.head || phase.intent.pr_url !== created.pr_url) {
+      return providerFail('STATE_RECORD_INVALID', 'external merge intent differs from the exact pushed head or created PR')
+    }
     if (phase.intent.repository !== 'watchout/kodama' || phase.intent.base !== request.preimages[0].required_base_branch
       || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(phase.intent.pr_url ?? ''))
       || !COMMIT.test(String(phase.intent.pushed_head ?? ''))) {
@@ -1535,7 +1650,7 @@ function validatePhaseSemantics(
       return providerFail('STATE_RECORD_INVALID', 'push evidence differs from immutable non-force intent')
     }
   } else if (phaseName === 'CREATE_DRAFT_PR') {
-    if (evidence.branch !== phase.intent.branch || evidence.draft !== true
+    if (evidence.branch !== phase.intent.branch || evidence.head !== phase.intent.head || evidence.draft !== true
       || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(evidence.pr_url ?? ''))) {
       return providerFail('STATE_RECORD_INVALID', 'Draft PR evidence differs from intent')
     }
@@ -2674,7 +2789,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       ], checkout)
       const prUrl = output.trim().split(/\s+/).find(value => /^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(value))
       if (!prUrl) return providerFail('READBACK_INVALID', 'gh did not return an exact Kodama PR URL')
-      return { evidence: { pr_url: prUrl, branch, draft: true }, protected_effect_count: 1 }
+      return { evidence: { pr_url: prUrl, branch, head: pushed?.head, draft: true }, protected_effect_count: 1 }
     }
     if (phase === 'COLD_START_DISCORD_KODAMA') {
       const clean = await this.verifyCheckout(
@@ -2827,7 +2942,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       const exact = rows.filter(row => row.isDraft === true && row.headRefOid === head && row.baseRefName === base
         && /^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(row.url)))
       if (exact.length !== 1) return { completed: false, evidence: null, protected_effect_count: 1 }
-      return { completed: true, evidence: { pr_url: exact[0].url, branch, draft: true }, protected_effect_count: 1 }
+      return { completed: true, evidence: { pr_url: exact[0].url, branch, head, draft: true }, protected_effect_count: 1 }
     }
     if (phase === 'COLD_START_DISCORD_KODAMA') {
       const mutable = context as FleetRuntimeLocalPhaseContext
