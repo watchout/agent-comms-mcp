@@ -1,0 +1,12 @@
+{
+  "schema_version": "cell-scope/v1",
+  "cell_id": "CELL-AUN-602-QUEUE-WAKEUP-SESSION-BINDING-001",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/602",
+  "declared_by": "aun seat, 2026-08-17",
+  "declaration_note": "Issue #602 is titled 'Automate full AUN recovery after terminal reboot, including queue wake-up'. This cell is that wake-up path: the runtime session binding that the memory_ready gate compares against.",
+  "allowed_paths": [
+    "core/runtime-heartbeat.ts",
+    "tests/runtime-heartbeat.test.ts",
+    ".shirube/cell-scope/CELL-AUN-602-QUEUE-WAKEUP-SESSION-BINDING-001.json"
+  ]
+}
