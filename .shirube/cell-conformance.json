@@ -1,0 +1,33 @@
+{
+  "schema_version": "cell-conformance-config/v1",
+  "repo": "watchout/agent-comms-mcp",
+  "protected_globs": [
+    ".github/workflows/**",
+    "db/migrations/**",
+    "db/migrate.ts",
+    "scripts/shirube-*.mjs",
+    "config/launchd/**",
+    "config/*.json",
+    "package.json",
+    ".npmrc"
+  ],
+  "protected_globs_note": "config/launchd/** was added 2026-08-16. PR #918 changed config/launchd/com.agent-comms.state-daemon.plist and neither Layer 0 nor the first draft of this config treated it as protected. That change was comment-only, but a change to ProgramArguments or StartInterval on the same path would have merged unremarked.",
+  "src_globs": [
+    "core/**",
+    "cli/**",
+    "adapters/**",
+    "bin/**",
+    "scripts/**",
+    "server.ts"
+  ],
+  "test_globs": [
+    "tests/**"
+  ],
+  "required_body_sections": [
+    "CELL-ID:",
+    "Risk Tier:",
+    "Allowed paths",
+    "Protected surfaces",
+    "Validation"
+  ]
+}

@@ -22,6 +22,10 @@ const overlayFixturePaths = [
   ".github/pull_request_template.md",
   ".github/workflows/pr-checks.yml",
   "scripts/shirube-current-overlay-check.mjs",
+  // The gate imports its conformance decision from here rather than keeping a second
+  // copy of the rule. An isolated gate root therefore has to carry it too.
+  "scripts/lib/cell-conformance.mjs",
+  ".shirube/cell-conformance.json",
 ];
 
 function runGate(
