@@ -1,0 +1,15 @@
+{
+  "schema_version": "cell-scope/v1",
+  "cell_id": "CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/602",
+  "declared_by": "aun seat, 2026-08-16",
+  "declaration_note": "This cell had no machine-readable scope anywhere. Its identifier is required by the Layer 0 gate for any workflow change, so several unrelated PRs cite it, but nothing states what it may touch. That is the exact gap this checker exists to close, so the first scope file written is its own. Narrow it or supersede it whenever the cell's real boundary is decided.",
+  "allowed_paths": [
+    ".github/workflows/**",
+    ".shirube/**",
+    "scripts/shirube-*.mjs",
+    "scripts/cell-conformance-check.mjs",
+    "tests/cell-conformance-check.test.ts",
+    "docs/**"
+  ]
+}

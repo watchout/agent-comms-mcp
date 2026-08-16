@@ -1,0 +1,120 @@
+name: Cell conformance (report-only)
+
+# Report-only by design, for now. This job never fails a pull request; it writes its
+# verdict to the run summary. The point of the first stage is to accumulate evidence on
+# real PRs, so that flipping it to blocking is a decision backed by observed behaviour
+# rather than a hope. Flipping it is an owner decision, because this file is a protected
+# surface.
+#
+# What it decides mechanically, so a seat only has to judge meaning:
+#   scope               every changed path is inside the cell's declared allowed_paths
+#   protected_surfaces  no changed path touches workflows, migrations, launchd, packaging
+#   test_cochange       a source change is accompanied by some test change (weak, see docs)
+#   body_shape          required PR body sections exist and are non-empty (shape only)
+#
+# Scope is read from `.shirube/cell-scope/<CELL-ID>.json` **on the base branch**, never
+# from the pull request. A PR that declares its own allowed paths and is then checked
+# against them is approving itself. Changing a scope file therefore takes its own
+# reviewed PR. This is an approximation of "declared at the control source": stronger in
+# that edits require review, weaker in that the declaration lives in the repo rather than
+# in the control-source issue. Moving it to the issue is tracked as follow-up.
+#
+# Undeterminable is never a pass. A missing scope file is reported as a failure to
+# determine, not as conformance.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  cell-conformance:
+    name: Cell conformance (report-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed files
+        run: |
+          git fetch --no-tags --depth=0 origin "${{ github.base_ref }}"
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" > changed-files.txt
+          echo "changed files: $(wc -l < changed-files.txt)"
+
+      - name: Resolve the cell scope from the base branch
+        id: scope
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > pr-body.md
+          cell_id="$(sed -n 's/.*CELL-ID:[[:space:]]*\([A-Za-z0-9._-]*\).*/\1/p' pr-body.md | head -1)"
+          echo "cell_id=${cell_id:-<none>}"
+          scope_path=".shirube/cell-scope/${cell_id}.json"
+          if [ -n "$cell_id" ] && git cat-file -e "origin/${{ github.base_ref }}:${scope_path}" 2>/dev/null; then
+            git show "origin/${{ github.base_ref }}:${scope_path}" > cell-scope.json
+            echo "resolved=true" >> "$GITHUB_OUTPUT"
+          else
+            # Fail closed, explicitly and legibly, rather than inventing a scope.
+            printf '{"schema_version":"cell-scope/v1","cell_id":"%s"}\n' "${cell_id:-unknown}" > cell-scope.json
+            echo "resolved=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "scope_path=${scope_path}" >> "$GITHUB_OUTPUT"
+          echo "cell_id=${cell_id:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Run the conformance checker
+        id: check
+        continue-on-error: true
+        run: |
+          node scripts/cell-conformance-check.mjs \
+            --config .shirube/cell-conformance.json \
+            --changed-files changed-files.txt \
+            --scope cell-scope.json \
+            --pr-body pr-body.md \
+            --format text | tee conformance.txt
+          node scripts/cell-conformance-check.mjs \
+            --config .shirube/cell-conformance.json \
+            --changed-files changed-files.txt \
+            --scope cell-scope.json \
+            --pr-body pr-body.md \
+            --format json > conformance.json
+
+      - name: Publish the verdict to the run summary
+        if: always()
+        run: |
+          {
+            echo "## Cell conformance (report-only)"
+            echo
+            echo "This job does not block merge. It reports what can be decided mechanically."
+            echo
+            echo "- cell: \`${{ steps.scope.outputs.cell_id }}\`"
+            if [ "${{ steps.scope.outputs.resolved }}" != "true" ]; then
+              echo "- scope: **not declared**. Expected \`${{ steps.scope.outputs.scope_path }}\` on \`${{ github.base_ref }}\`."
+              echo "  A missing scope declaration is reported as a failure to determine, not as conformance."
+            else
+              echo "- scope: read from \`${{ steps.scope.outputs.scope_path }}\` on \`${{ github.base_ref }}\`"
+            fi
+            echo
+            echo '```'
+            cat conformance.txt 2>/dev/null || echo "checker produced no output"
+            echo '```'
+            echo
+            echo "\`test_cochange\` proves a test file changed, not that the change is tested."
+            echo "\`body_shape\` proves a section exists and is non-empty, not that its content is true."
+            echo "Both remain a seat's judgement."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the machine-readable verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-conformance
+          path: |
+            conformance.json
+            conformance.txt
+            changed-files.txt
+          if-no-files-found: warn
