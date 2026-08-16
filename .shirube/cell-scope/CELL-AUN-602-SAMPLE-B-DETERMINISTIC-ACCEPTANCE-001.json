@@ -1,0 +1,12 @@
+{
+  "schema_version": "cell-scope/v1",
+  "cell_id": "CELL-AUN-602-SAMPLE-B-DETERMINISTIC-ACCEPTANCE-001",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/602",
+  "declared_by": "aun seat, 2026-08-17",
+  "declaration_note": "Created for this work rather than borrowed from an existing cell, and declared machine-readably from the start. The owner chose to replace the Sample B ceremony with a deterministic acceptance check rather than run another adjudicated attempt.",
+  "allowed_paths": [
+    "scripts/verify-internal-round-trip.ts",
+    "tests/verify-internal-round-trip.test.ts",
+    ".shirube/cell-scope/CELL-AUN-602-SAMPLE-B-DETERMINISTIC-ACCEPTANCE-001.json"
+  ]
+}
