@@ -1,5 +1,19 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import { evaluateStandingAuthorization } from "./lib/cell-conformance.mjs";
+
+// The owner published a standing authorization for frozen-roadmap A1 work:
+// CI green, no schema/billing/credential change, no breaking change, and it does not
+// override this gate for anything protected. Until this amendment, that decision could
+// not reach the gate at all: the exact-head requirement below applied to every non-draft
+// PR unconditionally, and a standing policy cannot satisfy a check on who authored a
+// comment. The result was that every PR in this repository, however small, required the
+// owner to run an approval by hand.
+//
+// This waiver mechanises the decision the owner already made, and nothing more.
+const STANDING_DECISION_ID = "OD-AUN-602-STANDING-MERGE-AND-NO-DRIFT-20260816-001";
+const STANDING_DECISION_URL = "https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5306783646";
+const CONFORMANCE_CONFIG_PATH = ".shirube/cell-conformance.json";
 
 const args = parseArgs(process.argv.slice(2));
 const repo = stringArg(args.repo) ?? process.env.GITHUB_REPOSITORY ?? "";
@@ -186,16 +200,47 @@ if (pr) {
     errors.push(`PR body must include the current exact head SHA ${headSha}.`);
   }
   if (pr.draft !== true) {
-    if (!labels.has("owner-exact-head-approved")) {
-      errors.push("Non-draft PRs require label owner-exact-head-approved.");
+    const waiver = evaluateStandingAuthorization_fromDisk();
+    if (waiver.applies) {
+      warnings.push(`Exact-head owner decision waived under ${STANDING_DECISION_ID}: ${waiver.reason}`);
+      // The merge method still has to be stated explicitly; the waiver removes the
+      // per-head approval, not the requirement to say how the PR merges.
+      requireMergeMethodSelection(null);
+    } else {
+      warnings.push(`Standing authorization does not apply: ${waiver.reason}`);
+      if (!labels.has("owner-exact-head-approved")) {
+        errors.push("Non-draft PRs require label owner-exact-head-approved.");
+      }
+      if (!labels.has("shirube-current-overlay")) {
+        errors.push("Non-draft PRs require label shirube-current-overlay.");
+      }
+      const ownerDecision = await requireOwnerDecisionArtifact();
+      requireMergeMethodSelection(ownerDecision);
     }
-    if (!labels.has("shirube-current-overlay")) {
-      errors.push("Non-draft PRs require label shirube-current-overlay.");
-    }
-    const ownerDecision = await requireOwnerDecisionArtifact();
-    requireMergeMethodSelection(ownerDecision);
   }
 }
+
+// Reads what the gate can see from disk, then defers to the shared decision function so
+// that this gate and the conformance report cannot disagree.
+function evaluateStandingAuthorization_fromDisk() {
+  let config = null;
+  if (existsSync(CONFORMANCE_CONFIG_PATH)) {
+    try {
+      config = JSON.parse(readFileSync(CONFORMANCE_CONFIG_PATH, "utf8"));
+    } catch (error) {
+      return { applies: false, reason: `${CONFORMANCE_CONFIG_PATH} is unreadable: ${error.message}` };
+    }
+  }
+  return evaluateStandingAuthorization({
+    config,
+    changedFiles,
+    labels,
+    body,
+    decisionId: STANDING_DECISION_ID,
+    decisionUrl: STANDING_DECISION_URL,
+  });
+}
+
 
 if (isRapidLiteAdoptionPr) {
   for (const file of changedFiles) {

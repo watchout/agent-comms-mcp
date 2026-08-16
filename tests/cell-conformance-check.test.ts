@@ -186,3 +186,65 @@ describe('cell conformance: a fully conformant cell passes', () => {
     expect(result.exitCode).toBe(0)
   })
 })
+
+describe('standing authorization waiver: every condition must hold, undeterminable refuses', () => {
+  const ID = 'OD-AUN-602-STANDING-MERGE-AND-NO-DRIFT-20260816-001'
+  const URL = 'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5306783646'
+  const citing = `Refs ${ID} published at ${URL}`
+
+  const evaluate = async (over: Partial<{
+    config: unknown; changedFiles: string[]; labels: Set<string>; body: string
+  }> = {}) => {
+    const { evaluateStandingAuthorization } = await import('../scripts/lib/cell-conformance.mjs')
+    return evaluateStandingAuthorization({
+      config: 'config' in over ? over.config : CONFIG,
+      changedFiles: over.changedFiles ?? ['core/a.ts', 'tests/a.test.ts'],
+      labels: over.labels ?? new Set<string>(),
+      body: over.body ?? citing,
+      decisionId: ID,
+      decisionUrl: URL,
+    })
+  }
+
+  test('a conformant, non-protected, non-breaking PR that cites the decision is waived', async () => {
+    expect((await evaluate()).applies).toBe(true)
+  })
+
+  test('touching a protected surface refuses the waiver', async () => {
+    const result = await evaluate({ changedFiles: ['.github/workflows/ci.yml'] })
+    expect(result.applies).toBe(false)
+    expect(result.reason).toContain('protected surface')
+  })
+
+  test('a launchd plist refuses the waiver', async () => {
+    const result = await evaluate({ changedFiles: ['config/launchd/com.agent-comms.state-daemon.plist'] })
+    expect(result.applies).toBe(false)
+  })
+
+  test('a breaking change refuses the waiver even when nothing protected is touched', async () => {
+    const result = await evaluate({ labels: new Set(['breaking-change-verified']) })
+    expect(result.applies).toBe(false)
+    expect(result.reason).toContain('breaking-change-verified')
+  })
+
+  test('not citing the decision id refuses the waiver', async () => {
+    const result = await evaluate({ body: `published at ${URL}` })
+    expect(result.applies).toBe(false)
+  })
+
+  test('citing the id without the published URL refuses the waiver', async () => {
+    const result = await evaluate({ body: `Refs ${ID}` })
+    expect(result.applies).toBe(false)
+  })
+
+  test('an absent config refuses rather than assuming nothing is protected', async () => {
+    const result = await evaluate({ config: null })
+    expect(result.applies).toBe(false)
+    expect(result.reason).toContain('absent')
+  })
+
+  test('a config with no protected_globs refuses rather than assuming', async () => {
+    const result = await evaluate({ config: { ...CONFIG, protected_globs: undefined } })
+    expect(result.applies).toBe(false)
+  })
+})
