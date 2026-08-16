@@ -13,6 +13,7 @@ import {
   parseStateDaemonLaunchAgentPlist,
   STATE_DAEMON_LAUNCH_AGENT_LABEL,
   STATE_DAEMON_PLIST_NAME,
+  validateStateDaemonCanaryOverlayEnv,
   validateStateDaemonLaunchAgentConfig,
   type PathProbe,
   type StateDaemonLaunchAgentConfig,
@@ -304,6 +305,7 @@ export function buildStateDaemonLaunchAgentReadinessReport(
       probe,
       allowRestoreOwnedTemp: allowPrivateTmp,
       restoreRoot: config.environmentVariables.STATE_DAEMON_RESTORE_ROOT ?? null,
+      now,
     })
     : null
   const programPath = config?.programArguments[0] ?? runtime.paths.program
@@ -326,6 +328,42 @@ export function buildStateDaemonLaunchAgentReadinessReport(
   if (validation) {
     blockers.push(...validation.errors.map(issueToFinding))
     warnings.push(...validation.warnings.map(warningFromIssue))
+  }
+  const loadedOverlayEnv = {
+    STATE_DAEMON_AGENT_ALLOWLIST: runtime.environment.agent_allowlist ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: runtime.environment.canary_overlay_control_ref ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: runtime.environment.canary_overlay_owner_decision_ref ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: runtime.environment.canary_overlay_expires_at ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: runtime.environment.canary_overlay_prior_plist_sha256 ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: runtime.environment.canary_overlay_rollback_command ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: runtime.environment.canary_overlay_observed_state_destination ?? '',
+    STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: runtime.environment.canary_overlay_subject_digest ?? '',
+  }
+  const loadedOverlayValidation = validateStateDaemonCanaryOverlayEnv(loadedOverlayEnv, now())
+  blockers.push(...loadedOverlayValidation.issues.map(issueToFinding))
+  if (runtime.launchd.loaded === true) {
+    const plistOverlayEnv = {
+      STATE_DAEMON_AGENT_ALLOWLIST: env.STATE_DAEMON_AGENT_ALLOWLIST ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: env.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: env.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: env.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: env.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256 ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: env.STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: env.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION ?? '',
+      STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: env.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST ?? '',
+    }
+    const mismatchedKeys = Object.keys(plistOverlayEnv).filter((key) =>
+      plistOverlayEnv[key as keyof typeof plistOverlayEnv] !== loadedOverlayEnv[key as keyof typeof loadedOverlayEnv],
+    )
+    if (mismatchedKeys.length > 0) {
+      blockers.push(finding(
+        'STATE_DAEMON_CANARY_OVERLAY_LOADED_STATE_DRIFT',
+        'blocker',
+        'launchd',
+        'Loaded state-daemon canary overlay does not match the installed LaunchAgent plist.',
+        { evidence: { mismatched_keys: mismatchedKeys } },
+      ))
+    }
   }
   if (!allowPrivateTmp) {
     for (const [field, value] of [

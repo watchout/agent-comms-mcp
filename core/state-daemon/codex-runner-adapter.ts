@@ -15,11 +15,15 @@ export interface CodexRunnerCommand {
   env: Record<string, string>
 }
 
+type CodexRunnerCommandInput = Omit<CodexRunnerInvocation, 'memoryReadyProject'> & {
+  memoryReadyProject?: string
+}
+
 function bunExecutable(): string {
   return process.env.STATE_DAEMON_BUN_EXECUTABLE?.trim() || process.execPath
 }
 
-function toRuntimeInvocation(input: CodexRunnerInvocation): RuntimeRunnerInvocation {
+function toRuntimeInvocation(input: CodexRunnerCommandInput): RuntimeRunnerInvocation {
   return buildRuntimeRunnerInvocation({
     runtimeKind: 'codex',
     agentId: input.agentId,
@@ -32,8 +36,9 @@ function toRuntimeInvocation(input: CodexRunnerInvocation): RuntimeRunnerInvocat
   })
 }
 
-export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunnerCommand {
+export function buildCodexRunnerCommand(input: CodexRunnerCommandInput): CodexRunnerCommand {
   const runtimeInput = toRuntimeInvocation(input)
+  const memoryReadyProject = input.memoryReadyProject?.trim()
   const args = [
     'bin/aun.ts',
     'codex-runner',
@@ -61,11 +66,18 @@ export function buildCodexRunnerCommand(input: CodexRunnerInvocation): CodexRunn
       AGENT_ID: runtimeInput.agent_id,
       AGENT_COM_EXPECTED_AGENT_ID: runtimeInput.agent_id,
       DATABASE_URL: runtimeInput.database_url,
+      AUN_RECEIVE_CLAIM_SOURCE: 'state-daemon-codex-runner',
+      ...(memoryReadyProject
+        ? {
+            AGENT_COMMS_MEMORY_READY_PROJECT: memoryReadyProject,
+            AGENT_MEMORY_PROJECT: memoryReadyProject,
+          }
+        : {}),
     },
   }
 }
 
-export function buildCodexRuntimeRunnerInvocation(input: CodexRunnerInvocation): RuntimeRunnerInvocation {
+export function buildCodexRuntimeRunnerInvocation(input: CodexRunnerCommandInput): RuntimeRunnerInvocation {
   return toRuntimeInvocation(input)
 }
 
@@ -83,6 +95,13 @@ export class ExecFileCodexRunnerInvoker implements CodexRunnerInvoker {
   ) {}
 
   async invoke(input: CodexRunnerInvocation): Promise<CodexRunnerResult> {
+    if (!input.memoryReadyProject?.trim()) {
+      return {
+        ok: false,
+        code: 1,
+        stderr: `memory-ready project is required for Codex runner ${input.agentId}`,
+      }
+    }
     const plan = buildCodexRunnerCommand(input)
     try {
       const { stdout, stderr } = await execFileAsync(plan.command, plan.args, {

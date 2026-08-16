@@ -80,7 +80,12 @@ import {
 } from './stall-detector'
 import { planQueueAction, type PlannedQueueAction } from './action-planner'
 import { selectAgentAdapter } from './adapter-registry'
-import { evaluateRuntimeMemoryReadyGate, type RuntimeMemoryReadyGateResult } from '../runtime-memory-ready'
+import {
+  evaluateRuntimeMemoryReadyGate,
+  resolveRuntimeMemoryReadyProject,
+  RuntimeMemoryReadyProjectResolutionError,
+  type RuntimeMemoryReadyGateResult,
+} from '../runtime-memory-ready'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -93,6 +98,10 @@ import {
   withQueueDispositionStamp,
   type QueueSurfaceClassification,
 } from '../queue-message-classification'
+import {
+  evaluateAutomaticProcessingEligibility,
+  type AutomaticProcessingEligibilityVerdict,
+} from '../communication-authority'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
@@ -105,7 +114,7 @@ function isCodexRunnerRuntime(runtime: string | null): boolean {
 }
 
 function effectiveRuntime(agent: AgentRow): string | null {
-  return agent.runtime_engine_preference?.trim() || agent.runtime
+  return agent.runtime_engine_preference?.trim() || agent.runtime?.trim() || null
 }
 
 function isInactiveAgentStatus(status: string | null | undefined): boolean {
@@ -116,6 +125,7 @@ interface QueueRow {
   id: number
   agent_id: string
   message_id?: string | null
+  channel_id?: string | null
   payload?: unknown
   message_type?: string | null
   status: string
@@ -135,9 +145,63 @@ interface AgentRow {
   tmux_session: string | null
   last_seen_at: Date | null
   metadata?: unknown
-  profile_enabled?: boolean | null
+  profile_enabled?: unknown
   disabled_at?: Date | string | null
   expected_provider_identity?: unknown
+}
+
+function parseChannelMembers(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((value): value is string => typeof value === 'string')
+      .map((value) => value.trim())
+      .filter(Boolean)
+  }
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean)
+    }
+  } catch {}
+  return raw.split(',').map((value) => value.trim()).filter(Boolean)
+}
+
+function isProfileEnabled(raw: unknown): boolean {
+  return raw === true || raw === 1 || raw === '1'
+}
+
+export async function evaluateStateDaemonAutomaticProcessingEligibility(
+  db: Pick<DBClient, 'query'>,
+  input: { agentId: string; channelId: string | null; denylisted: boolean },
+): Promise<AutomaticProcessingEligibilityVerdict> {
+  const agentRows = await db.query<AgentRow>(
+    `SELECT agent_id, runtime, runtime_engine_preference, status,
+            profile_enabled, disabled_at
+       FROM agents
+      WHERE agent_id=$1`,
+    [input.agentId],
+  )
+  const agent = agentRows.rows[0] ?? null
+  let channelMember = false
+  if (input.channelId) {
+    const channelRows = await db.query<{ members: unknown }>(
+      'SELECT members FROM channels WHERE id=$1',
+      [input.channelId],
+    )
+    channelMember = parseChannelMembers(channelRows.rows[0]?.members).includes(input.agentId)
+  }
+  return evaluateAutomaticProcessingEligibility({
+    enrolled: agent !== null,
+    enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
+    runtimeReady: agent !== null
+      && Boolean(effectiveRuntime(agent))
+      && Boolean(agent.status?.trim())
+      && !isInactiveAgentStatus(agent.status),
+    channelMember,
+    denylisted: input.denylisted,
+  })
 }
 
 export class StateDaemon {
@@ -165,6 +229,7 @@ export class StateDaemon {
   private dbErrorStreak = 0
   private readonly inflightWakes = new Set<Promise<boolean>>()
   private readonly inflightQueueWork = new Map<string, Promise<void>>()
+  private readonly inflightQueueWorkIds = new Set<string>()
   private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
@@ -329,8 +394,7 @@ export class StateDaemon {
         this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: 'notify_scope' })
         return
       }
-      const handled = await this.tryCompleteScopedOutNoReply(event)
-      if (!handled) this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
+      this.metrics.inc('state_daemon_scope_skipped_total', { agent_id: event.agent_id, path: 'notify' })
       return
     }
 
@@ -348,24 +412,14 @@ export class StateDaemon {
       }
     }
 
-    // For received events, the pg_notify payload already contains the data we
-    // need unless a bounded canary fence requires exact row inspection first.
-    if ((row?.status ?? event.status) === 'received'
-      && this.queueWorkScheduler
-      && !this.shirubeD1AutoReceive
-      && !this.config.allAgentCommunicationManifestEnforcementEnabled) {
-      this.scheduleQueueWorkRunner(
-        'received',
-        row ?? { id: event.id, agent_id: event.agent_id } as QueueRow,
-        () => this.queueWorkScheduler!.runReceived({ queueId: event.id, agentId: event.agent_id }),
-      )
-      return
-    }
-
     row = row ?? await this.fetchQueueRowById(event.id)
     if (!row) return // row may have been deleted
 
-    if (row.status === 'pending' || row.status === 'received' || (row.status === 'done' && this.shirubeD1AutoReceive)) {
+    if (
+      row.status === 'pending'
+      || row.status === 'received'
+      || (row.status === 'done' && (this.shirubeD1AutoReceive || this.queueWorkScheduler?.runDone))
+    ) {
       await this.runWakeIfNotSuppressed(row)
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
@@ -382,9 +436,18 @@ export class StateDaemon {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
     }
 
-    if (this.shirubeD1AutoReceive) {
+    if (this.shirubeD1AutoReceive && this.shirubeD1AutoReceive.recoverDone !== false) {
       const recoverableD1 = await this.fetchShirubeD1RecoveryRows()
       for (const row of recoverableD1) {
+        result.scanned++
+        const acted = await this.runWakeIfNotSuppressed(row)
+        if (acted) result.rewoken++
+      }
+    }
+
+    if (this.queueWorkScheduler?.runDone) {
+      const resumableDone = await this.fetchQueueWorkDoneFinalizationRows()
+      for (const row of resumableDone) {
         result.scanned++
         const acted = await this.runWakeIfNotSuppressed(row)
         if (acted) result.rewoken++
@@ -405,6 +468,11 @@ export class StateDaemon {
     for (const row of expired) {
       if (runnerErrorIds.has(row.id)) continue
       result.scanned++
+      const automaticProcessing = await this.checkAutomaticProcessingEligibility(row)
+      if (!automaticProcessing.ok) {
+        this.recordAutomaticProcessingBlocked(row, automaticProcessing)
+        continue
+      }
       const d1Decision = await this.classifyShirubeD1AutoReceive(row)
       if (d1Decision.outcome !== 'not_d1') {
         if (d1Decision.outcome === 'reject') {
@@ -523,6 +591,9 @@ export class StateDaemon {
 
   async refreshClaims(): Promise<RefreshResult> {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
+    const inflightQueueWorkIds = Array.from(this.inflightQueueWorkIds)
+      .filter((id) => /^[1-9]\d*$/.test(id))
+      .map((id) => Number.parseInt(id, 10))
     let sql = `UPDATE message_queue mq
           SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
               last_heartbeat_at = $1::timestamptz
@@ -532,21 +603,37 @@ export class StateDaemon {
           AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
           AND mq.claimed_by = mq.agent_id
           AND mq.claimed_at IS NOT NULL
-          AND mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
+          AND (
+            mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
+            OR mq.id = ANY($4::bigint[])
+          )
           AND EXISTS (
             SELECT 1 FROM agents a
              WHERE a.agent_id = mq.agent_id
-               AND a.status IN ('online', 'busy')
+               AND (
+                 a.status IN ('online', 'busy')
+                 OR mq.id = ANY($4::bigint[])
+               )
+               AND a.profile_enabled IS TRUE
+               AND a.disabled_at IS NULL
+               AND COALESCE(NULLIF(BTRIM(a.runtime_engine_preference), ''), NULLIF(BTRIM(a.runtime), '')) IS NOT NULL
+               AND EXISTS (
+                 SELECT 1
+                   FROM agent_messages am
+                   JOIN channels c ON c.id = am.channel_id
+                  WHERE am.id::text = mq.message_id
+                    AND mq.agent_id = ANY(c.members)
+               )
           )`
     const now = this.clock.now()
-    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec]
+    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
     sql += this.queueWorkResidueExclusionClause(params, 'mq')
     const { rowCount } = await this.dbQuery(sql, params)
     this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
 
-    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec]
+    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
     let skippedSql = `SELECT count(*)::int AS n
         FROM message_queue mq
        WHERE mq.status IN ('received', 'in_progress')
@@ -555,7 +642,10 @@ export class StateDaemon {
          AND (
            mq.claimed_by IS DISTINCT FROM mq.agent_id
            OR mq.claimed_at IS NULL
-           OR mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
+           OR (
+             mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
+             AND NOT (mq.id = ANY($3::bigint[]))
+           )
          )`
     skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
     skippedSql += this.queueWorkFenceClause(skippedParams, 'mq')
@@ -618,8 +708,20 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'wake' })
       return false
     }
+    const automaticProcessing = await this.checkAutomaticProcessingEligibility(row)
+    if (!automaticProcessing.ok) {
+      this.recordAutomaticProcessingBlocked(row, automaticProcessing)
+      return false
+    }
     const d1Handled = await this.tryShirubeD1AutoReceive(row)
     if (d1Handled !== null) return d1Handled
+    if (row.status === 'done' && this.queueWorkScheduler?.runDone) {
+      this.scheduleQueueWorkRunner('done', row, () => this.queueWorkScheduler!.runDone!({
+        queueId: row.id,
+        agentId: row.agent_id,
+      }))
+      return true
+    }
     const manifestAdmission = await this.checkAllAgentCommunicationManifestAdmission(row)
     if (manifestAdmission.outcome !== 'admit') {
       this.metrics.inc('state_daemon_all_agent_manifest_admission_total', {
@@ -665,6 +767,31 @@ export class StateDaemon {
     } finally {
       this.inflightWakes.delete(runPromise)
     }
+  }
+
+  private async checkAutomaticProcessingEligibility(
+    row: QueueRow,
+  ): Promise<AutomaticProcessingEligibilityVerdict> {
+    return evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
+      agentId: row.agent_id,
+      channelId: row.channel_id ?? null,
+      denylisted: this.config.agentDenylist?.includes(row.agent_id) ?? false,
+    })
+  }
+
+  private recordAutomaticProcessingBlocked(
+    row: QueueRow,
+    verdict: AutomaticProcessingEligibilityVerdict,
+  ): void {
+    for (const reason of verdict.reasons) {
+      this.metrics.inc('state_daemon_automatic_processing_blocked_total', {
+        agent_id: row.agent_id,
+        reason,
+      })
+    }
+    void this.alert.alert(
+      `DB automatic-processing authority blocked ${row.agent_id} queue_id=${row.id}: ${verdict.reasons.join(',')}`,
+    )
   }
 
   private async checkAllAgentCommunicationManifestAdmission(
@@ -801,7 +928,7 @@ export class StateDaemon {
       return true
     }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
-      return this.runObservedQueueAction(action, row, bot)
+      return this.runObservedQueueAction(action, row, bot, memoryReady.project)
     }
 
     this.metrics.inc('state_daemon_wake_actions_total', {
@@ -829,6 +956,11 @@ export class StateDaemon {
   }
 
   private async recoverQueueWorkRunnerErrorRow(row: QueueRow): Promise<'reclaimed' | 'failed' | 'skipped'> {
+    const automaticProcessing = await this.checkAutomaticProcessingEligibility(row)
+    if (!automaticProcessing.ok) {
+      this.recordAutomaticProcessingBlocked(row, automaticProcessing)
+      return 'skipped'
+    }
     const payload = parseQueuePayload(row.payload)
     if (!payload.runner_error) return 'skipped'
 
@@ -841,8 +973,19 @@ export class StateDaemon {
       : 0
     const maxReclaims = Math.max(0, this.config.queueWorkRunnerErrorMaxReclaims)
     const now = this.clock.now()
+    const configuredExtensionRef = this.config.queueWorkRecoveryControlRef?.trim() || null
+    const priorExtensionRef = typeof recovery === 'object' && recovery !== null
+      ? String((recovery as { bounded_extension_control_ref?: unknown }).bounded_extension_control_ref ?? '').trim() || null
+      : null
+    const boundedExtensionAllowed = !!(
+      configuredExtensionRef
+      && attempts === maxReclaims
+      && priorExtensionRef !== configuredExtensionRef
+      && this.queueWorkFenceConfigured()
+      && this.isQueueWorkFenceInScope(row)
+    )
 
-    if (attempts >= maxReclaims) {
+    if (attempts >= maxReclaims && !boundedExtensionAllowed) {
       const failedPayload = JSON.stringify({
         ...payload,
         [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
@@ -878,14 +1021,20 @@ export class StateDaemon {
     }
 
     const nextAttempts = attempts + 1
+    const effectiveMaxReclaims = boundedExtensionAllowed ? nextAttempts : maxReclaims
     const reclaimedPayload = JSON.stringify({
       ...payload,
       [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
         attempts: nextAttempts,
-        max_reclaims: maxReclaims,
+        max_reclaims: effectiveMaxReclaims,
         last_action: 'reclaimed',
         last_at: now.toISOString(),
         source: QUEUE_WORK_SCHEDULER_SOURCE,
+        ...(boundedExtensionAllowed ? {
+          base_max_reclaims: maxReclaims,
+          bounded_extension_control_ref: configuredExtensionRef,
+          bounded_extension_reason: 'exact_canary_recovery_after_control_plane_fix',
+        } : {}),
       },
     })
     const updated = await this.dbQuery(
@@ -955,10 +1104,36 @@ export class StateDaemon {
         },
       }
     }
-    return evaluateRuntimeMemoryReadyGate(this.db, {
+    let resolution
+    try {
+      resolution = await resolveRuntimeMemoryReadyProject(this.db, row.agent_id)
+    } catch (error) {
+      const typed = error instanceof RuntimeMemoryReadyProjectResolutionError ? error : null
+      return {
+        ok: false,
+        gate: 'memory_ready',
+        reason: 'project_resolution_failed',
+        agent_id: row.agent_id,
+        project: '',
+        checked_at: this.clock.now().toISOString(),
+        runtime_instance_id: null,
+        evidence_id: null,
+        evidence_path: null,
+        evidence_log_id: null,
+        source: 'state_daemon_target_project_resolver',
+        valid_until: null,
+        current_runtime: null,
+        details: {
+          code: typed?.code ?? 'PROJECT_RESOLUTION_ERROR',
+          error: (error as Error).message ?? String(error),
+          ...(typed?.details ?? {}),
+        },
+      }
+    }
+    const gate = await evaluateRuntimeMemoryReadyGate(this.db, {
       agent_id: row.agent_id,
       expected_agent_id: row.agent_id,
-      project: this.config.memoryReadyProject,
+      project: resolution.project,
       now: this.clock.now(),
       queue_scope: {
         queue_id: row.id,
@@ -966,6 +1141,14 @@ export class StateDaemon {
         action_kind: action.kind,
       },
     })
+    return {
+      ...gate,
+      details: {
+        ...gate.details,
+        project_resolution_source: resolution.source,
+        project_workspace_path: resolution.workspace_path,
+      },
+    }
   }
 
   private recordMemoryReadyBlocked(
@@ -986,7 +1169,8 @@ export class StateDaemon {
   private async runObservedQueueAction(
     action: PlannedQueueAction,
     row: QueueRow,
-    agent?: AgentRow | null,
+    agent: AgentRow | null | undefined,
+    memoryReadyProject: string,
   ): Promise<boolean> {
     switch (action.kind) {
       case 'invoke_codex_runner':
@@ -997,7 +1181,7 @@ export class StateDaemon {
           }))
           return true
         }
-        return this.invokeCodexRunner(row, agent)
+        return this.invokeCodexRunner(row, agent, memoryReadyProject)
       case 'agent_missing':
         await this.alert.alert(`wake target ${row.agent_id} not in agents table`)
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'agent_missing' })
@@ -1039,7 +1223,7 @@ export class StateDaemon {
   }
 
   private scheduleQueueWorkRunner(
-    phase: 'pending' | 'received',
+    phase: 'pending' | 'received' | 'done',
     row: QueueRow,
     run: () => Promise<void>,
   ): void {
@@ -1051,19 +1235,27 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: phase })
       return
     }
-    const key = String(row.id)
+    const key = row.agent_id
+    const queueId = String(row.id)
     if (this.inflightQueueWork.has(key)) {
-      this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_dedup_skipped` })
+      this.metrics.inc('state_daemon_queue_work_actions_total', {
+        result: this.inflightQueueWorkIds.has(queueId)
+          ? `${phase}_runner_dedup_skipped`
+          : `${phase}_runner_agent_busy_deferred`,
+      })
       return
     }
     this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_invoked` })
-    const promise = run()
+    this.inflightQueueWorkIds.add(queueId)
+    const promise = Promise.resolve()
+      .then(run)
       .catch((err) => {
         const message = (err as Error).message ?? String(err)
         this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_error` })
         void this.alert.alert(`queue work ${phase} runner failed for ${row.agent_id} queue_id=${row.id}: ${message}`)
       })
       .finally(() => {
+        this.inflightQueueWorkIds.delete(queueId)
         this.inflightQueueWork.delete(key)
       })
     this.inflightQueueWork.set(key, promise)
@@ -1302,7 +1494,7 @@ export class StateDaemon {
     const { rows } = await this.dbQuery<QueueRow>(
       `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.id = $1`,
@@ -1316,7 +1508,7 @@ export class StateDaemon {
     let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status,
               mq.claim_expires_at, mq.claimed_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status = 'done'
@@ -1329,29 +1521,13 @@ export class StateDaemon {
     return rows
   }
 
-  private async tryCompleteScopedOutNoReply(event: QueueEvent): Promise<boolean> {
-    if (this.config.agentIdPrefix) return false
-    const { rows } = await this.dbQuery<QueueRow>(
-      `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
-              mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
-         FROM message_queue mq
-         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
-        WHERE mq.id = $1`,
-      [event.id],
-    )
-    const row = rows[0]
-    if (!row || (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress')) return false
-    if (this.isQueueWorkResidueExcluded(row)) {
-      this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'scoped_out_no_reply' })
-      return false
-    }
-    return this.completeNoReplyIfRequired(row)
-  }
-
   private async completeNoReplyIfRequired(row: QueueRow): Promise<boolean> {
     if (this.isQueueWorkResidueExcluded(row)) return false
     if (!this.config.codexRunnerAutoCompleteNoReply) return false
+    // no_reply_required controls the outbound response after substantive work;
+    // it is not authority to skip that work. A configured queue-work scheduler
+    // must execute the row and let the typed result close it without a reply.
+    if (this.queueWorkScheduler) return false
     if (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress') return false
     const decision = this.noReplyDecisionForRow(row)
     if (!decision.no_reply_required) return false
@@ -1463,7 +1639,11 @@ export class StateDaemon {
     return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
   }
 
-  private async invokeCodexRunner(row: QueueRow, agent?: AgentRow | null): Promise<boolean> {
+  private async invokeCodexRunner(
+    row: QueueRow,
+    agent: AgentRow | null | undefined,
+    memoryReadyProject: string,
+  ): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
       return false
@@ -1508,6 +1688,7 @@ export class StateDaemon {
       messageId: row.message_id ?? null,
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
+      memoryReadyProject,
       ackContent: autoFinalReply ? '' : this.boundedAckContent(row, noReplyDecision),
       completeNoReply,
       completionReason: completeNoReply
@@ -1686,7 +1867,7 @@ export class StateDaemon {
     const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter, this.config.batchLimit]
     let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status='pending'
@@ -1702,7 +1883,7 @@ export class StateDaemon {
   private async fetchReceivedExpired(): Promise<QueueRow[]> {
     let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status IN ('received', 'in_progress')
@@ -1719,7 +1900,7 @@ export class StateDaemon {
   private async fetchQueueWorkRunnerErrorRows(): Promise<QueueRow[]> {
     let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status='in_progress'
@@ -1733,10 +1914,40 @@ export class StateDaemon {
     return rows
   }
 
+  private async fetchQueueWorkDoneFinalizationRows(): Promise<QueueRow[]> {
+    let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.claimed_at,
+              mq.created_at, mq.last_wake_attempt_at, mq.last_heartbeat_at,
+              am.message_type, am.channel_id
+         FROM message_queue mq
+         JOIN agents a
+           ON a.agent_id = mq.agent_id
+          AND a.profile_enabled = true
+          AND a.disabled_at IS NULL
+          AND a.status NOT IN ('disabled', 'offline', 'retired')
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status='done'
+          AND mq.payload LIKE '%"runner_result"%'
+          AND mq.payload::jsonb #>> '{receive_claim,source}' = $2
+          AND mq.payload::jsonb #>> '{queue_work_execution,source}' = $2
+          AND mq.payload::jsonb #>> '{runner_result,invocation_source}' = $2
+          AND CASE
+                WHEN (mq.payload::jsonb #>> '{finalizer_error,attempts}') ~ '^[0-9]+$'
+                  THEN (mq.payload::jsonb #>> '{finalizer_error,attempts}')::int
+                ELSE 0
+              END < 3`
+    const params: unknown[] = [this.config.batchLimit, QUEUE_WORK_SCHEDULER_SOURCE]
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
+    sql += ` ORDER BY mq.done_at NULLS FIRST, mq.created_at LIMIT $1`
+    const { rows } = await this.dbQuery<QueueRow>(sql, params)
+    return rows
+  }
+
   private async fetchObservableWork(): Promise<QueueRow[]> {
     let sql = `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.claim_expires_at, mq.created_at,
               mq.last_wake_attempt_at, mq.last_heartbeat_at,
-              am.message_type
+              am.message_type, am.channel_id
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status IN ('received', 'in_progress')

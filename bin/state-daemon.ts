@@ -24,9 +24,9 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
 import { PgAdapter } from '../core/db/pg-adapter'
@@ -46,7 +46,12 @@ import {
   type AunConfigurationCandidate,
 } from '../core/aun-configuration-candidate'
 import { configurationDigest, type AunConfigurationDesiredState } from '../core/aun-configuration-desired-state'
-import { parseStateDaemonLaunchAgentPlist, STATE_DAEMON_PLIST_NAME } from '../core/state-daemon/launchagent'
+import {
+  parseStateDaemonLaunchAgentPlist,
+  STATE_DAEMON_PLIST_NAME,
+  validateStateDaemonCanaryOverlayEnv,
+  type StateDaemonCanaryOverlayValidation,
+} from '../core/state-daemon/launchagent'
 import { parseClaudeMcpGet } from './aun/bootstrap-adapter-claude'
 import { ExecFileCodexRunnerInvoker } from '../core/state-daemon/codex-runner-adapter'
 import {
@@ -64,6 +69,7 @@ import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
 import type { QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
+import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import type {
   AlertSink,
   DBClient,
@@ -82,13 +88,74 @@ export const SHIRUBE_D1_AUTO_RECEIVE_SOURCE = 'state-daemon-d1-auto-receive' as 
 
 type RuntimeV2Invoker = (options: RuntimeV2CliOptions) => Promise<RuntimeV2CliResult>
 
+export const STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR = 'STATE_DAEMON_DIRECT_ENTRY_ARGS_UNSUPPORTED' as const
+export const STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS = [
+  'bun cli/index.ts state-daemon readiness --format json',
+  'bun cli/index.ts state-daemon queue-readiness --agent-id <id> --format json',
+] as const
+
+export type StateDaemonDirectEntryArgvValidation =
+  | {
+      ok: true
+      code: null
+      argv: []
+    }
+  | {
+      ok: false
+      code: typeof STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR
+      argv: string[]
+      diagnosticCommands: typeof STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS
+    }
+
+/**
+ * This file is the daemon-only entry point. Diagnostics belong to cli/index.ts;
+ * accepting their arguments here would silently start another LISTEN process.
+ */
+export function validateStateDaemonDirectEntryArgv(
+  argv: readonly string[] = process.argv.slice(2),
+): StateDaemonDirectEntryArgvValidation {
+  if (argv.length === 0) return { ok: true, code: null, argv: [] }
+  return {
+    ok: false,
+    code: STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR,
+    argv: [...argv],
+    diagnosticCommands: STATE_DAEMON_DIRECT_ENTRY_DIAGNOSTIC_COMMANDS,
+  }
+}
+
+export class StateDaemonDirectEntryArgsError extends Error {
+  readonly code = STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR
+  readonly argv: string[]
+
+  constructor(validation: Extract<StateDaemonDirectEntryArgvValidation, { ok: false }>) {
+    super(
+      `${validation.code}: bin/state-daemon.ts accepts no arguments; use `
+      + validation.diagnosticCommands.join(' or '),
+    )
+    this.name = 'StateDaemonDirectEntryArgsError'
+    this.argv = validation.argv
+  }
+}
+
+export function assertStateDaemonDirectEntryArgv(
+  argv: readonly string[] = process.argv.slice(2),
+): void {
+  const validation = validateStateDaemonDirectEntryArgv(argv)
+  if (!validation.ok) throw new StateDaemonDirectEntryArgsError(validation)
+}
+
 /** Production bridge from queue arrival to the canonical runtime-v2 D1 path. */
 export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoReceiveDispatcher {
+  readonly recoverDone: boolean
+
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
     private readonly invokeRuntimeV2: RuntimeV2Invoker = runtimeV2,
-  ) {}
+  ) {
+    this.recoverDone = env.SHIRUBE_D1_ENABLED?.trim() === '1'
+      && env.SHIRUBE_D1_KILL_SWITCH?.trim() === '0'
+  }
 
   classify(input: ShirubeD1AutoReceiveInput) {
     return classifyShirubeD1AutoReceive({ agent_id: input.agentId, payload: input.payload }, this.env)
@@ -119,6 +186,21 @@ export class RuntimeV2ShirubeD1AutoReceiveDispatcher implements ShirubeD1AutoRec
       replayed: input.status === 'done' || finalizer?.code === 'ALREADY_REPLIED',
     }
   }
+}
+
+/**
+ * Keep the retired Shirube D1 path outside the production daemon unless it is
+ * explicitly enabled. Constructing the dispatcher while D1 is disabled still
+ * lets D1-shaped legacy rows win classification, which prevents the DB-SSOT
+ * queue-work scheduler from handling those rows.
+ */
+export function buildOptionalShirubeD1AutoReceiveDispatcher(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  invokeRuntimeV2?: RuntimeV2Invoker,
+): ShirubeD1AutoReceiveDispatcher | undefined {
+  if (env.SHIRUBE_D1_ENABLED !== '1') return undefined
+  return new RuntimeV2ShirubeD1AutoReceiveDispatcher(env, cwd, invokeRuntimeV2)
 }
 
 // ── DBClient (single connection for queries; LISTEN uses its own client) ─────
@@ -250,14 +332,86 @@ export function describeQueueWorkFailure(result: RunQueueWorkCliResult): string 
   return 'queue work runner returned ok=false'
 }
 
+export function buildQueueWorkAgentEnv(
+  base: NodeJS.ProcessEnv,
+  agentId: string,
+  memoryReadyProject: string,
+): NodeJS.ProcessEnv {
+  const project = memoryReadyProject.trim()
+  if (!project) throw new Error(`queue-work memory-ready project is required for ${agentId}`)
+  return {
+    ...base,
+    AGENT_ID: agentId,
+    AGENT_COM_EXPECTED_AGENT_ID: agentId,
+    AGENT_COMMS_MEMORY_READY_PROJECT: project,
+    AGENT_MEMORY_PROJECT: project,
+    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
+      base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+        ?? base.AUN_RECEIVE_CLAIM_SOURCE
+        ?? 'state-daemon-queue-work-scheduler',
+  }
+}
+
+export type QueueWorkRuntimeWorkspaceDb = {
+  query<T = Record<string, unknown>>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[]; rowCount?: number | null }>
+}
+
+export async function resolveQueueWorkRuntimeWorkspace(
+  db: QueueWorkRuntimeWorkspaceDb,
+  agentId: string,
+): Promise<string> {
+  const result = await db.query<{
+    agent_id: string
+    runtime_workspace: string | null
+  }>(
+    `SELECT a.agent_id,
+            COALESCE(workspace.local_path, NULLIF(a.canonical_workspace, ''), NULLIF(a.home_directory, '')) AS runtime_workspace
+       FROM agents a
+       LEFT JOIN LATERAL (
+         SELECT w.local_path
+           FROM agent_workspace_bindings b
+           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+          WHERE b.agent_id = a.agent_id
+            AND b.active = true
+          ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
+          LIMIT 1
+       ) workspace ON true
+      WHERE a.agent_id = $1
+        AND a.profile_enabled = true
+        AND a.disabled_at IS NULL`,
+    [agentId],
+  )
+  if (result.rows.length !== 1) {
+    throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  }
+  const configured = result.rows[0]?.runtime_workspace?.trim() ?? ''
+  if (!configured || !isAbsolute(configured)) {
+    throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
+  }
+  if (!existsSync(configured) || !statSync(configured).isDirectory()) {
+    throw new Error(`queue-work runtime workspace does not exist as a directory for ${agentId}: ${configured}`)
+  }
+  return realpathSync(configured)
+}
+
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
+    private readonly resolveRuntimeWorkspace: (agentId: string) => Promise<string> = async () => cwd,
+    private readonly resolveMemoryReadyProject: (agentId: string) => Promise<string> = async () => {
+      throw new Error('queue-work memory-ready project resolver is required')
+    },
   ) {}
 
   async runPending(input: { queueId: number; agentId: string }): Promise<void> {
-    const env = this.envFor(input.agentId)
+    const project = await this.resolveMemoryReadyProject(input.agentId)
+    const env = this.envFor(input.agentId, project)
     const received = await receiveTargeted({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -274,11 +428,34 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     await this.runReceivedWithFence(input)
   }
 
+  async runDone(input: { queueId: number; agentId: string }): Promise<void> {
+    const project = await this.resolveMemoryReadyProject(input.agentId)
+    const env = this.envFor(input.agentId, project)
+    const result = await runQueueWork({
+      agentId: input.agentId,
+      queueId: String(input.queueId),
+      runtime: this.runtime(),
+      requireClaimFence: true,
+      finalize: true,
+      finalizeOnly: true,
+      env,
+      cwd: this.cwd,
+    })
+    if (!result.ok) throw new Error(describeQueueWorkFailure(result))
+  }
+
   private async runReceivedWithFence(
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
   ): Promise<void> {
-    const env = this.envFor(input.agentId)
+    const [runtimeCwd, project] = await Promise.all([
+      this.resolveRuntimeWorkspace(input.agentId),
+      this.resolveMemoryReadyProject(input.agentId),
+    ])
+    const env = {
+      ...this.envFor(input.agentId, project),
+      AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
+    }
     const result = await runQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
@@ -288,6 +465,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       finalize: env.STATE_DAEMON_QUEUE_WORK_FINALIZE === '1',
       env,
       cwd: this.cwd,
+      runtimeCwd,
     })
     if (!result.ok) {
       // Rows claimed by another path (e.g. a live TUI session that called
@@ -297,20 +475,10 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     }
   }
 
-  private envFor(agentId: string): NodeJS.ProcessEnv {
-    const env = {
-      ...this.env,
-      AGENT_ID: agentId,
-      AGENT_COM_EXPECTED_AGENT_ID: agentId,
-      AUN_RECEIVE_CLAIM_SOURCE: this.env.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
-      AUN_QUEUE_WORK_INVOCATION_SOURCE: this.env.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
-      // Only process rows this scheduler claimed itself (receive_claim.source
-      // match) — never rows claimed by a TUI session or another runner.
-      AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
-        this.env.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
-          ?? this.env.AUN_RECEIVE_CLAIM_SOURCE
-          ?? 'state-daemon-queue-work-scheduler',
-    }
+  private envFor(agentId: string, project: string): NodeJS.ProcessEnv {
+    // Only process rows this scheduler claimed itself (receive_claim.source
+    // match) — never rows claimed by a TUI session or another runner.
+    const env = buildQueueWorkAgentEnv(this.env, agentId, project)
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
     }
@@ -433,6 +601,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
+  if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
+    set('queueWorkRecoveryControlRef', str('STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF') ?? null)
+  }
   set('wakePoolMinCapacity', num('STATE_DAEMON_WAKE_POOL_MIN_CAPACITY'))
   set('wakePoolMaxCapacity', num('STATE_DAEMON_WAKE_POOL_MAX_CAPACITY'))
   set('wakePoolGrowStep', num('STATE_DAEMON_WAKE_POOL_GROW_STEP'))
@@ -462,6 +633,27 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('githubWorkPullerLabels', csv('STATE_DAEMON_GITHUB_WORK_LABELS'))
   set('githubWorkPullerOwnerAllowlist', csv('STATE_DAEMON_GITHUB_WORK_OWNER_ALLOWLIST'))
   return cfg
+}
+
+export function validateStateDaemonDirectEntryEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  now = new Date(),
+): StateDaemonCanaryOverlayValidation {
+  const values: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === 'string') values[key] = value
+  }
+  return validateStateDaemonCanaryOverlayEnv(values, now)
+}
+
+export function assertStateDaemonDirectEntryEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  now = new Date(),
+): void {
+  const validation = validateStateDaemonDirectEntryEnv(env, now)
+  if (validation.issues.length === 0) return
+  const detail = validation.issues.map((issue) => `${issue.code}: ${issue.message}`).join('; ')
+  throw new Error(`STATE_DAEMON_CANARY_OVERLAY_NO_GO: ${detail}`)
 }
 
 export function referenceMatches(actual: string | undefined, reference: string): boolean {
@@ -805,6 +997,10 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
 }
 
 export async function main(): Promise<void> {
+  assertStateDaemonDirectEntryArgv(process.argv.slice(2))
+  // Fail before DB connection, daemon construction, LISTEN, or any runtime
+  // effect when a host allowlist lacks the complete Issue #917 overlay.
+  assertStateDaemonDirectEntryEnv(process.env)
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()
@@ -840,9 +1036,14 @@ export async function main(): Promise<void> {
     tmux: new TmuxShellAdapter(),
     codexRunner: new ExecFileCodexRunnerInvoker(process.cwd()),
     queueWorkScheduler: queueWorkSchedulerEnabled()
-      ? new QueueWorkRunnerScheduler(process.env, process.cwd())
+      ? new QueueWorkRunnerScheduler(
+          process.env,
+          process.cwd(),
+          (agentId) => resolveQueueWorkRuntimeWorkspace(queryClient, agentId),
+          async (agentId) => (await resolveRuntimeMemoryReadyProject(queryClient, agentId)).project,
+        )
       : undefined,
-    shirubeD1AutoReceive: new RuntimeV2ShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
+    shirubeD1AutoReceive: buildOptionalShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),
     githubWorkPuller: githubWorkPullerEnabled(process.env)
       ? new StateDaemonGithubWorkPuller({
         db,

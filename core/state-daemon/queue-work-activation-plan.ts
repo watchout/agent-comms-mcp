@@ -8,6 +8,7 @@ import {
 } from '../queue-work'
 import {
   loadQueueWorkResiduePolicyFromEnv,
+  validateStateDaemonCanaryOverlayEnv,
   validateQueueWorkCanaryResiduePreflight,
   type QueueWorkCanaryResidueDb,
 } from './launchagent'
@@ -24,6 +25,16 @@ export interface QueueWorkActivationPlanOptions {
   githubWritebackMode?: string | null
   mediatedPostingCommand?: string | null
   mediatedPostingArgsJson?: string | null
+  githubTokenFile?: string | null
+  canaryControlRef?: string | null
+  canaryOwnerDecisionRef?: string | null
+  canaryExpiresAt?: string | null
+  canaryPriorPlistSha256?: string | null
+  canaryRollbackCommand?: string | null
+  canaryObservedStateDestination?: string | null
+  canarySubjectDigest?: string | null
+  recoverExpiredSchedulerClaim?: boolean
+  resumeDoneFinalization?: boolean
   now?: () => Date
 }
 
@@ -34,6 +45,9 @@ export interface QueueWorkActivationCandidate {
   status: string
   created_at: string | null
   priority: number | null
+  claimed_by: string | null
+  claimed_at: string | null
+  claim_expires_at: string | null
 }
 
 export interface QueueWorkActivationFinding {
@@ -90,21 +104,36 @@ type QueueRow = {
   created_at?: string | Date | null
   priority?: string | number | null
   payload?: string | null
+  claimed_by?: string | null
+  claimed_at?: string | Date | null
+  claim_expires_at?: string | Date | null
 }
 
 const DEFAULT_RESIDUE_POLICY_FILE = 'config/queue-work-residue-policy.json'
 const DEFAULT_CODEX_OUTPUT_SCHEMA = 'schemas/queue-work-result-v1.schema.json'
 const SUPPORTED_RUNTIMES = new Set(['codex-exec', 'echo', 'command-json'])
+const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
+const CANARY_OVERLAY_OPTION_ENV = [
+  ['canaryControlRef', 'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF'],
+  ['canaryOwnerDecisionRef', 'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF'],
+  ['canaryExpiresAt', 'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT'],
+  ['canaryPriorPlistSha256', 'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256'],
+  ['canaryRollbackCommand', 'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND'],
+  ['canaryObservedStateDestination', 'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION'],
+  ['canarySubjectDigest', 'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST'],
+] as const satisfies readonly (readonly [keyof QueueWorkActivationPlanOptions, string])[]
 
 function execFileJson(
   command: string,
   args: string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
     execFile(command, args, {
       encoding: 'utf-8',
       timeout: 30_000,
       maxBuffer: 1024 * 1024,
+      env,
     }, (err, stdout, stderr) => {
       const execErr = err as (NodeJS.ErrnoException & { code?: unknown }) | null
       resolvePromise({
@@ -158,7 +187,173 @@ function normalizeQueueRow(row: QueueRow): QueueWorkActivationCandidate {
     status: row.status,
     created_at: normalizeDate(row.created_at),
     priority: normalizePriority(row.priority),
+    claimed_by: normalizeText(row.claimed_by ?? null),
+    claimed_at: normalizeDate(row.claimed_at),
+    claim_expires_at: normalizeDate(row.claim_expires_at),
   }
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function instantMs(value: unknown): number | null {
+  if (!(typeof value === 'string' || value instanceof Date)) return null
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function expiredSchedulerClaimRecoveryBlockers(input: {
+  candidate: QueueWorkActivationCandidate
+  payload: string | null
+  requestedAgentId: string
+  now: Date
+}): QueueWorkActivationFinding[] {
+  const { candidate, requestedAgentId, now } = input
+  const mismatches: string[] = []
+  const claimedAtMs = instantMs(candidate.claimed_at)
+  const claimExpiresAtMs = instantMs(candidate.claim_expires_at)
+  let payload: Record<string, unknown> = {}
+  try {
+    payload = recordValue(JSON.parse(input.payload ?? '{}'))
+  } catch {
+    mismatches.push('payload_json')
+  }
+  const receiveClaim = recordValue(payload.receive_claim)
+  const execution = recordValue(payload.queue_work_execution)
+  const runnerError = recordValue(payload.runner_error)
+  const recovery = recordValue(payload.queue_work_runner_error_recovery)
+  const executionClaimedAtMs = instantMs(execution.claimed_at)
+  const executionStartedAtMs = instantMs(execution.started_at)
+  const runnerErrorClaimedAtMs = instantMs(recordValue(runnerError.claim_fence).claimed_at)
+  const runnerErrorFailedAtMs = instantMs(runnerError.failed_at)
+  const recoveryLastAtMs = instantMs(recovery.last_at)
+  const recoveryAttempts = Number(recovery.attempts)
+  const recoveryMaxReclaims = Number(recovery.max_reclaims)
+  const isExpiredInProgress = candidate.status === 'in_progress'
+  const isReclaimedPending = candidate.status === 'pending'
+
+  if (!isExpiredInProgress && !isReclaimedPending) mismatches.push('status')
+  if (candidate.agent_id !== requestedAgentId) mismatches.push('agent_id')
+  if (isExpiredInProgress) {
+    if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
+    if (claimedAtMs === null) mismatches.push('claimed_at')
+    if (claimExpiresAtMs === null || claimExpiresAtMs > now.getTime()) mismatches.push('claim_expires_at')
+  }
+  if (isReclaimedPending) {
+    if (candidate.claimed_by !== null) mismatches.push('claimed_by')
+    if (candidate.claimed_at !== null) mismatches.push('claimed_at')
+    if (candidate.claim_expires_at !== null) mismatches.push('claim_expires_at')
+    if (typeof runnerError.code !== 'string' || !runnerError.code) mismatches.push('runner_error.code')
+    if (runnerError.invocation_source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('runner_error.invocation_source')
+    if (runnerError.runtime_id !== execution.runtime_id) mismatches.push('runner_error.runtime_id')
+    if (recordValue(runnerError.claim_fence).claimed_by !== candidate.agent_id) mismatches.push('runner_error.claim_fence.claimed_by')
+    const runnerErrorMatchesCurrentExecution = runnerErrorClaimedAtMs === executionClaimedAtMs
+    const runnerErrorPrecedesReclaimedExecution = (
+      runnerErrorClaimedAtMs !== null
+      && executionClaimedAtMs !== null
+      && executionStartedAtMs !== null
+      && runnerErrorFailedAtMs !== null
+      && recoveryLastAtMs !== null
+      && runnerErrorClaimedAtMs < executionClaimedAtMs
+      && runnerErrorFailedAtMs <= executionStartedAtMs
+      && recoveryLastAtMs >= executionStartedAtMs
+      && recoveryAttempts >= 2
+    )
+    if (!runnerErrorMatchesCurrentExecution && !runnerErrorPrecedesReclaimedExecution) {
+      mismatches.push('runner_error.claim_fence.claimed_at')
+    }
+    if (recovery.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_runner_error_recovery.source')
+    if (recovery.last_action !== 'reclaimed') mismatches.push('queue_work_runner_error_recovery.last_action')
+    if (
+      !Number.isInteger(recoveryAttempts)
+      || recoveryAttempts < 1
+      || !Number.isInteger(recoveryMaxReclaims)
+      || recoveryMaxReclaims < recoveryAttempts
+    ) {
+      mismatches.push('queue_work_runner_error_recovery.attempts')
+    }
+  }
+  if (receiveClaim.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('receive_claim.source')
+  if (receiveClaim.agent_id !== candidate.agent_id) mismatches.push('receive_claim.agent_id')
+  if (String(receiveClaim.queue_id ?? '') !== candidate.queue_id) mismatches.push('receive_claim.queue_id')
+  if (execution.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_execution.source')
+  if (execution.agent_id !== candidate.agent_id) mismatches.push('queue_work_execution.agent_id')
+  if (String(execution.queue_id ?? '') !== candidate.queue_id) mismatches.push('queue_work_execution.queue_id')
+  if (execution.claimed_by !== candidate.agent_id) mismatches.push('queue_work_execution.claimed_by')
+  if (executionClaimedAtMs === null) mismatches.push('queue_work_execution.claimed_at')
+  if (isExpiredInProgress && executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
+  if (
+    executionClaimedAtMs === null
+    || executionStartedAtMs === null
+    || executionStartedAtMs < executionClaimedAtMs
+  ) mismatches.push('queue_work_execution.started_at')
+  if (typeof execution.runtime_id !== 'string' || !execution.runtime_id.trim()) {
+    mismatches.push('queue_work_execution.runtime_id')
+  }
+
+  return mismatches.length === 0 ? [] : [{
+    code: 'queue_work_expired_scheduler_claim_recovery_identity_mismatch',
+    message: `message_queue row ${candidate.queue_id} is not an exact expired scheduler-claim recovery target or its exact reclaimed pending successor.`,
+    evidence: { queue_id: candidate.queue_id, mismatches: Array.from(new Set(mismatches)) },
+  }]
+}
+
+function doneFinalizationResumeBlockers(input: {
+  candidate: QueueWorkActivationCandidate
+  payload: string | null
+  requestedAgentId: string
+}): QueueWorkActivationFinding[] {
+  const { candidate, requestedAgentId } = input
+  const mismatches: string[] = []
+  let payload: Record<string, unknown> = {}
+  try {
+    payload = recordValue(JSON.parse(input.payload ?? '{}'))
+  } catch {
+    mismatches.push('payload_json')
+  }
+  const receiveClaim = recordValue(payload.receive_claim)
+  const execution = recordValue(payload.queue_work_execution)
+  const result = recordValue(payload.runner_result)
+  const resultFence = recordValue(result.claim_fence)
+  const finalizerError = recordValue(payload.finalizer_error)
+  const claimedAtMs = instantMs(candidate.claimed_at)
+  const executionClaimedAtMs = instantMs(execution.claimed_at)
+  const resultClaimedAtMs = instantMs(resultFence.claimed_at)
+  const startedAtMs = instantMs(execution.started_at)
+  const completedAtMs = instantMs(result.completed_at)
+  const finalizerAttempts = Number(finalizerError.attempts ?? 0)
+
+  if (candidate.status !== 'done') mismatches.push('status')
+  if (candidate.agent_id !== requestedAgentId) mismatches.push('agent_id')
+  if (candidate.claimed_by !== candidate.agent_id) mismatches.push('claimed_by')
+  if (claimedAtMs === null) mismatches.push('claimed_at')
+  if (receiveClaim.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('receive_claim.source')
+  if (receiveClaim.agent_id !== candidate.agent_id) mismatches.push('receive_claim.agent_id')
+  if (String(receiveClaim.queue_id ?? '') !== candidate.queue_id) mismatches.push('receive_claim.queue_id')
+  if (execution.source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('queue_work_execution.source')
+  if (execution.agent_id !== candidate.agent_id) mismatches.push('queue_work_execution.agent_id')
+  if (String(execution.queue_id ?? '') !== candidate.queue_id) mismatches.push('queue_work_execution.queue_id')
+  if (execution.claimed_by !== candidate.claimed_by) mismatches.push('queue_work_execution.claimed_by')
+  if (executionClaimedAtMs === null || executionClaimedAtMs !== claimedAtMs) mismatches.push('queue_work_execution.claimed_at')
+  if (typeof execution.runtime_id !== 'string' || !execution.runtime_id.trim()) mismatches.push('queue_work_execution.runtime_id')
+  if (result.schema_version !== 'queue_work_result_v1') mismatches.push('runner_result.schema_version')
+  if (result.ok !== true) mismatches.push('runner_result.ok')
+  if (!['reply', 'close', 'none'].includes(String(result.next_action ?? ''))) mismatches.push('runner_result.next_action')
+  if (result.invocation_source !== QUEUE_WORK_SCHEDULER_SOURCE) mismatches.push('runner_result.invocation_source')
+  if (result.runtime_id !== execution.runtime_id) mismatches.push('runner_result.runtime_id')
+  if (resultFence.claimed_by !== candidate.claimed_by) mismatches.push('runner_result.claim_fence.claimed_by')
+  if (resultClaimedAtMs === null || resultClaimedAtMs !== claimedAtMs) mismatches.push('runner_result.claim_fence.claimed_at')
+  if (startedAtMs === null || completedAtMs === null || completedAtMs < startedAtMs) mismatches.push('runner_result.completed_at')
+  if (Number.isInteger(finalizerAttempts) && finalizerAttempts >= 3) mismatches.push('finalizer_error.attempts')
+
+  return mismatches.length === 0 ? [] : [{
+    code: 'queue_work_done_finalization_resume_identity_mismatch',
+    message: `message_queue row ${candidate.queue_id} is not an exact resumable stored-result finalization target.`,
+    evidence: { queue_id: candidate.queue_id, mismatches: Array.from(new Set(mismatches)) },
+  }]
 }
 
 function defaultResiduePolicyFile(): string | null {
@@ -173,6 +368,8 @@ function buildActivationEnv(
   handoffContract: QueueWorkHandoffContract,
   mediatedPostingCommand: string | null,
   mediatedPostingArgsJson: string | null,
+  githubTokenFile: string | null,
+  options: QueueWorkActivationPlanOptions,
 ): Record<string, string> {
   const env: Record<string, string> = {
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '0',
@@ -185,6 +382,15 @@ function buildActivationEnv(
   if (candidate.message_id) env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = candidate.message_id
   if (candidate.created_at) env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = candidate.created_at
   if (residuePolicyFile) env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = residuePolicyFile
+  if (options.recoverExpiredSchedulerClaim) {
+    env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
+  }
+  if (options.resumeDoneFinalization) {
+    env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
+  }
+  if (candidate.status === 'pending' && !options.recoverExpiredSchedulerClaim && !options.resumeDoneFinalization) {
+    env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING = '1'
+  }
   env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
   if (handoffContract.github_backed) {
     env.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = handoffContract.posting_mode
@@ -195,12 +401,17 @@ function buildActivationEnv(
   if (mediatedPostingArgsJson) {
     env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = mediatedPostingArgsJson
   }
+  if (githubTokenFile) env.STATE_DAEMON_GITHUB_TOKEN_FILE = githubTokenFile
   if (runtime === 'codex-exec') {
     env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = DEFAULT_CODEX_OUTPUT_SCHEMA
     env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
   }
   if (runtime === 'command-json' && queueWorkCommand) {
     env.STATE_DAEMON_QUEUE_WORK_COMMAND = queueWorkCommand
+  }
+  for (const [optionKey, envKey] of CANARY_OVERLAY_OPTION_ENV) {
+    const value = normalizeText(options[optionKey] as string | null | undefined)
+    if (value) env[envKey] = value
   }
   return env
 }
@@ -222,11 +433,28 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
     '--queue-work-fence-queue-ids',
     env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS,
   ]
+  const canaryOverlayEnv = Object.fromEntries(
+    CANARY_OVERLAY_OPTION_ENV
+      .map(([, envKey]) => [envKey, env[envKey]] as const)
+      .filter((entry): entry is readonly [string, string] => Boolean(entry[1])),
+  )
+  if (Object.keys(canaryOverlayEnv).length > 0) {
+    command.push('--canary-overlay-env-json', JSON.stringify(canaryOverlayEnv))
+  }
   if (env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS) {
     command.push('--queue-work-fence-message-ids', env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
   }
   if (env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER) {
     command.push('--queue-work-fence-created-after', env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER)
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM === '1') {
+    command.push('--recover-expired-scheduler-claim')
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION === '1') {
+    command.push('--resume-done-finalization')
+  }
+  if (env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING === '1') {
+    command.push('--defer-newer-pending')
   }
   if (env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE) {
     command.push('--queue-work-residue-policy-file', env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE)
@@ -251,6 +479,9 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON) {
     command.push('--queue-work-mediated-posting-args-json', env.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON)
+  }
+  if (env.STATE_DAEMON_GITHUB_TOKEN_FILE) {
+    command.push('--github-token-file', env.STATE_DAEMON_GITHUB_TOKEN_FILE)
   }
   if (execute) command.push('--execute')
   return command
@@ -309,7 +540,8 @@ export async function buildQueueWorkActivationPlan(
   db: DbAdapter,
   options: QueueWorkActivationPlanOptions = {},
 ): Promise<QueueWorkActivationPlanReport> {
-  const generatedAt = (options.now ?? (() => new Date()))().toISOString()
+  const planningNow = (options.now ?? (() => new Date()))()
+  const generatedAt = planningNow.toISOString()
   const agentId = normalizeText(options.agentId ?? null)
   const queueId = normalizeText(options.queueId ?? null)
   const commit = normalizeText(options.commit ?? null)
@@ -318,6 +550,7 @@ export async function buildQueueWorkActivationPlan(
   const githubWritebackMode = normalizeText(options.githubWritebackMode ?? null) ?? 'none'
   const mediatedPostingCommand = normalizeText(options.mediatedPostingCommand ?? null)
   const mediatedPostingArgsJson = normalizeText(options.mediatedPostingArgsJson ?? null)
+  const githubTokenFile = normalizeText(options.githubTokenFile ?? null)
   const blockers: QueueWorkActivationFinding[] = []
   const warnings: QueueWorkActivationFinding[] = []
   const mediatedPostingReadiness: QueueWorkActivationMediatedPostingReadiness = {
@@ -332,6 +565,24 @@ export async function buildQueueWorkActivationPlan(
   }
   if (!commit || !/^[0-9a-f]{7,40}$/i.test(commit)) {
     blockers.push({ code: 'commit_required', message: 'Queue-work activation planning requires a 7-40 character git commit SHA.' })
+  }
+  if (options.recoverExpiredSchedulerClaim && !queueId) {
+    blockers.push({
+      code: 'queue_id_required_for_expired_claim_recovery',
+      message: 'Expired scheduler claim recovery requires one explicit --queue-id.',
+    })
+  }
+  if (options.resumeDoneFinalization && !queueId) {
+    blockers.push({
+      code: 'queue_id_required_for_done_finalization_resume',
+      message: 'Done finalization resume requires one explicit --queue-id.',
+    })
+  }
+  if (options.recoverExpiredSchedulerClaim && options.resumeDoneFinalization) {
+    blockers.push({
+      code: 'queue_work_activation_mode_conflict',
+      message: 'Expired-claim recovery and done-finalization resume are mutually exclusive.',
+    })
   }
   if (!SUPPORTED_RUNTIMES.has(runtime)) {
     blockers.push({
@@ -366,13 +617,21 @@ export async function buildQueueWorkActivationPlan(
       })
     }
   }
+  if (githubTokenFile && !existsSync(githubTokenFile)) {
+    blockers.push({
+      code: 'queue_work_github_token_file_not_found',
+      message: '--github-token-file must point to an existing credential file.',
+      evidence: { path: githubTokenFile },
+    })
+  }
   if (blockers.length > 0 || !agentId || !commit) return emptyReport(options, blockers)
 
   let candidate: QueueWorkActivationCandidate | null = null
   let candidatePayload: string | null = null
   if (queueId) {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority, payload
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload,
+              claimed_by, claimed_at, claim_expires_at
          FROM message_queue
         WHERE id = $1
         LIMIT 1`,
@@ -390,7 +649,8 @@ export async function buildQueueWorkActivationPlan(
     }
   } else {
     const rows = await db.query<QueueRow>(
-      `SELECT id, agent_id, message_id, status, created_at, priority, payload
+      `SELECT id, agent_id, message_id, status, created_at, priority, payload,
+              claimed_by, claimed_at, claim_expires_at
          FROM message_queue
         WHERE agent_id = $1
           AND status = 'pending'
@@ -428,10 +688,45 @@ export async function buildQueueWorkActivationPlan(
       evidence: { queue_id: candidate.queue_id, row_agent_id: candidate.agent_id, requested_agent_id: agentId },
     })
   }
-  if (candidate && candidate.status !== 'pending') {
+  if (candidate && options.recoverExpiredSchedulerClaim) {
+    const recoveryBlockers = expiredSchedulerClaimRecoveryBlockers({
+      candidate,
+      payload: candidatePayload,
+      requestedAgentId: agentId,
+      now: planningNow,
+    })
+    blockers.push(...recoveryBlockers)
+    if (recoveryBlockers.length === 0) {
+      warnings.push({
+        code: 'queue_work_exact_expired_scheduler_claim_recovery',
+        message: `Activation is restricted to exact scheduler claim recovery row ${candidate.queue_id}; newer untouched pending work remains deferred behind the exact fence.`,
+        evidence: { queue_id: candidate.queue_id, status: candidate.status, claim_expires_at: candidate.claim_expires_at },
+      })
+    }
+  } else if (candidate && options.resumeDoneFinalization) {
+    const resumeBlockers = doneFinalizationResumeBlockers({
+      candidate,
+      payload: candidatePayload,
+      requestedAgentId: agentId,
+    })
+    blockers.push(...resumeBlockers)
+    if (resumeBlockers.length === 0) {
+      warnings.push({
+        code: 'queue_work_exact_done_finalization_resume',
+        message: `Activation is restricted to stored-result finalization for exact done row ${candidate.queue_id}; the runtime adapter will not be invoked again.`,
+        evidence: { queue_id: candidate.queue_id, status: candidate.status },
+      })
+    }
+  } else if (candidate && candidate.status !== 'pending') {
     blockers.push({
       code: 'queue_row_not_pending',
       message: `message_queue row ${candidate.queue_id} is ${candidate.status}; activation canary requires a pending row.`,
+      evidence: { queue_id: candidate.queue_id, status: candidate.status },
+    })
+  } else if (candidate) {
+    warnings.push({
+      code: 'queue_work_exact_serial_pending',
+      message: `Activation is restricted to exact pending row ${candidate.queue_id}; only newer untouched pending work may remain deferred behind the fence.`,
       evidence: { queue_id: candidate.queue_id, status: candidate.status },
     })
   }
@@ -490,7 +785,10 @@ export async function buildQueueWorkActivationPlan(
     blockers.length === 0
   ) {
     const probeArgs = mediatedPostingArgsJson ? JSON.parse(mediatedPostingArgsJson) as string[] : []
-    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'])
+    const probe = await execFileJson(mediatedPostingCommand, [...probeArgs, '--probe'], {
+      ...process.env,
+      ...(githubTokenFile ? { STATE_DAEMON_GITHUB_TOKEN_FILE: githubTokenFile } : {}),
+    })
     try {
       const parsed = JSON.parse(probe.stdout || '{}')
       if (probe.status === 0 && parsed.ok === true) {
@@ -531,7 +829,20 @@ export async function buildQueueWorkActivationPlan(
     handoffContract,
     mediatedPostingCommand,
     mediatedPostingArgsJson,
+    githubTokenFile,
+    options,
   )
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv(
+    activationEnv,
+    options.now?.() ?? new Date(),
+  )
+  for (const issue of overlayValidation.issues) {
+    blockers.push({
+      code: issue.code,
+      message: issue.message,
+      evidence: issue.path ? { path: issue.path } : undefined,
+    })
+  }
   let residuePolicy = null
   try {
     residuePolicy = loadQueueWorkResiduePolicyFromEnv(activationEnv)

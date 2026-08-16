@@ -233,6 +233,49 @@ describe('queue work envelope', () => {
       'github_url',
     ]))
   })
+
+  test('keeps reference-heavy no-reply control work plain while preserving its execution', () => {
+    const envelope = buildQueueWorkEnvelope(receivedRow({
+      payload: JSON.stringify({
+        author_id: 'pdca-ops',
+        message_type: 'instruction',
+        content: [
+          'execution_context.active_function: evidence_audit_gate',
+          'registry_control_source: https://github.com/watchout/iyasaka/issues/171',
+          'exact audit handoff wins over assigned work',
+          'Run the local check-in after CHECK and ADJUST exist.',
+          'no_reply_required: true',
+        ].join('\n'),
+      }),
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'plain_queue_work',
+      github_backed: false,
+      required_writebacks: [],
+    })
+    expect(envelope.reply_contract.required).toBe(false)
+  })
+
+  test('detects an instruction-form evidence audit request as GitHub-backed', () => {
+    const envelope = buildQueueWorkEnvelope(receivedRow({
+      payload: JSON.stringify({
+        author_id: 'aun',
+        message_type: 'instruction',
+        content: [
+          'schema_version: shirube-v3/evidence_audit_request/v1',
+          'pr: https://github.com/watchout/agent-comms-mcp/pull/918',
+          'exact_head: abc1234',
+        ].join('\n'),
+      }),
+    }))
+
+    expect(envelope.handoff_contract).toMatchObject({
+      kind: 'github_backed_role_handoff',
+      github_backed: true,
+      required_writebacks: ['github_issue_comment'],
+    })
+  })
 })
 
 describe('runReceivedQueueWork', () => {
@@ -368,6 +411,40 @@ describe('runReceivedQueueWork', () => {
       detail: 'runtime unavailable',
       runtime_id: 'fake-runtime',
       invocation_source: 'state-daemon-queue-work-scheduler',
+    })
+    expect(db.calls.find((call) => call.sql.includes('last_heartbeat_at = $3'))?.sql).toContain('RETURNING id')
+  })
+
+  test('non-ok result persistence returns its row for rows-length database adapters', async () => {
+    class RowsLengthAdapterDb extends FakeQueueDb {
+      override async query<T = any>(sql: string, params?: unknown[]) {
+        const result = await super.query<T>(sql, params)
+        return { rows: result.rows, rowCount: result.rows.length }
+      }
+    }
+    const db = new RowsLengthAdapterDb(receivedRow({ claim_expires_at: '2026-05-21T02:00:00.000Z' }))
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'rows-length-runtime',
+      capabilities,
+      async invoke() {
+        return { ...okResult(), ok: false, summary: 'audit found a blocker', next_action: 'retry' }
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:00:01.000Z',
+      },
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: false, code: 'ADAPTER_RESULT_NOT_OK' })
+    expect(JSON.parse(db.row.payload).runner_error).toMatchObject({
+      code: 'ADAPTER_RESULT_NOT_OK',
+      detail: 'audit found a blocker',
     })
   })
 
@@ -512,6 +589,69 @@ describe('runReceivedQueueWork', () => {
       claimed_at: '2026-05-21T00:00:01.000Z',
     })
     expect(payload.runner_result.completed_at).toBe(db.row.done_at)
+  })
+
+  test('a new fenced execution archives and clears the prior runner error before invocation', async () => {
+    const priorError = {
+      code: 'ADAPTER_RESULT_NOT_OK',
+      detail: 'prior attempt failed',
+      runtime_id: 'fenced-runtime',
+      invocation_source: 'state-daemon-queue-work-scheduler',
+      failed_at: '2026-05-21T00:10:00.000Z',
+      claim_fence: {
+        claimed_by: 'codex-audit',
+        claimed_at: '2026-05-21T00:00:01.000Z',
+      },
+    }
+    const row = receivedRow({
+      payload: JSON.stringify({
+        content: 'retry exact work',
+        receive_claim: {
+          source: 'state-daemon-queue-work-scheduler',
+          agent_id: 'codex-audit',
+          queue_id: '42',
+        },
+        runner_error: priorError,
+      }),
+      claimed_at: '2026-05-21T00:30:01.000Z',
+      claim_expires_at: '2026-05-21T02:00:00.000Z',
+    })
+    const db = new FakeQueueDb(row)
+    let invocationPayload: Record<string, unknown> | null = null
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'fenced-runtime',
+      capabilities,
+      async invoke() {
+        invocationPayload = JSON.parse(db.row.payload)
+        return okResult()
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      expectedClaimSource: 'state-daemon-queue-work-scheduler',
+      claimFence: {
+        claimedBy: 'codex-audit',
+        claimedAt: '2026-05-21T00:30:01.000Z',
+      },
+      requireClaimFence: true,
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: true, code: 'DONE' })
+    expect(invocationPayload?.runner_error).toBeUndefined()
+    expect(invocationPayload?.queue_work_runner_error_history).toEqual([
+      expect.objectContaining({
+        ...priorError,
+        archived_at: '2026-05-21T01:00:00.000Z',
+        replaced_by_claim_fence: {
+          claimed_by: 'codex-audit',
+          claimed_at: '2026-05-21T00:30:01.000Z',
+        },
+      }),
+    ])
   })
 
   test('exact claim fence prevents stale runner_error persistence after ownership changes', async () => {
@@ -857,6 +997,79 @@ describe('finalizeDoneQueueWork', () => {
     ])
   })
 
+  test('persists mediated writeback receipt before sender-owned reply close', async () => {
+    const postedWith = 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-1'
+    const writeback = {
+      mode: 'github_issue_comment' as const,
+      repo: 'watchout/agent-comms-mcp',
+      issue_number: 917,
+      body: 'current-head audit result',
+      body_sha256: 'b'.repeat(64),
+      evidence: ['exact_head:current'],
+    }
+    const row = githubBackedHandoffRow({
+      status: 'done',
+      payload: JSON.stringify({
+        author_id: 'aun',
+        content: 'Audit issue #917. GitHub SSOT: https://github.com/watchout/agent-comms-mcp/issues/917',
+        message_type: 'phase_handoff',
+        finalizer_error: {
+          code: 'WRITEBACK_FAILED',
+          attempts: 1,
+        },
+        runner_result: okResult({
+          reply: 'audit complete',
+          next_action: 'reply',
+          writeback,
+        }),
+      }),
+    })
+    const db = new FakeQueueDb(row)
+    const writebackSender: QueueWorkWritebackSender = {
+      async sendWriteback() {
+        return { posted_with: postedWith, body_sha256: 'b'.repeat(64) }
+      },
+    }
+    const replySender: QueueReplySender = {
+      queue_close_mode: 'sender',
+      async sendReply() {
+        const persisted = JSON.parse(db.row.payload)
+        expect(persisted.writeback_result).toMatchObject({
+          posted_with: postedWith,
+          body_sha256: 'b'.repeat(64),
+        })
+        expect(persisted.finalizer_error).toBeUndefined()
+        db.row.status = 'replied'
+        db.row.replied_with = 'reply-with-writeback'
+        db.row.claimed_by = null
+        db.row.claimed_at = null
+        db.row.claim_expires_at = null
+        return { message_id: 'reply-with-writeback', queue_closed: true }
+      },
+    }
+
+    const outcome = await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      replySender,
+      now: () => new Date('2026-05-21T01:05:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      code: 'REPLIED',
+      replied_with: 'reply-with-writeback',
+      writeback_posted_with: postedWith,
+    })
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.writeback_result).toMatchObject({
+      posted_with: postedWith,
+      body_sha256: 'b'.repeat(64),
+      completed_at: '2026-05-21T01:05:00.000Z',
+    })
+    expect(payload.finalizer_error).toBeUndefined()
+  })
+
   test('sends the stored reply and closes done rows as replied', async () => {
     const row = receivedRow({
       status: 'done',
@@ -1098,7 +1311,15 @@ describe('finalizeDoneQueueWork', () => {
     expect(payload.finalizer_error).toMatchObject({
       code: 'WRITEBACK_FAILED',
       detail: 'mediated writeback sender did not return posted_with',
+      attempts: 1,
     })
+
+    await finalizeDoneQueueWork(db, {
+      queueId: 42,
+      writebackSender,
+      now: () => new Date('2026-05-21T01:06:00.000Z'),
+    })
+    expect(JSON.parse(db.row.payload).finalizer_error.attempts).toBe(2)
   })
 
   test('does not terminal-close retry results until retry semantics exist', async () => {

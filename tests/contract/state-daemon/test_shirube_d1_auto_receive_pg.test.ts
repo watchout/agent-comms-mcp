@@ -162,17 +162,19 @@ function evidence() {
   }
 }
 
-async function insertD1Queue(client: Client, agentState: 'missing' | 'offline') {
-  if (agentState === 'offline') {
+async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' | 'ready') {
+  if (agentState !== 'missing') {
     await client.query(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
-       VALUES ('dev-001', 'dev-001', 'dev', 'codex', 'offline', '{}'::jsonb, true)`,
+       VALUES ('dev-001', 'dev-001', 'dev', 'codex', $1, '{}'::jsonb, true)`,
+      [agentState === 'ready' ? 'online' : 'offline'],
     )
   }
   const idResult = await client.query<{ id: string }>(
     `SELECT nextval(pg_get_serial_sequence('message_queue', 'id'))::text AS id`,
   )
   const queueId = idResult.rows[0].id
+  const messageId = randomUUID()
   const target = {
     repository: 'watchout/agent-comms-mcp',
     agent_id: 'dev-001',
@@ -212,9 +214,19 @@ async function insertD1Queue(client: Client, agentState: 'missing' | 'offline') 
     binding,
     async insert() {
       await client.query(
+        `INSERT INTO channels (id, name, type, members)
+         VALUES ('d1-pg-channel', 'd1-pg-channel', 'channel', ARRAY['dev-001']::text[])
+         ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`,
+      )
+      await client.query(
+        `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source)
+         VALUES ($1::uuid, 'd1-pg-channel', 'external-target', 'D1 PostgreSQL fixture', 'phase_handoff', 'fixture')`,
+        [messageId],
+      )
+      await client.query(
         `INSERT INTO message_queue (id, agent_id, message_id, payload, status, priority, created_at)
          VALUES ($1, 'dev-001', $2, $3, 'pending', 1, clock_timestamp())`,
-        [queueId, `message-d1-pg-${queueId}`, payload],
+        [queueId, messageId, payload],
       )
     },
   }
@@ -248,7 +260,6 @@ function daemonEnv(input: {
     ...process.env,
     AGENT_COM_DB: 'postgres',
     DATABASE_URL: input.databaseUrl,
-    STATE_DAEMON_AGENT_ALLOWLIST: 'dev-001',
     STATE_DAEMON_POLL_SWEEP_INTERVAL_MS: '50',
     STATE_DAEMON_HEARTBEAT_INTERVAL_MS: '50',
     STATE_DAEMON_CLAIM_TTL_SEC: '1',
@@ -364,7 +375,7 @@ async function assertSingleDurableEffect(client: Client, queueId: string, invoca
 }
 
 describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety', () => {
-  test('missing/offline targets run beyond TTL once with no reclaim; ACK loss replays without duplicate effect', async () => {
+  test('missing/offline DB targets are blocked before claim, runner, or external effect', async () => {
     if (!BASE_DATABASE_URL) {
       expect(process.env.AGENT_COM_TEST_DATABASE_URL).toBeUndefined()
       expect(process.env.DATABASE_URL).toBeUndefined()
@@ -376,60 +387,32 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
       tempDirs.push(dir)
       const counterFile = join(dir, 'runner-starts.log')
       let daemon: DaemonProcess | null = null
-      let replay: DaemonProcess | null = null
       try {
         const prepared = await insertD1Queue(client, agentState)
         const env = daemonEnv({
           databaseUrl: url,
           binding: prepared.binding,
           counterFile,
-          delayMs: 1_600,
+          delayMs: 10,
           timeoutMs: 5_000,
         })
         daemon = await startDaemon(env)
         // The only work trigger is the queue INSERT/trigger notification.
         await prepared.insert()
-        await waitFor(() => queueStatus(client, prepared.queueId).then((status) => status === 'in_progress'))
-        await Bun.sleep(1_100)
-        const live = await client.query<{ status: string; lease_live: boolean }>(
-          'SELECT status, claim_expires_at > clock_timestamp() AS lease_live FROM message_queue WHERE id = $1',
-          [prepared.queueId],
-        )
-        expect(live.rows[0]).toEqual({ status: 'in_progress', lease_live: true })
-        try {
-          await waitFor(() => queueStatus(client, prepared.queueId).then((status) => status === 'replied'))
-        } catch (error) {
-          const row = await client.query('SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id = $1', [prepared.queueId])
-          throw new Error(JSON.stringify({ error: String(error), row: row.rows[0], stdout: daemon.stdout.slice(-4_000), stderr: daemon.stderr.slice(-4_000) }))
-        }
+        await waitFor(() => daemon!.stderr.includes('DB automatic-processing authority blocked'))
         await stopDaemon(daemon)
 
-        expect(runnerStarts(counterFile)).toBe(1)
-        expect(metricCount(daemon, 'state_daemon_shirube_d1_auto_receive_total', { result: 'started' })).toBe(1)
-        expect(metricCount(daemon, 'state_daemon_shirube_d1_auto_receive_total', { result: 'terminal' })).toBe(1)
-        expect(metricCount(daemon, 'state_daemon_shirube_d1_auto_receive_total', { result: 'restart_reclaim' })).toBe(0)
-        expect(metricCount(daemon, 'state_daemon_shirube_d1_auto_receive_total', { result: 'error' })).toBe(0)
-        expect(daemon.stderr).not.toContain('[state-daemon] ALERT:')
-        await assertSingleDurableEffect(client, prepared.queueId, prepared.invocationKey)
-
-        if (agentState === 'offline') {
-          await client.query(
-            `UPDATE message_queue
-                SET status = 'done', replied_at = NULL, replied_with = NULL
-              WHERE id = $1 AND status = 'replied'`,
-            [prepared.queueId],
-          )
-          replay = await startDaemon({ ...env, D1_FIXTURE_DELAY_MS: '10' })
-          await waitFor(() => queueStatus(client, prepared.queueId).then((status) => status === 'replied'))
-          await stopDaemon(replay)
-          expect(runnerStarts(counterFile)).toBe(1)
-          expect(metricCount(replay, 'state_daemon_shirube_d1_auto_receive_total', { result: 'replayed' })).toBe(1)
-          expect(replay.stderr).not.toContain('[state-daemon] ALERT:')
-          await assertSingleDurableEffect(client, prepared.queueId, prepared.invocationKey)
-        }
+        expect(await queueStatus(client, prepared.queueId)).toBe('pending')
+        expect(runnerStarts(counterFile)).toBe(0)
+        expect(metricCount(daemon, 'state_daemon_shirube_d1_auto_receive_total', { result: 'started' })).toBe(0)
+        expect(metricCount(daemon, 'state_daemon_automatic_processing_blocked_total', {
+          reason: agentState === 'missing' ? 'AGENT_NOT_ENROLLED' : 'RUNTIME_NOT_READY',
+        })).toBeGreaterThan(0)
+        expect(Number((await client.query<{ n: string }>('SELECT count(*)::text AS n FROM shirube_d1_claims')).rows[0].n)).toBe(0)
+        expect(Number((await client.query<{ n: string }>('SELECT count(*)::text AS n FROM shirube_d1_invocations')).rows[0].n)).toBe(0)
+        expect(Number((await client.query<{ n: string }>('SELECT count(*)::text AS n FROM shirube_d1_effect_deliveries')).rows[0].n)).toBe(0)
       } finally {
         if (daemon) await stopDaemon(daemon).catch(() => {})
-        if (replay) await stopDaemon(replay).catch(() => {})
         await client.end()
       }
     }
@@ -448,7 +431,7 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
     let first: DaemonProcess | null = null
     let restarted: DaemonProcess | null = null
     try {
-      const prepared = await insertD1Queue(client, 'missing')
+      const prepared = await insertD1Queue(client, 'ready')
       const firstEnv = daemonEnv({
         databaseUrl: url,
         binding: prepared.binding,

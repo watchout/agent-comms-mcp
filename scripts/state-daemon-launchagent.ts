@@ -13,11 +13,20 @@ import {
   renderStateDaemonLaunchAgentPlist,
   validateShirubeD1LaunchAgentEnv,
   validateAllAgentCommunicationManifestLaunchAgentEnv,
+  validateStateDaemonCanaryOverlayEnv,
   validateStateDaemonLaunchAgentConfig,
   validateQueueWorkCanaryResiduePreflight,
   loadQueueWorkResiduePolicyFromEnv,
   type StateDaemonLaunchAgentConfig,
 } from '../core/state-daemon/launchagent'
+import {
+  PROVIDER_EFFECTS_ZERO_ALLOW_EMPTY_ENV,
+  PROVIDER_EFFECTS_ZERO_PREFLIGHT_ENV,
+  providerEffectsZeroPreflightRequested,
+  runProviderEffectsZeroActivationPreflight,
+} from '../core/provider-effects-activation-preflight'
+import { PROVIDER_EFFECTS_CONSUMER_ATTESTATION_DIR_ENV } from '../core/provider-effects-consumer-attestation'
+import { PROVIDER_EFFECTS_CONTROL_FILE_ENV } from '../core/provider-effects-control'
 
 type ParsedArgs = {
   command: 'restore' | 'preflight' | 'prune' | 'help'
@@ -65,6 +74,50 @@ const ALL_AGENT_MANIFEST_RESTORE_ENV_KEYS = new Set([
   'STATE_DAEMON_ALL_AGENT_MANIFEST_OWNER_DECISION_REF',
   'STATE_DAEMON_ALL_AGENT_MANIFEST_PATH',
 ])
+
+const CANARY_OVERLAY_RESTORE_ENV_KEYS = new Set([
+  'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT',
+  'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256',
+  'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND',
+  'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION',
+  'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST',
+])
+
+const CHECKOUT_BOUND_RESTORE_PATH_ENV_KEYS = [
+  'STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND',
+  'STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE',
+] as const
+
+function bindRestorePathsToCheckout(
+  extraEnv: Record<string, string>,
+  checkoutPath: string,
+): Record<string, string> {
+  const bound = { ...extraEnv }
+  for (const key of CHECKOUT_BOUND_RESTORE_PATH_ENV_KEYS) {
+    const value = bound[key]?.trim()
+    if (value) bound[key] = resolve(checkoutPath, value)
+  }
+  return bound
+}
+
+function parseCanaryOverlayRestoreEnv(raw: string): Record<string, string> {
+  let parsed: unknown
+  try { parsed = JSON.parse(raw) } catch { throw new Error('--canary-overlay-env-json requires a valid JSON object') }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--canary-overlay-env-json requires a JSON object')
+  }
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!CANARY_OVERLAY_RESTORE_ENV_KEYS.has(key)) {
+      throw new Error(`--canary-overlay-env-json does not allow key: ${key}`)
+    }
+    if (typeof value !== 'string') throw new Error(`--canary-overlay-env-json requires a string value for ${key}`)
+    result[key] = value
+  }
+  return result
+}
 
 function parseAllAgentManifestRestoreEnv(raw: string): Record<string, string> {
   let parsed: unknown
@@ -128,14 +181,20 @@ Usage:
      --github-token-file <path>]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --enable-queue-work-scheduler --agent-allowlist <agent>
+    --canary-overlay-env-json <bounded-json>
     --queue-work-runtime codex-exec --queue-work-fence-message-ids <id>
     [--queue-work-fence-created-after <iso>]
+    [--defer-newer-pending]
     [--queue-work-github-writeback-mode mediated]
     [--queue-work-mediated-posting-command <path>]
     [--github-token-file <path>]
     [--queue-work-residue-policy-file <path>] [--execute]
+    [--provider-effects-zero-preflight
+     --provider-effects-control-file <absolute-path>
+     --provider-effects-consumer-attestation-dir <absolute-path>
+     --outbound-exact-fence-json <strict-v2-json>]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
-    --agent-allowlist <agent> --disable-codex-runner [--execute]
+    --disable-codex-runner [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
     --shirube-d1-env-json <bounded-json> [--execute]
   bun scripts/state-daemon-launchagent.ts restore --commit <sha>
@@ -183,6 +242,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--sqlite-path') args.sqlitePath = resolve(next())
     else if (arg === '--shirube-d1-env-json') Object.assign(args.extraEnv, parseShirubeD1RestoreEnv(next()))
     else if (arg === '--all-agent-manifest-env-json') Object.assign(args.extraEnv, parseAllAgentManifestRestoreEnv(next()))
+    else if (arg === '--canary-overlay-env-json') Object.assign(args.extraEnv, parseCanaryOverlayRestoreEnv(next()))
     else if (arg === '--github-work-puller-enabled') args.githubWorkPullerEnabled = true
     else if (arg === '--github-work-repos') args.githubWorkRepos = next()
     else if (arg === '--github-work-labels') args.githubWorkLabels = next()
@@ -221,15 +281,25 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
     else if (arg === '--queue-work-handoff-contract') args.extraEnv.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = next()
     else if (arg === '--queue-work-github-writeback-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = next()
-    else if (arg === '--queue-work-mediated-posting-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = resolve(next())
+    else if (arg === '--queue-work-mediated-posting-command') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_COMMAND = next()
     else if (arg === '--queue-work-mediated-posting-args-json') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = next()
     else if (arg === '--queue-work-mediated-posting-timeout-ms') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS = next()
     else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
-    else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = resolve(next())
+    else if (arg === '--recover-expired-scheduler-claim') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
+    else if (arg === '--resume-done-finalization') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
+    else if (arg === '--defer-newer-pending') args.extraEnv.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING = '1'
+    else if (arg === '--queue-work-residue-policy-file') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = next()
     else if (arg === '--queue-work-fleet-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_MODE = '1'
     else if (arg === '--queue-work-fleet-decision-ref') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FLEET_DECISION_REF = next()
+    else if (arg === '--provider-effects-zero-preflight') args.extraEnv[PROVIDER_EFFECTS_ZERO_PREFLIGHT_ENV] = '1'
+    else if (arg === '--provider-effects-zero-allow-empty-consumers') args.extraEnv[PROVIDER_EFFECTS_ZERO_ALLOW_EMPTY_ENV] = '1'
+    else if (arg === '--provider-effects-control-file') args.extraEnv[PROVIDER_EFFECTS_CONTROL_FILE_ENV] = next()
+    else if (arg === '--provider-effects-consumer-attestation-dir') {
+      args.extraEnv[PROVIDER_EFFECTS_CONSUMER_ATTESTATION_DIR_ENV] = next()
+    }
+    else if (arg === '--outbound-exact-fence-json') args.extraEnv.OUTBOUND_QUEUE_EXACT_FENCE = next()
     else if (arg === '--keep') {
       const value = next()
       if (!/^\d+$/.test(value)) throw new Error('--keep requires a non-negative integer')
@@ -343,14 +413,49 @@ async function runQueueWorkCanaryResiduePreflight(
   }
 }
 
+function sampleProviderConsumerProcesses(): string {
+  const proc = Bun.spawnSync(['ps', '-axo', 'pid=,comm=,command='], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (proc.exitCode !== 0) {
+    throw new Error(`provider consumer process inventory failed (${proc.exitCode}): ${proc.stderr.toString()}`)
+  }
+  return proc.stdout.toString()
+}
+
+async function runProviderEffectsActivationPreflight(config: StateDaemonLaunchAgentConfig): Promise<void> {
+  if (!providerEffectsZeroPreflightRequested(config.environmentVariables)) return
+  const result = await runProviderEffectsZeroActivationPreflight(config.environmentVariables, {
+    sampleProcesses: sampleProviderConsumerProcesses,
+    waitBetweenSamples: () => new Promise(resolve => setTimeout(resolve, 250)),
+  })
+  if (!result.ok) {
+    throw new Error(`provider-effects zero activation preflight failed:\n${JSON.stringify(result, null, 2)}`)
+  }
+}
+
 function commandRestore(args: ParsedArgs): void {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
-  const extraEnv = {
+  const requestedExtraEnv = {
     ...args.extraEnv,
     ...(args.sqlitePath ? { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: args.sqlitePath } : {}),
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
   }
+  const overlayValidation = validateStateDaemonCanaryOverlayEnv(requestedExtraEnv)
+  if (overlayValidation.issues.length > 0) {
+    throw new Error(`state-daemon canary overlay failed preflight: ${overlayValidation.issues.map(issue => issue.code).join(',')}`)
+  }
+  const requestedPlan = buildStateDaemonRestorePlan({
+    commit: args.commit,
+    restoreRoot: args.restoreRoot,
+    launchAgentsDir: args.launchAgentsDir,
+    bunPath: args.bunPath,
+    databaseUrl: args.databaseUrl,
+    extraEnv: requestedExtraEnv,
+  })
+  const extraEnv = bindRestorePathsToCheckout(requestedExtraEnv, requestedPlan.checkoutPath)
   if (args.bootstrapSafeDefaults) {
     const expected = {
       SHIRUBE_D1_ENABLED: '0',
@@ -400,6 +505,7 @@ async function completeRestoreAfterQueueWorkCanaryResiduePreflight(
 ): Promise<void> {
   try {
     await runQueueWorkCanaryResiduePreflight(config, plan.databaseUrl)
+    await runProviderEffectsActivationPreflight(config)
     finishRestore(plan, args, extraEnv)
   } catch (err) {
     process.stderr.write(`state-daemon-launchagent: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -417,12 +523,21 @@ function finishRestore(
   process.stdout.write(`${JSON.stringify({ ok: true, plan, extraEnv, bootstrapped: !args.noBootstrap }, null, 2)}\n`)
 }
 
-function commandPreflight(args: ParsedArgs): void {
+async function commandPreflight(args: ParsedArgs): Promise<void> {
   const plistPath = resolve(args.plist ?? `${process.env.HOME}/Library/LaunchAgents/com.agent-comms.state-daemon.plist`)
   const config = parseStateDaemonLaunchAgentPlist(readFileSync(plistPath, 'utf8'))
   const result = validateStateDaemonLaunchAgentConfig(config)
-  process.stdout.write(`${JSON.stringify({ plist: plistPath, ...result }, null, 2)}\n`)
-  if (!result.ok) process.exitCode = 1
+  let providerEffectsResult: { ok: boolean; error?: string } | null = null
+  if (result.ok && providerEffectsZeroPreflightRequested(config.environmentVariables)) {
+    try {
+      await runProviderEffectsActivationPreflight(config)
+      providerEffectsResult = { ok: true }
+    } catch (error) {
+      providerEffectsResult = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  process.stdout.write(`${JSON.stringify({ plist: plistPath, ...result, provider_effects_zero_preflight: providerEffectsResult }, null, 2)}\n`)
+  if (!result.ok || providerEffectsResult?.ok === false) process.exitCode = 1
 }
 
 function commandPrune(args: ParsedArgs): void {
@@ -454,7 +569,7 @@ async function main(): Promise<void> {
     return
   }
   if (args.command === 'restore') commandRestore(args)
-  else if (args.command === 'preflight') commandPreflight(args)
+  else if (args.command === 'preflight') await commandPreflight(args)
   else if (args.command === 'prune') commandPrune(args)
 }
 

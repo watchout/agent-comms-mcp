@@ -38,6 +38,8 @@ export interface StateDaemonConfig {
   claimTtlSec: number               // default 60
   activeClaimMaxAgeSec: number      // default 300; daemon must not keep a claim alive forever
   queueWorkRunnerErrorMaxReclaims: number // default 3; fail after this many runner_error reclaims
+  /** Exact canary control ref allowed one audited retry-budget extension. */
+  queueWorkRecoveryControlRef: string | null
 
   // 補強 #2 subprocess pool
   wakePoolMinCapacity: number       // default 5
@@ -81,8 +83,11 @@ export interface StateDaemonConfig {
   memoryReadyGateEnabled: boolean
   memoryReadyProject: string
   /**
-   * Optional emergency narrowing gate. Production should normally leave this
-   * null so DB agent/channel state decides the fleet surface.
+   * Temporary one-target canary overlay only. A non-null value is valid only
+   * after LaunchAgent preflight verifies the Issue #917 control/owner refs,
+   * subject, expiry, prior-plist digest, rollback command, and receipt
+   * destination. It never makes an agent eligible; DB agent/channel state
+   * remains authoritative and steady-state production leaves this null.
    */
   agentAllowlist: string[] | null
   /**
@@ -150,6 +155,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   claimTtlSec: 60,
   activeClaimMaxAgeSec: 300,
   queueWorkRunnerErrorMaxReclaims: 3,
+  queueWorkRecoveryControlRef: null,
   wakePoolMinCapacity: 5,
   wakePoolMaxCapacity: 20,
   wakePoolGrowStep: 2,
@@ -342,6 +348,7 @@ export interface CodexRunnerInvocation {
   messageId: string | null
   requester: string | null
   databaseUrl: string
+  memoryReadyProject: string
   ackContent: string
   completeNoReply?: boolean
   completionReason?: string | null
@@ -375,6 +382,7 @@ export interface HostRuntimeInvoker {
 export interface QueueWorkScheduler {
   runPending?(input: { queueId: number; agentId: string }): Promise<void>
   runReceived(input: { queueId: number; agentId: string }): Promise<void>
+  runDone?(input: { queueId: number; agentId: string }): Promise<void>
 }
 
 /**
@@ -402,6 +410,8 @@ export interface ShirubeD1AutoReceiveResult {
 }
 
 export interface ShirubeD1AutoReceiveDispatcher {
+  /** Whether completed D1 rows should be revisited during the stale sweep. */
+  readonly recoverDone?: boolean
   classify(input: ShirubeD1AutoReceiveInput): ShirubeD1AutoReceiveDecision | Promise<ShirubeD1AutoReceiveDecision>
   dispatch(input: ShirubeD1AutoReceiveInput): Promise<ShirubeD1AutoReceiveResult>
 }

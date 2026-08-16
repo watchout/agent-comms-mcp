@@ -179,6 +179,84 @@ describe('T21 active claim heartbeat refresh', () => {
       await h.daemon.stop()
     }
   })
+
+  test('idle bot renews only its exact in-process aged claim', async () => {
+    const T0 = new Date('2026-05-08T00:10:00.000Z')
+    const agent = makeAgentId('t21-idle-exact-inflight')
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', status: 'idle' })
+    const originalExpiry = new Date(T0.getTime() + 30_000)
+    const exactId = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 301_000),
+      last_heartbeat_at: new Date(T0.getTime() - 30_000),
+    })
+    const unrelatedId = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: agent,
+      claimed_at: new Date(T0.getTime() - 301_000),
+      last_heartbeat_at: new Date(T0.getTime() - 30_000),
+    })
+    const mismatchedId = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'in_progress',
+      claim_expires_at: originalExpiry,
+      claimed_by: `${agent}-other`,
+      claimed_at: new Date(T0.getTime() - 301_000),
+      last_heartbeat_at: new Date(T0.getTime() - 30_000),
+    })
+
+    const clock = new FakeClock(T0)
+    const daemon = new StateDaemon({
+      db: new PgDBClient(pg),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock,
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      config: {
+        agentIdPrefix: 'sd-test-',
+        claimTtlSec: 60,
+        activeClaimMaxAgeSec: 300,
+      },
+    })
+
+    await daemon.start()
+    try {
+      // The scheduler unit test separately proves that runner start/end owns
+      // this registry. Here we pin the real PostgreSQL update effects while
+      // simulating an invocation that is already executing.
+      const runnerState = daemon as unknown as { inflightQueueWorkIds: Set<string> }
+      runnerState.inflightQueueWorkIds.add(String(exactId))
+
+      const result = await daemon.refreshClaims()
+      expect(result).toEqual({ refreshed: 1, skipped: 2 })
+      const rows = await pg.query<{
+        id: number
+        claim_expires_at: Date
+        last_heartbeat_at: Date
+      }>(
+        `SELECT id, claim_expires_at, last_heartbeat_at
+           FROM message_queue
+          WHERE id = ANY($1::bigint[])
+          ORDER BY id`,
+        [[exactId, unrelatedId, mismatchedId]],
+      )
+      const byId = new Map(rows.rows.map((row) => [Number(row.id), row]))
+      expect(new Date(byId.get(exactId)!.claim_expires_at).getTime()).toBe(T0.getTime() + 60_000)
+      expect(new Date(byId.get(exactId)!.last_heartbeat_at).getTime()).toBe(T0.getTime())
+      expect(new Date(byId.get(unrelatedId)!.claim_expires_at).getTime()).toBe(originalExpiry.getTime())
+      expect(new Date(byId.get(unrelatedId)!.last_heartbeat_at).getTime()).toBe(T0.getTime() - 30_000)
+      expect(new Date(byId.get(mismatchedId)!.claim_expires_at).getTime()).toBe(originalExpiry.getTime())
+      expect(new Date(byId.get(mismatchedId)!.last_heartbeat_at).getTime()).toBe(T0.getTime() - 30_000)
+    } finally {
+      await daemon.stop()
+    }
+  })
 })
 
 // ── T21 ───────────────────────────────────────────────────────────────────────
@@ -472,11 +550,12 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     await h.daemon.start()
     try {
       for (let i = 0; i < 5; i++) {
-        const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
-          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
-        )
-        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        const id = await seedQueueRow(pg, {
+          agent_id: agent,
+          status: 'pending',
+          created_at: T0,
+          payload: JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' }),
+        })
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
@@ -506,11 +585,12 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     await h.daemon.start()
     try {
       for (let i = 0; i < 4; i++) {
-        const ins = await pg.query(
-          `INSERT INTO message_queue (agent_id, status, payload, created_at) VALUES ($1, 'pending', $3, $2) RETURNING id`,
-          [agent, T0, JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' })],
-        )
-        const id = Number((ins.rows as Array<{ id: number }>)[0].id)
+        const id = await seedQueueRow(pg, {
+          agent_id: agent,
+          status: 'pending',
+          created_at: T0,
+          payload: JSON.stringify({ message_type: 'instruction', content: 'T26 fixture work' }),
+        })
         await h.daemon.__testHandleEvent({
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })

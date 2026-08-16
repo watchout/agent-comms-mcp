@@ -13,8 +13,27 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  assertStateDaemonDirectEntryArgv,
+  assertStateDaemonDirectEntryEnv,
+  STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR,
+  validateStateDaemonDirectEntryArgv,
+  validateStateDaemonDirectEntryEnv,
+} from '../../../bin/state-daemon'
+import { STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST } from '../../../core/state-daemon/launchagent'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
+
+const VALID_CANARY_OVERLAY: NodeJS.ProcessEnv = {
+  STATE_DAEMON_AGENT_ALLOWLIST: 'aun',
+  STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5223398908',
+  STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5223398910',
+  STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2099-08-08T00:00:00.000Z',
+  STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: 'a'.repeat(64),
+  STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: 'launchctl bootout gui/501/com.agent-comms.state-daemon',
+  STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: '/tmp/aun-917-observed-state.json',
+  STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+}
 
 describe('m4 — bin/state-daemon.ts source-pin', () => {
   const SRC = readFileSync(join(REPO, 'bin/state-daemon.ts'), 'utf-8')
@@ -75,6 +94,70 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
     // MCP tool. Operator alerts are stderr-first; the channel post is left
     // as a future TODO with a comment marker.
     expect(SRC).not.toMatch(/mcp__agent-comms/)
+  })
+
+  test('direct entry validates a temporary allowlist overlay before opening PostgreSQL', () => {
+    const mainIdx = SRC.indexOf('export async function main()')
+    const mainBody = SRC.slice(mainIdx, mainIdx + 1200)
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryArgv(process.argv.slice(2))')).toBeGreaterThan(-1)
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)')).toBeGreaterThan(-1)
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryArgv(process.argv.slice(2))')).toBeLessThan(
+      mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)'),
+    )
+    expect(mainBody.indexOf('assertStateDaemonDirectEntryEnv(process.env)')).toBeLessThan(
+      mainBody.indexOf('new Client({ connectionString: connStr })'),
+    )
+  })
+})
+
+describe('m4 — daemon-only direct-entry argv fail-closed', () => {
+  test('empty argv is the only accepted daemon launch shape', () => {
+    expect(validateStateDaemonDirectEntryArgv([])).toEqual({ ok: true, code: null, argv: [] })
+    expect(() => assertStateDaemonDirectEntryArgv([])).not.toThrow()
+  })
+
+  test.each([
+    ['status', '--json'],
+    ['queue-readiness', '--agent-id', 'codex-audit', '--json'],
+    ['--json'],
+  ])('rejects every non-empty direct-entry argv tuple: %p', (...argv) => {
+    const result = validateStateDaemonDirectEntryArgv(argv)
+    expect(result.ok).toBe(false)
+    expect(result.code).toBe(STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR)
+    expect(() => assertStateDaemonDirectEntryArgv(argv)).toThrow(STATE_DAEMON_DIRECT_ENTRY_ARGS_ERROR)
+  })
+})
+
+describe('m4 — direct-entry DB-SSOT canary overlay fail-closed matrix', () => {
+  const now = new Date('2026-08-08T00:00:00.000Z')
+
+  test('steady state without allowlist or overlay is allowed', () => {
+    expect(validateStateDaemonDirectEntryEnv({}, now)).toEqual({
+      active: false,
+      target: null,
+      expiresAt: null,
+      issues: [],
+    })
+  })
+
+  test('complete four-agent-cohort overlay is allowed', () => {
+    const result = validateStateDaemonDirectEntryEnv(VALID_CANARY_OVERLAY, now)
+    expect(result.active).toBe(true)
+    expect(result.target).toBe('aun')
+    expect(result.issues).toEqual([])
+    expect(() => assertStateDaemonDirectEntryEnv(VALID_CANARY_OVERLAY, now)).not.toThrow()
+  })
+
+  test.each([
+    ['missing metadata', { STATE_DAEMON_AGENT_ALLOWLIST: 'aun' }, 'state_daemon_canary_overlay_identity_incomplete'],
+    ['expired metadata', { ...VALID_CANARY_OVERLAY, STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2026-08-07T23:59:59.000Z' }, 'state_daemon_canary_overlay_expired'],
+    ['retired target', { ...VALID_CANARY_OVERLAY, STATE_DAEMON_AGENT_ALLOWLIST: 'codex-aun' }, 'state_daemon_canary_overlay_retired_target'],
+    ['wrong DesignPack subject', { ...VALID_CANARY_OVERLAY, STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: `sha256:${'b'.repeat(64)}` }, 'state_daemon_canary_overlay_subject_digest_mismatch'],
+    ['target outside cohort', { ...VALID_CANARY_OVERLAY, STATE_DAEMON_AGENT_ALLOWLIST: 'agent-com-dev' }, 'state_daemon_canary_overlay_target_outside_cohort'],
+  ])('%s is NO_GO before daemon effects', (_name, env, expectedCode) => {
+    const result = validateStateDaemonDirectEntryEnv(env, now)
+    expect(result.issues.map((issue) => issue.code)).toContain(expectedCode)
+    expect(() => assertStateDaemonDirectEntryEnv(env, now)).toThrow('STATE_DAEMON_CANARY_OVERLAY_NO_GO')
   })
 })
 

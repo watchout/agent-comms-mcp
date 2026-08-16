@@ -65,6 +65,8 @@ export async function openClient(): Promise<Client> {
 
 export async function cleanAll(c: Client): Promise<void> {
   await c.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
+  await c.query(`DELETE FROM agent_messages WHERE channel_id LIKE $1`, [`${TEST_PREFIX}channel-%`])
+  await c.query(`DELETE FROM channels WHERE id LIKE $1`, [`${TEST_PREFIX}channel-%`])
   await c.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
 }
 
@@ -91,6 +93,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   // tmux_session lives in metadata JSONB per spec v0.6 §7.1 (既存 column 不要、
   // metadata key で abstract). status / last_seen_at / runtime はそれぞれ既存 column.
   const metadata: Record<string, unknown> = {}
+  metadata.memory_project = 'agent-comms-mcp'
   if (a.tmux_session !== null) {
     metadata.tmux_session = a.tmux_session ?? `${a.agent_id}-session`
   }
@@ -101,15 +104,18 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   await c.query(
     `INSERT INTO agents
        (agent_id, display_name, agent_type, runtime, status, last_seen_at,
-        last_wake_attempt_at, channel_port, metadata, runtime_engine_preference)
-     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7)
+        last_wake_attempt_at, channel_port, metadata, runtime_engine_preference,
+        profile_enabled, disabled_at)
+     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL)
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
        runtime_engine_preference = EXCLUDED.runtime_engine_preference,
        status = EXCLUDED.status,
        last_seen_at = EXCLUDED.last_seen_at,
        last_wake_attempt_at = NULL,
-       metadata = EXCLUDED.metadata`,
+       metadata = EXCLUDED.metadata,
+       profile_enabled = TRUE,
+       disabled_at = NULL`,
     [
       a.agent_id,
       a.agent_id,
@@ -166,6 +172,13 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
         '{"fixture":true}'::jsonb)`,
     [a.agent_id, runtimeInstanceId, sessionName, port, completedAt],
   )
+  const fixtureChannelId = `${TEST_PREFIX}channel-${a.agent_id}`
+  await c.query(
+    `INSERT INTO channels (id, name, type, members)
+     VALUES ($1, $1, 'channel', ARRAY[$2]::text[])
+     ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`,
+    [fixtureChannelId, a.agent_id],
+  )
 }
 
 export interface SeedQueueRow {
@@ -182,6 +195,23 @@ export interface SeedQueueRow {
 }
 
 export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> {
+  const messageIdExplicit = Object.prototype.hasOwnProperty.call(r, 'message_id')
+  const messageId = messageIdExplicit ? r.message_id ?? null : randomUUID()
+  if (messageId !== null) {
+    const fixtureChannelId = `${TEST_PREFIX}channel-${r.agent_id}`
+    await c.query(
+      `INSERT INTO channels (id, name, type, members)
+       VALUES ($1, $1, 'channel', ARRAY[$2]::text[])
+       ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`,
+      [fixtureChannelId, r.agent_id],
+    )
+    await c.query(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source)
+       VALUES ($1::uuid, $2, 'state-daemon-fixture', $3, 'instruction', 'state-daemon-fixture')
+       ON CONFLICT (id) DO UPDATE SET channel_id=EXCLUDED.channel_id`,
+      [messageId, fixtureChannelId, r.payload ?? 'state-daemon fixture work'],
+    )
+  }
   const res = await c.query(
     `INSERT INTO message_queue
        (agent_id, status, message_id, payload, claim_expires_at,
@@ -191,7 +221,7 @@ export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> 
     [
       r.agent_id,
       r.status ?? 'pending',
-      r.message_id ?? null,
+      messageId,
       r.payload ?? JSON.stringify({ message_type: 'instruction', content: 'state-daemon fixture work' }),
       r.claim_expires_at ?? null,
       r.claimed_by ?? null,

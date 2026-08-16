@@ -27,9 +27,22 @@
  *   - docs/agent-com-message-queue-spec.md §3.3 / §7
  *   - github.com/watchout/agent-comms-mcp/issues/129
  */
-import { describe, test, expect } from 'bun:test'
+import { afterEach, beforeEach, describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  consumeOneOutboundRow,
+  OUTBOUND_QUEUE_EXACT_FENCE_ENV,
+  parseOutboundQueueExactFence,
+  reclaimOrphanOutboundRows,
+  setDbGetter,
+} from '../../adapters/outbound-consumer'
+import { discordClients } from '../../adapters/discord-client'
+import {
+  PROVIDER_EFFECTS_CONTROL_FILE_ENV,
+  PROVIDER_EFFECTS_CONTROL_SCHEMA,
+  parseProviderEffectsControl,
+} from '../../core/provider-effects-control'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const MIGRATE_SRC = readFileSync(join(REPO_ROOT, 'db', 'migrate.ts'), 'utf-8')
@@ -197,6 +210,303 @@ describe('T2 — server.ts has an outbound_queue consumer', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// T2b: bounded internal-canary correlation fence (Issue #602)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T2b — exact outbound correlation fence', () => {
+  const ROOT_MESSAGE_ID = '10000000-0000-4000-8000-000000000001'
+  const priorFence = process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+  const priorProviderControl = process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
+
+  type QueryCall = { sql: string; params?: any[] }
+
+  function activeFence(rootMessageIds = [ROOT_MESSAGE_ID]): string {
+    return JSON.stringify({
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+      root_message_ids: rootMessageIds,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  }
+
+  function activeFenceV2(
+    createdAfter = '2026-08-12T00:00:00.000Z',
+    rootMessageIds = [ROOT_MESSAGE_ID],
+  ): string {
+    return JSON.stringify({
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v2',
+      root_message_ids: rootMessageIds,
+      created_after: createdAfter,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    })
+  }
+
+  function installRecordingDb(calls: QueryCall[]): void {
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        return { rows: [], rowCount: 0 }
+      },
+    }), 'aun')
+  }
+
+  beforeEach(() => {
+    delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+    delete process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
+  })
+
+  afterEach(() => {
+    if (priorFence === undefined) delete process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV]
+    else process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = priorFence
+    if (priorProviderControl === undefined) delete process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV]
+    else process.env[PROVIDER_EFFECTS_CONTROL_FILE_ENV] = priorProviderControl
+  })
+
+  test('unset fence preserves the legacy unfiltered claim and parameter shape', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+
+    await consumeOneOutboundRow()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).not.toContain('correlated_message')
+    expect(calls[0].params).toEqual(['aun'])
+  })
+
+  test('active fence limits atomic claim to exact roots and their direct replies', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFence()
+
+    await consumeOneOutboundRow()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toContain('outbound_queue.message_id = ANY($2::text[])')
+    expect(calls[0].sql).toContain('correlated_message.id::text = outbound_queue.message_id')
+    expect(calls[0].sql).toContain('correlated_message.reply_to::text = ANY($2::text[])')
+    expect(calls[0].sql).toContain('correlated_message.author_id = $1')
+    expect(calls[0].params).toEqual(['aun', [ROOT_MESSAGE_ID]])
+  })
+
+  test('active fence limits both orphan-reclaim mutations to the same exact correlation set', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFence()
+
+    await reclaimOrphanOutboundRows()
+
+    expect(calls).toHaveLength(2)
+    for (const call of calls) {
+      expect(call.sql).toContain('outbound_queue.message_id = ANY($3::text[])')
+      expect(call.sql).toContain('correlated_message.reply_to::text = ANY($3::text[])')
+      expect(call.sql).toContain('correlated_message.author_id = $1')
+      expect(call.params?.[0]).toBe('aun')
+      expect(call.params?.[2]).toEqual([ROOT_MESSAGE_ID])
+    }
+  })
+
+  test('v2 fence also excludes every outbound row older than created_after', async () => {
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    const createdAfter = new Date(Date.now() - 1_000).toISOString()
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = activeFenceV2(createdAfter)
+
+    await consumeOneOutboundRow()
+    await reclaimOrphanOutboundRows()
+
+    expect(calls).toHaveLength(3)
+    expect(calls[0].sql).toContain('outbound_queue.created_at >= $3::timestamptz')
+    expect(calls[0].params).toEqual(['aun', [ROOT_MESSAGE_ID], createdAfter])
+    for (const call of calls.slice(1)) {
+      expect(call.sql).toContain('outbound_queue.created_at >= $4::timestamptz')
+      expect(call.params?.[2]).toEqual([ROOT_MESSAGE_ID])
+      expect(call.params?.[3]).toBe(createdAfter)
+    }
+  })
+
+  test('v2 fence fails closed when created_after is missing, malformed, or not before expiry', () => {
+    const fixedNow = Date.parse('2026-08-12T00:00:00.000Z')
+    const expiry = '2026-08-12T00:01:00.000Z'
+    const base = {
+      schema_version: 'agent-comms/outbound-exact-correlation-fence/v2',
+      root_message_ids: [ROOT_MESSAGE_ID],
+      expires_at: expiry,
+    }
+    const cases = [
+      base,
+      { ...base, created_after: 'not-a-date' },
+      { ...base, created_after: expiry },
+      { ...base, created_after: '2026-08-12T00:02:00.000Z' },
+    ]
+    expect(cases.map((value) => parseOutboundQueueExactFence(JSON.stringify(value), fixedNow))).toEqual([
+      { kind: 'invalid', reason: 'unexpected_or_missing_fields' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+      { kind: 'invalid', reason: 'invalid_created_after' },
+    ])
+  })
+
+  test('invalid, missing-field, expired, and duplicate fence values fail closed before DB access', async () => {
+    const fixedNow = Date.parse('2026-08-12T00:00:00.000Z')
+    const cases: Array<[string, string, string]> = [
+      ['invalid JSON', '{', 'invalid_json'],
+      ['missing roots', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        expires_at: '2026-08-12T00:01:00.000Z',
+      }), 'unexpected_or_missing_fields'],
+      ['expired', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        root_message_ids: [ROOT_MESSAGE_ID],
+        expires_at: '2026-08-11T23:59:59.000Z',
+      }), 'expired_fence'],
+      ['duplicate roots', JSON.stringify({
+        schema_version: 'agent-comms/outbound-exact-correlation-fence/v1',
+        root_message_ids: [ROOT_MESSAGE_ID, ROOT_MESSAGE_ID.toUpperCase()],
+        expires_at: '2026-08-12T00:01:00.000Z',
+      }), 'duplicate_root_message_id'],
+    ]
+
+    for (const [label, raw, reason] of cases) {
+      expect(parseOutboundQueueExactFence(raw, fixedNow), label).toEqual({ kind: 'invalid', reason })
+    }
+
+    const calls: QueryCall[] = []
+    installRecordingDb(calls)
+    process.env[OUTBOUND_QUEUE_EXACT_FENCE_ENV] = '{'
+    await consumeOneOutboundRow()
+    await reclaimOrphanOutboundRows()
+    expect(calls).toHaveLength(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2c: provider-effects host epoch (Issue #602 A1 Sample B)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T2c — provider-effects double fence', () => {
+  const allowed = (epoch: string) => parseProviderEffectsControl(JSON.stringify({
+    schema_version: PROVIDER_EFFECTS_CONTROL_SCHEMA,
+    epoch,
+    provider_effects: 'allowed',
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), '/tmp/provider-effects-control.json')
+  const forbidden = (epoch: string) => parseProviderEffectsControl(JSON.stringify({
+    schema_version: PROVIDER_EFFECTS_CONTROL_SCHEMA,
+    epoch,
+    provider_effects: 'forbidden',
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), '/tmp/provider-effects-control.json')
+
+  test('deny before claim performs no DB access and no provider call', async () => {
+    const calls: Array<{ sql: string; params?: any[] }> = []
+    let sends = 0
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        return { rows: [], rowCount: 0 }
+      },
+    }), 'aun')
+    discordClients.set('aun', {
+      isConnected: () => true,
+      sendAdapterMessage: async () => {
+        sends++
+        return { external_message_id: 'must-not-send' }
+      },
+    } as any)
+
+    try {
+      await consumeOneOutboundRow({
+        readProviderEffectsControl: () => forbidden('deny-before-claim'),
+        refreshProviderEffectsConsumerAttestation: () => ({
+          ok: true,
+          required: false,
+          path: null,
+          record: null,
+        }),
+      })
+    } finally {
+      discordClients.delete('aun')
+    }
+
+    expect(calls).toHaveLength(0)
+    expect(sends).toBe(0)
+  })
+
+  test('deny transition after claim releases the row and performs no provider call', async () => {
+    const calls: Array<{ sql: string; params?: any[] }> = []
+    let sends = 0
+    let reads = 0
+    setDbGetter(async () => ({
+      query: async (sql: string, params?: any[]) => {
+        calls.push({ sql, params })
+        if (sql.includes("SET status = 'claimed'")) {
+          return {
+            rows: [{
+              id: 'provider-race-row',
+              message_id: '10000000-0000-4000-8000-000000000099',
+              channel_external_id: 'provider-race-channel',
+              content: 'must remain internal',
+              mentions_display: null,
+              attachments: null,
+              reply_to_discord_id: null,
+              attempts: 1,
+              max_attempts: 5,
+              discord_message_id: null,
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 1 }
+      },
+    }), 'aun')
+    discordClients.set('aun', {
+      isConnected: () => true,
+      sendAdapterMessage: async () => {
+        sends++
+        return { external_message_id: 'must-not-send' }
+      },
+    } as any)
+
+    try {
+      await consumeOneOutboundRow({
+        readProviderEffectsControl: () => ++reads === 1
+          ? allowed('epoch-before')
+          : forbidden('epoch-after'),
+        refreshProviderEffectsConsumerAttestation: () => ({
+          ok: true,
+          required: false,
+          path: null,
+          record: null,
+        }),
+      })
+    } finally {
+      discordClients.delete('aun')
+    }
+
+    expect(sends).toBe(0)
+    expect(reads).toBe(2)
+    const release = calls.find((call) => call.sql.includes('attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END'))
+    expect(release).toBeDefined()
+    expect(release?.params).toEqual(['provider_effects_fenced:control_forbidden:epoch-after', 'provider-race-row'])
+  })
+
+  test('all three outbound producer blocks evaluate the shared control before INSERT', () => {
+    const cliHelperStart = CLI_SRC.indexOf('async function enqueueOutboundProjection')
+    const cliHelperEnd = CLI_SRC.indexOf('\nfunction ', cliHelperStart + 1)
+    const cliHelper = CLI_SRC.slice(cliHelperStart, cliHelperEnd)
+    expect(cliHelper.indexOf('readProviderEffectsControl()')).toBeGreaterThan(-1)
+    expect(cliHelper.indexOf('readProviderEffectsControl()')).toBeLessThan(cliHelper.indexOf('INSERT INTO outbound_queue'))
+    expect(cliHelper).toContain('PROVIDER_EFFECTS_FORBIDDEN_CODE')
+
+    for (const body of [serverToolBody('send'), serverToolBody('notify')]) {
+      const controlIdx = body.indexOf('readProviderEffectsControl()')
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection, providerEffectsControl)')
+      const insertIdx = body.indexOf('INSERT INTO outbound_queue')
+      expect(controlIdx).toBeGreaterThan(-1)
+      expect(skipIdx).toBeGreaterThan(controlIdx)
+      expect(insertIdx).toBeGreaterThan(skipIdx)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // T3: server.ts send-tool INSERTs into outbound_queue instead of calling
 //     getDiscordClient(...).sendAdapterMessage directly
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,8 +530,8 @@ describe('T3 — server.ts send-tool delivery uses outbound_queue', () => {
   })
   test('server send + notify skip enqueue when the resolver has no delivery consumer', () => {
     for (const body of [serverToolBody('send'), serverToolBody('notify')]) {
-      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection)')
-      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped")
+      const skipIdx = body.indexOf('outboundProjectionSkipReason(projection, providerEffectsControl)')
+      const skipAuditIdx = body.indexOf("outbound.enqueue_skipped", skipIdx)
       const insertIdx = body.indexOf('INSERT INTO outbound_queue')
       expect(skipIdx).toBeGreaterThan(-1)
       expect(skipAuditIdx).toBeGreaterThan(skipIdx)
@@ -311,7 +621,7 @@ describe('T4 — cli/index.ts sendMessage uses outbound_queue', () => {
   test('CLI send + notify skip enqueue when the resolver has no delivery consumer', () => {
     const helper = enqueueOutboundProjectionBody()
     const skipIdx = helper.indexOf('outboundProjectionSkipReason(projection)')
-    const skipAuditIdx = helper.indexOf("outbound.enqueue_skipped")
+    const skipAuditIdx = helper.indexOf("outbound.enqueue_skipped", skipIdx)
     const insertIdx = helper.indexOf('INSERT INTO outbound_queue')
     expect(skipIdx).toBeGreaterThan(-1)
     expect(skipAuditIdx).toBeGreaterThan(skipIdx)
@@ -426,7 +736,7 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
 
   test('consumer persists discord_message_id on mark-sent', () => {
     const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 12000)
     expect(fnBody).toMatch(
       /UPDATE outbound_queue SET status = 'sent'[^`]*discord_message_id\s*=\s*\$1/,
     )

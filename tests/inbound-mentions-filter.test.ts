@@ -16,6 +16,8 @@ import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { routeMessage } from '../core/route-message'
+import { authorizeDiscordInboundSender } from '../adapters/discord'
+import type { DbAdapter } from '../core/route-message-db'
 
 const PROJECT_ROOT = join(dirname(new URL(import.meta.url).pathname), '..')
 // FEAT-005: handleInboundMessage + sendHumanWarning moved to
@@ -31,6 +33,7 @@ const SERVER_SOURCE =
 // PR-A: routeInbound + helpers extracted to core/route-message{,-db}.ts
 const CORE_PURE_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message.ts'), 'utf-8')
 const CORE_DB_SOURCE = readFileSync(join(PROJECT_ROOT, 'core/route-message-db.ts'), 'utf-8')
+const DISCORD_SOURCE = readFileSync(join(PROJECT_ROOT, 'adapters/discord.ts'), 'utf-8')
 
 describe('Inbound Mentions Filter — extractDiscordMentions', () => {
   test('extractDiscordMentions function exists with rawDiscordUserIds param', () => {
@@ -109,7 +112,7 @@ describe('routeInbound — Pure function (§5.1)', () => {
 
   test('mentions filter checks individual and group mentions', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toContain("msg.mentions.includes(agent.agentId)")
     expect(fnBody).toContain("msg.mentions.includes('all')")
     expect(fnBody).toContain("msg.mentions.includes('dev')")
@@ -118,7 +121,7 @@ describe('routeInbound — Pure function (§5.1)', () => {
 
   test('NOT_MENTIONED is set in dropTargets', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
-    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
+    const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 8000)
     expect(fnBody).toContain("'NOT_MENTIONED'")
   })
 
@@ -150,12 +153,14 @@ describe('routeInbound — Pure function (§5.1)', () => {
     expect(fnBody).toContain("'OBSERVER_MODE'")
   })
 
-  // PR-B §C2: sender-side guard for send-tool / cli callers
-  test('routeMessage rejects non-member senders for send-tool / cli sourceType', () => {
+  test('routeMessage rejects unresolved/non-member senders for every source and human native inbound', () => {
     const fnIdx = CORE_PURE_SOURCE.indexOf('export function routeMessage(')
     const fnBody = CORE_PURE_SOURCE.slice(fnIdx, fnIdx + 5000)
-    expect(fnBody).toContain("sourceType !== 'inbound'")
+    expect(fnBody).not.toContain("sourceType !== 'inbound'")
+    expect(fnBody).toContain('SENDER_ID_UNRESOLVED')
     expect(fnBody).toContain("SENDER_NOT_A_MEMBER")
+    expect(fnBody).toContain("sourceType === 'inbound'")
+    expect(fnBody).toContain('SENDER_HUMAN_NOT_ALLOWED')
   })
 })
 
@@ -173,7 +178,7 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
     { agentId: 'lead-ama', agentType: 'org', observerMode: false, discordId: null },
   ] as const
 
-  test('case 4 — CEO posts with no mentions → no enqueue, explicit missing-target drops', () => {
+  test('case 4 — DB human sender is rejected before recipient routing', () => {
     const result = routeMessage(
       {
         authorAgentId: 'ceo',
@@ -187,9 +192,8 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
       'inbound',
     )
     expect(result.pushTargets).toEqual([])
-    expect(result.dropTargets['agent-com-dev']).toBe('MISSING_MENTION_TARGET')
-    expect(result.dropTargets['cto']).toBe('MISSING_MENTION_TARGET')
-    expect(result.dropTargets['lead-ama']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets).toEqual({})
+    expect(result.senderViolation).toBe('SENDER_HUMAN_NOT_ALLOWED')
     expect(result.noMentions).toBe(true)
     expect(result.senderIsHuman).toBe(true)
   })
@@ -201,8 +205,8 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
     ]
     const result = routeMessage(
       {
-        authorAgentId: 'ceo',
-        authorIsBot: false,
+        authorAgentId: 'agent-com-dev',
+        authorIsBot: true,
         content: 'broadcast',
         mentions: [],
         messageType: 'chat',
@@ -212,8 +216,8 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
       'inbound',
     )
     expect(result.pushTargets).toEqual([])
-    expect(result.dropTargets['agent-com-dev']).toBe('MISSING_MENTION_TARGET')
-    expect(result.dropTargets['cto']).toBe('MISSING_MENTION_TARGET')
+    expect(result.dropTargets['ceo']).toBe('HUMAN_AGENT_NO_QUEUE')
+    expect(result.dropTargets['cto']).toBe('NOT_MENTIONED')
     expect(result.dropTargets['lead-ama']).toBe('OBSERVER_MODE')
   })
 
@@ -238,9 +242,7 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
     expect(result.dropTargets['lead-ama']).toBeUndefined() // self-skip, no entry
   })
 
-  test('human author + explicit mentions skips the bypass (mention path wins)', () => {
-    // When the human author lists specific mentions, the bypass does
-    // not fire — only the named bots are pushed.
+  test('human author + explicit mentions is still rejected at native inbound boundary', () => {
     const result = routeMessage(
       {
         authorAgentId: 'ceo',
@@ -253,9 +255,9 @@ describe('routeMessage — Issue #278 §B CEO bypass behavior', () => {
       agents as any,
       'inbound',
     )
-    expect(result.pushTargets).toEqual(['cto'])
-    expect(result.dropTargets['agent-com-dev']).toBe('NOT_MENTIONED')
-    expect(result.dropTargets['lead-ama']).toBe('NOT_MENTIONED')
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets).toEqual({})
+    expect(result.senderViolation).toBe('SENDER_HUMAN_NOT_ALLOWED')
   })
 })
 
@@ -264,23 +266,14 @@ describe('handleInboundMessage — Full flow wrapper', () => {
     expect(SERVER_SOURCE).toContain('async function handleInboundMessage(')
   })
 
-  test('DB save happens before routing', () => {
-    const fnIdx = SERVER_SOURCE.indexOf('async function handleInboundMessage(')
-    // PR-β cycle 2 §1.2: cycle 2 added comment lines around the dispatch
-    // site so the original 5000-char window fell short of the routeInbound
-    // call. Bumped to 8000 chars (still well within the function body).
-    const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
-    const dbSaveIdx = fnBody.indexOf('saveMessage(')
-    // PR-β cycle 2 §1.2: routeInbound is now dispatched via
-    // `(d.routeInbound ?? routeInbound)(...)`. Match the wrapped form
-    // (`routeInbound)(`) preferentially; fall back to bare call which
-    // still applies elsewhere in the file (e.g. listener path line 281).
-    const wrappedIdx = fnBody.indexOf('routeInbound)(')
-    const bareIdx = fnBody.indexOf('routeInbound(')
-    const routeIdx = wrappedIdx >= 0 ? wrappedIdx : bareIdx
-    expect(dbSaveIdx).toBeGreaterThan(-1)
-    expect(routeIdx).toBeGreaterThan(-1)
-    expect(dbSaveIdx).toBeLessThan(routeIdx)
+  test('native Discord sender authorization happens before callbacks and queue-capable flow', () => {
+    const fnIdx = DISCORD_SOURCE.indexOf('private async handleInbound(msg: Message)')
+    const fnBody = DISCORD_SOURCE.slice(fnIdx, fnIdx + 7000)
+    const authIdx = fnBody.indexOf('authorizeDiscordInboundSender(')
+    expect(authIdx).toBeGreaterThan(-1)
+    expect(authIdx).toBeLessThan(fnBody.indexOf('startTypingInternal('))
+    expect(authIdx).toBeLessThan(fnBody.indexOf('this.messageCallback(unified)'))
+    expect(authIdx).toBeLessThan(fnBody.indexOf('this.adapterMessageCallback(inbound)'))
   })
 
   test('last_received_context abolished (reply_to required, §4.2)', () => {
@@ -297,6 +290,56 @@ describe('handleInboundMessage — Full flow wrapper', () => {
     const fnBody = SERVER_SOURCE.slice(fnIdx, fnIdx + 12000)
     expect(fnBody).toContain('humanWarning:')
     expect(fnBody).toContain('result.senderIsHuman && result.noMentions')
+  })
+})
+
+describe('Discord native inbound — DB channels.members sender boundary', () => {
+  function authDb(
+    bindingAgentIds: string[],
+    memberIds = ['agent-a', 'ceo'],
+    agentTypes: Record<string, string> = { 'agent-a': 'dev', ceo: 'human' },
+  ): DbAdapter {
+    return {
+      async query(sql: string, params: unknown[] = []) {
+        if (sql.includes('SELECT id, members, type FROM channels')) {
+          return { rows: [{ id: 'ch-1', members: memberIds, type: 'channel' }] }
+        }
+        if (sql.includes('FROM agent_ui_bindings')) {
+          return {
+            rows: bindingAgentIds.map((agentId) => ({
+              agent_id: agentId,
+              ui_id: String(params[0]),
+              status: 'active',
+              surface_role: 'primary',
+            })),
+          }
+        }
+        if (sql.includes("metadata->>'discord_id' = $1")) {
+          return { rows: bindingAgentIds.map((agent_id) => ({ agent_id })) }
+        }
+        if (sql.includes('SELECT agent_type FROM agents')) {
+          const agentType = agentTypes[String(params[0])]
+          return { rows: agentType ? [{ agent_type: agentType }] : [] }
+        }
+        return { rows: [] }
+      },
+    }
+  }
+
+  test('allows exactly one non-human member identity', async () => {
+    expect(await authorizeDiscordInboundSender(authDb(['agent-a']), 'ch-1', 'discord-a')).toEqual({
+      ok: true,
+      agentId: 'agent-a',
+      channelId: 'ch-1',
+    })
+  })
+
+  test('fails closed for absent DB, unmapped/nonmember, ambiguous, and human senders', async () => {
+    expect(await authorizeDiscordInboundSender(null, 'ch-1', 'discord-a')).toEqual({ ok: false, code: 'DB_UNAVAILABLE' })
+    expect(await authorizeDiscordInboundSender(authDb([]), 'ch-1', 'discord-a')).toEqual({ ok: false, code: 'SENDER_NOT_A_MEMBER' })
+    expect(await authorizeDiscordInboundSender(authDb(['outside'], ['agent-a']), 'ch-1', 'discord-a')).toEqual({ ok: false, code: 'SENDER_NOT_A_MEMBER' })
+    expect(await authorizeDiscordInboundSender(authDb(['agent-a', 'agent-b'], ['agent-a', 'agent-b'], { 'agent-a': 'dev', 'agent-b': 'dev' }), 'ch-1', 'discord-a')).toEqual({ ok: false, code: 'SENDER_ID_UNRESOLVED' })
+    expect(await authorizeDiscordInboundSender(authDb(['ceo']), 'ch-1', 'discord-ceo')).toEqual({ ok: false, code: 'SENDER_HUMAN_NOT_ALLOWED' })
   })
 })
 

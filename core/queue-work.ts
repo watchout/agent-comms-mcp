@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { detectNoReplyIntent } from './no-reply-policy'
 
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
@@ -335,7 +336,9 @@ function exactInstantText(value: unknown): string | null {
  * Shared authorization readback for the trusted core finalizer and the CLI
  * sender.  The runner result is not authority by itself: it must match the
  * receive identity, the pre-invocation execution record, the current exact
- * claim incarnation, the durable done timestamp, and a live database lease.
+ * claim incarnation and durable done timestamp. A live lease is required
+ * while work executes, but an exact locked done row may resume finalization
+ * after expiry because it is no longer reclaimable as executable work.
  */
 export function queueWorkClaimResultFenceMismatches(input: {
   row: Pick<QueueWorkRow,
@@ -350,6 +353,7 @@ export function queueWorkClaimResultFenceMismatches(input: {
   payload: Record<string, unknown>
   expectedClaimSource: string
   expectedRuntimeId?: string
+  requireLiveLease?: boolean
 }): string[] {
   const { row, payload } = input
   const receiveClaim = recordValue(payload.receive_claim)
@@ -368,7 +372,7 @@ export function queueWorkClaimResultFenceMismatches(input: {
 
   if (row.claimed_by !== row.agent_id) mismatches.push('claimed_by')
   if (claimedAtMs === null) mismatches.push('claimed_at')
-  if (leaseMs === null || databaseNowMs === null || leaseMs <= databaseNowMs) {
+  if (input.requireLiveLease !== false && (leaseMs === null || databaseNowMs === null || leaseMs <= databaseNowMs)) {
     mismatches.push('claim_expires_at')
   }
   if (receiveClaim.source !== input.expectedClaimSource) mismatches.push('receive_claim.source')
@@ -430,6 +434,15 @@ function looksLikeRoleHandoff(content: string, agentId: string): boolean {
   )
 }
 
+function hasExplicitGithubHandoffIntent(content: string): boolean {
+  return (
+    /\bGitHub\s+SSOT\b/i.test(content)
+    || /(?:^|\n)\s*(?:pr|issue):\s*https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+/i.test(content)
+    || /schema_version:\s*shirube-v3\/(?:evidence_audit_request|control_handoff|gate_request)\/v\d+/i.test(content)
+    || /(?:^|\n)\s*(?:required_)?writeback:\s*(?:github|issue|pr)/i.test(content)
+  )
+}
+
 export function detectQueueWorkHandoffContract(input: {
   agentId: string
   payload: string
@@ -438,14 +451,19 @@ export function detectQueueWorkHandoffContract(input: {
   const payload = parsePayload(input.payload)
   const content = typeof payload.content === 'string' ? payload.content : input.payload
   const messageType = payloadMessageType(payload)
+  const explicitGithubHandoff = hasExplicitGithubHandoffIntent(content)
   const detectedFrom: string[] = []
   if (messageType === 'phase_handoff') detectedFrom.push('message_type:phase_handoff')
   if (containsGithubIssueOrPullUrl(content)) detectedFrom.push('github_url')
   if (looksLikeRoleHandoff(content, input.agentId)) detectedFrom.push('role_handoff_text')
+  if (explicitGithubHandoff) detectedFrom.push('explicit_github_handoff')
 
   const githubBacked = (
     (messageType === 'phase_handoff' && containsGithubIssueOrPullUrl(content)) ||
-    (containsGithubIssueOrPullUrl(content) && looksLikeRoleHandoff(content, input.agentId))
+    (
+      containsGithubIssueOrPullUrl(content)
+      && explicitGithubHandoff
+    )
   )
   return {
     kind: githubBacked ? 'github_backed_role_handoff' : 'plain_queue_work',
@@ -506,6 +524,7 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
   const payload = parsePayload(row.payload)
   const messageId = row.message_id ?? payload.message_id ?? null
   const requester = payload.author_id ?? payload.from ?? null
+  const noReply = detectNoReplyIntent({ payload, content: payload.content })
   return {
     schema_version: QUEUE_WORK_ENVELOPE_VERSION,
     queue_id: queueIdOf(row),
@@ -516,7 +535,7 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
     requester: requester === null ? null : String(requester),
     content: typeof payload.content === 'string' ? payload.content : row.payload,
     reply_contract: {
-      required: payload.reply_contract?.required === false ? false : true,
+      required: payload.reply_contract?.required === false || noReply.no_reply_required ? false : true,
       reply_to: messageId === null ? null : String(messageId),
       mention: requester === null ? null : String(requester),
     },
@@ -622,6 +641,7 @@ async function persistRunnerError(
         AND claimed_at = $5
         AND claim_expires_at > ${databaseClockSql(db)}`
   }
+  sql += '\n        RETURNING id'
   if (!claimFence) {
     const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
     return rowCount(persisted) === 1
@@ -777,9 +797,34 @@ export async function runReceivedQueueWork(
       }
     }
 
+    const priorPayload = parsePayload(row.payload)
+    const priorRunnerError = recordValue(priorPayload.runner_error)
+    const priorRunnerErrorHistory = Array.isArray(priorPayload.queue_work_runner_error_history)
+      ? priorPayload.queue_work_runner_error_history.filter((entry) => (
+          entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+        ))
+      : []
+    const executionBasePayload = { ...priorPayload }
+    delete executionBasePayload.runner_error
+    const runnerErrorHistory = Object.keys(priorRunnerError).length > 0
+      ? [
+          ...priorRunnerErrorHistory,
+          {
+            ...priorRunnerError,
+            archived_at: now.toISOString(),
+            replaced_by_claim_fence: claimFence ? {
+              claimed_by: claimFence.claimedBy,
+              claimed_at: claimFence.claimedAt,
+            } : null,
+          },
+        ].slice(-16)
+      : priorRunnerErrorHistory
     const executionPayload = claimFence
       ? JSON.stringify({
-          ...parsePayload(row.payload),
+          ...executionBasePayload,
+          ...(runnerErrorHistory.length > 0
+            ? { queue_work_runner_error_history: runnerErrorHistory }
+            : {}),
           queue_work_execution: {
             source: opts.invocationSource ?? null,
             agent_id: row.agent_id,
@@ -1040,7 +1085,7 @@ export async function finalizeDoneQueueWork(
       }
     }
 
-    const payload = parsePayload(row.payload)
+    let payload = parsePayload(row.payload)
     const result = payload.runner_result as QueueWorkResult | undefined
     if (!resultLooksValid(result)) {
       await db.query('ROLLBACK')
@@ -1059,16 +1104,17 @@ export async function finalizeDoneQueueWork(
       writebackBodySha256?: string | null,
     ): Promise<QueueWorkFinalizeOutcome> => {
       const closedAt = opts.now?.() ?? new Date()
-      const nextPayload = writebackPostedWith
-        ? JSON.stringify({
-            ...payload,
+      const { finalizer_error: _staleFinalizerError, ...successfulPayload } = payload
+      const nextPayload = JSON.stringify(writebackPostedWith
+        ? {
+            ...successfulPayload,
             writeback_result: {
               posted_with: writebackPostedWith,
               body_sha256: writebackBodySha256 ?? null,
               completed_at: closedAt.toISOString(),
             },
-          })
-        : row.payload
+          }
+        : successfulPayload)
       const closeFence = opts.d1CompletionFence
       const closeParams: unknown[] = [
         row.id,
@@ -1089,8 +1135,7 @@ export async function finalizeDoneQueueWork(
         const ownerParam = closeParams.push(resultClaimFence.claimed_by)
         const claimedAtParam = closeParams.push(resultClaimFence.claimed_at)
         claimGuard = `AND claimed_by = $${ownerParam}
-            AND claimed_at = $${claimedAtParam}
-            AND claim_expires_at > ${databaseClockSql(db)}`
+            AND claimed_at = $${claimedAtParam}`
       }
       const updated = await db.query<{ id: string | number }>(
         `UPDATE message_queue
@@ -1150,12 +1195,18 @@ export async function finalizeDoneQueueWork(
       detail?: string,
     ): Promise<QueueWorkFinalizeOutcome> => {
       const failedAt = opts.now?.() ?? new Date()
+      const previousFinalizerError = recordValue(payload.finalizer_error)
+      const previousAttempts = Number(previousFinalizerError.attempts)
+      const attempts = Number.isInteger(previousAttempts) && previousAttempts > 0
+        ? previousAttempts + 1
+        : 1
       const nextPayload = JSON.stringify({
         ...payload,
         finalizer_error: {
           code,
           detail: detail ?? null,
           failed_at: failedAt.toISOString(),
+          attempts,
         },
       })
       await db.query(
@@ -1177,6 +1228,7 @@ export async function finalizeDoneQueueWork(
         payload,
         expectedClaimSource: opts.claimResultFence.expectedClaimSource,
         expectedRuntimeId: opts.claimResultFence.expectedRuntimeId,
+        requireLiveLease: false,
       })
       if (mismatches.length > 0) {
         return failClosed(
@@ -1303,6 +1355,19 @@ export async function finalizeDoneQueueWork(
       return failClosed('TERMINAL_EVIDENCE_INVALID', validation.detail)
     }
 
+    if (result.next_action === 'reply') {
+      if (!result.reply || result.reply.trim().length === 0) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
+      }
+      if (!d1CompletedReceipt && !opts.replySender) {
+        await db.query('ROLLBACK')
+        committed = true
+        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
+      }
+    }
+
     let writebackPostedWith: string | null = null
     let writebackBodySha256: string | null = null
     if (handoffContract.github_backed) {
@@ -1319,6 +1384,7 @@ export async function finalizeDoneQueueWork(
         if (!opts.writebackSender) {
           return failClosed('MISSING_WRITEBACK_SENDER')
         }
+        let writebackFailure: string | null = null
         const sent = await opts.writebackSender.sendWriteback({
           queue_id: queueIdOf(row),
           agent_id: row.agent_id,
@@ -1331,9 +1397,15 @@ export async function finalizeDoneQueueWork(
             next_action: result.next_action,
             evidence: result.evidence ?? [],
           },
-        }).catch((err) => null)
+        }).catch((err) => {
+          writebackFailure = (err as Error).message ?? String(err)
+          return null
+        })
         if (!sent) {
-          return failClosed('WRITEBACK_FAILED', 'mediated writeback sender failed')
+          return failClosed(
+            'WRITEBACK_FAILED',
+            `mediated writeback sender failed${writebackFailure ? `: ${writebackFailure.slice(0, 1000)}` : ''}`,
+          )
         }
         const postedWith = typeof sent.posted_with === 'string' && sent.posted_with.trim().length > 0
           ? sent.posted_with.trim()
@@ -1346,21 +1418,62 @@ export async function finalizeDoneQueueWork(
       }
     }
 
+    const finalizationPreparedAt = opts.now?.() ?? new Date()
+    const { finalizer_error: _staleFinalizerError, ...successfulPayload } = payload
+    payload = writebackPostedWith
+      ? {
+          ...successfulPayload,
+          writeback_result: {
+            posted_with: writebackPostedWith,
+            body_sha256: writebackBodySha256 ?? null,
+            completed_at: finalizationPreparedAt.toISOString(),
+          },
+        }
+      : successfulPayload
+
     if (result.next_action === 'reply') {
-      if (!result.reply || result.reply.trim().length === 0) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_REPLY', queue_id: queueIdOf(row) }
-      }
-      if (!d1CompletedReceipt && !opts.replySender) {
-        await db.query('ROLLBACK')
-        committed = true
-        return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueIdOf(row) }
-      }
       if (d1CompletedReceipt) {
         return closeDirectly(d1CompletedReceipt, 'REPLIED', writebackPostedWith, writebackBodySha256)
       }
       if (opts.replySender!.queue_close_mode === 'sender') {
+        // A sender-owned close happens on another connection. Persist the
+        // successful mediated writeback receipt (and clear any stale prior
+        // finalizer error) before releasing this exact row lock. If the reply
+        // send later fails, failClosed adds the new error without losing the
+        // durable receipt, so a retry can resume without reposting.
+        const preparedPayload = JSON.stringify(payload)
+        const preparedParams: unknown[] = [
+          row.id,
+          preparedPayload,
+          finalizationPreparedAt.toISOString(),
+        ]
+        let claimGuard = ''
+        if (opts.claimResultFence) {
+          const resultClaimFence = recordValue(result.claim_fence)
+          const ownerParam = preparedParams.push(resultClaimFence.claimed_by)
+          const claimedAtParam = preparedParams.push(resultClaimFence.claimed_at)
+          claimGuard = `AND claimed_by = $${ownerParam}
+              AND claimed_at = $${claimedAtParam}`
+        }
+        const prepared = await db.query<{ id: string | number }>(
+          `UPDATE message_queue
+              SET payload = $2,
+                  last_heartbeat_at = $3
+            WHERE id = $1
+              AND status = 'done'
+              ${claimGuard}
+            RETURNING id`,
+          preparedParams,
+        )
+        if (rowCount(prepared) === 0) {
+          await db.query('ROLLBACK')
+          committed = true
+          return {
+            ok: false,
+            code: 'FINALIZE_RACE',
+            queue_id: queueIdOf(row),
+          }
+        }
         // The production CLI sender closes the exact queue row atomically with
         // its reply. Release this transaction's FOR UPDATE lock first; keeping
         // it while spawning the CLI would deadlock the second connection.

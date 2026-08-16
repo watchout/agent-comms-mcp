@@ -33,6 +33,7 @@ export type DirectoryChannel = {
   primary: string | null
   adapter_owner: string | null
   outbound_allowlist: string[] | null
+  outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE'
   native_projection_count: number
   warnings: string[]
 }
@@ -68,6 +69,8 @@ export type MentionDirectoryChannel = {
   name: string | null
   adapter_owner: string | null
   primary: string | null
+  communication_authority: 'channels.members'
+  outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE'
   recommended: MentionDirectoryCandidate[]
   candidates: MentionDirectoryCandidate[]
   excluded_policy_entries: MentionDirectoryPolicyEntry[]
@@ -341,6 +344,7 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       primary: policy.primary,
       adapter_owner: policy.adapterOwner,
       outbound_allowlist: policy.outboundAllowlist,
+      outbound_allowlist_status: policy.outboundAllowlistStatus,
       native_projection_count: Object.keys(policy.nativeProjectionIdentities).length + Object.keys(policy.nativeRoleOutboundOwners).length,
       warnings: channelWarnings(row, activeMemberCount),
     }
@@ -404,6 +408,8 @@ export async function buildDirectoryReport(db: Queryable): Promise<DirectoryRepo
       name: row.name ? String(row.name) : null,
       adapter_owner: policy.adapterOwner,
       primary: policy.primary,
+      communication_authority: 'channels.members',
+      outbound_allowlist_status: policy.outboundAllowlistStatus,
       recommended: candidates.filter((candidate) => candidate.recommended),
       candidates,
       excluded_policy_entries: excludedPolicyEntries,

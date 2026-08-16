@@ -9,18 +9,34 @@ import {
 import {
   classifyQueueWorkResidueRows,
   loadQueueWorkResiduePolicyFile,
+  matchQueueWorkResiduePolicyEntry,
   type QueueWorkResiduePolicy,
   type QueueWorkResidueRow,
 } from './queue-work-residue-policy'
 import {
   parseAllAgentCommunicationManifest,
 } from '../all-agent-communication-manifest'
+import { validateProviderEffectsZeroActivationConfig } from '../provider-effects-activation-preflight'
 
 export const STATE_DAEMON_LAUNCH_AGENT_LABEL = 'com.agent-comms.state-daemon'
 export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist`
+export const DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID = 'state_daemon'
 export const DEFAULT_STATE_DAEMON_BUN_PATH = '/Users/yuji/.bun/bin/bun'
 export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
 export const DEFAULT_STATE_DAEMON_DENYLIST = 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
+export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor'] as const
+export const STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID = 'codex-aun'
+export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:3dda8cd2b471e907245b28b4a1c4f6e656d2d76c6eff9f5c5a44db698f2372bc'
+
+const STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS = [
+  'STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF',
+  'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT',
+  'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256',
+  'STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND',
+  'STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION',
+  'STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST',
+] as const
 
 export type StateDaemonLaunchAgentConfig = {
   label: string | null
@@ -374,8 +390,14 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
     USER: process.env.USER ?? 'yuji',
     PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     ...mergedExtraEnv,
+    // The shared listener is never a bot-scoped runtime. Keep the canonical
+    // identity last so restore inputs cannot accidentally turn it into one.
+    AGENT_ID: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
   }
-  if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) delete env.STATE_DAEMON_AGENT_ALLOWLIST
+  if (!mergedExtraEnv.STATE_DAEMON_AGENT_ALLOWLIST) {
+    delete env.STATE_DAEMON_AGENT_ALLOWLIST
+    for (const key of STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS) delete env[key]
+  }
 
   const envXml = Object.entries(env)
     .map(([key, value]) => `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(value)}</string>`)
@@ -434,6 +456,124 @@ function parseCsvValue(value: string | undefined): string[] {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
 
+export type StateDaemonCanaryOverlayValidation = {
+  active: boolean
+  target: string | null
+  expiresAt: string | null
+  issues: StateDaemonPreflightIssue[]
+}
+
+export function validateStateDaemonCanaryOverlayEnv(
+  env: Record<string, string>,
+  now = new Date(),
+): StateDaemonCanaryOverlayValidation {
+  const allowlist = parseCsvValue(env.STATE_DAEMON_AGENT_ALLOWLIST)
+  const target = allowlist.length === 1 ? allowlist[0] : null
+  const issues: StateDaemonPreflightIssue[] = []
+  const populatedOverlayKeys = STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS
+    .filter((key) => Boolean(env[key]?.trim()))
+
+  if (allowlist.length === 0) {
+    if (populatedOverlayKeys.length > 0) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_without_target',
+        message: 'Canary overlay metadata must not remain when STATE_DAEMON_AGENT_ALLOWLIST is absent.',
+      })
+    }
+    return { active: false, target: null, expiresAt: null, issues }
+  }
+
+  if (allowlist.length !== 1) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_target_not_exact',
+      message: 'A temporary DB-SSOT canary overlay requires exactly one STATE_DAEMON_AGENT_ALLOWLIST target.',
+    })
+  }
+
+  for (const key of STATE_DAEMON_CANARY_OVERLAY_ENV_KEYS) {
+    if (!env[key]?.trim()) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_identity_incomplete',
+        message: `${key} is required whenever STATE_DAEMON_AGENT_ALLOWLIST is present.`,
+      })
+    }
+  }
+
+  if (target === STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_retired_target',
+      message: `${STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID} is retired; the canonical agent id is aun.`,
+    })
+  } else if (target && !STATE_DAEMON_DB_SSOT_CANARY_TARGETS.includes(target as typeof STATE_DAEMON_DB_SSOT_CANARY_TARGETS[number])) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_target_outside_cohort',
+      message: `Canary overlay target ${target} is outside the owner-authorized four-agent cohort.`,
+    })
+  }
+
+  for (const key of ['STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF', 'STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF'] as const) {
+    const value = env[key]?.trim()
+    if (value && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/.test(value)) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_ref_invalid',
+        message: `${key} must be an immutable GitHub issue or pull-request comment URL.`,
+      })
+    }
+  }
+  const controlRef = env.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF?.trim()
+  const ownerDecisionRef = env.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF?.trim()
+  if (controlRef && ownerDecisionRef && controlRef === ownerDecisionRef) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_refs_not_distinct',
+      message: 'Canary control handoff and owner activation decision must cite separate immutable comments.',
+    })
+  }
+
+  const expiresAt = env.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT?.trim() || null
+  if (expiresAt) {
+    const expiresAtMs = Date.parse(expiresAt)
+    if (!Number.isFinite(expiresAtMs)) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_expiry_invalid',
+        message: 'STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT must be a valid timestamp.',
+      })
+    } else if (expiresAtMs <= now.getTime()) {
+      issues.push({
+        code: 'state_daemon_canary_overlay_expired',
+        message: 'The temporary state-daemon canary overlay has expired and must be removed before processing.',
+      })
+    }
+  }
+
+  const priorPlistDigest = env.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256?.trim()
+  if (priorPlistDigest && !/^[0-9a-f]{64}$/.test(priorPlistDigest)) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_prior_plist_digest_invalid',
+      message: 'STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256 must be 64 lowercase hex.',
+    })
+  }
+
+  const observedStateDestination = env.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION?.trim()
+  if (observedStateDestination
+    && !observedStateDestination.startsWith('/')
+    && !/^https:\/\/github\.com\/[^\s]+$/.test(observedStateDestination)) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_observed_state_destination_invalid',
+      message: 'Observed-state destination must be an absolute path or immutable GitHub URL.',
+    })
+  }
+
+  const subjectDigest = env.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST?.trim()
+  if (subjectDigest && subjectDigest !== STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST) {
+    issues.push({
+      code: 'state_daemon_canary_overlay_subject_digest_mismatch',
+      message: 'Canary overlay subject digest does not match the admitted Issue #917 DesignPack.',
+    })
+  }
+
+  return { active: true, target, expiresAt, issues }
+}
+
 function isCanaryLabel(label: string): boolean {
   return label.trim().toLowerCase().startsWith('canary:')
 }
@@ -488,6 +628,7 @@ export function validateStateDaemonLaunchAgentConfig(
     probe?: PathProbe
     allowRestoreOwnedTemp?: boolean
     restoreRoot?: string | null
+    now?: () => Date
   } = {},
 ): StateDaemonPreflightResult {
   const probe = options.probe ?? {
@@ -597,6 +738,10 @@ export function validateStateDaemonLaunchAgentConfig(
 
   errors.push(...validateShirubeD1LaunchAgentEnv(env))
   errors.push(...validateAllAgentCommunicationManifestLaunchAgentEnv(env))
+  errors.push(...validateStateDaemonCanaryOverlayEnv(env, options.now?.() ?? new Date()).issues)
+  errors.push(...validateProviderEffectsZeroActivationConfig(env, {
+    nowMs: options.now?.().getTime() ?? Date.now(),
+  }).issues)
   const allAgentManifestPath = env.STATE_DAEMON_ALL_AGENT_MANIFEST_PATH?.trim()
   if (env.STATE_DAEMON_ALL_AGENT_MANIFEST_ENFORCEMENT_ENABLED === '1' && allAgentManifestPath) {
     if (!probe.exists(allAgentManifestPath)) {
@@ -658,6 +803,56 @@ export function validateStateDaemonLaunchAgentConfig(
   }
 
   const queueWorkSchedulerEnabled = queueWorkSchedulerLaunchAgentEnabled(env)
+  const expiredClaimRecoveryValue = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim()
+  const doneFinalizationResumeValue = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim()
+  const deferNewerPendingValue = env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING?.trim()
+  if (expiredClaimRecoveryValue && expiredClaimRecoveryValue !== '1') {
+    errors.push({
+      code: 'queue_work_expired_claim_recovery_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM must be 1 when present.',
+    })
+  }
+  if (expiredClaimRecoveryValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_expired_claim_recovery_requires_scheduler',
+      message: 'Expired scheduler claim recovery requires the queue-work scheduler to be enabled.',
+    })
+  }
+  if (doneFinalizationResumeValue && doneFinalizationResumeValue !== '1') {
+    errors.push({
+      code: 'queue_work_done_finalization_resume_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION must be 1 when present.',
+    })
+  }
+  if (doneFinalizationResumeValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_done_finalization_resume_requires_scheduler',
+      message: 'Done queue-work finalization resume requires the queue-work scheduler to be enabled.',
+    })
+  }
+  if (deferNewerPendingValue && deferNewerPendingValue !== '1') {
+    errors.push({
+      code: 'queue_work_defer_newer_pending_flag_invalid',
+      message: 'STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING must be 1 when present.',
+    })
+  }
+  if (deferNewerPendingValue === '1' && !queueWorkSchedulerEnabled) {
+    errors.push({
+      code: 'queue_work_defer_newer_pending_requires_scheduler',
+      message: 'Serial pending deferral requires the queue-work scheduler to be enabled.',
+    })
+  }
+  const activationModes = [
+    expiredClaimRecoveryValue === '1',
+    doneFinalizationResumeValue === '1',
+    deferNewerPendingValue === '1',
+  ].filter(Boolean).length
+  if (activationModes > 1) {
+    errors.push({
+      code: 'queue_work_activation_mode_conflict',
+      message: 'Expired-claim recovery, done finalization resume, and serial pending deferral are mutually exclusive.',
+    })
+  }
   if (queueWorkSchedulerEnabled) {
     // Fleet mode (owner ruling 6 amended, iyasaka-arc#24 comment 4921804733):
     // after the fenced single-seat canary has a terminal PASS + audit PASS,
@@ -686,12 +881,10 @@ export function validateStateDaemonLaunchAgentConfig(
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    if (fleetMode ? allowlist.length === 0 : allowlist.length !== 1) {
+    if (allowlist.length > 1) {
       errors.push({
         code: 'queue_work_scheduler_requires_single_agent_allowlist',
-        message: fleetMode
-          ? 'Fleet-mode scheduler activation must specify at least one STATE_DAEMON_AGENT_ALLOWLIST entry.'
-          : 'Queue-work scheduler activation must specify exactly one STATE_DAEMON_AGENT_ALLOWLIST entry for bounded canary launch.',
+        message: 'Queue-work scheduler activation may use at most one temporary STATE_DAEMON_AGENT_ALLOWLIST overlay; broad persistent host allowlists are not authoritative.',
       })
     }
 
@@ -704,6 +897,22 @@ export function validateStateDaemonLaunchAgentConfig(
       .map((item) => item.trim())
       .filter(Boolean)
     const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+    if (
+      expiredClaimRecoveryValue === '1'
+      && (
+        fleetMode
+        || allowlist.length !== 1
+        || fenceQueueIds.length !== 1
+        || fenceMessageIds.length > 1
+        || !fenceCreatedAfter
+        || !Number.isFinite(Date.parse(fenceCreatedAfter))
+      )
+    ) {
+      errors.push({
+        code: 'queue_work_expired_claim_recovery_requires_exact_fence',
+        message: 'Expired scheduler claim recovery requires single-agent, single-queue, non-fleet fencing with a valid created-after timestamp.',
+      })
+    }
     if (!fleetMode && fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
       errors.push({
         code: 'queue_work_scheduler_requires_canary_fence',
@@ -879,6 +1088,35 @@ export async function validateQueueWorkCanaryResiduePreflight(
   const fenceQueueIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS)
   const fenceMessageIds = parseCsvValue(env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS)
   const fenceCreatedAfter = env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER?.trim()
+  const expiredClaimRecovery = env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM?.trim() === '1'
+  const doneFinalizationResume = env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION?.trim() === '1'
+  const deferNewerPending = env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING?.trim() === '1'
+  const exactResume = expiredClaimRecovery || doneFinalizationResume
+  const exactSerial = exactResume || deferNewerPending
+  if (
+    exactSerial
+    && (
+      allowlist.length !== 1
+      || fenceQueueIds.length !== 1
+      || fenceMessageIds.length > 1
+      || !fenceCreatedAfter
+      || !Number.isFinite(Date.parse(fenceCreatedAfter))
+    )
+  ) {
+    errors.push({
+      code: doneFinalizationResume
+        ? 'queue_work_done_finalization_resume_requires_exact_fence'
+        : expiredClaimRecovery
+          ? 'queue_work_expired_claim_recovery_requires_exact_fence'
+          : 'queue_work_defer_newer_pending_requires_exact_fence',
+      message: `${doneFinalizationResume
+        ? 'Done finalization resume'
+        : expiredClaimRecovery
+          ? 'Expired scheduler claim recovery'
+          : 'Serial pending deferral'} residue preflight requires one agent, one queue id, at most one message id, and a valid created-after timestamp.`,
+    })
+    return { ok: false, errors, warnings, residues: [] }
+  }
   if (
     allowlist.length !== 1
     || (fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter)
@@ -894,7 +1132,17 @@ export async function validateQueueWorkCanaryResiduePreflight(
     return { ok: true, errors, warnings, residues: [] }
   }
   const limit = options.limit ?? 20
-  params.push(limit)
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit >= Number.MAX_SAFE_INTEGER) {
+    errors.push({
+      code: 'queue_work_canary_residue_preflight_limit_invalid',
+      message: 'Queue-work scheduler canary residue preflight requires a positive safe row limit.',
+    })
+    return { ok: false, errors, warnings, residues: [] }
+  }
+  // Fetch one sentinel row beyond the bounded validation set. A plain
+  // LIMIT would otherwise let an unsafe claimed/executed row hide just
+  // beyond the scan and incorrectly produce an activation GO.
+  params.push(limit + 1)
   try {
     const result = await db.query<QueueWorkCanaryResidueRow>(
       `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.created_at,
@@ -908,8 +1156,91 @@ export async function validateQueueWorkCanaryResiduePreflight(
       params,
     )
     const residues = result.rows ?? []
+    if (residues.length > limit) {
+      const sentinel = residues[limit]
+      errors.push({
+        code: 'queue_work_canary_residue_preflight_truncated',
+        message: `Queue-work scheduler canary residue preflight found more than ${limit} non-fenced non-terminal row(s); validation is not exhaustive (first unvalidated row ${sentinel?.id ?? '(unknown)'}:${sentinel?.status ?? '(unknown)'}:${sentinel?.message_id ?? '(no-message-id)'}). Refusing activation.`,
+      })
+      return { ok: false, errors, warnings, residues }
+    }
     if (residues.length > 0) {
-      if (!options.residuePolicy) {
+      if (exactSerial) {
+        const governedQueueIds = new Set<number>()
+        if (options.residuePolicy) {
+          for (const row of residues) {
+            const queueId = Number(row.id)
+            const entry = options.residuePolicy.entries.find((item) => item.queue_id === queueId)
+            if (!entry) continue
+            const classification = matchQueueWorkResiduePolicyEntry(entry, row)
+            if (classification.matched) {
+              governedQueueIds.add(queueId)
+            } else {
+              errors.push({
+                code: 'queue_work_residue_policy_mismatch',
+                message: `queue ${queueId} does not match governed residue policy: ${classification.mismatches.join('; ')}`,
+              })
+            }
+          }
+        }
+        const serialResidues = residues.filter((row) => !governedQueueIds.has(Number(row.id)))
+        const targetCreatedAtMs = Date.parse(fenceCreatedAfter!)
+        const unsafeResidues = serialResidues.filter((row) => {
+          const createdAtMs = row.created_at instanceof Date
+            ? row.created_at.getTime()
+            : Date.parse(row.created_at)
+          let payload: Record<string, unknown> = {}
+          try {
+            const parsed = typeof row.payload === 'string' ? JSON.parse(row.payload) : {}
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return true
+            payload = parsed as Record<string, unknown>
+          } catch {
+            return true
+          }
+          const untouched = payload.receive_claim == null
+            && payload.queue_work_execution == null
+            && payload.runner_error == null
+          return row.agent_id !== allowlist[0]
+            || row.status !== 'pending'
+            || !Number.isFinite(createdAtMs)
+            || createdAtMs <= targetCreatedAtMs
+            || row.claimed_by !== null
+            || row.claimed_at !== null
+            || row.claim_expires_at !== null
+            || !untouched
+        })
+        if (unsafeResidues.length > 0) {
+          errors.push({
+            code: doneFinalizationResume
+              ? 'queue_work_done_finalization_resume_unsafe_residue'
+              : expiredClaimRecovery
+                ? 'queue_work_expired_claim_recovery_unsafe_residue'
+                : 'queue_work_defer_newer_pending_unsafe_residue',
+            message: `${doneFinalizationResume
+              ? 'Done finalization resume'
+              : expiredClaimRecovery
+                ? 'Expired scheduler claim recovery'
+                : 'Serial pending deferral'} found ${unsafeResidues.length} non-fenced row(s) that are not newer untouched pending work: ${
+              unsafeResidues.map((row) => `${row.id}:${row.status}:${row.message_id ?? '(no-message-id)'}`).join(', ')
+            }. Refusing activation.`,
+          })
+        } else if (serialResidues.length > 0) {
+          warnings.push({
+            code: doneFinalizationResume
+              ? 'queue_work_done_finalization_resume_newer_pending_deferred'
+              : expiredClaimRecovery
+                ? 'queue_work_expired_claim_recovery_newer_pending_deferred'
+                : 'queue_work_serial_pending_newer_pending_deferred',
+            message: `${serialResidues.length} newer untouched pending row(s) remain deferred behind the exact queue fence.`,
+          })
+        }
+        if (governedQueueIds.size > 0) {
+          warnings.push({
+            code: 'queue_work_governed_residue_deferred',
+            message: `${governedQueueIds.size} policy-classified non-fenced row(s) remain deferred to their authorized lifecycle.`,
+          })
+        }
+      } else if (!options.residuePolicy) {
         errors.push({
           code: 'queue_work_residue_policy_missing',
           message: `Queue-work scheduler activation found ${residues.length} non-fenced non-terminal row(s) for ${allowlist[0]} but no STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE was provided: ${

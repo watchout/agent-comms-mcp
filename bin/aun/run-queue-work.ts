@@ -27,13 +27,16 @@ export interface RunQueueWorkOptions {
   claimFence?: QueueWorkClaimFence
   requireClaimFence?: boolean
   finalize?: boolean
+  finalizeOnly?: boolean
   dryRun?: boolean
   env?: NodeJS.ProcessEnv
   cwd?: string
+  runtimeCwd?: string
 }
 
 export interface RunQueueWorkPlan {
   repoRoot: string
+  runtime_cwd: string
   agent_id: string | null
   queue_id: string | null
   runtime: string
@@ -66,6 +69,10 @@ function parseArgs(argv: string[]): RunQueueWorkOptions {
     else if (tok === '--runtime') out.runtime = argv[++i]
     else if (tok === '--expected-claim-source') out.expectedClaimSource = argv[++i]
     else if (tok === '--finalize') out.finalize = true
+    else if (tok === '--finalize-only') {
+      out.finalize = true
+      out.finalizeOnly = true
+    }
     else if (tok === '--dry-run') out.dryRun = true
   }
   return out
@@ -75,8 +82,13 @@ export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueW
   const env = opts.env ?? process.env
   const envRuntime = env.AUN_QUEUE_WORK_RUNTIME ?? env.STATE_DAEMON_QUEUE_WORK_RUNTIME
   const envCommand = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
+  const subjectRoot = opts.cwd ?? repoRoot()
   return {
-    repoRoot: opts.cwd ?? repoRoot(),
+    repoRoot: subjectRoot,
+    runtime_cwd: opts.runtimeCwd
+      ?? env.AUN_QUEUE_WORK_RUNTIME_CWD
+      ?? env.STATE_DAEMON_QUEUE_WORK_RUNTIME_CWD
+      ?? subjectRoot,
     agent_id: opts.agentId ?? env.AGENT_ID ?? null,
     queue_id: opts.queueId ?? null,
     runtime: opts.runtime ?? envRuntime ?? (envCommand ? 'command-json' : 'unconfigured'),
@@ -192,18 +204,21 @@ function defaultQueueWorkResultSchemaPath(cwd: string): string {
   return resolve(cwd, 'schemas', 'queue-work-result-v1.schema.json')
 }
 
-function queueWorkPrompt(envelope: QueueWorkEnvelope): string {
+function queueWorkPrompt(envelope: QueueWorkEnvelope, subjectRoot: string): string {
   return [
     'You are the AUN queue-work runtime adapter for one exact queue row.',
     'Return only JSON matching queue_work_result_v1.',
     'Do not call next, inbox, processing, done, send, repair commands, tmux, or Discord.',
     'Do not post to GitHub directly.',
     'Do not inspect unrelated queue rows.',
+    `The immutable implementation subject is available read-only at ${subjectRoot}. Inspect that path for repository evidence; do not treat the execution workspace as the implementation subject.`,
     'For terminal completion, evidence must include machine-readable entries semantic_outcome=<reply|handoff|no_reply|close|fail> and outcome_reason=<stable_reason>.',
     'If handoff_contract.github_backed is true, include writeback.mode="github_issue_comment" with repo, issue_number, body, and evidence. The trusted wrapper will post it.',
     'If handoff_contract.github_backed is false, omit writeback or set it to null.',
     'If reply_contract.required is false, use next_action "close" and omit reply.',
     'If reply_contract.required is true and you can answer, use next_action "reply" with reply text.',
+    'A negative audit, gate, or domain finding is still successfully completed work: return ok=true and put the finding in summary, evidence, writeback, and reply as applicable.',
+    'Use ok=false only when the requested inspection or work itself could not be completed safely.',
     'If you cannot safely complete the work, return ok=false with next_action "retry" and a concise summary.',
     '',
     JSON.stringify(envelope),
@@ -257,13 +272,15 @@ export function describeCodexExecFailure(input: {
 export function buildCodexExecQueueWorkCommand(input: {
   envelope: QueueWorkEnvelope
   cwd: string
+  subjectRoot?: string
   env: NodeJS.ProcessEnv
   outputLastMessagePath: string
 }): CodexExecQueueWorkCommand {
   const schemaPath = resolve(
+    input.subjectRoot ?? input.cwd,
     input.env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
       ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
-      ?? defaultQueueWorkResultSchemaPath(input.cwd),
+      ?? defaultQueueWorkResultSchemaPath(input.subjectRoot ?? input.cwd),
   )
   const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
@@ -278,6 +295,10 @@ export function buildCodexExecQueueWorkCommand(input: {
     '--output-last-message', input.outputLastMessagePath,
     '--sandbox', sandbox,
     '--cd', input.cwd,
+    // Runtime workspaces are DB-authorized agent roots and need not be Git
+    // repositories. The immutable subject, read-only sandbox, and queue fence
+    // remain separate authority boundaries.
+    '--skip-git-repo-check',
   ]
   const profile = input.env.AUN_QUEUE_WORK_CODEX_PROFILE
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE
@@ -296,7 +317,7 @@ export function buildCodexExecQueueWorkCommand(input: {
   return {
     command,
     args,
-    stdin: queueWorkPrompt(input.envelope),
+    stdin: queueWorkPrompt(input.envelope, input.subjectRoot ?? input.cwd),
     outputLastMessagePath: input.outputLastMessagePath,
     schemaPath,
   }
@@ -316,6 +337,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
 
   constructor(
     private readonly cwd: string,
+    private readonly subjectRoot: string,
     private readonly env: NodeJS.ProcessEnv,
   ) {}
 
@@ -326,6 +348,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
       const plan = buildCodexExecQueueWorkCommand({
         envelope,
         cwd: this.cwd,
+        subjectRoot: this.subjectRoot,
         env: this.env,
         outputLastMessagePath,
       })
@@ -407,7 +430,7 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
 
 function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
-  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.repoRoot, env)
+  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
   if (plan.runtime === 'command-json') {
     const command = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
     if (!command) {
@@ -489,6 +512,48 @@ interface MediatedPostingRequest {
   runtime_result_summary: QueueWorkRuntimeResultSummary
 }
 
+function mediatedMarkerForAgent(agentId: string): string {
+  if (/^(l1auditor|l2auditor|auditor|codex-audit)$/i.test(agentId)) return 'aun:l2-audit/v1'
+  if (/^qa$/i.test(agentId)) return 'aun:qa-check/v1'
+  if (/^check$/i.test(agentId)) return 'aun:technical-check/v1'
+  if (/^arc$/i.test(agentId)) return 'aun:arc-technical-design/v1'
+  if (/^(cto|codex-cto)$/i.test(agentId)) return 'aun:cto-go-no-go/v1'
+  return 'aun:state-transition-request/v1'
+}
+
+export function frameMediatedGithubWriteback(input: {
+  queueId: string
+  agentId: string
+  messageId: string | null
+  writeback: QueueWorkGithubIssueCommentWriteback
+}): QueueWorkGithubIssueCommentWriteback {
+  const body = input.writeback.body
+  if (/^<!--\s*aun:[a-z0-9-]+\/v\d+\s*-->/i.test(body)) return input.writeback
+  // A marker anywhere except the first line is invalid and must remain invalid
+  // for the trusted wrapper to reject; do not conceal conflicting authority.
+  if (/<!--\s*aun:[a-z0-9-]+\/v\d+\s*-->/i.test(body)) return input.writeback
+  const headers = [
+    `<!-- ${mediatedMarkerForAgent(input.agentId)} -->`,
+    `repo: ${input.writeback.repo}`,
+    `issue: ${input.writeback.issue_number}`,
+    `role: ${input.agentId}`,
+    `source_queue_id: ${input.queueId}`,
+    ...(input.messageId ? [`source_message_id: ${input.messageId}`] : []),
+    'status: completed',
+    ...(input.writeback.idempotency_key
+      ? [`idempotency_key: ${input.writeback.idempotency_key}`]
+      : []),
+    '',
+    body,
+  ]
+  return {
+    ...input.writeback,
+    body: headers.join('\n'),
+    // The wrapper returns the digest of the trusted framed body.
+    body_sha256: null,
+  }
+}
+
 class MediatedPostingCommandSender implements QueueWorkWritebackSender {
   constructor(
     private readonly command: string,
@@ -512,7 +577,12 @@ class MediatedPostingCommandSender implements QueueWorkWritebackSender {
       agent_id: input.agent_id,
       message_id: input.message_id,
       handoff_contract: input.handoff_contract,
-      writeback: input.writeback,
+      writeback: frameMediatedGithubWriteback({
+        queueId: input.queue_id,
+        agentId: input.agent_id,
+        messageId: input.message_id,
+        writeback: input.writeback,
+      }),
       runtime_result_summary: input.runtime_result_summary,
     }
     const child = await execFileAsync(this.command, this.args, {
@@ -592,8 +662,35 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
   }
 
   try {
-    const writebackSender = createWritebackSender(plan, env)
     const adapter = createRuntimeAdapter(plan, env)
+    const writebackSender = createWritebackSender(plan, env)
+    if (opts.finalizeOnly) {
+      if (!plan.queue_id || !plan.finalize) {
+        return {
+          ok: false,
+          dry_run: false,
+          plan,
+          error: 'finalize-only requires queue_id and finalize=true',
+        }
+      }
+      const finalizer = await finalizeDoneQueueWork(legacyDb, {
+        queueId: plan.queue_id,
+        replySender: new AgentComCliReplySender(plan.repoRoot, env, adapter.runtime_id),
+        writebackSender,
+        ...(plan.expected_claim_source ? {
+          claimResultFence: {
+            expectedClaimSource: plan.expected_claim_source,
+            expectedRuntimeId: adapter.runtime_id,
+          },
+        } : {}),
+      })
+      return {
+        ok: finalizer.ok,
+        dry_run: false,
+        plan,
+        finalizer,
+      }
+    }
     const runner = await runReceivedQueueWork(legacyDb, {
       queueId: plan.queue_id ?? undefined,
       agentId: plan.agent_id ?? undefined,

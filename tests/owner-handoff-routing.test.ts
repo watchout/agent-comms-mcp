@@ -86,6 +86,36 @@ describe('owner handoff routing diagnostics', () => {
         channel_id: 'ops-ch',
       })
       expect(diagnostic.handoff_evidence?.github_url).toContain('issuecomment-owner')
+      expect(diagnostic.communication_authority).toMatchObject({
+        authority: 'channels.members',
+        members: ['codex-cto', 'dev-001'],
+        violations: [],
+      })
+    })
+  })
+
+  test('does not let existing queue evidence bypass current channels.members authority', async () => {
+    await withOwnerHandoffDb(async (db) => {
+      const queueId = await seedOwnerQueue(db)
+      await db.execute(
+        `UPDATE channels SET members = $1 WHERE id = 'ops-ch'`,
+        [JSON.stringify(['codex-cto'])],
+      )
+
+      const diagnostic = await buildOwnerHandoffDiagnostic(db, {
+        senderAgentId: 'codex-cto',
+        intendedRecipientAgentId: 'dev-001',
+        queueId,
+      })
+
+      expect(diagnostic.ok).toBe(false)
+      expect(diagnostic.status).toBe('blocked_channel_membership')
+      expect(diagnostic.queue?.queue_id).toBe(queueId)
+      expect(diagnostic.communication_authority).toMatchObject({
+        authority: 'channels.members',
+        members: ['codex-cto'],
+        violations: ['dev-001'],
+      })
     })
   })
 
@@ -132,8 +162,12 @@ describe('owner handoff routing diagnostics', () => {
     })
   })
 
-  test('records blocked owner diagnostics with outbound ACL evidence', async () => {
+  test('records blocked owner diagnostics when the intended recipient is not a channel member', async () => {
     await withOwnerHandoffDb(async (db) => {
+      await db.execute(
+        `UPDATE channels SET members = $1 WHERE id = 'ops-ch'`,
+        [JSON.stringify(['codex-cto'])],
+      )
       await db.execute(
         `INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
          VALUES ('ops-ch', $1, 'locked-test-policy')`,
@@ -147,14 +181,14 @@ describe('owner handoff routing diagnostics', () => {
         githubHandoffUrl: 'https://github.com/watchout/agent-comms-mcp/issues/592#issuecomment-owner',
       })
       expect(diagnostic.ok).toBe(false)
-      expect(diagnostic.status).toBe('blocked_outbound_acl')
-      expect(diagnostic.acl).toMatchObject({
+      expect(diagnostic.status).toBe('blocked_channel_membership')
+      expect(diagnostic.communication_authority).toMatchObject({
         sender: 'codex-cto',
         intended_recipient: 'dev-001',
         channel_id: 'ops-ch',
-        violated_policy: 'channel.outboundAllowlist',
-        outbound_allowlist: ['codex-cto'],
-        policy_source: 'locked-test-policy',
+        authority: 'channels.members',
+        members: ['codex-cto'],
+        outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
         violations: ['dev-001'],
       })
 
@@ -162,16 +196,16 @@ describe('owner handoff routing diagnostics', () => {
       const audits = await db.query<any>(
         `SELECT event_type, agent_id, target, detail
            FROM audit_log
-          WHERE event_type = 'owner_handoff.outbound_acl_blocked'`,
+          WHERE event_type = 'owner_handoff.channel_membership_blocked'`,
       )
       expect(audits).toHaveLength(1)
       expect(audits[0].agent_id).toBe('codex-cto')
       expect(audits[0].target).toBe('dev-001')
-      expect(JSON.parse(audits[0].detail).acl).toMatchObject({
+      expect(JSON.parse(audits[0].detail).communication_authority).toMatchObject({
         sender: 'codex-cto',
         intended_recipient: 'dev-001',
         channel_id: 'ops-ch',
-        violated_policy: 'channel.outboundAllowlist',
+        authority: 'channels.members',
       })
     })
   })
@@ -199,14 +233,14 @@ describe('owner handoff routing diagnostics', () => {
 
       expect(diagnostic.ok).toBe(true)
       expect(diagnostic.status).toBe('relay_policy')
-      expect(diagnostic.acl).toMatchObject({
+      expect(diagnostic.communication_authority).toMatchObject({
         sender: 'codex-cto',
         intended_recipient: 'dev-001',
         channel_id: 'ops-ch',
-        violated_policy: 'channel.outboundAllowlist',
-        outbound_allowlist: ['codex-cto'],
-        policy_source: 'direct-route-blocked',
-        violations: ['dev-001'],
+        authority: 'channels.members',
+        members: ['codex-cto', 'dev-001'],
+        outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+        violations: [],
       })
       expect(diagnostic.relay_policy).toEqual({
         evidence_type: 'relay_policy',

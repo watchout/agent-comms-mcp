@@ -273,6 +273,44 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
     expect(rows().find((row) => row.id === instructionId)).toMatchObject({ status: 'pending', claimed_by: null })
   })
 
+  test('state-daemon child receive fails closed when the target project was not injected', () => {
+    const instructionId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'scheduler must bind the target project',
+    })
+    env.AUN_RECEIVE_CLAIM_SOURCE = 'state-daemon-queue-work-scheduler'
+    delete env.AGENT_COMMS_MEMORY_READY_PROJECT
+    delete env.AGENT_MEMORY_PROJECT
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('STATE_DAEMON_TARGET_MEMORY_READY_PROJECT_REQUIRED')
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({
+      status: 'pending',
+      claimed_by: null,
+    })
+  })
+
+  test('direct Codex-runner child receive also fails closed without the target project', () => {
+    const instructionId = seedQueue({
+      messageType: 'instruction',
+      ageSeconds: 30,
+      content: 'direct runner must bind the target project',
+    })
+    env.AUN_RECEIVE_CLAIM_SOURCE = 'state-daemon-codex-runner'
+    delete env.AGENT_COMMS_MEMORY_READY_PROJECT
+    delete env.AGENT_MEMORY_PROJECT
+
+    const r = runAun(['receive-actionable', '--agent-id', TEST_AGENT, '--max-inspect', '10'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('STATE_DAEMON_TARGET_MEMORY_READY_PROJECT_REQUIRED')
+    expect(rows().find((row) => row.id === instructionId)).toMatchObject({
+      status: 'pending',
+      claimed_by: null,
+    })
+  })
+
   test('pending report row is non-actionable and remains open without claim', () => {
     const reportId = seedQueue({ messageType: 'report', ageSeconds: 60, content: 'status report only' })
 

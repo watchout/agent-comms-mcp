@@ -1,11 +1,16 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
+  buildOptionalShirubeD1AutoReceiveDispatcher,
+  buildQueueWorkAgentEnv,
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
+  resolveQueueWorkRuntimeWorkspace,
 } from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
 import type {
@@ -16,12 +21,49 @@ import type {
 import {
   FakeAlertSink,
   FakeClock,
+  FakeCodexRunner,
   FakeMetrics,
   FakePgListen,
   FakeTmux,
 } from './contract/state-daemon/fakes'
 
 const REPO = join(import.meta.dir, '..')
+const AUTHORITY_CHANNEL_ID = 'state-daemon-scheduler-fixture'
+
+test('disabled Shirube D1 is not wired into the production daemon', () => {
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({}, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '0' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: ' 1 ' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: 'true' }, REPO)).toBeUndefined()
+  expect(buildOptionalShirubeD1AutoReceiveDispatcher({ SHIRUBE_D1_ENABLED: '1' }, REPO))
+    .toBeInstanceOf(RuntimeV2ShirubeD1AutoReceiveDispatcher)
+})
+
+function authorityFixtureResult<T>(
+  sql: string,
+  agentId: string,
+  memoryProject = 'agent-comms-mcp',
+): { rows: T[]; rowCount: number } | null {
+  if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) {
+    return {
+      rows: [{
+        agent_id: agentId,
+        runtime: 'codex',
+        runtime_engine_preference: 'codex',
+        status: 'idle',
+        profile_enabled: true,
+        disabled_at: null,
+        metadata: { memory_project: memoryProject },
+      }] as T[],
+      rowCount: 1,
+    }
+  }
+  if (sql.includes('SELECT members FROM channels WHERE id=$1')) {
+    return { rows: [{ members: [agentId] }] as T[], rowCount: 1 }
+  }
+  return null
+}
 
 test('queue-work failure reporting surfaces the failed finalizer instead of the successful runner', () => {
   const detail = describeQueueWorkFailure({
@@ -41,16 +83,70 @@ test('queue-work failure reporting surfaces the failed finalizer instead of the 
   expect(detail).not.toContain('"code":"DONE"')
 })
 
+test('queue-work runtime workspace resolves from the enabled agent DB binding', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'queue-work-agent-workspace-'))
+  const calls: Array<{ sql: string; params?: unknown[] }> = []
+  try {
+    const resolved = await resolveQueueWorkRuntimeWorkspace({
+      async query<T>(sql: string, params?: unknown[]) {
+        calls.push({ sql, params })
+        return {
+          rows: [{ agent_id: 'codex-audit', runtime_workspace: workspace }] as T[],
+          rowCount: 1,
+        }
+      },
+    }, 'codex-audit')
+
+    expect(resolved).toBe(realpathSync(workspace))
+    expect(calls[0]?.params).toEqual(['codex-audit'])
+    expect(calls[0]?.sql).toContain('agent_workspace_bindings')
+    expect(calls[0]?.sql).toContain('a.profile_enabled = true')
+    expect(calls[0]?.sql).toContain('a.disabled_at IS NULL')
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('queue-work runtime workspace fails closed on missing, relative, or absent DB paths', async () => {
+  const cases = [
+    { rows: [], message: 'requires one enabled DB agent row' },
+    { rows: [{ agent_id: 'codex-audit', runtime_workspace: 'relative/path' }], message: 'must be an absolute DB path' },
+    { rows: [{ agent_id: 'codex-audit', runtime_workspace: '/definitely/missing/aun-workspace' }], message: 'does not exist as a directory' },
+  ]
+  for (const fixture of cases) {
+    await expect(resolveQueueWorkRuntimeWorkspace({
+      async query<T>() {
+        return { rows: fixture.rows as T[], rowCount: fixture.rows.length }
+      },
+    }, 'codex-audit')).rejects.toThrow(fixture.message)
+  }
+})
+
+test('queue-work child env replaces daemon project with the resolved target project', () => {
+  const env = buildQueueWorkAgentEnv({
+    AGENT_MEMORY_PROJECT: 'agent-comms-mcp',
+    AGENT_COMMS_MEMORY_READY_PROJECT: 'agent-comms-mcp',
+  }, 'codex-cto', 'codex')
+
+  expect(env.AGENT_ID).toBe('codex-cto')
+  expect(env.AGENT_COM_EXPECTED_AGENT_ID).toBe('codex-cto')
+  expect(env.AGENT_MEMORY_PROJECT).toBe('codex')
+  expect(env.AGENT_COMMS_MEMORY_READY_PROJECT).toBe('codex')
+  expect(() => buildQueueWorkAgentEnv({}, 'codex-cto', ' ')).toThrow('project is required')
+})
+
 class SingleRowDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (
       sql.includes('FROM message_queue WHERE id = $1')
       || (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1'))
     ) {
       if (String(this.row.id) === String(params?.[0])) {
-        return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     }
@@ -70,15 +166,40 @@ class RecordingDb implements DBClient {
   }
 }
 
+class DoneFinalizationDb implements DBClient {
+  constructor(private readonly row: any) {}
+
+  async query<T = any>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
+    if (
+      sql.includes('FROM message_queue mq')
+      && sql.includes("mq.status='done'")
+      && sql.includes('runner_result')
+    ) {
+      return this.row.status === 'done'
+        ? { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
+        : { rows: [] as T[], rowCount: 0 }
+    }
+    if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
+    return { rows: [] as T[], rowCount: 0 }
+  }
+}
+
 class PendingLlmDb implements DBClient {
+  readonly evidenceProjects: string[] = []
+
   constructor(
     private readonly agentId: string,
     private readonly row: any,
+    private readonly memoryProject = 'agent-comms-mcp',
   ) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.agentId, this.memoryProject)
+    if (authority) return authority
     if (sql.includes('FROM message_queue mq') && sql.includes('WHERE mq.id = $1')) {
-      if (String(this.row.id) === String(params?.[0])) return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      if (String(this.row.id) === String(params?.[0])) return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     }
     if (sql.includes('FROM agents WHERE agent_id=$1')) {
@@ -131,11 +252,12 @@ class PendingLlmDb implements DBClient {
       }
     }
     if (sql.includes('FROM runtime_memory_ready_evidence')) {
+      this.evidenceProjects.push(String(params?.[1] ?? ''))
       return {
         rows: [{
           id: 1,
           agent_id: this.agentId,
-          project: 'agent-comms-mcp',
+          project: this.memoryProject,
           runtime_instance_id: 'rt-queue-scheduler',
           profile_revision: null,
           profile_source: null,
@@ -161,14 +283,77 @@ class PendingLlmDb implements DBClient {
   }
 }
 
+class DirectCodexLlmDb extends PendingLlmDb {
+  constructor(agentId: string, private readonly directRow: any, memoryProject: string) {
+    super(agentId, directRow, memoryProject)
+  }
+
+  override async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('UPDATE agents') && sql.includes('SET last_wake_attempt_at=$1')) {
+      return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT status FROM message_queue WHERE id=$1')) {
+      return { rows: [{ status: this.directRow.status }] as T[], rowCount: 1 }
+    }
+    if (sql.includes('UPDATE message_queue SET last_wake_attempt_at=$1')) {
+      return { rows: [], rowCount: 1 }
+    }
+    return super.query<T>(sql, params)
+  }
+}
+
+class MultiPendingLlmDb implements DBClient {
+  private readonly delegatesById = new Map<string, PendingLlmDb>()
+  private readonly delegatesByAgent = new Map<string, PendingLlmDb>()
+  private readonly members: string[]
+  private readonly first: PendingLlmDb
+
+  constructor(rows: any[]) {
+    if (rows.length === 0) throw new Error('MultiPendingLlmDb requires at least one row')
+    this.members = [...new Set(rows.map((row) => String(row.agent_id)))]
+    this.first = new PendingLlmDb(rows[0].agent_id, rows[0])
+    for (const row of rows) {
+      const delegate = new PendingLlmDb(row.agent_id, row)
+      this.delegatesById.set(String(row.id), delegate)
+      if (!this.delegatesByAgent.has(row.agent_id)) this.delegatesByAgent.set(row.agent_id, delegate)
+    }
+  }
+
+  async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    if (sql.includes('SELECT members FROM channels WHERE id=$1')) {
+      return { rows: [{ members: this.members }] as T[], rowCount: 1 }
+    }
+    if (
+      sql.includes('FROM message_queue mq')
+      && sql.includes('WHERE mq.id = $1')
+    ) {
+      const delegate = this.delegatesById.get(String(params?.[0]))
+      return delegate ? delegate.query<T>(sql, params) : { rows: [], rowCount: 0 }
+    }
+    const delegate = this.delegatesByAgent.get(String(params?.[0])) ?? this.first
+    return delegate.query<T>(sql, params)
+  }
+}
+
+class RecordingMultiPendingLlmDb extends MultiPendingLlmDb {
+  queries: Array<{ sql: string; params?: unknown[] }> = []
+
+  override async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    this.queries.push({ sql, params })
+    return super.query<T>(sql, params)
+  }
+}
+
 class ExpiredSchedulerClaimDb implements DBClient {
   updates: Array<{ sql: string; params?: unknown[] }> = []
 
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
-      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
     }
     if (sql.includes('FROM message_queue mq') && sql.includes("mq.status IN ('received', 'in_progress')")) {
       return { rows: [] as T[], rowCount: 0 }
@@ -190,6 +375,8 @@ class RunnerErrorSweepDb implements DBClient {
   constructor(public row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (
       sql.includes('FROM message_queue mq')
       && sql.includes("mq.status='in_progress'")
@@ -202,7 +389,7 @@ class RunnerErrorSweepDb implements DBClient {
         return { rows: [] as T[], rowCount: 0 }
       }
       if (this.row?.status === 'in_progress') {
-        return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
       }
       return { rows: [] as T[], rowCount: 0 }
     }
@@ -243,8 +430,10 @@ class D1DoneRecoveryDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes("mq.status = 'done'") && sql.includes('shirube_v4_d1')) {
-      return { rows: [{ ...this.row }] as T[], rowCount: 1 }
+      return { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
     }
     if (sql.includes('count(*)::int AS n')) return { rows: [{ n: 0 }] as T[], rowCount: 1 }
     return { rows: [] as T[], rowCount: 0 }
@@ -256,9 +445,11 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
   constructor(private readonly row: any) {}
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
+    const authority = authorityFixtureResult<T>(sql, this.row.agent_id)
+    if (authority) return authority
     if (sql.includes("mq.status IN ('received', 'in_progress')") && sql.includes('mq.claim_expires_at <')) {
       return this.row.status === 'received'
-        ? { rows: [{ ...this.row }] as T[], rowCount: 1 }
+        ? { rows: [{ channel_id: AUTHORITY_CHANNEL_ID, ...this.row }] as T[], rowCount: 1 }
         : { rows: [] as T[], rowCount: 0 }
     }
     if (sql.trim().startsWith('UPDATE message_queue') && String(params?.[0]) === String(this.row.id)) {
@@ -469,6 +660,11 @@ describe('state_daemon queue work scheduler boundary', () => {
         outcome: { ok: true, dry_run: false, code: 'E2E_DONE', plan: {} as any, claimed: {} as any, runner: {} as any },
       }
     })
+    expect(dispatcher.recoverDone).toBe(false)
+    expect(new RuntimeV2ShirubeD1AutoReceiveDispatcher({
+      SHIRUBE_D1_ENABLED: '1',
+      SHIRUBE_D1_KILL_SWITCH: '0',
+    } as NodeJS.ProcessEnv, REPO).recoverDone).toBe(true)
     await expect(dispatcher.dispatch({
       queueId: 88704, agentId: 'dev-001', messageId: 'msg-d1-exact',
       createdAt: '2026-07-23T00:00:00.000Z', status: 'pending', payload: {},
@@ -541,6 +737,37 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     expect(dispatches).toBe(1)
     expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'resume_started' })).toBe(1)
+  })
+
+  test('post-restart sweep leaves historical done D1 rows untouched while D1 is disabled', async () => {
+    const agentId = 'dev-001'
+    let classifications = 0
+    let dispatches = 0
+    const daemon = new StateDaemon({
+      db: new D1DoneRecoveryDb({
+        id: 88708, agent_id: agentId, status: 'done', message_id: 'msg-d1-disabled-history',
+        payload: JSON.stringify({ shirube_v4_d1: {} }),
+        claim_expires_at: null, claimed_at: new Date('2026-07-23T00:00:00.000Z'),
+        created_at: new Date('2026-07-23T00:00:00.000Z'),
+        last_wake_attempt_at: null, last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(),
+      shirubeD1AutoReceive: {
+        recoverDone: false,
+        classify() { classifications += 1; return { outcome: 'reject', reason: 'D1_DISABLED' } },
+        async dispatch() { dispatches += 1; return { code: 'unexpected', replayed: true } },
+      },
+    })
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+    expect(classifications).toBe(0)
+    expect(dispatches).toBe(0)
   })
 
   test('post-restart sweep reclaims an expired D1 claim and dispatches it once', async () => {
@@ -637,6 +864,182 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
   })
 
+  test('invalid disabled D1 env leaves a D1-shaped row to the generic scheduler exactly once', async () => {
+    const agentId = 'devauditor'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 488,
+      agent_id: agentId,
+      status: 'received',
+      message_id: 'msg-d1-invalid-disabled',
+      payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-15T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new SingleRowDb(row),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived(input) { calls.push(input) },
+      },
+      shirubeD1AutoReceive: buildOptionalShirubeD1AutoReceiveDispatcher(
+        { SHIRUBE_D1_ENABLED: ' 1 ' },
+        REPO,
+      ),
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: row.id,
+        agent_id: agentId,
+        status: 'received',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: row.id, agentId }])
+  })
+
+  test('done generic queue events resume only the stored-result finalizer', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const scheduler: QueueWorkScheduler = {
+      async runReceived() {
+        throw new Error('runReceived must not replay done work')
+      },
+      async runDone(input) {
+        calls.push(input)
+      },
+    }
+    const daemon = new StateDaemon({
+      db: new SingleRowDb({
+        id: 497,
+        agent_id: 'codex-audit',
+        status: 'done',
+        message_id: 'msg-497',
+        payload: JSON.stringify({ runner_result: { schema_version: 'queue_work_result_v1' } }),
+        claim_expires_at: null,
+        created_at: new Date('2026-05-21T00:00:00.000Z'),
+        last_wake_attempt_at: null,
+        last_heartbeat_at: null,
+      }),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'UPDATE',
+        id: 497,
+        agent_id: 'codex-audit',
+        status: 'done',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 497, agentId: 'codex-audit' }])
+  })
+
+  test('sweep resumes a stored-result finalizer after a writeback failure or restart', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 498,
+      agent_id: 'codex-audit',
+      status: 'done',
+      message_id: 'msg-498',
+      payload: JSON.stringify({
+        receive_claim: { source: 'state-daemon-queue-work-scheduler' },
+        queue_work_execution: { source: 'state-daemon-queue-work-scheduler' },
+        runner_result: {
+          schema_version: 'queue_work_result_v1',
+          invocation_source: 'state-daemon-queue-work-scheduler',
+        },
+        finalizer_error: { code: 'WRITEBACK_FAILED' },
+      }),
+      claim_expires_at: null,
+      claimed_at: new Date('2026-05-21T00:00:01.000Z'),
+      created_at: new Date('2026-05-21T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new DoneFinalizationDb(row),
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runReceived() {
+          throw new Error('runReceived must not replay done work')
+        },
+        async runDone(input) {
+          calls.push(input)
+        },
+      },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(result.rewoken).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 498, agentId: 'codex-audit' }])
+  })
+
+  test('done finalizer sweep selects only enabled rows owned by the current scheduler', async () => {
+    const db = new RecordingDb()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock(),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: { async runDone() {} },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.sweepStale()
+    } finally {
+      await daemon.stop()
+    }
+
+    const query = db.queries.find(({ sql }) => sql.includes("mq.status='done'") && sql.includes('runner_result'))
+    expect(query).toBeDefined()
+    expect(query?.sql).toContain('JOIN agents a')
+    expect(query?.sql).toContain('a.profile_enabled = true')
+    expect(query?.sql).toContain('a.disabled_at IS NULL')
+    expect(query?.sql).toContain("a.status NOT IN ('disabled', 'offline', 'retired')")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{receive_claim,source}' = $2")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{queue_work_execution,source}' = $2")
+    expect(query?.sql).toContain("mq.payload::jsonb #>> '{runner_result,invocation_source}' = $2")
+    expect(query?.params?.[1]).toBe('state-daemon-queue-work-scheduler')
+  })
+
   test('pending LLM queue events use the scheduler when runPending is configured', async () => {
     const agentId = 'codex-audit'
     const calls: Array<{ queueId: number; agentId: string }> = []
@@ -691,6 +1094,172 @@ describe('state_daemon queue work scheduler boundary', () => {
 
     expect(calls).toEqual([{ queueId: 490, agentId }])
     expect(tmux.sentKeys).toEqual([])
+    expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+      result: 'pending_runner_invoked',
+    })).toBe(1)
+  })
+
+  test('daemon pre-gate uses the target agent project instead of its global project', async () => {
+    const agentId = 'codex-cto'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const db = new PendingLlmDb(agentId, {
+      id: 155889,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-155889',
+      payload: JSON.stringify({
+        author_id: 'owner',
+        content: 'target project regression',
+        message_type: 'instruction',
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-13T11:41:19.210Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }, 'codex')
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-13T11:41:20.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending(input) { calls.push(input) },
+      },
+      config: {
+        codexRunnerEnabled: true,
+        memoryReadyProject: 'agent-comms-mcp',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 155889,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(db.evidenceProjects).toEqual(['codex'])
+    expect(calls).toEqual([{ queueId: 155889, agentId }])
+  })
+
+  test('daemon passes the same target project to the direct Codex runner child', async () => {
+    const agentId = 'codex-cto'
+    const row = {
+      id: 155891,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-155891',
+      payload: JSON.stringify({
+        author_id: 'owner',
+        content: 'direct runner project regression',
+        message_type: 'instruction',
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-13T11:41:19.210Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const db = new DirectCodexLlmDb(agentId, row, 'codex')
+    const runner = new FakeCodexRunner()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-13T11:41:20.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      codexRunner: runner,
+      config: {
+        codexRunnerEnabled: true,
+        memoryReadyProject: 'agent-comms-mcp',
+      },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: row.id,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(db.evidenceProjects).toEqual(['codex'])
+    expect(runner.invocations).toHaveLength(1)
+    expect(runner.invocations[0]).toMatchObject({
+      agentId,
+      queueId: row.id,
+      memoryReadyProject: 'codex',
+    })
+  })
+
+  test('no-reply work still runs before the scheduler closes it without outbound chat', async () => {
+    const agentId = 'codex-audit'
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    const row = {
+      id: 154254,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-154254',
+      payload: JSON.stringify({
+        author_id: 'pdca-ops',
+        content: 'Complete CHECK and ADJUST, then check in.',
+        message_type: 'instruction',
+        no_reply_required: true,
+      }),
+      claim_expires_at: null,
+      created_at: new Date('2026-08-09T10:03:42.480Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const db = new PendingLlmDb(agentId, row)
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-08-09T10:04:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending(input) {
+          calls.push(input)
+        },
+      },
+      config: { codexRunnerEnabled: true },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({
+        op: 'INSERT',
+        id: 154254,
+        agent_id: agentId,
+        status: 'pending',
+        claim_expires_at: null,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      await daemon.stop()
+    }
+
+    expect(calls).toEqual([{ queueId: 154254, agentId }])
+    expect(metrics.countInc('state_daemon_wake_actions_total', {
+      result: 'state_daemon_no_reply_completed',
+    })).toBe(0)
     expect(metrics.countInc('state_daemon_queue_work_actions_total', {
       result: 'pending_runner_invoked',
     })).toBe(1)
@@ -841,22 +1410,23 @@ describe('state_daemon queue work scheduler boundary', () => {
       },
     }
     const metrics = new FakeMetrics()
-    const daemon = new StateDaemon({
-      db: new PendingLlmDb(agentId, {
-        id: 491,
-        agent_id: agentId,
-        status: 'pending',
-        message_id: 'msg-491',
-        payload: JSON.stringify({
-          author_id: 'codex-cto',
-          content: 'Audit PR #491',
-          message_type: 'instruction',
-        }),
-        claim_expires_at: null,
-        created_at: new Date('2026-05-08T00:00:00.000Z'),
-        last_wake_attempt_at: null,
-        last_heartbeat_at: null,
+    const row = {
+      id: 491,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: 'msg-491',
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        content: 'Audit PR #491',
+        message_type: 'instruction',
       }),
+      claim_expires_at: null,
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }
+    const daemon = new StateDaemon({
+      db: new PendingLlmDb(agentId, row),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
       clock: new FakeClock(),
@@ -876,6 +1446,7 @@ describe('state_daemon queue work scheduler boundary', () => {
         claim_expires_at: null,
       })
       await pendingStarted
+      row.status = 'received'
       await daemon.__testHandleEvent({
         op: 'UPDATE',
         id: 491,
@@ -890,6 +1461,146 @@ describe('state_daemon queue work scheduler boundary', () => {
       })).toBe(1)
     } finally {
       releasePending()
+      await daemon.stop()
+    }
+  })
+
+  test('different queue rows for one agent are serialized until the active runner completes', async () => {
+    const agentId = 'codex-audit'
+    const calls: number[] = []
+    let releaseFirst!: () => void
+    let firstStartedResolve!: () => void
+    const firstStarted = new Promise<void>((resolve) => { firstStartedResolve = resolve })
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input.queueId)
+        if (input.queueId === 492) {
+          firstStartedResolve()
+          await new Promise<void>((resolve) => { releaseFirst = resolve })
+        }
+      },
+    }
+    const rows = [492, 493].map((id) => ({
+      id,
+      agent_id: agentId,
+      status: 'pending',
+      message_id: `msg-${id}`,
+      payload: JSON.stringify({ author_id: 'aun', content: `work ${id}`, message_type: 'instruction' }),
+      claim_expires_at: null,
+      created_at: new Date(`2026-05-08T00:00:0${id - 492}.000Z`),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+    }))
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db: new MultiPendingLlmDb(rows),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics, alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 492, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await firstStarted
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 493, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      expect(calls).toEqual([492])
+      expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+        result: 'pending_runner_agent_busy_deferred',
+      })).toBe(1)
+
+      releaseFirst()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 493, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(calls).toEqual([492, 493])
+    } finally {
+      releaseFirst?.()
+      await daemon.stop()
+    }
+  })
+
+  test('different agents retain parallel queue-work capacity', async () => {
+    const calls: Array<{ queueId: number; agentId: string }> = []
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const scheduler: QueueWorkScheduler = {
+      async runPending(input) {
+        calls.push(input)
+        await blocked
+      },
+    }
+    const rows = [
+      { id: 494, agent_id: 'codex-audit' },
+      { id: 495, agent_id: 'adf-lead' },
+    ].map(({ id, agent_id }) => ({
+      id, agent_id, status: 'pending', message_id: `msg-${id}`,
+      payload: JSON.stringify({ author_id: 'aun', content: `work ${id}`, message_type: 'instruction' }),
+      claim_expires_at: null, created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }))
+    const daemon = new StateDaemon({
+      db: new MultiPendingLlmDb(rows),
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
+    })
+
+    await daemon.start()
+    try {
+      await Promise.all(rows.map((row) => daemon.__testHandleEvent({
+        op: 'INSERT' as const, id: row.id, agent_id: row.agent_id,
+        status: 'pending', claim_expires_at: null,
+      })))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(calls).toEqual([
+        { queueId: 494, agentId: 'codex-audit' },
+        { queueId: 495, agentId: 'adf-lead' },
+      ])
+    } finally {
+      release()
+      await daemon.stop()
+    }
+  })
+
+  test('live queue-work ids remain heartbeat-renewable past the generic claim max age', async () => {
+    const agentId = 'adf-lead'
+    let release!: () => void
+    let startedResolve!: () => void
+    const started = new Promise<void>((resolve) => { startedResolve = resolve })
+    const row = {
+      id: 496, agent_id: agentId, status: 'pending', message_id: 'msg-496',
+      payload: JSON.stringify({ author_id: 'aun', content: 'long work', message_type: 'instruction' }),
+      claim_expires_at: null, created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null, last_heartbeat_at: null,
+    }
+    const db = new RecordingMultiPendingLlmDb([row])
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(),
+      queueWorkScheduler: {
+        async runPending() {
+          startedResolve()
+          await new Promise<void>((resolve) => { release = resolve })
+        },
+      },
+      config: { activeClaimMaxAgeSec: 300 },
+    })
+
+    await daemon.start()
+    try {
+      await daemon.__testHandleEvent({ op: 'INSERT', id: 496, agent_id: agentId, status: 'pending', claim_expires_at: null })
+      await started
+      await daemon.refreshClaims()
+      const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+      const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+      expect(update?.sql).toContain('OR mq.id = ANY($4::bigint[])')
+      expect(update?.sql).toContain("a.status IN ('online', 'busy')\n                 OR mq.id = ANY($4::bigint[])")
+      expect(update?.params?.[3]).toEqual([496])
+      expect(skipped?.sql).toContain('AND NOT (mq.id = ANY($3::bigint[]))')
+      expect(skipped?.params?.[2]).toEqual([496])
+    } finally {
+      release?.()
       await daemon.stop()
     }
   })
@@ -1204,6 +1915,76 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
   })
 
+  test('exact fenced canary recovery grants one control-ref-bound reclaim beyond the normal cap', async () => {
+    const controlRef = 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-control'
+    const db = new RunnerErrorSweepDb({
+      id: 496,
+      agent_id: 'qa',
+      status: 'in_progress',
+      message_id: 'msg-496',
+      payload: JSON.stringify({
+        content: 'exact canary retry',
+        runner_error: {
+          invocation_source: 'state-daemon-queue-work-scheduler',
+          message: 'control-plane precondition failed',
+        },
+        queue_work_runner_error_recovery: {
+          attempts: 3,
+          max_reclaims: 3,
+          last_action: 'reclaimed',
+        },
+      }),
+      claim_expires_at: new Date('2026-05-08T00:05:00.000Z'),
+      claimed_by: 'qa',
+      claimed_at: new Date('2026-05-08T00:00:00.000Z'),
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: new Date('2026-05-08T00:00:10.000Z'),
+    })
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-05-08T00:01:00.000Z'),
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: { async runReceived() {} },
+      config: {
+        agentAllowlist: ['qa'],
+        queueWorkFenceMessageIds: ['msg-496'],
+        queueWorkRecoveryControlRef: controlRef,
+      },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+
+      expect(result.reclaimed).toBe(1)
+      expect(result.permanentlyFailed).toBe(0)
+      expect(db.row.status).toBe('pending')
+      const recovery = JSON.parse(db.row.payload).queue_work_runner_error_recovery
+      expect(recovery).toMatchObject({
+        attempts: 4,
+        max_reclaims: 4,
+        base_max_reclaims: 3,
+        bounded_extension_control_ref: controlRef,
+        bounded_extension_reason: 'exact_canary_recovery_after_control_plane_fix',
+      })
+
+      db.row.status = 'in_progress'
+      db.row.claimed_by = 'qa'
+      db.row.claimed_at = new Date('2026-05-08T00:01:01.000Z')
+      db.row.claim_expires_at = new Date('2026-05-08T00:01:02.000Z')
+      const second = await daemon.sweepStale()
+      expect(second.reclaimed).toBe(0)
+      expect(second.permanentlyFailed).toBe(1)
+      expect(db.row.status).toBe('failed')
+    } finally {
+      await daemon.stop()
+    }
+  })
+
   test('runner_error recovery is inert when queue-work scheduler is not configured', async () => {
     const db = new RunnerErrorSweepDb({
       id: 495,
@@ -1378,7 +2159,28 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(loadQueueWorkResidueExcludedQueueIds({
       STATE_DAEMON_QUEUE_WORK_RESIDUE_EXCLUDE_QUEUE_IDS: '42',
       STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE: join(REPO, 'config', 'queue-work-residue-policy.json'),
-    } as NodeJS.ProcessEnv)).toEqual([42, 120138, 120245, 121744, 121839, 121873, 121876, 121919, 121924, 121938, 123851, 123940, 123945])
+    } as NodeJS.ProcessEnv)).toEqual([
+      42,
+      120138,
+      120245,
+      121744,
+      121839,
+      121873,
+      121876,
+      121919,
+      121924,
+      121938,
+      123851,
+      123940,
+      123945,
+      152953,
+      153868,
+      153903,
+      154250,
+      154252,
+      154254,
+      154258,
+    ])
   })
 
   test('state-daemon fails closed on invalid manual residue exclusion ids', () => {

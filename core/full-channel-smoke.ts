@@ -824,7 +824,16 @@ async function evaluateTarget(
     // audit evidence for send rejections / acl violations -> send_feedback_mismatch signal
     const auditTypes = await queryAuditEventTypes(db, channel.external_id ?? channel.channel_id, cutoff)
     lifecycle.audit_event_types = [...auditTypes.keys()].sort()
-    const rejectionEvents = ['send_reject', 'outbound.acl_violation', 'queue_evidence_mismatch', 'owner_handoff.outbound_acl_blocked']
+    const rejectionEvents = [
+      'send_reject',
+      'channel.membership_violation',
+      'owner_handoff.channel_membership_blocked',
+      // Historical evidence remains readable across the #917 cutover; these
+      // legacy event names are diagnostic only and no longer authorize sends.
+      'outbound.acl_violation',
+      'owner_handoff.outbound_acl_blocked',
+      'queue_evidence_mismatch',
+    ]
     const observedRejections = rejectionEvents.filter((e) => auditTypes.has(e))
     if (observedRejections.length > 0 && !failures.some((f) => f.failure_class === 'send_feedback_mismatch')) {
       failures.push(

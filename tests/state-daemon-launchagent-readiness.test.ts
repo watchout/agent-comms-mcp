@@ -6,7 +6,10 @@ import {
   formatStateDaemonLaunchAgentReadinessText,
 } from '../core/state-daemon-launchagent-readiness'
 import type { StateDaemonRuntimeReadiness } from '../core/state-daemon-readiness'
-import type { PathProbe } from '../core/state-daemon/launchagent'
+import {
+  STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+  type PathProbe,
+} from '../core/state-daemon/launchagent'
 
 const REPO = join(import.meta.dir, '..')
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
@@ -20,6 +23,7 @@ function plist(options: {
 	  agentId?: string | null
 	  stderrPath?: string
 	  restoreCommit?: string | null
+	  extraEnv?: Record<string, string>
 	} = {}): string {
   const program = options.program ?? '/opt/homebrew/bin/bun'
   const entry = options.entry ?? '/opt/agent-comms/bin/state-daemon.ts'
@@ -33,6 +37,9 @@ function plist(options: {
 	      ? ''
 	      : `<key>STATE_DAEMON_RESTORE_COMMIT</key><string>${options.restoreCommit}</string>`
 	  const stderrPath = options.stderrPath ?? `${cwd}/logs/state-daemon.err.log`
+  const extraEnv = Object.entries(options.extraEnv ?? {})
+    .map(([key, value]) => `<key>${key}</key><string>${value}</string>`)
+    .join('')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
@@ -53,6 +60,7 @@ function plist(options: {
 	    <key>STATE_DAEMON_AGENT_DENYLIST</key><string>ceo,test</string>
 	    ${agentEnv}
 	    ${restoreEnv}
+	    ${extraEnv}
 	  </dict>
 </dict>
 </plist>`
@@ -184,6 +192,88 @@ describe('#603 state-daemon LaunchAgent readiness diagnostic', () => {
     expect(formatStateDaemonLaunchAgentReadinessText(report)).toContain('Result: GO')
   })
 
+  test('safe global listener identities remain GO without an exact identity request', () => {
+    for (const agentId of ['state-daemon', 'state_daemon', 'com.agent-comms.state-daemon']) {
+      const report = build({ plistText: plist({ agentId }) })
+
+      expect(report.go_no_go, agentId).toBe('GO')
+      expect(report.identity.agent_id).toBe(agentId)
+      expect(report.identity.expected_agent_id).toBeNull()
+    }
+  })
+
+  test('canonical state_daemon identity satisfies an exact global listener expectation', () => {
+    const report = build({
+      plistText: plist({ agentId: 'state_daemon' }),
+      expectedAgentId: 'state_daemon',
+    })
+
+    expect(report.go_no_go).toBe('GO')
+    expect(report.identity.agent_id).toBe('state_daemon')
+    expect(report.identity.expected_agent_id).toBe('state_daemon')
+  })
+
+  test('persistent or loaded allowlist without a typed Issue #917 overlay is a blocker', () => {
+    const report = build({
+      plistText: plist({ extraEnv: { STATE_DAEMON_AGENT_ALLOWLIST: 'aun' } }),
+      runtime: runtime({ environment: { agent_allowlist: 'aun' } as any }),
+    })
+
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.blockers.map((item) => item.code)).toContain('STATE_DAEMON_CANARY_OVERLAY_IDENTITY_INCOMPLETE')
+  })
+
+  test('one unexpired exact-target overlay is distinguishable from steady-state drift', () => {
+    const overlay = {
+      STATE_DAEMON_AGENT_ALLOWLIST: 'aun',
+      STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213450982',
+      STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213090076',
+      STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2099-08-08T14:59:59.000Z',
+      STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: 'a'.repeat(64),
+      STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: 'cp /evidence/prior.plist /evidence/installed.plist',
+      STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-observed',
+      STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+    }
+    const report = build({
+      plistText: plist({ extraEnv: overlay }),
+      runtime: runtime({
+        environment: {
+          agent_allowlist: 'aun',
+          canary_overlay_control_ref: overlay.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF,
+          canary_overlay_owner_decision_ref: overlay.STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF,
+          canary_overlay_expires_at: overlay.STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT,
+          canary_overlay_prior_plist_sha256: overlay.STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256,
+          canary_overlay_rollback_command: overlay.STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND,
+          canary_overlay_observed_state_destination: overlay.STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION,
+          canary_overlay_subject_digest: overlay.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST,
+        } as any,
+      }),
+    })
+
+    expect(report.go_no_go).toBe('GO')
+    expect(report.identity.agent_allowlist).toBe('aun')
+  })
+
+  test('plist and loaded canary overlay drift is a blocker even when each side is otherwise parseable', () => {
+    const overlay = {
+      STATE_DAEMON_AGENT_ALLOWLIST: 'aun',
+      STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213450982',
+      STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: 'https://github.com/watchout/agent-comms-mcp/issues/917#issuecomment-5213090076',
+      STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2099-08-08T14:59:59.000Z',
+      STATE_DAEMON_CANARY_OVERLAY_PRIOR_PLIST_SHA256: 'a'.repeat(64),
+      STATE_DAEMON_CANARY_OVERLAY_ROLLBACK_COMMAND: 'cp /evidence/prior.plist /evidence/installed.plist',
+      STATE_DAEMON_CANARY_OVERLAY_OBSERVED_STATE_DESTINATION: '/evidence/observed.json',
+      STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST,
+    }
+    const report = build({
+      plistText: plist({ extraEnv: overlay }),
+      runtime: runtime({ environment: { agent_allowlist: null } as any }),
+    })
+
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.blockers.map((item) => item.code)).toContain('STATE_DAEMON_CANARY_OVERLAY_LOADED_STATE_DRIFT')
+  })
+
   test('private tmp ProgramArguments or WorkingDirectory is a blocker', () => {
     const text = plist({
       entry: '/private/tmp/agent-comms-state-daemon/bin/state-daemon.ts',
@@ -238,14 +328,14 @@ describe('#603 state-daemon LaunchAgent readiness diagnostic', () => {
 
   test('wrong AGENT_ID/listener identity is a blocker', () => {
     const report = build({
-      plistText: plist({ agentId: 'codex-cto' }),
-      expectedAgentId: 'state-daemon',
+      plistText: plist({ agentId: 'aun' }),
+      expectedAgentId: 'state_daemon',
     })
 
     expect(report.ok).toBe(false)
     expect(report.blockers.map((item) => item.code)).toContain('AGENT_ID_MISMATCH')
-    expect(report.identity.agent_id).toBe('codex-cto')
-	  expect(report.identity.expected_agent_id).toBe('state-daemon')
+    expect(report.identity.agent_id).toBe('aun')
+	  expect(report.identity.expected_agent_id).toBe('state_daemon')
 	})
 
   test('expected commit drift is a blocker without changing LaunchAgent state', () => {

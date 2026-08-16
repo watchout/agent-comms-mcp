@@ -823,6 +823,15 @@ describe('T11e — NORM-060 full-channel smoke CLI surface', () => {
 
   test('help documents state-daemon exact-row queue-work activation planner', () => {
     expect(CLI_SRC).toMatch(/state-daemon queue-work-activation-plan --agent-id <id> --commit <sha>/)
+    for (const flag of [
+      '--canary-control-ref',
+      '--canary-owner-decision-ref',
+      '--canary-expires-at',
+      '--canary-prior-plist-sha256',
+      '--canary-rollback-command',
+      '--canary-observed-state-destination',
+      '--canary-subject-digest',
+    ]) expect(CLI_SRC).toContain(flag)
     expect(CLI_SRC).toMatch(/read-only exact-row queue-work runner activation plan; no LaunchAgent mutation or restart/)
     expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/issue_ref: '#603'/)
     expect(STATE_DAEMON_QUEUE_WORK_ACTIVATION_PLAN_SRC).toMatch(/no_db_mutation: true/)

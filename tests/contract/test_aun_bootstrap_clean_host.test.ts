@@ -9,6 +9,8 @@ import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
+  DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
+  parseStateDaemonLaunchAgentPlist,
   renderStateDaemonLaunchAgentPlist,
   STATE_DAEMON_PLIST_NAME,
   type StateDaemonRestorePlan,
@@ -304,7 +306,7 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  test('B5-CONCURRENCY-001 and B5-FINAL-TUPLE-READBACK-001 bind readback and reject every authoritative tuple drift', async () => {
+  test('B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -358,6 +360,7 @@ describe('aun bootstrap clean-host journal', () => {
       });
     `
     let ordinaryHeartbeatAdvances = 0
+    let providerTransportDrift = false
     const run = async (command: string, args: string[]) => {
       const joined = args.join(' ')
       if (command === process.execPath && joined.includes('agent profile get')) {
@@ -382,7 +385,10 @@ describe('aun bootstrap clean-host journal', () => {
           exitCode: 0,
           stdout: JSON.stringify({
             enabled: true,
-            transport: { type: 'stdio', command: process.execPath, args: ['-e', recoveryFixture], env: {} },
+            transport: {
+              type: 'stdio', command: process.execPath,
+              args: ['-e', providerTransportDrift ? `${recoveryFixture}\n// drift` : recoveryFixture], env: {},
+            },
           }),
           stderr: '',
         }
@@ -463,6 +469,121 @@ describe('aun bootstrap clean-host journal', () => {
         'B5_MEMORY_READINESS',
       )
       expect(restoredReadback.ok).toBe(true)
+
+      const unboundSameHeadReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          priorState: { mutations: [] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(unboundSameHeadReadback.ok).toBe(true)
+
+      const successorRepoRoot = join(home, 'successor-release')
+      mkdirSync(successorRepoRoot)
+      const incrementalReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(incrementalReadback.ok).toBe(true)
+      expect(incrementalReadback.evidenceRefs).toContain(
+        `memory-runtime-binding:bound_runtime_receipt:${reuseRun.outcome.mutation?.rollback_payload?.runtime_tuple_digest}`,
+      )
+
+      const unboundIncrementalReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(unboundIncrementalReadback.ok).toBe(false)
+
+      const wrongDigestMutation = structuredClone(reuseRun.outcome.mutation!)
+      wrongDigestMutation.rollback_payload = {
+        ...wrongDigestMutation.rollback_payload,
+        runtime_tuple_digest: '0'.repeat(64),
+      }
+      const wrongDigestReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [wrongDigestMutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongDigestReadback.ok).toBe(false)
+      expect(wrongDigestReadback.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
+
+      const wrongAgentReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          agentId: 'b5-concurrency-foreign',
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongAgentReadback.ok).toBe(false)
+
+      const wrongEvidenceMutation = structuredClone(reuseRun.outcome.mutation!)
+      wrongEvidenceMutation.rollback_payload = {
+        ...wrongEvidenceMutation.rollback_payload,
+        evidence_id: '999999999',
+      }
+      const wrongEvidenceReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [wrongEvidenceMutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(wrongEvidenceReadback.ok).toBe(false)
+
+      await driftDb.execute(
+        `UPDATE agent_runtime_instances SET status = 'stopped'
+          WHERE runtime_instance_id = $1`,
+        [createdReceipts[0].runtime_instance_id],
+      )
+      const inactiveReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(inactiveReadback.ok).toBe(false)
+      await driftDb.execute(
+        `UPDATE agent_runtime_instances SET status = 'running'
+          WHERE runtime_instance_id = $1`,
+        [createdReceipts[0].runtime_instance_id],
+      )
+
+      providerTransportDrift = true
+      const transportMismatchReadback = await reuseRun.ports.revalidateStage!(
+        {
+          ...reuseRun.context,
+          repoRoot: successorRepoRoot,
+          repoHead: 'b'.repeat(40),
+          priorState: { mutations: [reuseRun.outcome.mutation] } as any,
+        },
+        'B5_MEMORY_READINESS',
+      )
+      expect(transportMismatchReadback.ok).toBe(false)
+      providerTransportDrift = false
     } finally {
       await driftDb.close()
     }
@@ -485,7 +606,7 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBe(4)
+    expect(ordinaryHeartbeatAdvances).toBe(7)
     await readback.close()
   })
 
@@ -724,6 +845,8 @@ describe('aun bootstrap clean-host journal', () => {
     let daemonLoaded = false
     let queueReceiveCount = 0
     let syntheticPid = 50_000
+    const stateDaemonRestoreCalls: string[][] = []
+    const stateDaemonReadinessCalls: string[][] = []
     const nativeTuple = () => JSON.stringify({
       name: 'aun', enabled: true,
       transport: {
@@ -775,6 +898,7 @@ describe('aun bootstrap clean-host journal', () => {
       }
       if (command === process.execPath && args[0] === '--version') return { exitCode: 0, stdout: '1.3.11\n', stderr: '', pid: ++syntheticPid }
       if (command === process.execPath && args[0] === 'scripts/state-daemon-launchagent.ts') {
+        stateDaemonRestoreCalls.push([...args])
         const plistPath = join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME)
         mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
         const plan: StateDaemonRestorePlan = {
@@ -792,7 +916,8 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: JSON.stringify({ ok: true }), stderr: '', pid: ++syntheticPid }
       }
       if (command === process.execPath && joined.includes('state-daemon readiness')) {
-        return { exitCode: 0, stdout: JSON.stringify({ ok: true, expected_agent_id: 'clean-default' }), stderr: '', pid: ++syntheticPid }
+        stateDaemonReadinessCalls.push([...args])
+        return { exitCode: 0, stdout: JSON.stringify({ ok: true, expected_agent_id: DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID }), stderr: '', pid: ++syntheticPid }
       }
       const useRealCli = command === process.execPath && (
         args[0] === 'db/migrate.ts'
@@ -813,6 +938,21 @@ describe('aun bootstrap clean-host journal', () => {
     expect(first.status).toBe('READY')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonRestoreCalls).toHaveLength(1)
+    expect(stateDaemonRestoreCalls[0]).toContain('--bootstrap-safe-defaults')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('--agent-allowlist')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('--configuration-reconciler-enabled')
+    expect(stateDaemonRestoreCalls[0]).not.toContain('clean-default')
+    const restoredDaemon = parseStateDaemonLaunchAgentPlist(readFileSync(
+      join(home, 'Library', 'LaunchAgents', STATE_DAEMON_PLIST_NAME),
+      'utf8',
+    ))
+    expect(restoredDaemon.environmentVariables.AGENT_ID).toBe(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID)
+    expect(restoredDaemon.environmentVariables.STATE_DAEMON_AGENT_ALLOWLIST).toBeUndefined()
+    expect(restoredDaemon.environmentVariables.STATE_DAEMON_CONFIGURATION_RECONCILER_ENABLED).toBeUndefined()
+    expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(1)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
 
     const contentionMessageId = randomUUID()
     const contentionDb = backend === 'postgres' ? new PgAdapter(databaseUrl!) : new SqliteAdapter(dbPath)
@@ -865,6 +1005,10 @@ describe('aun bootstrap clean-host journal', () => {
     const second = await bootstrap(input, { run })
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
+    expect(stateDaemonRestoreCalls).toHaveLength(1)
+    expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(2)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain('clean-default')
     let activeOwnedQueueId: string | null = null
     let invalidPayloadQueueId: string | null = null
     const invalidPayload = 'step one legacy queue payload'
@@ -947,13 +1091,14 @@ describe('aun bootstrap clean-host journal', () => {
       databaseUrl: 'postgresql:///disposable?host=/tmp', agentDenylist: '', extraEnv: {},
     }
     const original = renderStateDaemonLaunchAgentPlist(plan, {
-      AGENT_ID: 'state_daemon', SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
+      SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
       SHIRUBE_D1_TARGET_ALLOWLIST: '[]', STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
     })
     let loaded = false
     let pid = 9001
     let restoreCalls = 0
     let bootoutCalls = 0
+    const stateDaemonReadinessCalls: string[][] = []
     const run = async (command: string, args: string[]) => {
       if (command === 'launchctl' && args[0] === 'print') return loaded
         ? { exitCode: 0, stdout: launchctlSafePrint(pid), stderr: '' }
@@ -976,6 +1121,7 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
       }
       if (command === process.execPath && args.join(' ').includes('state-daemon readiness')) {
+        stateDaemonReadinessCalls.push([...args])
         return { exitCode: 0, stdout: '{"ok":true}', stderr: '' }
       }
       return { exitCode: 0, stdout: '', stderr: '' }
@@ -1060,6 +1206,11 @@ describe('aun bootstrap clean-host journal', () => {
     expect(restoreCalls).toBe(restoreCallsBeforeLoaded)
     expect(readFileSync(plistPath).equals(exactLoadedBytes)).toBe(true)
     expect(statSync(plistPath).mode & 0o777).toBe(exactLoadedMode)
+    const resumeReadback = await ports.revalidateStage?.(context, 'B6_ORDINARY_DAEMON_INSTALL_START')
+    expect(resumeReadback?.ok).toBe(true)
+    expect(stateDaemonReadinessCalls).toHaveLength(2)
+    expect(stateDaemonReadinessCalls.every((args) => args.includes(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID))).toBe(true)
+    expect(stateDaemonReadinessCalls.flat()).not.toContain(context.agentId)
   })
 
   test('profile, SQLite DB, and daemon mutations returned after nonzero are read back and exactly recoverable', async () => {

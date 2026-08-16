@@ -9,6 +9,8 @@ import {
 } from '../core/local-supervisor-adapter'
 import {
   buildStateDaemonRestorePlan,
+  DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
+  parseStateDaemonLaunchAgentPlist,
   renderStateDaemonLaunchAgentPlist,
   type PathProbe,
 } from '../core/state-daemon/launchagent'
@@ -204,8 +206,19 @@ describe('#602/#603 local supervisor adapter dry-run evidence', () => {
 
   test('wrong LaunchAgent AGENT_ID fails closed against desired listener identity', () => {
     const plan = durablePlan()
+    const canonicalPlist = renderStateDaemonLaunchAgentPlist(plan)
+    const canonicalEntry = `<key>AGENT_ID</key>\n    <string>${DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID}</string>`
+    const driftedEntry = '<key>AGENT_ID</key>\n    <string>codex-cto</string>'
+
+    expect(canonicalPlist.split(canonicalEntry)).toHaveLength(2)
+    expect(parseStateDaemonLaunchAgentPlist(canonicalPlist).environmentVariables.AGENT_ID)
+      .toBe(DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID)
+    const driftedPlist = canonicalPlist.replace(canonicalEntry, driftedEntry)
+    expect(driftedPlist).not.toBe(canonicalPlist)
+    expect(parseStateDaemonLaunchAgentPlist(driftedPlist).environmentVariables.AGENT_ID).toBe('codex-cto')
+
     const report = buildLocalLaunchdSupervisorReport({
-      plistText: renderStateDaemonLaunchAgentPlist(plan, { AGENT_ID: 'codex-cto' }),
+      plistText: driftedPlist,
       plistPath: plan.plistPath,
       restoreRoot: plan.restoreRoot,
       probe: probe([plan.bunPath, plan.entryPath, plan.plistPath], [plan.checkoutPath, plan.logsDir]),

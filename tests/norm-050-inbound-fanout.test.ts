@@ -22,8 +22,8 @@ describe('NORM-050 registered inbound fanout regression', () => {
 
     const result = routeMessage(
       {
-        authorAgentId: null,
-        authorIsBot: false,
+        authorAgentId: 'agent-com-dev',
+        authorIsBot: true,
         content: '<@900000000000000002> <@900000000000000003> please inspect',
         mentions: ['arc', 'codex-cto'],
         messageType: 'chat',
@@ -34,7 +34,33 @@ describe('NORM-050 registered inbound fanout regression', () => {
     )
 
     expect(result.pushTargets.sort()).toEqual(['arc', 'codex-cto'])
-    expect(result.dropTargets['agent-com-dev']).toBe('NOT_MENTIONED')
+    expect(result.dropTargets['agent-com-dev']).toBeUndefined()
+    expect(result.senderViolation).toBeUndefined()
+  })
+
+  test('unresolved native sender fails closed with no queue target', () => {
+    const channel: ChannelInfo = {
+      channelId: '1509299147109306508',
+      members: ['agent-com-dev', 'arc', 'codex-cto'],
+      type: 'channel',
+    }
+    const agents: AgentInfo[] = [
+      { agentId: 'agent-com-dev', agentType: 'dev', observerMode: false, discordId: '900000000000000001' },
+      { agentId: 'arc', agentType: 'dev', observerMode: false, discordId: '900000000000000002' },
+      { agentId: 'codex-cto', agentType: 'dev', observerMode: false, discordId: '900000000000000003' },
+    ]
+
+    const result = routeMessage({
+      authorAgentId: null,
+      authorIsBot: false,
+      content: '<@900000000000000002> inspect',
+      mentions: ['arc'],
+      messageType: 'chat',
+    }, channel, agents, 'inbound')
+
+    expect(result.pushTargets).toEqual([])
+    expect(result.dropTargets).toEqual({})
+    expect(result.senderViolation).toBe('SENDER_ID_UNRESOLVED')
   })
 
   test('receiver persists one message_queue delivery per pushTarget', () => {

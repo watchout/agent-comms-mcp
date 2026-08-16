@@ -1,4 +1,5 @@
 import { getChannelPolicy, refreshChannelPolicyDbSnapshot } from './channel-policy'
+import { evaluateCommunicationAuthority } from './communication-authority'
 
 type QueryResult<T = any> = { rows: T[] } | T[]
 type Queryable = {
@@ -8,7 +9,7 @@ type Queryable = {
 export type OwnerHandoffDiagnosticStatus =
   | 'queued_owner'
   | 'relay_policy'
-  | 'blocked_outbound_acl'
+  | 'blocked_channel_membership'
   | 'handoff_only'
   | 'queue_evidence_mismatch'
   | 'unknown_channel'
@@ -36,13 +37,13 @@ export interface OwnerHandoffDiagnostic {
     policy_ref: string
     relay_agent_id: string | null
   } | null
-  acl: {
+  communication_authority: {
     sender: string
     intended_recipient: string
     channel_id: string
-    violated_policy: 'channel.outboundAllowlist'
-    outbound_allowlist: string[] | null
-    policy_source: string
+    authority: 'channels.members'
+    members: string[]
+    outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE'
     violations: string[]
   } | null
   reason: string
@@ -99,7 +100,9 @@ function parseJsonObject(raw: unknown): Record<string, unknown> | null {
 
 function parseStringArray(raw: unknown): string[] | null {
   if (Array.isArray(raw)) {
-    return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    return raw.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
   }
   if (typeof raw !== 'string') return null
   const trimmed = raw.trim()
@@ -107,7 +110,9 @@ function parseStringArray(raw: unknown): string[] | null {
   try {
     const parsed = JSON.parse(trimmed)
     if (Array.isArray(parsed)) {
-      return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      return parsed.filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
     }
   } catch {}
   return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
@@ -163,19 +168,7 @@ async function readQueueEvidence(db: Queryable, queueId: number): Promise<QueueE
   }
 }
 
-async function readPolicySource(db: Queryable, channelId: string): Promise<string | null> {
-  try {
-    const rows = rowsOf<any>(await db.query(
-      `SELECT policy_source FROM channel_routing_policy WHERE channel_id = $1`,
-      [channelId],
-    ))
-    return stringValue(rows[0]?.policy_source)
-  } catch {
-    return null
-  }
-}
-
-async function buildAclDiagnostic(
+async function buildCommunicationAuthorityDiagnostic(
   db: Queryable,
   senderAgentId: string,
   intendedRecipientAgentId: string,
@@ -183,36 +176,33 @@ async function buildAclDiagnostic(
 ): Promise<{
   missingChannel: boolean
   senderMember: boolean
-  acl: OwnerHandoffDiagnostic['acl']
+  communication_authority: OwnerHandoffDiagnostic['communication_authority']
 }> {
   const channelRows = rowsOf<any>(await db.query(`SELECT members FROM channels WHERE id = $1`, [channelId]))
   if (channelRows.length === 0) {
-    return { missingChannel: true, senderMember: false, acl: null }
+    return { missingChannel: true, senderMember: false, communication_authority: null }
   }
 
   const members = parseStringArray(channelRows[0].members) ?? []
   await refreshChannelPolicyDbSnapshot(asLegacyQueryable(db))
   const policy = getChannelPolicy(channelId)
-  const policySource = await readPolicySource(db, channelId)
-  const outboundAllowlist = policy.outboundAllowlist
-  const violations: string[] = []
-  if (outboundAllowlist !== null) {
-    const allow = new Set(outboundAllowlist)
-    if (!allow.has(senderAgentId)) violations.push(senderAgentId)
-    if (!allow.has(intendedRecipientAgentId)) violations.push(intendedRecipientAgentId)
-  }
+  const verdict = evaluateCommunicationAuthority({
+    sender: senderAgentId,
+    recipients: [intendedRecipientAgentId],
+    members,
+  })
 
   return {
     missingChannel: false,
     senderMember: members.includes(senderAgentId),
-    acl: {
+    communication_authority: {
       sender: senderAgentId,
       intended_recipient: intendedRecipientAgentId,
       channel_id: channelId,
-      violated_policy: 'channel.outboundAllowlist',
-      outbound_allowlist: outboundAllowlist,
-      policy_source: policySource ?? policy.policySource,
-      violations,
+      authority: verdict.authority,
+      members: verdict.members,
+      outbound_allowlist_status: policy.outboundAllowlistStatus,
+      violations: verdict.violations,
     },
   }
 }
@@ -243,7 +233,7 @@ export async function buildOwnerHandoffDiagnostic(
       ok: false,
       status: 'queue_evidence_mismatch',
       ...base,
-      acl: null,
+      communication_authority: null,
       reason: `queue_id ${input.queueId} does not exist`,
     }
   }
@@ -253,7 +243,7 @@ export async function buildOwnerHandoffDiagnostic(
       ok: false,
       status: 'queue_evidence_mismatch',
       ...base,
-      acl: null,
+      communication_authority: null,
       reason: `queue_id ${queue.queue_id} belongs to ${queue.agent_id}, not ${input.intendedRecipientAgentId}`,
     }
   }
@@ -263,8 +253,41 @@ export async function buildOwnerHandoffDiagnostic(
       ok: false,
       status: 'queue_evidence_mismatch',
       ...base,
-      acl: null,
+      communication_authority: null,
       reason: `queue_id ${queue.queue_id} belongs to channel ${queue.channel_id ?? 'unknown'}, not ${explicitChannelId}`,
+    }
+  }
+
+  let communicationAuthority: OwnerHandoffDiagnostic['communication_authority'] = null
+  if (channelId) {
+    const authorityDiagnostic = await buildCommunicationAuthorityDiagnostic(db, input.senderAgentId, input.intendedRecipientAgentId, channelId)
+    communicationAuthority = authorityDiagnostic.communication_authority
+    if (authorityDiagnostic.missingChannel) {
+      return {
+        ok: false,
+        status: 'unknown_channel',
+        ...base,
+        communication_authority: communicationAuthority,
+        reason: `channel ${channelId} not found`,
+      }
+    }
+    if (!authorityDiagnostic.senderMember) {
+      return {
+        ok: false,
+        status: 'not_channel_member',
+        ...base,
+        communication_authority: communicationAuthority,
+        reason: `${input.senderAgentId} is not a member of channel ${channelId}`,
+      }
+    }
+    if (communicationAuthority && communicationAuthority.violations.length > 0) {
+      return {
+        ok: false,
+        status: 'blocked_channel_membership',
+        ...base,
+        communication_authority: communicationAuthority,
+        reason: `${communicationAuthority.violations.join(',')} are not in channels.members`,
+      }
     }
   }
 
@@ -273,41 +296,8 @@ export async function buildOwnerHandoffDiagnostic(
       ok: true,
       status: 'queued_owner',
       ...base,
-      acl: null,
+      communication_authority: communicationAuthority,
       reason: `message_queue row ${queue.queue_id} is addressed to ${input.intendedRecipientAgentId}`,
-    }
-  }
-
-  let acl: OwnerHandoffDiagnostic['acl'] = null
-  if (channelId) {
-    const aclDiagnostic = await buildAclDiagnostic(db, input.senderAgentId, input.intendedRecipientAgentId, channelId)
-    acl = aclDiagnostic.acl
-    if (aclDiagnostic.missingChannel) {
-      return {
-        ok: false,
-        status: 'unknown_channel',
-        ...base,
-        acl,
-        reason: `channel ${channelId} not found`,
-      }
-    }
-    if (!aclDiagnostic.senderMember) {
-      return {
-        ok: false,
-        status: 'not_channel_member',
-        ...base,
-        acl,
-        reason: `${input.senderAgentId} is not a member of channel ${channelId}`,
-      }
-    }
-    if (acl && acl.violations.length > 0 && !relayPolicy) {
-      return {
-        ok: false,
-        status: 'blocked_outbound_acl',
-        ...base,
-        acl,
-        reason: `${acl.violations.join(',')} violate channel.outboundAllowlist`,
-      }
     }
   }
 
@@ -316,7 +306,7 @@ export async function buildOwnerHandoffDiagnostic(
       ok: true,
       status: 'relay_policy',
       ...base,
-      acl,
+      communication_authority: communicationAuthority,
       reason: `explicit ${relayPolicy.evidence_type} evidence supplied`,
     }
   }
@@ -325,15 +315,15 @@ export async function buildOwnerHandoffDiagnostic(
     ok: false,
     status: 'handoff_only',
     ...base,
-    acl,
+    communication_authority: communicationAuthority,
     reason: 'handoff metadata exists, but no message_queue row was created for the owner',
   }
 }
 
 export function ownerHandoffDiagnosticCode(diagnostic: OwnerHandoffDiagnostic): string {
   switch (diagnostic.status) {
-    case 'blocked_outbound_acl':
-      return 'OWNER_HANDOFF_OUTBOUND_ACL_VIOLATION'
+    case 'blocked_channel_membership':
+      return 'OWNER_HANDOFF_CHANNEL_MEMBERSHIP_VIOLATION'
     case 'queue_evidence_mismatch':
       return 'OWNER_HANDOFF_QUEUE_EVIDENCE_MISMATCH'
     case 'unknown_channel':
@@ -351,8 +341,8 @@ export async function recordOwnerHandoffDiagnostic(
   db: Queryable,
   diagnostic: OwnerHandoffDiagnostic,
 ): Promise<void> {
-  const eventType = diagnostic.status === 'blocked_outbound_acl'
-    ? 'owner_handoff.outbound_acl_blocked'
+  const eventType = diagnostic.status === 'blocked_channel_membership'
+    ? 'owner_handoff.channel_membership_blocked'
     : 'owner_handoff.route_diagnostic'
   await db.query(
     `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)

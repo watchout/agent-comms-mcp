@@ -1426,9 +1426,16 @@ async function withDb<T>(
 }
 
 function memoryReadyProject(env: Record<string, string>): string {
-  return env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim()
+  const configured = env.AGENT_COMMS_MEMORY_READY_PROJECT?.trim()
     || env.AGENT_MEMORY_PROJECT?.trim()
-    || 'agent-comms-mcp'
+  if (configured) return configured
+  if (
+    env.AUN_RECEIVE_CLAIM_SOURCE?.trim() === 'state-daemon-queue-work-scheduler'
+    || env.AUN_RECEIVE_CLAIM_SOURCE?.trim() === 'state-daemon-codex-runner'
+  ) {
+    throw new Error('STATE_DAEMON_TARGET_MEMORY_READY_PROJECT_REQUIRED')
+  }
+  return 'agent-comms-mcp'
 }
 
 export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promise<DiagnoseReceiveResult> {

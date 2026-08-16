@@ -140,6 +140,21 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
     }
 
     await db.execute(
+      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, profile_enabled, disabled_at)
+       VALUES ('dev-001', 'dev-001', 'dev', 'codex', 'online', 1, NULL)`,
+    )
+    await db.execute(
+      `INSERT INTO channels (id, name, type, members)
+       VALUES ('channel-auto-receive', 'channel-auto-receive', 'channel', $1)`,
+      [JSON.stringify(['dev-001'])],
+    )
+    await db.execute(
+      `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source)
+       VALUES ('message-auto-receive', 'channel-auto-receive', 'external-target', $1, 'phase_handoff', 'fixture')`,
+      [delivery.unit.content.text],
+    )
+
+    await db.execute(
       `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
        VALUES ($1, $2, $3, 'pending', 1, $4)`,
       ['dev-001', 'message-auto-receive', JSON.stringify({

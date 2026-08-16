@@ -1,3 +1,6 @@
+import { existsSync, statSync } from 'node:fs'
+import { basename, isAbsolute } from 'node:path'
+
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
 
 export type RuntimeMemoryReadySource =
@@ -66,6 +69,7 @@ export interface RuntimeMemoryReadyGateResult {
     | 'runtime_instance_mismatch'
     | 'expected_agent_id_mismatch'
     | 'project_mismatch'
+    | 'project_resolution_failed'
     | 'session_mismatch'
     | 'port_mismatch'
     | 'profile_revision_mismatch'
@@ -92,6 +96,173 @@ export interface RuntimeMemoryReadyGateResult {
   valid_until: string | null
   current_runtime: RuntimeMemoryReadyCurrentRuntime | null
   details: Record<string, unknown>
+}
+
+export type RuntimeMemoryReadyProjectResolutionSource =
+  | 'agent_metadata_override'
+  | 'active_primary_workspace'
+  | 'canonical_workspace'
+
+export interface RuntimeMemoryReadyProjectResolution {
+  agent_id: string
+  project: string
+  workspace_path: string | null
+  source: RuntimeMemoryReadyProjectResolutionSource
+}
+
+export class RuntimeMemoryReadyProjectResolutionError extends Error {
+  constructor(
+    readonly code:
+      | 'AGENT_NOT_ENABLED'
+      | 'WORKSPACE_AMBIGUOUS'
+      | 'WORKSPACE_MISSING'
+      | 'WORKSPACE_NOT_ABSOLUTE'
+      | 'WORKSPACE_NOT_FOUND'
+      | 'WORKSPACE_NOT_DIRECTORY'
+      | 'PROJECT_INVALID',
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message)
+    this.name = 'RuntimeMemoryReadyProjectResolutionError'
+  }
+}
+
+interface RuntimeMemoryReadyProjectAgentRow {
+  agent_id: string
+  profile_enabled: unknown
+  disabled_at: unknown
+  home_directory: string | null
+  metadata: unknown
+}
+
+interface RuntimeMemoryReadyWorkspaceRow {
+  local_path: string | null
+}
+
+function enabledProfile(value: unknown): boolean {
+  return value === true || value === 1 || value === '1'
+}
+
+function projectFromWorkspace(agentId: string, workspacePath: string): string {
+  if (!isAbsolute(workspacePath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_NOT_ABSOLUTE',
+      `memory-ready workspace must be absolute for ${agentId}`,
+      { workspace_path: workspacePath },
+    )
+  }
+  if (!existsSync(workspacePath)) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_NOT_FOUND',
+      `memory-ready workspace does not exist for ${agentId}`,
+      { workspace_path: workspacePath },
+    )
+  }
+  if (!statSync(workspacePath).isDirectory()) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_NOT_DIRECTORY',
+      `memory-ready workspace is not a directory for ${agentId}`,
+      { workspace_path: workspacePath },
+    )
+  }
+  const project = basename(workspacePath).trim()
+  if (!project || project === '.' || project === '/') {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'PROJECT_INVALID',
+      `memory-ready project cannot be derived for ${agentId}`,
+      { workspace_path: workspacePath },
+    )
+  }
+  return project
+}
+
+/**
+ * Resolve the target agent's memory partition from DB-owned identity state.
+ *
+ * An explicit per-agent metadata override wins. Otherwise exactly one active
+ * primary workspace is authoritative. The agent profile's `home_directory`
+ * is the schema-stable canonical-workspace fallback. No daemon-repository or
+ * latest-evidence fallback exists.
+ */
+export async function resolveRuntimeMemoryReadyProject(
+  db: RuntimeMemoryReadyDb,
+  agentId: string,
+): Promise<RuntimeMemoryReadyProjectResolution> {
+  const agents = await queryRows<RuntimeMemoryReadyProjectAgentRow>(
+    db,
+    `SELECT agent_id, profile_enabled, disabled_at, home_directory, metadata
+       FROM agents
+      WHERE agent_id = $1
+      LIMIT 1`,
+    [agentId],
+  )
+  const agent = agents[0] ?? null
+  if (!agent || !enabledProfile(agent.profile_enabled) || agent.disabled_at != null) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'AGENT_NOT_ENABLED',
+      `memory-ready project requires one enabled agent row for ${agentId}`,
+    )
+  }
+
+  const metadata = parseObject(agent.metadata)
+  const explicitProject = normalizeText(metadata.memory_project)
+  if (explicitProject) {
+    return {
+      agent_id: agentId,
+      project: explicitProject,
+      workspace_path: null,
+      source: 'agent_metadata_override',
+    }
+  }
+
+  const primaryRows = await queryRows<RuntimeMemoryReadyWorkspaceRow>(
+    db,
+    `SELECT w.local_path
+       FROM agent_workspace_bindings b
+       JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
+      WHERE b.agent_id = $1
+        AND b.active = true
+        AND b.binding_role = 'primary'
+      ORDER BY b.workspace_id`,
+    [agentId],
+  )
+  if (primaryRows.length > 1) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_AMBIGUOUS',
+      `memory-ready project has multiple active primary workspaces for ${agentId}`,
+      { workspace_count: primaryRows.length },
+    )
+  }
+  const primaryPath = normalizeText(primaryRows[0]?.local_path)
+  if (primaryRows.length === 1 && !primaryPath) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_MISSING',
+      `memory-ready primary workspace path is missing for ${agentId}`,
+    )
+  }
+  if (primaryPath) {
+    return {
+      agent_id: agentId,
+      project: projectFromWorkspace(agentId, primaryPath),
+      workspace_path: primaryPath,
+      source: 'active_primary_workspace',
+    }
+  }
+
+  const canonicalWorkspace = normalizeText(agent.home_directory)
+  if (!canonicalWorkspace) {
+    throw new RuntimeMemoryReadyProjectResolutionError(
+      'WORKSPACE_MISSING',
+      `memory-ready project has no active primary or canonical workspace for ${agentId}`,
+    )
+  }
+  return {
+    agent_id: agentId,
+    project: projectFromWorkspace(agentId, canonicalWorkspace),
+    workspace_path: canonicalWorkspace,
+    source: 'canonical_workspace',
+  }
 }
 
 interface AgentProfileRow {
@@ -519,12 +690,13 @@ export async function evaluateRuntimeMemoryReadyGate(
          FROM agent_runtime_instances
         WHERE port = $1
           AND status IN ('running', 'active')
+          AND agent_id <> $2
         ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
         LIMIT 1`,
-      [expectedPort],
+      [expectedPort, input.agent_id],
     ).catch(() => [])
     const occupant = occupants[0]
-    if (occupant && occupant.agent_id !== input.agent_id) {
+    if (occupant) {
       return fail(base, 'port_identity_mismatch', {
         expected_port: expectedPort,
         occupant_agent_id: occupant.agent_id,
@@ -532,38 +704,6 @@ export async function evaluateRuntimeMemoryReadyGate(
       })
     }
   }
-
-  const runtimeRows = await queryRows<RuntimeRow>(
-    db,
-    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
-       FROM agent_runtime_instances
-      WHERE agent_id = $1
-        AND status IN ('running', 'active')
-      ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
-      LIMIT 1`,
-    [input.agent_id],
-  ).catch(() => [])
-  const runtime = runtimeRows[0] ?? null
-  if (!runtime) return fail(base, 'missing_current_runtime')
-
-  const currentRuntime: RuntimeMemoryReadyCurrentRuntime = {
-    agent_id: input.agent_id,
-    runtime_instance_id: normalizeText(runtime.runtime_instance_id),
-    profile_revision: normalizeNumber(agent.profile_revision),
-    profile_source: normalizeText(agent.profile_source),
-    session_name: firstNonEmptyText(runtime.session_name, agentMetadata.tmux_session),
-    port: normalizeNumber(runtime.port) ?? expectedPort,
-    checkout_path: normalizeText(runtime.checkout_path) ?? normalizeText(agent.home_directory),
-    commit_sha: normalizeText(runtime.commit_sha),
-    started_at: runtime.started_at,
-    status: normalizeText(runtime.status),
-  }
-  const withRuntime = {
-    ...base,
-    runtime_instance_id: currentRuntime.runtime_instance_id,
-    current_runtime: currentRuntime,
-  }
-  if (!currentRuntime.runtime_instance_id) return fail(withRuntime, 'missing_current_runtime')
 
   let evidenceRows: EvidenceRow[]
   try {
@@ -583,29 +723,90 @@ export async function evaluateRuntimeMemoryReadyGate(
   } catch (err) {
     const msg = (err as Error).message ?? String(err)
     const missing = /runtime_memory_ready_evidence|does not exist|no such table/i.test(msg)
-    return fail(withRuntime, missing ? 'missing_read_model' : 'read_error', { error: msg })
+    return fail(base, missing ? 'missing_read_model' : 'read_error', { error: msg })
   }
   const evidence = evidenceRows[0] ?? null
-  if (!evidence) return fail(withRuntime, 'missing_evidence')
+  if (!evidence) return fail(base, 'missing_evidence')
 
-  const withEvidence = {
-    ...withRuntime,
+  const withEvidenceBase = {
+    ...base,
     evidence_id: evidence.id ?? null,
     evidence_path: evidence.evidence_path ?? null,
     evidence_log_id: evidence.evidence_log_id ?? null,
     source: evidence.source ?? null,
     valid_until: normalizeDateIso(evidence.valid_until),
   }
-  if (evidence.project !== input.project) return fail(withEvidence, 'project_mismatch', { evidence_project: evidence.project })
+  if (evidence.project !== input.project) return fail(withEvidenceBase, 'project_mismatch', { evidence_project: evidence.project })
   if (evidence.result_status !== 'ready' && evidence.result_status !== 'bypassed') {
-    return fail(withEvidence, 'not_ready', {
+    return fail(withEvidenceBase, 'not_ready', {
       result_status: evidence.result_status,
       failure_reason: evidence.failure_reason,
     })
   }
   const validUntilMs = dateMs(evidence.valid_until)
   if (validUntilMs === null || validUntilMs <= now.getTime()) {
-    return fail(withEvidence, 'expired')
+    return fail(withEvidenceBase, 'expired')
+  }
+
+  const runtimeRows = await queryRows<RuntimeRow>(
+    db,
+    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
+       FROM agent_runtime_instances
+      WHERE CAST(runtime_instance_id AS TEXT) = $1
+        AND agent_id = $2
+        AND status IN ('running', 'active')
+      LIMIT 1`,
+    [evidence.runtime_instance_id, input.agent_id],
+  ).catch(() => [])
+  const runtime = runtimeRows[0] ?? null
+  if (!runtime) {
+    return fail(withEvidenceBase, 'runtime_instance_mismatch', {
+      evidence_runtime_instance_id: evidence.runtime_instance_id,
+    })
+  }
+
+  const currentRuntime: RuntimeMemoryReadyCurrentRuntime = {
+    agent_id: input.agent_id,
+    runtime_instance_id: normalizeText(runtime.runtime_instance_id),
+    profile_revision: normalizeNumber(agent.profile_revision),
+    profile_source: normalizeText(agent.profile_source),
+    session_name: normalizeText(runtime.session_name),
+    port: normalizeNumber(runtime.port),
+    checkout_path: normalizeText(runtime.checkout_path),
+    commit_sha: normalizeText(runtime.commit_sha),
+    started_at: runtime.started_at,
+    status: normalizeText(runtime.status),
+  }
+  const withEvidence = {
+    ...withEvidenceBase,
+    runtime_instance_id: currentRuntime.runtime_instance_id,
+    current_runtime: currentRuntime,
+  }
+  if (!currentRuntime.runtime_instance_id) {
+    return fail(withEvidence, 'runtime_instance_mismatch', {
+      evidence_runtime_instance_id: evidence.runtime_instance_id,
+    })
+  }
+
+  const expectedSession = normalizeText(agentMetadata.tmux_session)
+  if (expectedSession && currentRuntime.session_name !== expectedSession) {
+    return fail(withEvidence, 'session_mismatch', {
+      profile_session_name: expectedSession,
+      runtime_session_name: currentRuntime.session_name,
+    })
+  }
+  if (expectedPort !== null && currentRuntime.port !== expectedPort) {
+    return fail(withEvidence, 'port_mismatch', {
+      profile_port: expectedPort,
+      runtime_port: currentRuntime.port,
+    })
+  }
+  const expectedCheckoutPath = normalizeText(agent.home_directory)
+  if (expectedCheckoutPath && currentRuntime.checkout_path !== expectedCheckoutPath) {
+    return fail(withEvidence, 'checkout_path_mismatch', {
+      profile_checkout_path: expectedCheckoutPath,
+      runtime_checkout_path: currentRuntime.checkout_path,
+    })
   }
   if (evidence.runtime_instance_id !== currentRuntime.runtime_instance_id) {
     return fail(withEvidence, 'runtime_instance_mismatch', { evidence_runtime_instance_id: evidence.runtime_instance_id })

@@ -21,6 +21,12 @@
 import { Client } from 'pg'
 import { execSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import {
+  PROVIDER_EFFECTS_FORBIDDEN_CODE,
+  PROVIDER_EFFECTS_FORBIDDEN_REASON,
+  providerEffectsControlAuditEvidence,
+  readProviderEffectsControl,
+} from '../core/provider-effects-control'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const CHANNEL_ID = process.env.HEARTBEAT_CHANNEL_ID ?? '1487368919613444156'
@@ -149,7 +155,34 @@ export async function runOnce(client: Client, now: Date = new Date()): Promise<{
   return { lines, stuckCount, warnCount, busyCount }
 }
 
-async function postToOutbound(client: Client, content: string): Promise<void> {
+export async function postToOutbound(
+  client: Pick<Client, 'query'>,
+  content: string,
+): Promise<{ outboundQueued: boolean; outboundSkipReason: string | null }> {
+  const providerEffectsControl = readProviderEffectsControl()
+  if (!providerEffectsControl.allowsProviderEffects) {
+    await client.query(
+      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        'outbound.enqueue_skipped',
+        SENDER_AGENT_ID,
+        CHANNEL_ID,
+        JSON.stringify({
+          code: PROVIDER_EFFECTS_FORBIDDEN_CODE,
+          surface: 'heartbeat-poll',
+          provider_effects_control: providerEffectsControlAuditEvidence(providerEffectsControl),
+          reason: PROVIDER_EFFECTS_FORBIDDEN_REASON,
+        }),
+        'default',
+      ],
+    )
+    return {
+      outboundQueued: false,
+      outboundSkipReason: PROVIDER_EFFECTS_FORBIDDEN_REASON,
+    }
+  }
+
   const messageId = randomUUID()
   await client.query(
     `INSERT INTO outbound_queue
@@ -169,6 +202,7 @@ async function postToOutbound(client: Client, content: string): Promise<void> {
       content,
     ],
   )
+  return { outboundQueued: true, outboundSkipReason: null }
 }
 
 async function main(): Promise<void> {
@@ -193,7 +227,10 @@ async function main(): Promise<void> {
       try {
         const { lines, stuckCount, warnCount, busyCount } = await runOnce(client)
         if (lines.length > 0) {
-          await postToOutbound(client, lines.join('\n'))
+          const outbound = await postToOutbound(client, lines.join('\n'))
+          if (!outbound.outboundQueued) {
+            process.stderr.write(`heartbeat: provider projection skipped — ${outbound.outboundSkipReason}\n`)
+          }
         }
         process.stderr.write(
           `heartbeat: cycle posted — busy=${busyCount} warn=${warnCount} stuck=${stuckCount} lines=${lines.length}\n`,

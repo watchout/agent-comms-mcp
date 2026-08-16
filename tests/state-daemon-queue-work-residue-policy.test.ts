@@ -164,6 +164,33 @@ function rowCp80ExactResidue(
   }
 }
 
+const NATIVE_AGENT_WORK_ROWS = [
+  { id: 152953, agent_id: 'adf-lead', message_id: '425a14e9-8270-4e0f-be4c-db56b3745005' },
+  { id: 153868, agent_id: 'adf-lead', message_id: '9898333f-d809-4342-ac82-f06629c5d8c3' },
+  { id: 153903, agent_id: 'adf-lead', message_id: 'a1abb4cc-88b5-4666-9bb2-39a5937a3f37' },
+  { id: 154250, agent_id: 'adf-lead', message_id: '5ed91721-06d9-4032-8ade-28718ea1a18e' },
+  { id: 154252, agent_id: 'aun', message_id: '4bd91c16-f107-4bf7-9c23-7b139ebc290c' },
+  { id: 154254, agent_id: 'codex-audit', message_id: '60ea96f6-bdab-4db2-95cb-e9287885f7b3' },
+  { id: 154258, agent_id: 'devauditor', message_id: 'e1ba7a02-ca7b-4c5a-8459-ae0b2cc9d37c' },
+] as const
+
+function rowNativeAgentWork(
+  item: typeof NATIVE_AGENT_WORK_ROWS[number],
+  patch: Partial<QueueWorkResidueRow> = {},
+): QueueWorkResidueRow {
+  return {
+    id: item.id,
+    agent_id: item.agent_id,
+    message_id: item.message_id,
+    status: 'pending',
+    payload: JSON.stringify({
+      source: 'cli-notify',
+      message_type: 'instruction',
+    }),
+    ...patch,
+  }
+}
+
 describe('#758 queue-work residue policy model', () => {
   test('repo policy validates and exposes exact excluded queue ids', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
@@ -182,6 +209,13 @@ describe('#758 queue-work residue policy model', () => {
       123851,
       123940,
       123945,
+      152953,
+      153868,
+      153903,
+      154250,
+      154252,
+      154254,
+      154258,
     ])
     expect(policy.entries.map((entry) => entry.authorized_action)).toEqual(
       Array.from({ length: policy.entries.length }, () => 'preserve_only'),
@@ -320,11 +354,27 @@ describe('#758 queue-work residue policy model', () => {
     }
   })
 
+  test('daily PDCA rows remain pending native-agent work and reject scheduler provenance drift', () => {
+    const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
+
+    for (const item of NATIVE_AGENT_WORK_ROWS) {
+      const entry = policy.entries.find((candidate) => candidate.queue_id === item.id)!
+      expect(entry.classification).toBe('preserve_native_agent_work')
+      expect(matchQueueWorkResiduePolicyEntry(entry, rowNativeAgentWork(item)).matched).toBe(true)
+      const drifted = matchQueueWorkResiduePolicyEntry(entry, rowNativeAgentWork(item, {
+        payload: JSON.stringify({ source: 'state-daemon-queue-work-scheduler' }),
+      }))
+      expect(drifted.matched).toBe(false)
+      expect(drifted.mismatches.join('\n')).toContain('payload.source expected cli-notify')
+    }
+  })
+
   test('classifier reports exact matches, unclassified rows, missing entries, and mismatches', () => {
     const policy = loadQueueWorkResiduePolicyFile(POLICY_PATH)
     const l2Rows = L2AUDITOR_OBSOLETE_ROWS.map((item) => rowL2AuditorObsolete(item))
     const cp80Rows = CP80_EXACT_ROW_RESIDUE_ROWS.map((item) => rowCp80ExactResidue(item))
-    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, ...cp80Rows], {
+    const nativeRows = NATIVE_AGENT_WORK_ROWS.map((item) => rowNativeAgentWork(item))
+    const passing = classifyQueueWorkResidueRows(policy, [row120138(), row120245(), row121744(), row121873(), ...l2Rows, ...cp80Rows, ...nativeRows], {
       requirePolicyRows: true,
     })
 
@@ -342,6 +392,13 @@ describe('#758 queue-work residue policy model', () => {
       123851,
       123940,
       123945,
+      152953,
+      153868,
+      153903,
+      154250,
+      154252,
+      154254,
+      154258,
     ])
 
     const failing = classifyQueueWorkResidueRows(policy, [

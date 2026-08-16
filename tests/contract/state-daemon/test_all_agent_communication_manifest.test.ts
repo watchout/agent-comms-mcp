@@ -5,7 +5,7 @@ import {
   type StateDaemonDeps,
 } from '../../../core/state-daemon/types'
 
-function fixture(enforcement: boolean, gateOutcome: 'admit' | 'deny') {
+function fixture(enforcement: boolean, gateOutcome: 'admit' | 'deny', rowStatus = 'pending') {
   const queries: string[] = []
   const scheduler = { pending: 0, received: 0 }
   let listener: ((payload: string) => void) | null = null
@@ -13,18 +13,30 @@ function fixture(enforcement: boolean, gateOutcome: 'admit' | 'deny') {
     db: {
       async query(sql: string) {
         queries.push(sql)
+        if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) return {
+          rows: [{
+            agent_id: 'dev-001', runtime: 'codex', runtime_engine_preference: 'codex',
+            status: 'online', profile_enabled: true, disabled_at: null,
+          }],
+          rowCount: 1,
+        }
+        if (sql.includes('SELECT members FROM channels WHERE id=$1')) return {
+          rows: [{ members: ['dev-001'] }],
+          rowCount: 1,
+        }
         if (/FROM message_queue mq/.test(sql)) return {
           rows: [{
             id: 8001,
             agent_id: 'dev-001',
             message_id: 'message-8001',
             payload: '{}',
-            status: 'pending',
+            status: rowStatus,
             claim_expires_at: null,
             created_at: new Date('2026-07-26T00:00:00Z'),
             last_wake_attempt_at: null,
             last_heartbeat_at: null,
             message_type: 'task_request',
+            channel_id: 'channel-8001',
           }],
           rowCount: 1,
         }
@@ -83,13 +95,15 @@ describe('state-daemon ordinary manifest default-off admission hook', () => {
       expect(f.scheduler).toEqual({ pending: 0, received: 0 })
       expect(f.queries.filter(sql => /\b(UPDATE|INSERT|DELETE)\b/i.test(sql))).toEqual([])
       expect(f.queries.filter(sql => /FROM message_queue mq/.test(sql))).toHaveLength(1)
+      expect(f.queries.some(sql => /FROM agents/.test(sql))).toBe(true)
+      expect(f.queries.some(sql => /FROM channels/.test(sql))).toBe(true)
     } finally {
       await f.daemon.stop()
     }
   })
 
   test('disabled default preserves the existing received scheduler path without consulting manifest policy', async () => {
-    const f = fixture(false, 'deny')
+    const f = fixture(false, 'deny', 'received')
     await f.daemon.start()
     try {
       await f.daemon.__testHandleEvent({
@@ -97,7 +111,9 @@ describe('state-daemon ordinary manifest default-off admission hook', () => {
       })
       await Promise.resolve()
       expect(f.scheduler.received).toBe(1)
-      expect(f.queries).toEqual([])
+      expect(f.queries.some(sql => /FROM agents/.test(sql))).toBe(true)
+      expect(f.queries.some(sql => /FROM channels/.test(sql))).toBe(true)
+      expect(f.queries.filter(sql => /\b(UPDATE|INSERT|DELETE)\b/i.test(sql))).toEqual([])
     } finally {
       await f.daemon.stop()
     }

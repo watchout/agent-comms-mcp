@@ -53,12 +53,12 @@ export interface Phase5ResolveOk {
 export interface Phase5ResolveErr {
   ok: false
   /** Error class — active-owner / policy validation failures. */
-  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' | 'OUTBOUND_ACL_VIOLATION'
+  error: 'INVALID_MENTION' | 'UNKNOWN_AGENT' | 'MULTI_ACTIVE_RECIPIENT_UNSUPPORTED' | 'CHANNEL_MEMBERSHIP_VIOLATION'
   /** Identifier surfaced in error message (agent_id or channel_id). */
   detail?: AgentId
-  /** For OUTBOUND_ACL_VIOLATION: the canonical attempted recipients. */
+  /** For CHANNEL_MEMBERSHIP_VIOLATION: the canonical attempted recipients. */
   intended_recipients?: AgentId[]
-  /** For OUTBOUND_ACL_VIOLATION: the offenders. */
+  /** For CHANNEL_MEMBERSHIP_VIOLATION: the offenders. */
   violations?: AgentId[]
 }
 
@@ -97,15 +97,15 @@ export function resolvePhase5(input: Phase5ResolveInput): Phase5ResolveResult | 
     return { ok: false, error: resolved.error, detail: resolved.agent_id }
   }
 
-  // §2.4 — outbound ACL: active owner + observers must all be policy-allowed.
+  // #917 — active owner + observers and sender must all be channel members.
   const policyRecipients = [...resolved.enqueue, ...resolved.cc, ...resolved.fyi]
-  const aclResult = outboundValidator.validate(input.sender, input.channel_id, policyRecipients)
-  if (!aclResult.ok) {
+  const membershipResult = outboundValidator.validate(input.sender, input.channel_id, policyRecipients)
+  if (!membershipResult.ok) {
     return {
       ok: false,
-      error: 'OUTBOUND_ACL_VIOLATION',
+      error: 'CHANNEL_MEMBERSHIP_VIOLATION',
       intended_recipients: policyRecipients,
-      violations: aclResult.violations,
+      violations: membershipResult.violations,
     }
   }
 

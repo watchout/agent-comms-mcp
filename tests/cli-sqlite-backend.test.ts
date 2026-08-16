@@ -118,6 +118,7 @@ function allowOutboundAgents(...agentIds: string[]): void {
     for (const agentId of agentIds) {
       if (agentId !== 'probe-f') insertAgent.run(agentId, agentId)
     }
+    db.prepare(`UPDATE channels SET members = ? WHERE id = 'probe-f-ch'`).run(JSON.stringify(agentIds))
     db.prepare(`
       INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('probe-f-ch', ?, 'cli-test')
@@ -128,6 +129,43 @@ function allowOutboundAgents(...agentIds: string[]): void {
   } finally {
     db.close()
   }
+}
+
+function enableDiscordProjection(consumerAgentId: string): void {
+  const db = new Database(dbPath)
+  try {
+    const connectorId = randomUUID()
+    db.prepare(`INSERT INTO channel_adapters (channel_id, platform, external_id, metadata)
+      VALUES ('probe-f-ch', 'discord', 'probe-f-external', '{}')`).run()
+    db.prepare(`INSERT INTO connector_instances
+      (connector_instance_id, agent_id, provider, status, trust_status, metadata)
+      VALUES (?, ?, 'discord', 'active', 'local', '{}')`).run(connectorId, consumerAgentId)
+    db.prepare(`INSERT INTO connector_credentials
+      (credential_id, provider, agent_id, connector_instance_id, secret_ref, status, trust_status, metadata)
+      VALUES (?, 'discord', ?, ?, 'env:TEST_PROVIDER_EFFECTS_TOKEN', 'active', 'local', '{}')`)
+      .run(randomUUID(), consumerAgentId, connectorId)
+    db.prepare(`INSERT INTO channel_connector_bindings
+      (channel_binding_id, channel_id, provider, connector_instance_id, binding_role, priority, status, metadata)
+      VALUES (?, 'probe-f-ch', 'discord', ?, 'outbound', 1, 'active', '{}')`)
+      .run(randomUUID(), connectorId)
+    db.prepare(`INSERT INTO provider_channel_access
+      (provider_channel_access_id, provider, provider_channel_id, connector_instance_id, agent_id, capabilities, status, trust_status, metadata)
+      VALUES (?, 'discord', 'probe-f-external', ?, ?, '{"message_create":true}', 'active', 'local', '{}')`)
+      .run(randomUUID(), connectorId, consumerAgentId)
+  } finally {
+    db.close()
+  }
+}
+
+function writeProviderEffectsControl(mode: 'allowed' | 'forbidden', epoch: string): string {
+  const path = join(tmpDir, `provider-effects-${epoch}.json`)
+  writeFileSync(path, JSON.stringify({
+    schema_version: 'agent-comms/provider-effects-control/v1',
+    epoch,
+    provider_effects: mode,
+    expires_at: '2099-01-01T00:00:00.000Z',
+  }), { mode: 0o600 })
+  return path
 }
 
 function authorizeQueueWorkDone(
@@ -1481,10 +1519,10 @@ describe('F3 — agent-com send (SQLite)', () => {
     }
   })
 
-  test('queue-work finalizer rejects an expired exact lease with zero outbound and zero close', () => {
+  test('queue-work finalizer resumes an exact locked done row after lease expiry', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('expired claim/result fence')
-    const reply = 'expired result must not escape'
+    const reply = 'expired done result resumes safely'
     authorizeQueueWorkDone(queueId, reply)
     const db = new Database(dbPath)
     try {
@@ -1494,28 +1532,22 @@ describe('F3 — agent-com send (SQLite)', () => {
       db.close()
     }
 
-    const rejected = runCli([
+    const resumed = runCli([
       'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
       '--message-id', messageId, '--queue-work-finalizer', '--close',
     ])
-    expect(rejected.status).toBe(1)
-    expect(JSON.parse(rejected.stdout.trim()).mismatches).toContain('claim_expires_at')
+    expect(resumed.status).toBe(0)
     expect(dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId]))
-      .toEqual([{ status: 'done', replied_with: null }])
+      .toEqual([{ status: 'replied', replied_with: JSON.parse(resumed.stdout.trim()).message_id }])
     expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
-      .toHaveLength(0)
+      .toHaveLength(1)
   })
 
-  test('queue-work finalizer rolls back reply, fanout, outbound, and close when the lease is lost at mutation time', () => {
+  test('queue-work finalizer is not invalidated when only the terminal done-row lease expires mid-transaction', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('mutation-time lease race')
-    const reply = 'mutation-time lease race must not escape'
+    const reply = 'terminal done result remains exact'
     authorizeQueueWorkDone(queueId, reply)
-    const originalQueue = dbRead(
-      `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
-      [queueId],
-    )
-
     const db = new Database(dbPath)
     try {
       const connectorId = randomUUID()
@@ -1537,11 +1569,9 @@ describe('F3 — agent-com send (SQLite)', () => {
         VALUES (?, 'discord', 'probe-f-external', ?, 'cto', '{"message_create":true}', 'active', 'local', '{}')`)
         .run(randomUUID(), connectorId)
 
-      // The outbound insert proves initial validation already passed and the
-      // reply transaction reached projection. Expire the exact claim inside
-      // that same transaction so only the mutation-time close fence can stop
-      // it. The expected CLI failure must roll this trigger update and every
-      // reply/fanout/outbound write back together.
+      // Expire only the lease after outbound projection. The exact done-row
+      // claim identity remains unchanged and the row cannot be reassigned as
+      // executable work, so finalization must still commit atomically.
       db.exec(`CREATE TRIGGER expire_queue_work_claim_after_outbound
         AFTER INSERT ON outbound_queue
         WHEN NEW.message_id IN (
@@ -1556,26 +1586,24 @@ describe('F3 — agent-com send (SQLite)', () => {
       db.close()
     }
 
-    const rejected = runCli([
+    const resumed = runCli([
       'send', '--content', reply, '--mentions', 'cto', '--queue-id', String(queueId),
       '--message-id', messageId, '--queue-work-finalizer', '--close',
     ], { AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: 'codex-exec' })
 
-    expect(rejected.status).toBe(1)
-    expect(JSON.parse(rejected.stdout.trim())).toMatchObject({
-      ok: false,
-      code: 'QUEUE_WORK_FINALIZER_UNAUTHORIZED',
-      queue_id: queueId,
-      mismatches: ['mutation_time_claim_fence'],
-    })
+    expect(resumed.status).toBe(0)
     expect(dbRead(
       `SELECT status, replied_with, claim_expires_at FROM message_queue WHERE id = ?`,
       [queueId],
-    )).toEqual(originalQueue)
+    )).toEqual([{
+      status: 'replied',
+      replied_with: JSON.parse(resumed.stdout.trim()).message_id,
+      claim_expires_at: null,
+    }])
     expect(dbRead(`SELECT id FROM agent_messages WHERE reply_to = ? AND author_id = 'probe-f'`, [messageId]))
-      .toHaveLength(0)
-    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(0)
-    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
+      .toHaveLength(1)
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(1)
   })
 
   test('D1 reserved internal reply writes once from done and replays the same durable message id', () => {
@@ -1812,24 +1840,25 @@ describe('F3 — agent-com send (SQLite)', () => {
     expect(fail.stderr).toContain('INVALID_REPLY_TO')
   })
 
-  test('rejects DB channel policy outbound allowlist violations before writing reply rows', () => {
+  test('rejects channels.members violations before writing reply rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
-    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
     const { queueId } = seedPendingMessage('acl send')
     runCli(['next'])
 
     const blocked = runCli(['send', '--content', 'blocked send', '--mentions', 'cto'])
     expect(blocked.status).not.toBe(0)
-    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
-    expect(blocked.stderr).toContain('allowlist=["cto"]')
+    expect(blocked.stderr).toContain('CHANNEL_MEMBERSHIP_VIOLATION')
+    expect(blocked.stderr).toContain('members=["probe-f"]')
     const q = dbRead(`SELECT status, replied_with FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('received')
     expect(q[0].replied_with).toBeNull()
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked send'`)
     expect(written.length).toBe(0)
-    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'channel.membership_violation'`)
     expect(audits).toHaveLength(1)
     expect(audits[0]).toMatchObject({ agent_id: 'probe-f', target: 'probe-f-ch' })
     expect(JSON.parse(audits[0].detail)).toMatchObject({
@@ -1837,10 +1866,11 @@ describe('F3 — agent-com send (SQLite)', () => {
       sender: 'probe-f',
       intended_recipients: ['cto'],
       channel_id: 'probe-f-ch',
-      violated_policy: 'channel.outboundAllowlist',
-      outbound_allowlist: ['cto'],
-      policy_source: 'db',
-      violations: ['probe-f'],
+      violated_policy: 'channels.members',
+      authority: 'channels.members',
+      members: ['probe-f'],
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+      violations: ['cto'],
     })
   })
 })
@@ -2054,31 +2084,89 @@ describe('F5 — agent-com notify (SQLite)', () => {
     })
   })
 
-  test('notify rejects DB channel policy outbound allowlist violations before writing rows', () => {
+  test('notify rejects channels.members violations before writing rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
     db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
-    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["cto"]')`)
+    db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
+    db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
 
     const blocked = runCli(['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'blocked notify'])
     expect(blocked.status).not.toBe(0)
-    expect(blocked.stderr).toContain('OUTBOUND_ACL_VIOLATION')
-    expect(blocked.stderr).toContain('allowlist=["cto"]')
+    expect(blocked.stderr).toContain('CHANNEL_MEMBERSHIP_VIOLATION')
+    expect(blocked.stderr).toContain('members=["probe-f"]')
     const written = dbRead(`SELECT id FROM agent_messages WHERE content = 'blocked notify'`)
     expect(written.length).toBe(0)
     const queued = dbRead(`SELECT id FROM message_queue WHERE payload LIKE '%blocked notify%'`)
     expect(queued.length).toBe(0)
-    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'outbound.acl_violation'`)
+    const audits = dbRead(`SELECT event_type, agent_id, target, detail FROM audit_log WHERE event_type = 'channel.membership_violation'`)
     expect(audits).toHaveLength(1)
     expect(JSON.parse(audits[0].detail)).toMatchObject({
       operation: 'notify',
       sender: 'probe-f',
       intended_recipients: ['cto'],
       channel_id: 'probe-f-ch',
-      violated_policy: 'channel.outboundAllowlist',
-      outbound_allowlist: ['cto'],
-      policy_source: 'db',
-      violations: ['probe-f'],
+      violated_policy: 'channels.members',
+      authority: 'channels.members',
+      members: ['probe-f'],
+      outbound_allowlist_status: 'DEPRECATED_NON_AUTHORITATIVE',
+      violations: ['cto'],
     })
+  })
+
+  test('host provider-forbidden epoch keeps notify internal with zero outbound projection', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    enableDiscordProjection('cto')
+    const controlPath = writeProviderEffectsControl('forbidden', 'cli-notify-deny')
+
+    const r = runCli(
+      ['notify', '--channel-id', 'probe-f-ch', '--mentions', 'cto', '--content', 'internal notify only'],
+      { AGENT_COM_PROVIDER_EFFECTS_CONTROL_FILE: controlPath },
+    )
+
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({
+      ok: true,
+      outbound_queued: false,
+      outbound_skip_reason: 'provider effects forbidden by host control',
+    })
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
+    const audit = dbRead(`SELECT detail FROM audit_log WHERE event_type = 'outbound.enqueue_skipped'`)
+    expect(audit).toHaveLength(1)
+    expect(JSON.parse(audit[0].detail)).toMatchObject({
+      code: 'PROVIDER_EFFECTS_FORBIDDEN',
+      provider_effects_control: {
+        mode: 'forbidden',
+        epoch: 'cli-notify-deny',
+        reason: 'control_forbidden',
+      },
+    })
+  })
+})
+
+describe('F5b — provider-forbidden anchored reply (SQLite)', () => {
+  test('next/send closes the internal queue lifecycle with zero outbound projection', () => {
+    allowOutboundAgents('probe-f', 'cto')
+    enableDiscordProjection('cto')
+    const { messageId, queueId } = seedPendingMessage('provider-forbidden reply source')
+    expect(runCli(['next']).status).toBe(0)
+    const controlPath = writeProviderEffectsControl('forbidden', 'cli-send-deny')
+
+    const r = runCli(
+      ['send', '--content', 'internal evidence reply', '--mentions', 'cto', '--queue-id', String(queueId), '--message-id', messageId, '--close'],
+      { AGENT_COM_PROVIDER_EFFECTS_CONTROL_FILE: controlPath },
+    )
+
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout.trim())).toMatchObject({
+      ok: true,
+      outbound_queued: false,
+      outbound_skip_reason: 'provider effects forbidden by host control',
+      work_closed: true,
+    })
+    expect(dbRead(`SELECT status FROM message_queue WHERE id = ?`, [queueId])).toEqual([{ status: 'replied' }])
+    expect(dbRead(`SELECT id FROM message_queue WHERE agent_id = 'cto'`)).toHaveLength(1)
+    expect(dbRead(`SELECT id FROM outbound_queue`)).toHaveLength(0)
   })
 })

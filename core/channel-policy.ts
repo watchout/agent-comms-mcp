@@ -17,6 +17,8 @@ type Queryable = {
 }
 
 export interface ChannelPolicyEntry {
+  /** #917 Phase 1 — sole channel send/receive authorization authority. */
+  members: AgentId[]
   /** §1.3 / §2.3 — inbound default recipient when no `mention` is present. */
   primary: AgentId | null
   /** #410 — chat adapter process that owns projection for this channel. */
@@ -29,8 +31,10 @@ export interface ChannelPolicyEntry {
   adapterOwnerFallbackAllowed: boolean
   /** NORM-036 — explicit permit for legacy primary-agent delivery fallback. */
   primaryFallbackAllowed: boolean
-  /** §1.3 / §2.4 — outbound ACL allowlist. `null` = entry absent (legacy: all senders permitted). */
+  /** Compatibility-only legacy outbound list. `null` means no compatibility record. */
   outboundAllowlist: AgentId[] | null
+  /** #917 Phase 1 — retained data, never an authorization input. */
+  outboundAllowlistStatus: 'DEPRECATED_NON_AUTHORITATIVE'
   /** Evidence source for operator/audit diagnostics. */
   policySource: string
 }
@@ -38,6 +42,7 @@ export interface ChannelPolicyEntry {
 interface RoutingConfig {
   version: number
   channels: Record<string, {
+    members?: AgentId[]
     primary?: AgentId | null
     adapterOwner?: AgentId | null
     nativeRoleOutboundOwners?: Record<AgentId, AgentId>
@@ -57,13 +62,21 @@ let cachedConfigSize: number | null = null
 let dbPolicySnapshot: RoutingConfig | null = null
 
 function parseStringArray(raw: unknown): string[] | undefined {
-  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  if (Array.isArray(raw)) {
+    return raw.filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
   if (!trimmed) return undefined
   try {
     const parsed = JSON.parse(trimmed)
-    if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    }
   } catch {}
   return trimmed.split(',').map((item) => item.trim()).filter(Boolean)
 }
@@ -108,6 +121,7 @@ function normalizePolicyEntry(
 ): ChannelPolicyEntry {
   if (!entry) {
     return {
+      members: [],
       primary: null,
       adapterOwner: null,
       nativeRoleOutboundOwners: {},
@@ -115,6 +129,7 @@ function normalizePolicyEntry(
       adapterOwnerFallbackAllowed: false,
       primaryFallbackAllowed: false,
       outboundAllowlist: fallbackPolicySource === 'none' ? [] : null,
+      outboundAllowlistStatus: 'DEPRECATED_NON_AUTHORITATIVE',
       policySource: fallbackPolicySource,
     }
   }
@@ -135,6 +150,7 @@ function normalizePolicyEntry(
       )
       : {}
   return {
+    members: Array.isArray(entry.members) ? entry.members : [],
     primary: entry.primary ?? null,
     adapterOwner: entry.adapterOwner ?? null,
     nativeRoleOutboundOwners,
@@ -142,6 +158,7 @@ function normalizePolicyEntry(
     adapterOwnerFallbackAllowed: explicitBoolean(entry.adapterOwnerFallbackAllowed),
     primaryFallbackAllowed: explicitBoolean(entry.primaryFallbackAllowed),
     outboundAllowlist: Array.isArray(entry.outboundAllowlist) ? entry.outboundAllowlist : null,
+    outboundAllowlistStatus: 'DEPRECATED_NON_AUTHORITATIVE',
     policySource: entry.policySource ?? fallbackPolicySource,
   }
 }
@@ -161,7 +178,7 @@ function locateRoutingConfig(): string {
 /**
  * Load + cache routing config for explicit compatibility/seed/test callers.
  * Long-lived compatibility callers revalidate file metadata on each policy
- * lookup; file fallback is still revalidated on access so ACL fixture updates
+ * lookup; file fallback is still revalidated on access so routing fixture updates
  * are picked up without a process restart.
  * Tests that need to reset the cache should call {@link resetChannelPolicyCache}.
  *
@@ -259,21 +276,24 @@ export function getChannelPolicy(channel_id: string): ChannelPolicyEntry {
 export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ loaded: boolean; count: number }> {
   try {
     const result = await db.query(
-      `SELECT channel_id,
-              primary_agent_id,
-              adapter_owner_agent_id,
-              outbound_allowlist,
-              native_role_outbound_owners,
-              native_projection_identities,
-              policy_source
-         FROM channel_routing_policy
-        ORDER BY channel_id`,
+      `SELECT c.id AS channel_id,
+              c.members,
+              p.primary_agent_id,
+              p.adapter_owner_agent_id,
+              p.outbound_allowlist,
+              p.native_role_outbound_owners,
+              p.native_projection_identities,
+              p.policy_source
+         FROM channels c
+         LEFT JOIN channel_routing_policy p ON p.channel_id = c.id
+        ORDER BY c.id`,
     )
     const channels: RoutingConfig['channels'] = {}
     for (const row of result.rows) {
       const channelId = typeof row.channel_id === 'string' ? row.channel_id.trim() : ''
       if (!channelId) continue
       channels[channelId] = {
+        members: parseStringArray(row.members) ?? [],
         primary: typeof row.primary_agent_id === 'string' && row.primary_agent_id.trim() ? row.primary_agent_id.trim() : null,
         adapterOwner: typeof row.adapter_owner_agent_id === 'string' && row.adapter_owner_agent_id.trim() ? row.adapter_owner_agent_id.trim() : null,
         outboundAllowlist: parseStringArray(row.outbound_allowlist),
@@ -281,14 +301,14 @@ export async function refreshChannelPolicyDbSnapshot(db: Queryable): Promise<{ l
         nativeProjectionIdentities: parseStringMap(row.native_projection_identities),
         adapterOwnerFallbackAllowed: false,
         primaryFallbackAllowed: false,
-        policySource: typeof row.policy_source === 'string' && row.policy_source.trim() ? row.policy_source.trim() : 'db',
+        policySource: typeof row.policy_source === 'string' && row.policy_source.trim() ? row.policy_source.trim() : 'db:channels.members',
       }
     }
     dbPolicySnapshot = { version: 1, channels }
     return { loaded: true, count: Object.keys(channels).length }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    if (/channel_routing_policy/i.test(message) && /(does not exist|no such table|no such column)/i.test(message)) {
+    if (/(channel_routing_policy|channels)/i.test(message) && /(does not exist|no such table|no such column)/i.test(message)) {
       dbPolicySnapshot = null
       return { loaded: false, count: 0 }
     }

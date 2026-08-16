@@ -9,12 +9,9 @@
  * v0.2.0 spec — without the discriminator each caller had to duplicate
  * the channel-membership and mention checks.
  *
- * Behavioural contract for the `inbound` branch is byte-for-byte
- * identical to PR-A's `routeInbound`. The `send-tool` and `cli` branches
- * add a sender-side guard (`SENDER_NOT_A_MEMBER`) so bots cannot fanout
- * into channels they don't belong to. See tests/inbound-router.test.ts
- * and tests/inbound-mentions-filter.test.ts for the source-level
- * regression checks that protect against drift.
+ * All branches enforce the DB-owned sender membership boundary. Native
+ * inbound additionally requires a resolved non-human agent identity; null,
+ * unmapped, external-human, and nonmember senders fail closed.
  *
  * Backwards compat: `routeInbound` is still exported as an alias that
  * forwards to `routeMessage({sourceType: 'inbound'})`. Planned removal
@@ -47,7 +44,7 @@ export interface RouteResult {
   dropTargets: Record<string, string>  // agentId → reason
   senderIsHuman: boolean
   noMentions: boolean  // true when mentions array is empty (Pattern A)
-  senderViolation?: string  // set when the sender itself is blocked (send-tool / cli only)
+  senderViolation?: string  // set whenever the sender itself is blocked
 }
 
 /** Call-site discriminator for `routeMessage`. */
@@ -80,6 +77,8 @@ export type RouteDropReason =
   | 'observer_mode'
   | 'mention_not_in_array'
   | 'sender_not_a_member'
+  | 'sender_identity_unresolved'
+  | 'sender_human_not_allowed'
   | 'human_agent_no_queue'
   | 'not_primary_no_mention'
   | 'missing_mention_target'
@@ -239,7 +238,7 @@ export function isEmergencyMessage(content: string, messageType: string): boolea
  *
  * `sourceType` selects the guards:
  *   - `'inbound'` (default): called by the receiver when a message arrives
- *     from the Gateway.  Matches the old `routeInbound` behaviour exactly.
+ *     from the Gateway. Requires a resolved non-human DB member sender.
  *   - `'send-tool'`: called by the MCP `send` tool before it does any DB
  *     writes.  Adds a sender-side `SENDER_NOT_A_MEMBER` check so a bot
  *     cannot fanout into channels it does not belong to.
@@ -248,7 +247,7 @@ export function isEmergencyMessage(content: string, messageType: string): boolea
  *
  * Caller is responsible for:
  *   1. Resolving channel + loading agent info (before)
- *   2. DB save (before or after, always)
+ *   2. DB save only after a successful sender decision
  *   3. Pushing to pushTargets (after)
  *   4. Sending human warning if noMentions && senderIsHuman (after)
  *   5. Returning an error to the sender if `senderViolation` is set
@@ -268,19 +267,46 @@ export function routeMessage(
 
   const logCtx = { senderAgentId: msg.authorAgentId, channelId: channel.channelId, messageId: null }
 
-  // §C2 sender-side guard: only applies to send-tool / cli. Inbound senders
-  // are untrusted external parties (humans or other bots) and cannot be
-  // blocked by this check — the receiver still accepts and records the
-  // message, it just never gets pushed to any subscriber.
-  if (sourceType !== 'inbound' && msg.authorAgentId) {
-    if (!channel.members.includes(msg.authorAgentId)) {
-      emitRouteDrop('sender_not_a_member', msg.authorAgentId, logCtx)
+  if (!msg.authorAgentId) {
+    emitRouteDrop('sender_identity_unresolved', '(unresolved)', logCtx)
+    return {
+      pushTargets: [],
+      dropTargets: {},
+      senderIsHuman,
+      noMentions,
+      senderViolation: 'SENDER_ID_UNRESOLVED',
+    }
+  }
+  if (!channel.members.includes(msg.authorAgentId)) {
+    emitRouteDrop('sender_not_a_member', msg.authorAgentId, logCtx)
+    return {
+      pushTargets: [],
+      dropTargets: {},
+      senderIsHuman,
+      noMentions,
+      senderViolation: 'SENDER_NOT_A_MEMBER',
+    }
+  }
+  if (sourceType === 'inbound') {
+    const senderAgent = agents.find((agent) => agent.agentId === msg.authorAgentId)
+    if (!senderAgent) {
+      emitRouteDrop('sender_identity_unresolved', msg.authorAgentId, logCtx)
       return {
         pushTargets: [],
         dropTargets: {},
         senderIsHuman,
         noMentions,
-        senderViolation: 'SENDER_NOT_A_MEMBER',
+        senderViolation: 'SENDER_ID_UNRESOLVED',
+      }
+    }
+    if (senderAgent.agentType === 'human') {
+      emitRouteDrop('sender_human_not_allowed', msg.authorAgentId, logCtx)
+      return {
+        pushTargets: [],
+        dropTargets: {},
+        senderIsHuman,
+        noMentions,
+        senderViolation: 'SENDER_HUMAN_NOT_ALLOWED',
       }
     }
   }
