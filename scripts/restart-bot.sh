@@ -40,6 +40,9 @@ build_profile_command() {
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED=\"0\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.WEBHOOK_PORT=\"${port}\"'"
       CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DISCORD_STATE_DIR=\"${state_dir}\"'"
+      # Pin the session name explicitly. Left unset, the heartbeat falls back to
+      # TMUX_PANE and records a pane identifier instead of the session.
+      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_SESSION=\"${session}\"'"
       ;;
     claude | claude-code)
       CLAUDE_CMD="$DEFAULT_CMD"
