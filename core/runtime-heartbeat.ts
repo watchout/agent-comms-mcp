@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { basename, resolve } from 'node:path'
@@ -363,8 +364,49 @@ async function heartbeatRuntimeEndpointLease(
 }
 
 export function inferRuntimeSessionName(env: NodeJS.ProcessEnv = process.env): string | null {
+  return resolveRuntimeSessionName(env, resolveTmuxSessionName)
+}
+
+/**
+ * Resolve a tmux pane identifier to the session that contains it. Separated so the
+ * inference above can be exercised without tmux, and so a machine without tmux degrades
+ * instead of throwing.
+ */
+export function resolveTmuxSessionName(paneId: string): string | null {
+  try {
+    const out = execFileSync('tmux', ['display-message', '-p', '-t', paneId, '#{session_name}'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    })
+    const name = out.trim()
+    return name.length > 0 ? name : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * TMUX_PANE holds a pane identifier such as `%1008`, not a session name. Recording it as
+ * the session name made `agent_runtime_instances.session_name` disagree with the seat's
+ * registered `metadata.tmux_session`, and the memory_ready gate compares exactly those
+ * two — so every affected seat failed with `session_mismatch` and its queue rows were
+ * never delivered. 26 agents were in that state when this was found.
+ *
+ * The pane identifier is still used, but as a lookup key rather than as the answer. If
+ * tmux cannot be queried the pane id is returned as a last resort, which is no worse
+ * than the previous behaviour and keeps a machine without tmux working.
+ *
+ * The resolver is injected here rather than added as an optional parameter above, so
+ * that the exported inference keeps its signature.
+ */
+export function resolveRuntimeSessionName(
+  env: NodeJS.ProcessEnv,
+  resolvePane: (paneId: string) => string | null,
+): string | null {
   if (env.AGENT_COM_RUNTIME_SESSION?.trim()) return env.AGENT_COM_RUNTIME_SESSION.trim()
-  if (env.TMUX_PANE?.trim()) return env.TMUX_PANE.trim()
+  const pane = env.TMUX_PANE?.trim()
+  if (pane) return resolvePane(pane) ?? pane
   const stateDir = env.DISCORD_STATE_DIR?.trim()
   if (!stateDir) return null
   return stateDir.split('/').filter(Boolean).pop() ?? null

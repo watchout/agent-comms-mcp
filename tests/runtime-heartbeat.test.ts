@@ -4,6 +4,7 @@ import {
   hasRuntimeConnectorIdentityEvidence,
   heartbeatRuntimeInstance,
   inferRuntimeSessionName,
+  resolveRuntimeSessionName,
   inferWorkspaceName,
   normalizeCheckoutPath,
   parseRuntimePort,
@@ -368,6 +369,26 @@ describe('runtime heartbeat evidence', () => {
 
   test('infers session name and port from runtime environment', () => {
     expect(inferRuntimeSessionName({ DISCORD_STATE_DIR: '/tmp/channels/discord-hotel' })).toBe('discord-hotel')
+
+    // TMUX_PANE is a pane identifier, not a session name. Recording it verbatim made
+    // agent_runtime_instances.session_name disagree with the seat's registered
+    // metadata.tmux_session, and the memory_ready gate compares exactly those two, so
+    // affected seats failed with session_mismatch and never received their queue rows.
+    expect(resolveRuntimeSessionName({ TMUX_PANE: '%1008' }, () => 'discord-auditor')).toBe('discord-auditor')
+
+    // An explicit override still wins over the pane lookup.
+    expect(
+      resolveRuntimeSessionName({ AGENT_COM_RUNTIME_SESSION: 'discord-arc', TMUX_PANE: '%1008' }, () => 'other'),
+    ).toBe('discord-arc')
+
+    // Without tmux the pane id is still returned, which is no worse than before and
+    // keeps a machine with no tmux working.
+    expect(resolveRuntimeSessionName({ TMUX_PANE: '%1008' }, () => null)).toBe('%1008')
+
+    // A pane takes precedence over the state directory fallback.
+    expect(
+      resolveRuntimeSessionName({ TMUX_PANE: '%42', DISCORD_STATE_DIR: '/tmp/channels/discord-hotel' }, () => 'discord-auditor'),
+    ).toBe('discord-auditor')
     expect(parseRuntimePort({ WEBHOOK_PORT: '8811' })).toBe(8811)
     expect(hasRuntimeConnectorIdentityEvidence({
       DISCORD_STATE_DIR: '/tmp/channels/discord-aun',
