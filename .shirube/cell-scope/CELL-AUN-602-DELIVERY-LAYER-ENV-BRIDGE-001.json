@@ -1,0 +1,14 @@
+{
+  "schema_version": "cell-scope/v1",
+  "cell_id": "CELL-AUN-602-DELIVERY-LAYER-ENV-BRIDGE-001",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/602",
+  "handoff": "CH-ARC-602-DELIVERY-LAYER-REPAIR-20260817-002",
+  "handoff_ref": "https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5313630297",
+  "declared_by": "aun seat, 2026-08-17",
+  "allowed_paths": [
+    "scripts/sync-mcp-config.sh",
+    "scripts/restart-bot.sh",
+    "tests/runtime-session-env-bridge.test.ts",
+    ".shirube/cell-scope/CELL-AUN-602-DELIVERY-LAYER-ENV-BRIDGE-001.json"
+  ]
+}

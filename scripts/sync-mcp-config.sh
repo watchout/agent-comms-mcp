@@ -78,6 +78,13 @@ sync_mcp_config() {
     if (env.AGENT_ID !== '$agent_id') { env.AGENT_ID = '$agent_id'; changed = true; }
     if (env.AGENT_COM_EXPECTED_AGENT_ID !== '$agent_id') { env.AGENT_COM_EXPECTED_AGENT_ID = '$agent_id'; changed = true; }
     if (env.WEBHOOK_PORT !== '$port') { env.WEBHOOK_PORT = '$port'; changed = true; }
+    // The heartbeat resolves its session name from AGENT_COM_RUNTIME_SESSION first and
+    // from TMUX_PANE second. Without this key the MCP server inherits TMUX_PANE from the
+    // pane it was launched in and records a pane identifier such as %1008 as the session
+    // name, which the memory_ready gate then compares against the seat's registered
+    // metadata.tmux_session and rejects as session_mismatch. Repairing the row by hand
+    // does not hold: the heartbeat rewrites it every five minutes.
+    if (env.AGENT_COM_RUNTIME_SESSION !== '$session') { env.AGENT_COM_RUNTIME_SESSION = '$session'; changed = true; }
     if (env.DISCORD_STATE_DIR !== '$state_dir') { env.DISCORD_STATE_DIR = '$state_dir'; changed = true; }
     if (env.DATABASE_URL !== '$database_url') { env.DATABASE_URL = '$database_url'; changed = true; }
     if (!changed) {
