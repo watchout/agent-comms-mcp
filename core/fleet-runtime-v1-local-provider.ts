@@ -2120,7 +2120,6 @@ function normalizeTreeEntry(entry: GitTreeEntry): { path: string; mode: string; 
 
 function surfaceDigest(entries: GitTreeEntry[], runtime: boolean): { count: number; digest: string } {
   const selected = entries
-    .filter(entry => entry.type === 'blob')
     .filter(entry => runtime
       ? entry.path === '.github/workflows/shirube-rapid-lite-gates-report.yml' || entry.path.startsWith('.shirube/runtime/rapid-lite/')
       : entry.path === '.github/workflows/shirube-rapid-lite-gates-report.yml' || entry.path.startsWith('.shirube/') || entry.path.startsWith('docs/shirube/'))
