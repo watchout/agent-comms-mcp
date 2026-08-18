@@ -394,6 +394,18 @@ export function assertExactFleetRuntimePathSet(expected: readonly string[], actu
   }
 }
 
+export function assertExactFleetRuntimeChangedPathSet(
+  expected: readonly string[],
+  actual: readonly string[],
+  label: string,
+): void {
+  if (actual.length !== expected.length
+    || new Set(expected).size !== expected.length || new Set(actual).size !== actual.length
+    || expected.some((path, index) => path !== actual[index])) {
+    return providerFail('PAYLOAD_VERIFICATION_FAILED', `${label} differs from the exact ordered changed-against-preimage paths`)
+  }
+}
+
 export function validateFleetRuntimePayloadBlobLayer(
   expected: readonly { path: string; bytes: number; sha256: string }[],
   actual: readonly { path: string; bytes: number; sha256: string }[],
@@ -2337,6 +2349,7 @@ export async function validateFleetRuntimeGitPayloadLayer(input: {
 }): Promise<{
   blobs: Record<string, { bytes: number; sha256: string }>
   object_ids: Record<string, string>
+  changed_paths: string[]
 }> {
   const run = async (argv: readonly string[]): Promise<string> => {
     const result = await input.runner.run(argv, { cwd: input.checkout })
@@ -2344,16 +2357,21 @@ export async function validateFleetRuntimeGitPayloadLayer(input: {
     return result.stdout
   }
   const paths = input.manifest.map(file => file.path)
-  const actual = input.layer === 'index'
-    ? (await run(['git', 'diff', '--cached', '--name-only'])).trim().split('\n').filter(Boolean).sort()
-    : (await run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', assertCommit(input.commit, 'commit layer head')])).trim().split('\n').filter(Boolean).sort()
-  assertExactFleetRuntimePathSet(paths, actual, `${input.layer} paths`)
+  assertExactFleetRuntimePathSet([...paths].sort(), paths, `${input.layer} manifest`)
   const blobs: Record<string, { bytes: number; sha256: string }> = {}
   const objectIds: Record<string, string> = {}
   for (const file of input.manifest) {
     const spec = input.layer === 'index' ? `:${file.path}` : `${input.commit}:${file.path}`
-    const objectId = (await run(['git', 'rev-parse', spec])).trim()
-    const bytes = Buffer.from(await run(['git', 'cat-file', 'blob', objectId]))
+    const objectResult = await input.runner.run(['git', 'rev-parse', spec], { cwd: input.checkout })
+    if (objectResult.exitCode !== 0) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.layer} blob is absent at ${file.path}`)
+    }
+    const objectId = objectResult.stdout.trim()
+    const blobResult = await input.runner.run(['git', 'cat-file', 'blob', objectId], { cwd: input.checkout })
+    if (blobResult.exitCode !== 0) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.layer} blob is unreadable at ${file.path}`)
+    }
+    const bytes = Buffer.from(blobResult.stdout)
     if (!COMMIT.test(objectId) || bytes.byteLength !== file.bytes || sha256(bytes) !== file.sha256
       || (input.expected_object_ids && objectId !== input.expected_object_ids[file.path])) {
       return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.layer} blob differs at ${file.path}`)
@@ -2361,8 +2379,28 @@ export async function validateFleetRuntimeGitPayloadLayer(input: {
     objectIds[file.path] = objectId
     blobs[file.path] = { bytes: bytes.byteLength, sha256: sha256(bytes) }
   }
+  // The manifest binds the complete 24-file inventory above. Git's delta is
+  // a different layer: byte-identical payload files are absent from diff
+  // output, so derive the ordered changed subset from the frozen parent tree.
+  const commit = input.layer === 'commit' ? assertCommit(input.commit, 'commit layer head') : null
+  const baseline = (await run(['git', 'rev-parse', input.layer === 'index' ? 'HEAD' : `${commit}^`])).trim()
+  assertCommit(baseline, `${input.layer} baseline`)
+  const baselineTree = await run(['git', 'ls-tree', '-rz', '--full-tree', baseline, '--', ...paths])
+  const baselineObjectIds = new Map<string, string>()
+  for (const row of baselineTree.split('\0').filter(Boolean)) {
+    const match = /^([0-7]{6}) (blob|tree|commit) ([a-f0-9]{40})\t(.+)$/.exec(row)
+    if (!match || !paths.includes(match[4]) || baselineObjectIds.has(match[4])) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', `${input.layer} baseline tree differs from the manifest namespace`)
+    }
+    baselineObjectIds.set(match[4], match[3])
+  }
+  const changedPaths = paths.filter(path => baselineObjectIds.get(path) !== objectIds[path])
+  const actual = input.layer === 'index'
+    ? (await run(['git', 'diff', '--cached', '--no-renames', '--name-only'])).trim().split('\n').filter(Boolean)
+    : (await run(['git', 'diff-tree', '--no-commit-id', '--no-renames', '--name-only', '-r', commit!])).trim().split('\n').filter(Boolean)
+  assertExactFleetRuntimeChangedPathSet(changedPaths, actual, `${input.layer} paths`)
   validateFleetRuntimePayloadBlobLayer(input.manifest, paths.map(path => ({ path, ...blobs[path] })), `${input.layer} blobs`)
-  return { blobs, object_ids: objectIds }
+  return { blobs, object_ids: objectIds, changed_paths: changedPaths }
 }
 
 /**
@@ -2646,6 +2684,100 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     return validateFleetRuntimePredecessorReceipt(request, context.predecessor_receipt_raw_body, binding)
   }
 
+  private async localCommitResidualPaths(checkout: string): Promise<string[]> {
+    const unstaged = (await this.run(['git', 'diff', '--no-renames', '--name-only'], checkout))
+      .trim().split('\n').filter(Boolean)
+    const untracked = (await this.run(['git', 'ls-files', '--others', '--exclude-standard'], checkout))
+      .trim().split('\n').filter(Boolean)
+    return [...new Set([...unstaged, ...untracked])].sort()
+  }
+
+  private async createLocalCommitEvidence(
+    request: FleetRuntimeRequest,
+    context: FleetRuntimeLocalPhaseContext,
+    allowCompletedCommit: boolean,
+  ): Promise<Record<string, unknown>> {
+    const checkout = this.checkoutPath(context)
+    const branch = `shirube-v41-${request.operation.toLowerCase().replaceAll('_', '-')}-${request.request_digest.slice(-12)}`
+    const paths = context.prior_evidence.VERIFY_EXACT_PAYLOAD?.payload_paths
+    if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string')) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'verified payload path evidence is absent')
+    }
+    assertExactFleetRuntimePathSet([...paths as string[]].sort(), paths as string[], 'commit path evidence')
+    const manifest = await this.payloadManifest(request)
+    const expectedBase = String(context.prior_evidence.PREPARE_CLEAN_CHECKOUT?.head ?? '')
+    assertCommit(expectedBase, 'local commit preimage head')
+    const currentHead = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
+    const currentBranch = (await this.run(['git', 'branch', '--show-current'], checkout)).trim()
+
+    if (currentHead !== expectedBase) {
+      if (!allowCompletedCommit || currentBranch !== branch) {
+        return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'local commit checkout is not at the exact preimage or deterministic branch')
+      }
+      const parent = (await this.run(['git', 'rev-parse', `${currentHead}^`], checkout)).trim()
+      if (parent !== expectedBase || (await this.run(['git', 'status', '--porcelain=v1', '--untracked-files=all'], checkout)) !== '') {
+        return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'local commit cannot be bound to one clean commit above the exact preimage')
+      }
+      const index = await validateFleetRuntimeGitPayloadLayer({
+        runner: this.runner, checkout, manifest: manifest.files, layer: 'index',
+      })
+      assertExactFleetRuntimeChangedPathSet([], index.changed_paths, 'resumed clean index')
+      const committed = await validateFleetRuntimeGitPayloadLayer({
+        runner: this.runner,
+        checkout,
+        manifest: manifest.files,
+        layer: 'commit',
+        commit: currentHead,
+        expected_object_ids: index.object_ids,
+      })
+      return {
+        branch,
+        head: currentHead,
+        payload_paths: paths,
+        index_blobs: index.blobs,
+        commit_blobs: committed.blobs,
+      }
+    }
+
+    const preSwitchResidual = await this.localCommitResidualPaths(checkout)
+    if (preSwitchResidual.some(path => !(paths as string[]).includes(path))) {
+      return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'local commit checkout has non-payload worktree residue')
+    }
+    if (currentBranch === '') await this.run(['git', 'switch', '-c', branch], checkout)
+    else if (currentBranch !== branch) {
+      return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'local commit checkout is attached to a foreign branch')
+    }
+    await this.run(['git', 'add', '--', ...paths as string[]], checkout)
+    assertExactFleetRuntimeChangedPathSet([], await this.localCommitResidualPaths(checkout), 'local commit unstaged paths')
+    const index = await validateFleetRuntimeGitPayloadLayer({
+      runner: this.runner, checkout, manifest: manifest.files, layer: 'index',
+    })
+    if (index.changed_paths.length === 0) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'local commit has no changed-against-preimage payload paths')
+    }
+    await this.run(['git', 'commit', '-m', `chore(shirube): ${request.operation.toLowerCase().replaceAll('_', ' ')}`], checkout)
+    const head = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
+    const committed = await validateFleetRuntimeGitPayloadLayer({
+      runner: this.runner,
+      checkout,
+      manifest: manifest.files,
+      layer: 'commit',
+      commit: head,
+      expected_object_ids: index.object_ids,
+    })
+    assertExactFleetRuntimeChangedPathSet(index.changed_paths, committed.changed_paths, 'index/commit changed paths')
+    if ((await this.run(['git', 'status', '--porcelain=v1', '--untracked-files=all'], checkout)) !== '') {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'local commit left checkout residue')
+    }
+    return {
+      branch,
+      head,
+      payload_paths: paths,
+      index_blobs: index.blobs,
+      commit_blobs: committed.blobs,
+    }
+  }
+
   private async prepareCheckout(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
     const path = this.checkoutPath(context)
     const operationInput = this.operationInputReceipt(request, context)
@@ -2865,34 +2997,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       }
     }
     if (phase === 'CREATE_LOCAL_COMMIT') {
-      const branch = `shirube-v41-${request.operation.toLowerCase().replaceAll('_', '-')}-${request.request_digest.slice(-12)}`
-      const paths = context.prior_evidence.VERIFY_EXACT_PAYLOAD?.payload_paths
-      if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string')) {
-        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'verified payload path evidence is absent')
-      }
-      assertExactFleetRuntimePathSet([...paths as string[]].sort(), paths as string[], 'commit path evidence')
-      await this.run(['git', 'switch', '-c', branch], checkout)
-      await this.run(['git', 'add', '--', ...paths as string[]], checkout)
-      const manifest = await this.payloadManifest(request)
-      const index = await validateFleetRuntimeGitPayloadLayer({ runner: this.runner, checkout, manifest: manifest.files, layer: 'index' })
-      await this.run(['git', 'commit', '-m', `chore(shirube): ${request.operation.toLowerCase().replaceAll('_', ' ')}`], checkout)
-      const head = (await this.run(['git', 'rev-parse', 'HEAD'], checkout)).trim()
-      const committed = await validateFleetRuntimeGitPayloadLayer({
-        runner: this.runner,
-        checkout,
-        manifest: manifest.files,
-        layer: 'commit',
-        commit: head,
-        expected_object_ids: index.object_ids,
-      })
       return {
-        evidence: {
-          branch,
-          head,
-          payload_paths: paths,
-          index_blobs: index.blobs,
-          commit_blobs: committed.blobs,
-        },
+        evidence: await this.createLocalCommitEvidence(request, mutableContext, false),
         protected_effect_count: 0,
       }
     }
@@ -3010,8 +3116,10 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     phase: FleetRuntimeLocalPhase,
     context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<FleetRuntimeLocalReconcileResult> {
-    // Read-only reconciliation is explicit for every phase. A phase is never
-    // blindly repeated after process loss.
+    // Reconciliation is explicit for every phase. Protected effects are never
+    // blindly repeated after process loss. CREATE_LOCAL_COMMIT may resume only
+    // after proving the exact preimage/branch/index state; it has no protected
+    // effect and is required to make a reserved no-receipt journal retryable.
     if (phase === 'VERIFY_EXTERNAL_MERGE') {
       const evidence = await this.externalMerge(request as FleetRuntimeRequest, context as FleetRuntimeLocalPhaseContext)
       return { completed: true, evidence, protected_effect_count: 0 }
@@ -3048,6 +3156,14 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     if (phase === 'VERIFY_EXACT_PAYLOAD' || phase === 'VERIFY_LIVE_IDENTITY') {
       const result = await this.performPhase(request, preflight, phase, context)
       return { completed: true, ...result }
+    }
+    if (phase === 'CREATE_LOCAL_COMMIT') {
+      const evidence = await this.createLocalCommitEvidence(
+        request as FleetRuntimeRequest,
+        context as FleetRuntimeLocalPhaseContext,
+        true,
+      )
+      return { completed: true, evidence, protected_effect_count: 0 }
     }
     if (phase === 'PUSH_NORMAL_BRANCH') {
       const branch = String(context.current_intent.branch ?? '')
