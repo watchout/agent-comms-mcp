@@ -841,6 +841,49 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(existsSync(statePath)).toBe(false)
   })
 
+  test('frozen Kodama tree derives the exact runtime and distribution surfaces including tree entries', async () => {
+    const fixturePath = join(
+      resolveRepo(),
+      'tests/fixtures/fleet-runtime-v1/kodama-tree-47d992a5c709cf65ef15f4aab5e60887be1aa45a.json',
+    )
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      truncated: boolean
+      tree: Array<{ path: string; mode: string; type: string; size: number | null; sha: string }>
+    }
+    expect(fixture.tree).toHaveLength(63)
+    expect(fixture.tree.filter(entry => entry.type === 'tree')).toHaveLength(8)
+
+    const request = requestFor()
+    const calls: string[] = []
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        const path = argv[2]
+        calls.push(path)
+        if (path === 'repos/watchout/kodama/git/ref/heads/main') {
+          return { exitCode: 0, stdout: JSON.stringify({ object: { sha: request.preimages[0].head_commit } }), stderr: '' }
+        }
+        if (path === `repos/watchout/kodama/git/commits/${request.preimages[0].head_commit}`) {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ sha: request.preimages[0].head_commit, tree: { sha: request.preimages[0].tree } }),
+            stderr: '',
+          }
+        }
+        if (path === `repos/watchout/kodama/git/trees/${request.preimages[0].tree}?recursive=1`) {
+          return { exitCode: 0, stdout: JSON.stringify(fixture), stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected gh path ${path}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+    expect(await (system as any).remotePreimage(request)).toEqual(request.preimages[0])
+    expect(calls).toEqual([
+      'repos/watchout/kodama/git/ref/heads/main',
+      `repos/watchout/kodama/git/commits/${request.preimages[0].head_commit}`,
+      `repos/watchout/kodama/git/trees/${request.preimages[0].tree}?recursive=1`,
+    ])
+  })
+
   test('root-goal preflight verifies only the exact released ADF image before the immutable goal argv', async () => {
     const canonicalDirtyRoot = '/Users/yuji/Developer/ai-dev-framework'
     const calls: Array<{ argv: string[]; cwd?: string }> = []
