@@ -27,6 +27,7 @@ import {
   buildFleetRuntimeV1DryRunReceipt,
   bunFleetRuntimeArgvRunner,
   executeLocalFleetRuntimeV1,
+  assertExactFleetRuntimeChangedPathSet,
   assertExactFleetRuntimePathSet,
   validateFleetRuntimePayloadBlobLayer,
   parseFleetRuntimeQueueStatus,
@@ -467,6 +468,43 @@ const FIXTURE_PAYLOAD_PATHS = FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES.map(file =
 const FIXTURE_RAW_PATHS = [...FIXTURE_PAYLOAD_PATHS, ...Array.from({ length: 10 }, (_, index) => `control/extra-${index}.txt`)].sort()
 const SYNTHETIC_PAYLOAD_PATHS = Array.from({ length: 24 }, (_, index) => `payload/${String(index).padStart(2, '0')}.txt`)
 const SYNTHETIC_RAW_PATHS = [...SYNTHETIC_PAYLOAD_PATHS, ...Array.from({ length: 10 }, (_, index) => `control/extra-${index}.txt`)].sort()
+const MEASURED_CHANGED_PATHS = [
+  '.github/workflows/shirube-rapid-lite-gates-report.yml',
+  '.shirube/runtime/rapid-lite/check-control-state-completeness.mjs',
+  '.shirube/runtime/rapid-lite/manifest.json',
+  '.shirube/runtime/rapid-lite/run-rapid-lite-report.mjs',
+]
+
+function measuredGitDeltaFixture(name: string, stage = true) {
+  const stateDirectory = temporary(name)
+  const invocationDirectory = join(stateDirectory, 'invocations', 'copied-reserved-journal')
+  const checkout = join(invocationDirectory, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  runTempGit(['git', 'init', '--quiet'], checkout)
+  runTempGit(['git', 'config', 'user.name', 'Fleet Runtime Fixture'], checkout)
+  runTempGit(['git', 'config', 'user.email', 'fleet-runtime@example.invalid'], checkout)
+  const baseline = new Map<string, string>()
+  for (const [index, path] of FIXTURE_PAYLOAD_PATHS.entries()) {
+    const content = `preimage-payload-${String(index).padStart(2, '0')}\n`
+    baseline.set(path, content)
+    const target = join(checkout, path)
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(target, content)
+  }
+  runTempGit(['git', 'add', '--', ...FIXTURE_PAYLOAD_PATHS], checkout)
+  runTempGit(['git', 'commit', '--quiet', '-m', 'frozen preimage'], checkout)
+  const preimageHead = runTempGit(['git', 'rev-parse', 'HEAD'], checkout)
+  runTempGit(['git', 'checkout', '--quiet', '--detach', preimageHead], checkout)
+  const manifest = FIXTURE_PAYLOAD_PATHS.map((path, index) => {
+    const content = MEASURED_CHANGED_PATHS.includes(path)
+      ? `rendered-payload-${String(index).padStart(2, '0')}\n`
+      : baseline.get(path)!
+    writeFileSync(join(checkout, path), content)
+    return { path, bytes: Buffer.byteLength(content), sha256: rawDigest(content) }
+  })
+  if (stage) runTempGit(['git', 'add', '--', ...FIXTURE_PAYLOAD_PATHS], checkout)
+  return { stateDirectory, invocationDirectory, checkout, manifest, preimageHead }
+}
 
 function fixtureBlobMap(): Record<string, { bytes: number; sha256: string }> {
   return Object.fromEntries(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES.map(file => [file.path, { bytes: file.bytes, sha256: file.sha256 }]))
@@ -2052,6 +2090,14 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(() => assertExactFleetRuntimePathSet(paths, [paths[0], paths[0], ...paths.slice(2)], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
   })
 
+  test('changed path set blocks omissions, extras, reordering, and duplicates without requiring 24 paths', () => {
+    expect(() => assertExactFleetRuntimeChangedPathSet(MEASURED_CHANGED_PATHS, [...MEASURED_CHANGED_PATHS], 'fixture')).not.toThrow()
+    expect(() => assertExactFleetRuntimeChangedPathSet(MEASURED_CHANGED_PATHS, MEASURED_CHANGED_PATHS.slice(1), 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    expect(() => assertExactFleetRuntimeChangedPathSet(MEASURED_CHANGED_PATHS, [...MEASURED_CHANGED_PATHS, '.shirube/extra'], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    expect(() => assertExactFleetRuntimeChangedPathSet(MEASURED_CHANGED_PATHS, [MEASURED_CHANGED_PATHS[1], MEASURED_CHANGED_PATHS[0], ...MEASURED_CHANGED_PATHS.slice(2)], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
+    expect(() => assertExactFleetRuntimeChangedPathSet(MEASURED_CHANGED_PATHS, [MEASURED_CHANGED_PATHS[0], MEASURED_CHANGED_PATHS[0], ...MEASURED_CHANGED_PATHS.slice(2)], 'fixture')).toThrow('PAYLOAD_VERIFICATION_FAILED')
+  })
+
   test.each(['renderer', 'index', 'commit'])('%s payload layer binds all 24 paths and byte digests', layer => {
     const rows = Array.from({ length: 24 }, (_, index) => ({
       path: `payload/${String(index).padStart(2, '0')}.txt`, bytes: index + 1, sha256: `sha256:${index.toString(16).padStart(64, '0')}`,
@@ -2144,6 +2190,68 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       }), `renderer mutation ${index}`).toThrow(index === reportMutations.length - 1 ? 'STATE_DIRECTORY_INVALID' : 'PAYLOAD_VERIFICATION_FAILED')
       expect(existsSync(fixture.selectedPayloadPath)).toBe(false)
     }
+  })
+
+  test('measured 24-path payload admits exactly the 4 paths changed against the frozen preimage', async () => {
+    const fixture = measuredGitDeltaFixture('frv1-measured-24-20-4')
+    const index = await validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: fixture.checkout, manifest: fixture.manifest, layer: 'index',
+    })
+    expect(index.changed_paths).toEqual(MEASURED_CHANGED_PATHS)
+
+    runTempGit(['git', 'reset', '--quiet', '--', MEASURED_CHANGED_PATHS[0]], fixture.checkout)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: fixture.checkout, manifest: fixture.manifest, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    runTempGit(['git', 'add', '--', MEASURED_CHANGED_PATHS[0]], fixture.checkout)
+
+    writeFileSync(join(fixture.checkout, '.shirube/extra-delta.txt'), 'extra\n')
+    runTempGit(['git', 'add', '--', '.shirube/extra-delta.txt'], fixture.checkout)
+    await expectProviderCode(() => validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner, checkout: fixture.checkout, manifest: fixture.manifest, layer: 'index',
+    }), 'PAYLOAD_VERIFICATION_FAILED')
+    runTempGit(['git', 'reset', '--quiet', '--', '.shirube/extra-delta.txt'], fixture.checkout)
+    rmSync(join(fixture.checkout, '.shirube/extra-delta.txt'))
+
+    runTempGit(['git', 'commit', '--quiet', '-m', 'measured four-path payload'], fixture.checkout)
+    const head = runTempGit(['git', 'rev-parse', 'HEAD'], fixture.checkout)
+    const committed = await validateFleetRuntimeGitPayloadLayer({
+      runner: bunFleetRuntimeArgvRunner,
+      checkout: fixture.checkout,
+      manifest: fixture.manifest,
+      layer: 'commit',
+      commit: head,
+      expected_object_ids: index.object_ids,
+    })
+    expect(committed.changed_paths).toEqual(MEASURED_CHANGED_PATHS)
+  })
+
+  test('started local-commit reconciliation resumes the measured staged copy once and then reads it back', async () => {
+    const fixture = measuredGitDeltaFixture('frv1-reserved-journal-resume')
+    const request = requestFor()
+    const branch = `shirube-v41-canary-cold-start-${request.request_digest.slice(-12)}`
+    runTempGit(['git', 'switch', '-c', branch], fixture.checkout)
+    const system = new ConcreteFleetRuntimeV1LocalSystem(bunFleetRuntimeArgvRunner)
+    ;(system as any).payloadManifest = async () => ({ path_count: 24, files: fixture.manifest })
+    const context: FleetRuntimeLocalPhaseContext = {
+      state_directory: fixture.stateDirectory,
+      invocation_directory: fixture.invocationDirectory,
+      prior_evidence: {
+        PREPARE_CLEAN_CHECKOUT: { head: fixture.preimageHead },
+        VERIFY_EXACT_PAYLOAD: { payload_paths: FIXTURE_PAYLOAD_PATHS },
+      },
+      current_intent: { payload_digest: request.payload_digest, path_count: 24 },
+      execution_owner_id: 'fixture-owner',
+      owner_decision_raw_body: OWNER_BODY,
+      predecessor_receipt_raw_body: PREDECESSOR_BODY,
+    }
+    const first = await system.reconcilePhase(request, preflightFor(request), 'CREATE_LOCAL_COMMIT', context)
+    expect(first).toMatchObject({ completed: true, protected_effect_count: 0 })
+    const head = String(first.evidence?.head)
+    expect(runTempGit(['git', 'diff-tree', '--no-commit-id', '--no-renames', '--name-only', '-r', head], fixture.checkout).split('\n')).toEqual(MEASURED_CHANGED_PATHS)
+    const second = await system.reconcilePhase(request, preflightFor(request), 'CREATE_LOCAL_COMMIT', context)
+    expect(second).toEqual(first)
+    expect(runTempGit(['git', 'rev-list', '--count', `${fixture.preimageHead}..${head}`], fixture.checkout)).toBe('1')
   })
 
   test('real temp-git index and commit objects reject exact-path and byte tampering', async () => {
