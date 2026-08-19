@@ -786,6 +786,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
       'B2_DB_MIGRATION',
       'B3_AGENT_PROFILE',
       'B4_MCP_REGISTRATION',
+      'B5_MEMORY_READINESS',
       'B6_ORDINARY_DAEMON_INSTALL_START',
       'B7_QUEUE_SMOKE',
       'B8_READY_READBACK',
