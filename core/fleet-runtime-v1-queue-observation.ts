@@ -541,6 +541,31 @@ export function assertFleetRuntimeSealToPreObservation(
   }
 }
 
+/**
+ * Admission check for an exact invocation that already has a durable STARTED
+ * reservation. The sealed observation remains part of the immutable request,
+ * but is deliberately not reused as the live admission observation: a resume
+ * must prove a newly read, fresh, zero queue before any remaining subeffect.
+ */
+export function assertFleetRuntimeFreshResumeObservation(
+  sealed: FleetRuntimeQueueObservationV2,
+  observation: FleetRuntimeQueueObservationV2,
+  nowMs = Date.now(),
+): void {
+  assertFleetRuntimeQueueObservationV2(sealed)
+  assertFleetRuntimeQueueObservationV2(observation)
+  freshness(observation, nowMs)
+  if (canonicalFleetRuntimeObservationJson(withoutObservedAt(sealed))
+    !== canonicalFleetRuntimeObservationJson(withoutObservedAt(observation))) {
+    return fail('QUEUE_OBSERVATION_DRIFT', 'sealed binding and fresh resume observation differ beyond observed_at')
+  }
+  if (observation.queue.pending_count !== 0
+    || observation.queue.received_count !== 0
+    || observation.queue.in_progress_count !== 0) {
+    return fail('QUEUE_OBSERVATION_DRIFT', 'resume admission queue is not zero')
+  }
+}
+
 export function assertFleetRuntimePreToPostObservation(
   pre: FleetRuntimeQueueObservationV2,
   post: FleetRuntimeQueueObservationV2,
