@@ -21,6 +21,7 @@ import {
 import {
   ConcreteFleetRuntimeV1LocalSystem,
   FLEET_RUNTIME_V1_ADF_READBACK_RELEASE,
+  FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT,
   FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES,
   FileFleetRuntimeV1Persistence,
   FleetRuntimeLocalProviderError,
@@ -843,6 +844,25 @@ async function expectProviderCode(action: () => Promise<unknown> | unknown, code
 }
 
 describe('FLEET_RUNTIME_V1 concrete local provider', () => {
+  test('binds the regenerated payload fixture and preserves the three immutable release artifacts', () => {
+    const fixture = JSON.parse(readFileSync(join(
+      resolveRepo(),
+      'tests/contract/fixtures/fleet-runtime-v1/payload-pin-bump-20260819.json',
+    ), 'utf8'))
+
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref).toBe(fixture.source.amendment_merge_commit)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.previous_payload_digest).toBe(fixture.previous_tuple.payload_records_sha256)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_payload_digest).toBe(fixture.effective_tuple.payload_records_sha256)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256).toBe(fixture.effective_tuple.path_manifest_sha256)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_sha256).toBe(fixture.effective_tuple.amendment_sha256)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_byte_sha256).toBe(fixture.effective_tuple.amendment_byte_sha256)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES[0]).toEqual(fixture.modified_file)
+    expect(digest(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES)).toBe(fixture.effective_tuple.payload_records_sha256)
+    expect(rawDigest(`${FIXTURE_PAYLOAD_PATHS.join('\n')}\n`)).toBe(fixture.effective_tuple.path_manifest_sha256)
+    expect(Object.fromEntries(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.original_immutable_artifacts.map(artifact => [artifact.path, artifact.byte_sha256])))
+      .toEqual(fixture.original_immutable_artifact_byte_sha256)
+  })
+
   test('default deny is deterministic and does not create state', async () => {
     const root = temporary('frv1-default-deny')
     const state = join(root, 'state-not-created')

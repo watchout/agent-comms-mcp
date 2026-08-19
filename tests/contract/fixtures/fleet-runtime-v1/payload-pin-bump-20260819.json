@@ -1,0 +1,30 @@
+{
+  "schema_version": "fleet-runtime-v1/payload-pin-regression-fixture/v1",
+  "source": {
+    "control_handoff_url": "https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5335706294",
+    "payload_evidence_url": "https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-5335397485",
+    "amendment_merge_commit": "d3c3be1394f509839db83c6ed57482178ebbaecd"
+  },
+  "previous_tuple": {
+    "payload_records_sha256": "sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973",
+    "expected_result": "REJECT"
+  },
+  "effective_tuple": {
+    "amendment_id": "TARGET-PAYLOAD-AMENDMENT-20260819-001",
+    "amendment_sha256": "sha256:ab1c6f434637f946172fee97be3b5c084e6cbfde6a82dd9eaaca728c12f21134",
+    "amendment_byte_sha256": "sha256:b9326f5f2eb1b56bed957ee2a0ea36da3beea651dff679c00f79bded9c1f0c55",
+    "path_manifest_sha256": "sha256:c50f3ef1e15d31e57a11c19278607ac70b5a7d59bbf11c1ee87e237f7001fec9",
+    "payload_records_sha256": "sha256:59f2a8b1b82eabd38f93ed50467b53bf67d18c6ee06b48adae05293a4ce0ff03",
+    "expected_result": "ACCEPT"
+  },
+  "original_immutable_artifact_byte_sha256": {
+    "releases/shirube-v4.1/release-manifest.json": "sha256:f7c5a8b6012b39f94a1e26ad7a6c120a9330cff185a6bbf1af2b2dc168557a36",
+    "releases/shirube-v4.1/target-payload-manifest.json": "sha256:6a7bce4ab348d3cd4ccc290aed06fe41dff7db4b7c690cd0b031b7ddc30b63a9",
+    "releases/shirube-v4.1/fleet-runtime-v1-contract.json": "sha256:7936bd8d92c73f54f71c67c744a4e8fb5339f69c7070f709449fba178dd73ebd"
+  },
+  "modified_file": {
+    "bytes": 10912,
+    "path": ".github/workflows/shirube-rapid-lite-gates-report.yml",
+    "sha256": "sha256:33d4c5d911affdca44ab5cf587f8bde556c9732809fc9745048f08050091ee48"
+  }
+}

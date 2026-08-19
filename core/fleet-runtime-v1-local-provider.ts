@@ -56,6 +56,25 @@ export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   payload_path_count: 24,
 })
 
+export const FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT = Object.freeze({
+  repository: 'watchout/ai-dev-framework',
+  ref: 'd3c3be1394f509839db83c6ed57482178ebbaecd',
+  path: 'releases/shirube-v4.1/target-payload-amendment-20260819-001.json',
+  schema_version: 'shirube-v4.1/target-payload-amendment/v1',
+  artifact_state: 'FINAL_IMMUTABLE',
+  amendment_id: 'TARGET-PAYLOAD-AMENDMENT-20260819-001',
+  amendment_sha256: 'sha256:ab1c6f434637f946172fee97be3b5c084e6cbfde6a82dd9eaaca728c12f21134',
+  amendment_byte_sha256: 'sha256:b9326f5f2eb1b56bed957ee2a0ea36da3beea651dff679c00f79bded9c1f0c55',
+  previous_payload_digest: 'sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973',
+  effective_path_manifest_sha256: 'sha256:c50f3ef1e15d31e57a11c19278607ac70b5a7d59bbf11c1ee87e237f7001fec9',
+  effective_payload_digest: FLEET_RUNTIME_V1_CONTRACT.payload_digest,
+  original_immutable_artifacts: Object.freeze([
+    Object.freeze({ path: 'releases/shirube-v4.1/release-manifest.json', byte_sha256: 'sha256:f7c5a8b6012b39f94a1e26ad7a6c120a9330cff185a6bbf1af2b2dc168557a36' }),
+    Object.freeze({ path: 'releases/shirube-v4.1/target-payload-manifest.json', byte_sha256: 'sha256:6a7bce4ab348d3cd4ccc290aed06fe41dff7db4b7c690cd0b031b7ddc30b63a9' }),
+    Object.freeze({ path: 'releases/shirube-v4.1/fleet-runtime-v1-contract.json', byte_sha256: 'sha256:7936bd8d92c73f54f71c67c744a4e8fb5339f69c7070f709449fba178dd73ebd' }),
+  ]),
+})
+
 export const FLEET_RUNTIME_V1_ADF_READBACK_RELEASE = Object.freeze({
   root: '/Users/yuji/.local/share/shirube/releases/07640c9c173b36930434847e1cb6838d56b993c0',
   origin_allowed: Object.freeze([
@@ -72,7 +91,7 @@ export const FLEET_RUNTIME_V1_ADF_READBACK_RELEASE = Object.freeze({
 })
 
 export const FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES = Object.freeze([
-  { bytes: 6894, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:8166ff6d42388a37ea4d170ed08c7204fc540a2bdd1a08548d1c9e378980fcf6' },
+  { bytes: 10912, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:33d4c5d911affdca44ab5cf587f8bde556c9732809fc9745048f08050091ee48' },
   { bytes: 12331, path: '.shirube/runtime/rapid-lite/build-review-plan.mjs', sha256: 'sha256:e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85' },
   { bytes: 25234, path: '.shirube/runtime/rapid-lite/check-adoption.mjs', sha256: 'sha256:80c35f811abdb2d5b5c5653a56eea189244b41c70d0195953b13a4bd6b6369b3' },
   { bytes: 19515, path: '.shirube/runtime/rapid-lite/check-audit-checklist.mjs', sha256: 'sha256:6ac7d94098a2b77a28e52e2b99498def9e8753920604ecb89eb6752bea2c300e' },
@@ -2851,24 +2870,69 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   private async payloadManifest(request: FleetRuntimeRequest): Promise<FleetRuntimePayloadManifest> {
-    const envelope = await this.ghJson<{ encoding: string; content: string }>(
-      'repos/watchout/ai-dev-framework/contents/releases/shirube-v4.1/target-payload-manifest.json?ref=9ab2be2476735d7ccc8bafb105a1dd0e7bff9df3',
-    )
-    if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') {
-      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest API encoding differs')
+    const contentAtPin = async (path: string): Promise<string> => {
+      const envelope = await this.ghJson<{ encoding: string; content: string }>(
+        `repos/${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.repository}/contents/${path}?ref=${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref}`,
+      )
+      if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') {
+        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment API encoding differs')
+      }
+      return Buffer.from(envelope.content.replace(/\s+/g, ''), 'base64').toString('utf8')
     }
-    const manifest = parseJson<FleetRuntimePayloadManifest>(
-      Buffer.from(envelope.content.replace(/\s+/g, ''), 'base64').toString('utf8'),
-      'payload manifest',
-    )
+    const amendmentRaw = await contentAtPin(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.path)
+    if (sha256(amendmentRaw) !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_byte_sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment byte digest differs')
+    }
+    const amendment = parseJson<Record<string, unknown>>(amendmentRaw, 'payload amendment')
+    assertPlainRecord(amendment.original_immutable_artifact_binding, 'payload amendment original binding')
+    assertPlainRecord(amendment.release_binding, 'payload amendment release binding')
+    assertPlainRecord(amendment.previous_selected_payload, 'payload amendment previous selected payload')
+    assertPlainRecord(amendment.effective_selected_payload, 'payload amendment effective selected payload')
+    const originalBinding = amendment.original_immutable_artifact_binding
+    const releaseBinding = amendment.release_binding
+    const previousPayload = amendment.previous_selected_payload
+    const effectivePayload = amendment.effective_selected_payload
+    if (amendment.schema_version !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.schema_version
+      || amendment.artifact_state !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.artifact_state
+      || amendment.amendment_id !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_id
+      || amendment.amendment_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_sha256
+      || canonicalSelfDigest(amendment, 'amendment_sha256') !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_sha256
+      || originalBinding.path !== 'releases/shirube-v4.1/target-payload-manifest.json'
+      || originalBinding.byte_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.original_immutable_artifacts[1].byte_sha256
+      || originalBinding.mutation_forbidden !== true
+      || releaseBinding.repository !== FLEET_RUNTIME_V1_CONTRACT.release_repository
+      || releaseBinding.commit !== FLEET_RUNTIME_V1_CONTRACT.release_commit
+      || releaseBinding.tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+      || releaseBinding.release_manifest_digest !== FLEET_RUNTIME_V1_CONTRACT.release_manifest_digest
+      || previousPayload.payload_records_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.previous_payload_digest
+      || effectivePayload.path_manifest_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256
+      || effectivePayload.payload_records_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_payload_digest
+      || effectivePayload.path_count !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.payload_path_count
+      || !Array.isArray(effectivePayload.files)) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment binding differs')
+    }
+    const manifest: FleetRuntimePayloadManifest = {
+      files: effectivePayload.files as FleetRuntimePayloadManifest['files'],
+      payload_records_sha256: String(effectivePayload.payload_records_sha256),
+      path_count: Number(effectivePayload.path_count),
+    }
     if (!Array.isArray(manifest.files)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest files are absent')
     const paths = manifest.files.map(file => file.path)
     assertExactFleetRuntimePathSet([...paths].sort(), paths, 'manifest ordering')
     if (manifest.path_count !== 24
       || canonicalFleetRuntimeJson(manifest.files) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES)
       || manifest.files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256))
-      || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest) {
+      || sha256(`${paths.join('\n')}\n`) !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256
+      || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest
+      || manifest.payload_records_sha256 !== request.payload_digest) {
       return providerFail('PAYLOAD_VERIFICATION_FAILED', 'aggregate payload manifest differs')
+    }
+    const immutableReadbacks = await Promise.all(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.original_immutable_artifacts.map(async artifact => ({
+      artifact,
+      raw: await contentAtPin(artifact.path),
+    })))
+    if (immutableReadbacks.some(({ artifact, raw }) => sha256(raw) !== artifact.byte_sha256)) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'original immutable release artifact byte digest differs')
     }
     return manifest
   }
