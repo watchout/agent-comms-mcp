@@ -511,19 +511,22 @@ function fixtureBlobMap(): Record<string, { bytes: number; sha256: string }> {
   return Object.fromEntries(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES.map(file => [file.path, { bytes: file.bytes, sha256: file.sha256 }]))
 }
 
-function concreteRendererFixture(name: string) {
-  const stateDirectory = temporary(name)
-  const rawOutputPath = join(stateDirectory, 'renderer-raw-output')
-  const selectedPayloadPath = join(stateDirectory, 'selected-payload')
-  mkdirSync(rawOutputPath, { recursive: true })
-  const manifest = {
+function concreteRendererManifest() {
+  return {
     files: SYNTHETIC_PAYLOAD_PATHS.map((path, index) => {
       const content = `selected-payload-${String(index).padStart(2, '0')}\n`
-      const outputPath = join(rawOutputPath, path)
-      mkdirSync(join(outputPath, '..'), { recursive: true })
-      writeFileSync(outputPath, content)
       return { path, bytes: Buffer.byteLength(content), sha256: rawDigest(content) }
     }),
+  }
+}
+
+function writeConcreteRendererOutput(rawOutputPath: string) {
+  mkdirSync(rawOutputPath, { recursive: true })
+  const manifest = concreteRendererManifest()
+  for (const [index, file] of manifest.files.entries()) {
+    const outputPath = join(rawOutputPath, file.path)
+    mkdirSync(join(outputPath, '..'), { recursive: true })
+    writeFileSync(outputPath, `selected-payload-${String(index).padStart(2, '0')}\n`)
   }
   const extras = Array.from({ length: 10 }, (_, index) => {
     const path = `control/extra-${index}.txt`
@@ -571,10 +574,18 @@ function concreteRendererFixture(name: string) {
     required_next_actions: [
       'Open a target-repo adoption PR containing only the generated overlay files.',
       'Owner must fill exact-head decision evidence before merge if any gate would block.',
-      'The generated workflow and immutable local runtime bundle must stay report-only; update them together from an audited Shirube release.',
+      'The generated fail-closed workflow and immutable local runtime bundle must be updated together from an audited Shirube release; required-check activation remains separately authorized.',
       'Do not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes into the adoption PR.',
     ],
   }
+  return { manifest, rendererReport }
+}
+
+function concreteRendererFixture(name: string) {
+  const stateDirectory = temporary(name)
+  const rawOutputPath = join(stateDirectory, 'renderer-raw-output')
+  const selectedPayloadPath = join(stateDirectory, 'selected-payload')
+  const { manifest, rendererReport } = writeConcreteRendererOutput(rawOutputPath)
   return { stateDirectory, rawOutputPath, selectedPayloadPath, manifest, rendererReport }
 }
 
@@ -595,12 +606,14 @@ function fixtureCheckout(intent: Record<string, unknown>): Record<string, unknow
   }
 }
 
-function fixtureReleaseCheckout(context: Readonly<FleetRuntimeLocalPhaseContext>): Record<string, unknown> {
+function fixtureRendererSourceCheckout(context: Readonly<FleetRuntimeLocalPhaseContext>): Record<string, unknown> {
   return {
-    checkout_path: join(context.invocation_directory, 'adf-release'),
+    checkout_path: join(context.invocation_directory, 'adf-payload-amendment'),
     remote: 'https://github.com/watchout/ai-dev-framework.git',
-    head: FLEET_RUNTIME_V1_CONTRACT.release_commit,
-    tree: FLEET_RUNTIME_V1_CONTRACT.release_tree,
+    head: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref,
+    tree: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree,
+    renderer_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob,
+    workflow_template_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob,
     clean: true,
     detached: true,
   }
@@ -628,6 +641,8 @@ function fixtureIntent(
     payload_digest: request.payload_digest, path_count: 24,
     raw_output_path: join(context.invocation_directory, 'renderer-raw-output'),
     release_commit: request.subject.release_commit, release_tree: request.subject.release_tree,
+    renderer_source_ref: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref,
+    renderer_source_tree: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree,
     selected_payload_path: join(context.invocation_directory, 'selected-payload'),
   }
   if (phase === 'VERIFY_EXACT_PAYLOAD') return {
@@ -685,7 +700,8 @@ function fixtureEvidence(
   if (phase === 'STAGE_EXACT_PAYLOAD') return {
     path_count: 24, payload_digest: request.payload_digest, payload_paths: FIXTURE_PAYLOAD_PATHS,
     raw_output_path: intent.raw_output_path, raw_path_count: 34, raw_paths: FIXTURE_RAW_PATHS,
-    release_checkout_after: fixtureReleaseCheckout(context), release_checkout_before: fixtureReleaseCheckout(context), renderer_report_sha256: SHA_A,
+    renderer_source_checkout_after: fixtureRendererSourceCheckout(context),
+    renderer_source_checkout_before: fixtureRendererSourceCheckout(context), renderer_report_sha256: SHA_A,
     selected_blobs: fixtureBlobMap(), selected_payload_path: intent.selected_payload_path,
   }
   if (phase === 'VERIFY_EXACT_PAYLOAD') return {
@@ -851,6 +867,17 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     ), 'utf8'))
 
     expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref).toBe(fixture.source.amendment_merge_commit)
+    expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree).toBe(fixture.source.amendment_merge_tree)
+    expect({
+      path: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path,
+      content_sha256: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_content_sha256,
+      git_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob,
+    }).toEqual(fixture.source.renderer)
+    expect({
+      path: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_path,
+      content_sha256: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_sha256,
+      git_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob,
+    }).toEqual(fixture.source.workflow_template)
     expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.previous_payload_digest).toBe(fixture.previous_tuple.payload_records_sha256)
     expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_payload_digest).toBe(fixture.effective_tuple.payload_records_sha256)
     expect(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256).toBe(fixture.effective_tuple.path_manifest_sha256)
@@ -2075,7 +2102,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
         expectInvalid((copy, selected) => {
           const evidence = copy.phases[selected]!.evidence!
           if (selected === 'PREPARE_CLEAN_CHECKOUT' || selected === 'PREPARE_MERGED_CHECKOUT' || selected === 'VERIFY_EXACT_PREIMAGE') evidence.head = 'f'.repeat(40)
-          else if (selected === 'STAGE_EXACT_PAYLOAD') (evidence.release_checkout_after as Record<string, unknown>).remote = 'https://github.com/watchout/foreign.git'
+          else if (selected === 'STAGE_EXACT_PAYLOAD') (evidence.renderer_source_checkout_after as Record<string, unknown>).remote = 'https://github.com/watchout/foreign.git'
           else if (selected === 'VERIFY_EXACT_PAYLOAD') (evidence.checkout_blobs as Record<string, unknown>)[FIXTURE_PAYLOAD_PATHS[0]] = { bytes: 99, sha256: SHA_A }
           else if (selected === 'CREATE_LOCAL_COMMIT') {
             ;(evidence.index_blobs as Record<string, unknown>)[FIXTURE_PAYLOAD_PATHS[0]] = { bytes: 99, sha256: SHA_A }
@@ -2210,6 +2237,94 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       }), `renderer mutation ${index}`).toThrow(index === reportMutations.length - 1 ? 'STATE_DIRECTORY_INVALID' : 'PAYLOAD_VERIFICATION_FAILED')
       expect(existsSync(fixture.selectedPayloadPath)).toBe(false)
     }
+  })
+
+  test('concrete STAGE_EXACT_PAYLOAD renders only from the amendment image and rejects the predecessor image before renderer spawn', async () => {
+    const runStage = async (observedHead: string) => {
+      const request = requestFor()
+      const stateDirectory = temporary(`frv1-stage-amendment-${observedHead.slice(0, 7)}`)
+      const invocationDirectory = join(stateDirectory, 'invocations', 'stage-amendment')
+      const checkout = join(invocationDirectory, 'checkout')
+      mkdirSync(checkout, { recursive: true })
+      const manifest = concreteRendererManifest()
+      const checkoutRefs: string[] = []
+      let rendererCalls = 0
+      const runner: FleetRuntimeArgvRunner = {
+        async run(argv, options) {
+          const command = argv.join(' ')
+          if (argv[0] === 'git' && argv[1] === 'clone') {
+            mkdirSync(String(argv.at(-1)), { recursive: true })
+            return { exitCode: 0, stdout: '', stderr: '' }
+          }
+          if (argv[0] === 'git' && argv[1] === 'checkout' && argv[2] === '--detach') {
+            checkoutRefs.push(String(argv[3]))
+            return { exitCode: 0, stdout: '', stderr: '' }
+          }
+          if (command === 'git remote get-url origin') {
+            return { exitCode: 0, stdout: 'https://github.com/watchout/ai-dev-framework.git', stderr: '' }
+          }
+          if (command === 'git rev-parse HEAD') return { exitCode: 0, stdout: observedHead, stderr: '' }
+          if (command === 'git rev-parse HEAD^{tree}') {
+            return { exitCode: 0, stdout: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree, stderr: '' }
+          }
+          if (command === `git rev-parse HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path}`) {
+            return { exitCode: 0, stdout: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob, stderr: '' }
+          }
+          if (command === `git rev-parse HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_path}`) {
+            return { exitCode: 0, stdout: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob, stderr: '' }
+          }
+          if (command === 'git status --porcelain=v1' || command === 'git branch --show-current') {
+            return { exitCode: 0, stdout: '', stderr: '' }
+          }
+          if (argv[0] === 'node' && argv[1] === FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path) {
+            rendererCalls += 1
+            expect(options?.cwd).toBe(join(invocationDirectory, 'adf-payload-amendment'))
+            const outputIndex = argv.indexOf('--out')
+            const { rendererReport } = writeConcreteRendererOutput(String(argv[outputIndex + 1]))
+            return { exitCode: 0, stdout: JSON.stringify(rendererReport), stderr: '' }
+          }
+          return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+        },
+      }
+      const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+      ;(system as any).payloadManifest = async () => ({ path_count: 24, files: manifest.files })
+      const context: FleetRuntimeLocalPhaseContext = {
+        state_directory: stateDirectory,
+        invocation_directory: invocationDirectory,
+        prior_evidence: {},
+        current_intent: {},
+        execution_owner_id: 'fixture-owner',
+        owner_decision_raw_body: OWNER_BODY,
+        predecessor_receipt_raw_body: PREDECESSOR_BODY,
+      }
+      context.current_intent = system.phaseIntent(request, 'STAGE_EXACT_PAYLOAD', context)
+      const perform = () => system.performPhase(request, preflightFor(request), 'STAGE_EXACT_PAYLOAD', context)
+      return { checkout, checkoutRefs, manifest, perform, rendererCalls: () => rendererCalls }
+    }
+
+    const accepted = await runStage(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref)
+    const result = await accepted.perform()
+    expect(result).toMatchObject({
+      protected_effect_count: 0,
+      evidence: {
+        path_count: 24,
+        raw_path_count: 34,
+        renderer_source_checkout_before: {
+          head: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref,
+          tree: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree,
+          renderer_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob,
+          workflow_template_blob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob,
+        },
+      },
+    })
+    expect(accepted.checkoutRefs).toEqual([FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref])
+    expect(accepted.rendererCalls()).toBe(1)
+    expect(readFileSync(join(accepted.checkout, accepted.manifest.files[0].path), 'utf8')).toBe('selected-payload-00\n')
+
+    const rejected = await runStage(FLEET_RUNTIME_V1_CONTRACT.release_commit)
+    await expectProviderCode(rejected.perform, 'PAYLOAD_VERIFICATION_FAILED')
+    expect(rejected.checkoutRefs).toEqual([FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref])
+    expect(rejected.rendererCalls()).toBe(0)
   })
 
   test('measured 24-path payload admits exactly the 4 paths changed against the frozen preimage', async () => {
@@ -2423,14 +2538,16 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     await expectProviderCode(() => system.verifyCheckout(linkedCheckout, stateDirectory, exact.head, exact.tree), 'UNSAFE_CHECKOUT')
   })
 
-  test('concrete adf-release readback enforces exact origin/head/tree/clean/detached/realpath matrix', async () => {
-    const stateDirectory = temporary('frv1-adf-release-matrix')
-    const checkout = join(stateDirectory, 'adf-release')
+  test('concrete amendment-bound renderer source enforces exact origin/head/tree/blobs/clean/detached/realpath matrix', async () => {
+    const stateDirectory = temporary('frv1-adf-payload-source-matrix')
+    const checkout = join(stateDirectory, 'adf-payload-amendment')
     mkdirSync(checkout)
     const exact = {
       remote: 'https://github.com/watchout/ai-dev-framework.git',
-      head: FLEET_RUNTIME_V1_CONTRACT.release_commit,
-      tree: FLEET_RUNTIME_V1_CONTRACT.release_tree,
+      head: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref,
+      tree: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree,
+      rendererBlob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob,
+      workflowTemplateBlob: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob,
       status: '',
       branch: '',
     }
@@ -2441,32 +2558,42 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
         if (command === 'git remote get-url origin') return { exitCode: 0, stdout: observed.remote, stderr: '' }
         if (command === 'git rev-parse HEAD') return { exitCode: 0, stdout: observed.head, stderr: '' }
         if (command === 'git rev-parse HEAD^{tree}') return { exitCode: 0, stdout: observed.tree, stderr: '' }
+        if (command === `git rev-parse HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path}`) {
+          return { exitCode: 0, stdout: observed.rendererBlob, stderr: '' }
+        }
+        if (command === `git rev-parse HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_path}`) {
+          return { exitCode: 0, stdout: observed.workflowTemplateBlob, stderr: '' }
+        }
         if (command === 'git status --porcelain=v1') return { exitCode: 0, stdout: observed.status, stderr: '' }
         if (command === 'git branch --show-current') return { exitCode: 0, stdout: observed.branch, stderr: '' }
         return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
       },
     }
     const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
-    await expect(system.verifyReleaseCheckout(checkout, stateDirectory)).resolves.toMatchObject({
-      remote: exact.remote, head: exact.head, tree: exact.tree, clean: true, detached: true,
+    await expect(system.verifyRendererSourceCheckout(checkout, stateDirectory)).resolves.toMatchObject({
+      remote: exact.remote, head: exact.head, tree: exact.tree,
+      renderer_blob: exact.rendererBlob, workflow_template_blob: exact.workflowTemplateBlob,
+      clean: true, detached: true,
     })
     const mutations: Array<[keyof typeof observed, string]> = [
       ['remote', 'https://github.com/watchout/not-ai-dev-framework.git'],
       ['head', 'c'.repeat(40)],
       ['tree', 'd'.repeat(40)],
+      ['rendererBlob', 'e'.repeat(40)],
+      ['workflowTemplateBlob', 'f'.repeat(40)],
       ['status', ' M scripts/shirube/render-adoption-pack.mjs'],
       ['branch', 'main'],
     ]
     for (const [key, value] of mutations) {
       Object.assign(observed, exact, { [key]: value })
-      await expectProviderCode(() => system.verifyReleaseCheckout(checkout, stateDirectory), 'PAYLOAD_VERIFICATION_FAILED')
+      await expectProviderCode(() => system.verifyRendererSourceCheckout(checkout, stateDirectory), 'PAYLOAD_VERIFICATION_FAILED')
     }
     Object.assign(observed, exact)
-    const realCheckout = join(stateDirectory, 'real-adf-release')
-    const linkedCheckout = join(stateDirectory, 'linked-adf-release')
+    const realCheckout = join(stateDirectory, 'real-adf-payload-amendment')
+    const linkedCheckout = join(stateDirectory, 'linked-adf-payload-amendment')
     mkdirSync(realCheckout)
     symlinkSync(realCheckout, linkedCheckout)
-    await expectProviderCode(() => system.verifyReleaseCheckout(linkedCheckout, stateDirectory), 'STATE_DIRECTORY_INVALID')
+    await expectProviderCode(() => system.verifyRendererSourceCheckout(linkedCheckout, stateDirectory), 'STATE_DIRECTORY_INVALID')
   })
 
   test('a concrete Kodama checkout payload-file symlink is rejected by the full no-symlink readback', () => {
