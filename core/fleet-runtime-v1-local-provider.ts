@@ -1542,7 +1542,7 @@ function assertCheckoutEvidence(value: Record<string, unknown>, intent: Record<s
   }
 }
 
-function assertRendererSourceCheckoutEvidence(value: unknown, label: string): void {
+function assertReleaseCheckoutEvidence(value: unknown, label: string): void {
   assertPlainRecord(value, label)
   assertExactKeys(value, [
     'checkout_path', 'clean', 'detached', 'head', 'remote', 'renderer_blob', 'tree', 'workflow_template_blob',
@@ -1701,8 +1701,8 @@ function validatePhaseSemantics(
     if (sha256(canonicalFleetRuntimeJson(manifestRows)) !== request.payload_digest) {
       return providerFail('STATE_RECORD_INVALID', 'selected blob manifest does not equal the sealed payload digest')
     }
-    assertRendererSourceCheckoutEvidence(evidence.renderer_source_checkout_before, 'renderer source checkout before renderer')
-    assertRendererSourceCheckoutEvidence(evidence.renderer_source_checkout_after, 'renderer source checkout after renderer')
+    assertReleaseCheckoutEvidence(evidence.renderer_source_checkout_before, 'renderer source checkout before renderer')
+    assertReleaseCheckoutEvidence(evidence.renderer_source_checkout_after, 'renderer source checkout after renderer')
     if (canonicalFleetRuntimeJson(evidence.renderer_source_checkout_before) !== canonicalFleetRuntimeJson(evidence.renderer_source_checkout_after)) {
       return providerFail('STATE_RECORD_INVALID', 'renderer source checkout changed across renderer execution')
     }
@@ -2611,6 +2611,10 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       expected_tree: expectedTree,
     })
     return { checkout_path: path, remote, head, tree, clean: true, detached: true }
+  }
+
+  async verifyReleaseCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
+    return this.verifyRendererSourceCheckout(path, stateDirectory)
   }
 
   async verifyRendererSourceCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
