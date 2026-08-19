@@ -25,12 +25,15 @@ import {
   computeFleetRuntimeReceiptDigest,
   executeFleetRuntimeV1,
   prepareFleetRuntimeV1Request,
+  validateFleetRuntimeResumeAdmissionControlHandoffRef,
   type FleetRuntimeEffectReceipt,
   type FleetRuntimeInvocationState,
   type FleetRuntimeOperation,
   type FleetRuntimePersistencePort,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
+  type FleetRuntimeResumeAdmissionBindingReadback,
+  type FleetRuntimeResumeAdmissionControlHandoffRef,
   type FleetRuntimeRootGoalReadback,
 } from './fleet-runtime-v1-adapter'
 import {
@@ -157,6 +160,11 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/
 const COMMIT = /^[a-f0-9]{40}$/
 const ACTIVE_LOCAL_INVOCATIONS = new Set<string>()
 const PROCESS_EXECUTION_OWNER_ID = `${hostname()}:${process.pid}:${randomUUID()}`
+
+export const FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV = Object.freeze({
+  url: 'FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_URL',
+  raw_api_body_sha256: 'FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_SHA256',
+})
 
 export type FleetRuntimeLocalProviderErrorCode =
   | 'PROTECTED_EFFECTS_DISABLED'
@@ -550,6 +558,123 @@ function yamlList(section: string, key: string): string[] {
 function yamlInlineList(value: string, label: string): string[] {
   if (!/^\[[^\[\]]*\]$/.test(value)) return providerFail('READBACK_INVALID', `${label} must be an inline list`)
   return value.slice(1, -1).split(',').map(item => item.trim()).filter(Boolean)
+}
+
+function yamlString(value: string, label: string): string {
+  if (value.startsWith('"')) {
+    if (!value.endsWith('"')) return providerFail('READBACK_INVALID', `${label} has an unterminated quoted scalar`)
+    const parsed = parseJson<unknown>(value, label)
+    if (typeof parsed !== 'string') return providerFail('READBACK_INVALID', `${label} must be a string scalar`)
+    return parsed
+  }
+  if (!/^[^\s\[\]{},#&*!|>'"%@`][^\n]*$/.test(value)) {
+    return providerFail('READBACK_INVALID', `${label} must be a plain or JSON-quoted string scalar`)
+  }
+  return value
+}
+
+function parseExactFlatYamlSection(
+  body: string,
+  sectionName: string,
+  expectedKeys: readonly string[],
+): Record<string, string> {
+  const section = yamlSection(body, sectionName)
+  const parsed: Record<string, string> = {}
+  for (const line of section.split('\n').filter(line => line.trim() !== '')) {
+    const match = line.match(/^  ([a-z0-9_]+):\s*(\S.*)$/)
+    if (!match || Object.hasOwn(parsed, match[1])) {
+      return providerFail('READBACK_INVALID', `${sectionName} is nested, duplicate, empty, or malformed`)
+    }
+    parsed[match[1]] = yamlString(match[2].trim(), `${sectionName}.${match[1]}`)
+  }
+  if (canonicalFleetRuntimeJson(Object.keys(parsed).sort())
+    !== canonicalFleetRuntimeJson([...expectedKeys].sort())) {
+    return providerFail('READBACK_INVALID', `${sectionName} keys differ`)
+  }
+  return parsed
+}
+
+const RESUME_SUBJECT_INVOCATION_KEYS = Object.freeze([
+  'request_id', 'request_digest', 'idempotency_key', 'remote_head', 'operational_subject_digest',
+] as const)
+
+const RESUME_ADMISSION_BINDING_KEYS = Object.freeze([
+  'note', 'repository', 'stage_id', 'operation', 'durable_request_id', 'request_digest', 'idempotency_key',
+  'remote_head', 'operational_subject_digest', 'sealed_queue_revision', 'admitted_fresh_queue_revision',
+  'admitted_fresh_queue_observation_id', 'admitted_registry_status_change', 'drift_disposition',
+] as const)
+
+export function parseFleetRuntimeResumeAdmissionBinding(
+  request: FleetRuntimeRequest,
+  durableRemoteHead: string,
+  expectedRef: FleetRuntimeResumeAdmissionControlHandoffRef,
+  readback: GitHubCommentReadback,
+): FleetRuntimeResumeAdmissionBindingReadback {
+  try {
+    validateFleetRuntimeResumeAdmissionControlHandoffRef(expectedRef)
+  } catch (error) {
+    return providerFail('READBACK_INVALID', `resume admission control handoff ref is invalid: ${(error as Error).message}`)
+  }
+  if (readback.user.login !== 'watchout' || readback.created_at !== readback.updated_at
+    || sha256(readback.body) !== expectedRef.raw_api_body_sha256) {
+    return providerFail('READBACK_INVALID', 'resume admission control handoff immutable readback differs')
+  }
+  const handoffId = yamlString(yamlTopScalar(readback.body, 'handoff_id'), 'handoff_id')
+  const marker = `<!-- shirube-v3:control-handoff:${handoffId} -->\n`
+  const cell = parseExactFlatYamlSection(readback.body, 'cell', ['id'])
+  const repository = parseExactFlatYamlSection(readback.body, 'repository', ['name'])
+  const from = parseExactFlatYamlSection(readback.body, 'from', ['actor_agent_id', 'active_function'])
+  const to = parseExactFlatYamlSection(readback.body, 'to', ['actor_agent_id', 'active_function', 'physical_bootstrap'])
+  if (!readback.body.startsWith(marker)
+    || yamlString(yamlTopScalar(readback.body, 'schema_version'), 'schema_version') !== 'shirube-v3/control_handoff/v1'
+    || !/^CH-ARC-ADF576-N40-LIVE-EXECUTION-[0-9]{8}-[0-9]{3}$/.test(handoffId)
+    || cell.id !== handoffId || repository.name !== 'watchout/kodama'
+    || yamlString(yamlTopScalar(readback.body, 'control_source'), 'control_source')
+      !== 'https://github.com/watchout/ai-dev-framework/issues/576'
+    || from.actor_agent_id !== 'arc' || from.active_function !== 'control_artifact_author'
+    || to.actor_agent_id !== 'aun-runtime-executor' || to.active_function !== 'runtime_recovery_executor') {
+    return providerFail('READBACK_INVALID', 'resume admission control handoff canonical identity differs')
+  }
+  const subject = parseExactFlatYamlSection(readback.body, 'subject_invocation', RESUME_SUBJECT_INVOCATION_KEYS)
+  const binding = parseExactFlatYamlSection(readback.body, 'resume_admission_binding', RESUME_ADMISSION_BINDING_KEYS)
+  if (!COMMIT.test(durableRemoteHead) || binding.repository !== 'watchout/kodama'
+    || request.target_scope.repositories.length !== 1
+    || request.target_scope.repositories[0] !== binding.repository
+    || binding.stage_id !== request.stage_id || binding.operation !== request.operation
+    || binding.durable_request_id !== request.request_id || binding.request_digest !== request.request_digest
+    || binding.idempotency_key !== request.idempotency_key || binding.remote_head !== durableRemoteHead
+    || binding.operational_subject_digest !== request.predecessor_receipt.subject_digest
+    || binding.sealed_queue_revision !== request.queue_observation.queue.revision
+    || subject.request_id !== binding.durable_request_id || subject.request_digest !== binding.request_digest
+    || subject.idempotency_key !== binding.idempotency_key || subject.remote_head !== binding.remote_head
+    || subject.operational_subject_digest !== binding.operational_subject_digest
+    || !/^\d+$/.test(binding.admitted_fresh_queue_revision)
+    || !SHA256.test(binding.admitted_fresh_queue_observation_id)
+    || binding.note.length === 0 || binding.admitted_registry_status_change.length === 0
+    || binding.drift_disposition.length === 0) {
+    return providerFail('READBACK_INVALID', 'resume admission binding differs from the durable invocation tuple')
+  }
+  return {
+    schema_version: 'fleet-runtime-v1/resume-admission-binding-readback/v1',
+    control_handoff_id: handoffId,
+    control_handoff_url: expectedRef.url,
+    control_handoff_raw_api_body_sha256: expectedRef.raw_api_body_sha256,
+    control_handoff_raw_body: readback.body,
+    control_handoff_actor: 'watchout',
+    control_handoff_created_at: readback.created_at,
+    control_handoff_updated_at: readback.updated_at,
+    repository: binding.repository as FleetRuntimeResumeAdmissionBindingReadback['repository'],
+    stage_id: binding.stage_id as FleetRuntimeResumeAdmissionBindingReadback['stage_id'],
+    operation: binding.operation as FleetRuntimeResumeAdmissionBindingReadback['operation'],
+    durable_request_id: binding.durable_request_id,
+    request_digest: binding.request_digest,
+    idempotency_key: binding.idempotency_key,
+    remote_head: binding.remote_head,
+    operational_subject_digest: binding.operational_subject_digest,
+    sealed_queue_revision: binding.sealed_queue_revision,
+    admitted_fresh_queue_revision: binding.admitted_fresh_queue_revision,
+    admitted_fresh_queue_observation_id: binding.admitted_fresh_queue_observation_id,
+  }
 }
 
 function parseOwnerStageMatrix(body: string): FleetRuntimeRequest['owner_decision']['stage_authority_matrix'] {
@@ -1040,6 +1165,19 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     return assertSafeStatePath(this.root, join(this.root, 'invocations', key))
   }
 
+  readDurableResumeRemoteHead(request: FleetRuntimeRequest): string {
+    const path = join(this.invocationDirectory(request.idempotency_key), 'operation-state.json')
+    if (!existsSync(path)) return providerFail('STATE_RECORD_INVALID', 'durable resume operation journal is absent')
+    const state = readState<FleetRuntimeLocalOperationState>(this.root, path, 'operation state')
+    assertJournal(state, request, state.execution_owner_id)
+    const pushed = state.phases.PUSH_NORMAL_BRANCH
+    const remoteHead = pushed?.intent.head
+    if (!pushed || !COMMIT.test(String(remoteHead ?? ''))) {
+      return providerFail('STATE_RECORD_INVALID', 'durable resume journal lacks an exact pushed remote head')
+    }
+    return String(remoteHead)
+  }
+
   private reservationPath(key: string): string {
     return join(this.invocationDirectory(key), 'reservation.json')
   }
@@ -1421,7 +1559,11 @@ export interface FleetRuntimeLocalSystem {
     context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<Record<string, unknown>> | Record<string, unknown>
   inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
-  inspectResume?(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
+  inspectResume?(
+    request: Readonly<FleetRuntimeRequest>,
+    controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+    durableRemoteHead: string | null,
+  ): Promise<FleetRuntimePreflightReceipt>
   performPhase(
     request: Readonly<FleetRuntimeRequest>,
     preflight: Readonly<FleetRuntimePreflightReceipt>,
@@ -2037,6 +2179,7 @@ export async function executeLocalFleetRuntimeV1(input: {
   approvedStateRoot?: string
   executeProtectedEffects: boolean
   system: FleetRuntimeLocalSystem
+  resumeAdmissionControlHandoff?: FleetRuntimeResumeAdmissionControlHandoffRef | null
   now?: () => string
   persistenceOptions?: Omit<FleetRuntimePersistenceOptions, 'approvedRoot'>
 }): Promise<FleetRuntimeEffectReceipt | FleetRuntimeV1DryRunReceipt> {
@@ -2050,6 +2193,15 @@ export async function executeLocalFleetRuntimeV1(input: {
     approvedRoot: input.approvedStateRoot ?? FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
   })
   const effect = new FleetRuntimeLocalEffectPort(persistence, input.system, input.now ?? (() => new Date().toISOString()))
+  const resumeAdmissionControlHandoff = input.resumeAdmissionControlHandoff === undefined
+    ? process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.url] === undefined
+      && process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.raw_api_body_sha256] === undefined
+      ? null
+      : {
+          url: process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.url] ?? '',
+          raw_api_body_sha256: process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.raw_api_body_sha256] ?? '',
+        }
+    : input.resumeAdmissionControlHandoff
   if (ACTIVE_LOCAL_INVOCATIONS.has(input.request.idempotency_key)) {
     return providerFail('IN_FLIGHT', 'the invocation is already active in this executor process')
   }
@@ -2058,13 +2210,17 @@ export async function executeLocalFleetRuntimeV1(input: {
     return await executeFleetRuntimeV1(input.request, {
       preflight: {
         inspect: request => input.system.inspect(request),
-        inspectResume: request => input.system.inspectResume
-          ? input.system.inspectResume(request)
+        inspectResume: (request, controlHandoff) => input.system.inspectResume
+          ? input.system.inspectResume(
+              request,
+              controlHandoff,
+              controlHandoff ? persistence.readDurableResumeRemoteHead(request as FleetRuntimeRequest) : null,
+            )
           : providerFail('READBACK_INVALID', 'local system does not implement durable resume preflight'),
       },
       persistence,
       effect,
-    })
+    }, { resume_admission_control_handoff: resumeAdmissionControlHandoff })
   } finally {
     ACTIVE_LOCAL_INVOCATIONS.delete(input.request.idempotency_key)
   }
@@ -2142,7 +2298,7 @@ export function validateFleetRuntimeAdfReleaseReadback(input: FleetRuntimeAdfRel
   }
 }
 
-interface GitHubCommentReadback {
+export interface GitHubCommentReadback {
   body: string
   user: { login: string }
   created_at: string
@@ -2539,24 +2695,38 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   async inspect(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
-    return this.inspectAdmission(readonlyRequest, false)
+    return this.inspectAdmission(readonlyRequest, false, null, null)
   }
 
-  async inspectResume(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
-    return this.inspectAdmission(readonlyRequest, true)
+  async inspectResume(
+    readonlyRequest: Readonly<FleetRuntimeRequest>,
+    controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+    durableRemoteHead: string | null,
+  ): Promise<FleetRuntimePreflightReceipt> {
+    return this.inspectAdmission(readonlyRequest, true, controlHandoff, durableRemoteHead)
   }
 
   private async inspectAdmission(
     readonlyRequest: Readonly<FleetRuntimeRequest>,
     durableResume: boolean,
+    readonlyControlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+    durableRemoteHead: string | null,
   ): Promise<FleetRuntimePreflightReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
-    const [owner, predecessor, preimage, observation, rootRaw] = await Promise.all([
+    const controlHandoff = readonlyControlHandoff as FleetRuntimeResumeAdmissionControlHandoffRef | null
+    if (!durableResume && (controlHandoff || durableRemoteHead)) {
+      return providerFail('READBACK_INVALID', 'resume admission binding is invalid for a sealed start')
+    }
+    if (durableResume && Boolean(controlHandoff) !== Boolean(durableRemoteHead)) {
+      return providerFail('READBACK_INVALID', 'resume admission binding and durable remote head must be supplied together')
+    }
+    const [owner, predecessor, preimage, observation, rootRaw, resumeHandoff] = await Promise.all([
       this.comment(request.owner_decision.url),
       this.comment(request.predecessor_receipt.url),
       this.remotePreimage(request),
       this.queueObservation(),
       this.readAdfRootGoalStatus(),
+      controlHandoff ? this.comment(controlHandoff.url) : Promise.resolve(null),
     ])
     if (owner.user.login !== request.owner_decision.actor
       || owner.created_at !== request.owner_decision.created_at
@@ -2575,9 +2745,17 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return providerFail('READBACK_INVALID', 'immutable rollback companion raw-body digest differs')
     }
     validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body, companion?.body)
+    const resumeAdmissionBinding = controlHandoff && resumeHandoff && durableRemoteHead
+      ? parseFleetRuntimeResumeAdmissionBinding(request, durableRemoteHead, controlHandoff, resumeHandoff)
+      : null
     try {
       if (durableResume) {
-        assertFleetRuntimeFreshResumeObservation(request.queue_observation, observation, this.nowMs())
+        assertFleetRuntimeFreshResumeObservation(
+          request.queue_observation,
+          observation,
+          this.nowMs(),
+          resumeAdmissionBinding,
+        )
       } else {
         assertFleetRuntimeSealToPreObservation(request.queue_observation, observation, this.nowMs())
       }
@@ -2585,7 +2763,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return providerFail('READBACK_INVALID', `queue admission preflight differs: ${(error as Error).message}`)
     }
     return {
-      schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
+      schema_version: 'fleet-runtime-v1/preflight-receipt/v3',
       request_digest: request.request_digest,
       observed_at: observation.observed_at,
       owner_decision_readback: clone(request.owner_decision),
@@ -2594,6 +2772,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       predecessor_receipt_raw_body: predecessor.body,
       target_preimages: [preimage],
       queue_observation: observation,
+      resume_admission_binding: resumeAdmissionBinding,
       root_goal_readbacks: [parseFleetRuntimeRootGoalReadback(parseJson(rootRaw, 'root-goal status'))],
       filesystem_write_count: 0,
       database_write_count: 0,

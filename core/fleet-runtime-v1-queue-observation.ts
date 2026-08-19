@@ -524,6 +524,12 @@ function withoutObservedAt(observation: FleetRuntimeQueueObservationV2): unknown
   return copy
 }
 
+export interface FleetRuntimeResumeQueueAdmissionBinding {
+  sealed_queue_revision: string
+  admitted_fresh_queue_revision: string
+  admitted_fresh_queue_observation_id: string
+}
+
 export function assertFleetRuntimeSealToPreObservation(
   sealed: FleetRuntimeQueueObservationV2,
   pre: FleetRuntimeQueueObservationV2,
@@ -551,11 +557,20 @@ export function assertFleetRuntimeFreshResumeObservation(
   sealed: FleetRuntimeQueueObservationV2,
   observation: FleetRuntimeQueueObservationV2,
   nowMs = Date.now(),
+  binding: FleetRuntimeResumeQueueAdmissionBinding | null = null,
 ): void {
   assertFleetRuntimeQueueObservationV2(sealed)
   assertFleetRuntimeQueueObservationV2(observation)
   freshness(observation, nowMs)
-  if (canonicalFleetRuntimeObservationJson(withoutObservedAt(sealed))
+  if (binding) {
+    if (binding.sealed_queue_revision !== sealed.queue.revision) {
+      return fail('QUEUE_OBSERVATION_DRIFT', 'resume admission binding sealed queue revision differs')
+    }
+    if (binding.admitted_fresh_queue_revision !== observation.queue.revision
+      || binding.admitted_fresh_queue_observation_id !== observation.queue.queue_observation_id) {
+      return fail('QUEUE_OBSERVATION_DRIFT', 'fresh resume observation differs from the admitted binding')
+    }
+  } else if (canonicalFleetRuntimeObservationJson(withoutObservedAt(sealed))
     !== canonicalFleetRuntimeObservationJson(withoutObservedAt(observation))) {
     return fail('QUEUE_OBSERVATION_DRIFT', 'sealed binding and fresh resume observation differ beyond observed_at')
   }

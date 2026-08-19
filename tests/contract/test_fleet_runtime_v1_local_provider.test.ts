@@ -18,6 +18,8 @@ import {
   type FleetRuntimePreflightContext,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
+  type FleetRuntimeResumeAdmissionBindingReadback,
+  type FleetRuntimeResumeAdmissionControlHandoffRef,
 } from '../../core/fleet-runtime-v1-adapter'
 import {
   ConcreteFleetRuntimeV1LocalSystem,
@@ -42,6 +44,7 @@ import {
   validateFleetRuntimeLocalReceipt,
   validateFleetRuntimePayloadDirectory,
   parseFleetRuntimeOperationPredecessorBinding,
+  parseFleetRuntimeResumeAdmissionBinding,
   selectFleetRuntimePayloadFromRenderer,
   type FleetRuntimeLocalOperationState,
   type FleetRuntimeLocalPhase,
@@ -83,6 +86,79 @@ function protectedFixtureInput<T extends { stateDirectory: string }>(input: T): 
 
 function rawDigest(raw: string): string {
   return `sha256:${createHash('sha256').update(raw).digest('hex')}`
+}
+
+function refreshQueueObservationId(observation: FleetRuntimeQueueObservationV2): void {
+  observation.queue.active_rows_sha256 = digestFleetRuntimeObservationMaterial(observation.queue.active_rows)
+  const material = { ...observation.queue }
+  delete (material as Partial<typeof material>).queue_observation_id
+  observation.queue.queue_observation_id = digestFleetRuntimeObservationMaterial(
+    fleetRuntimeQueueObservationIdMaterial(observation.source, material),
+  )
+}
+
+function resumeAdmissionControlHandoffFixture(
+  request: FleetRuntimeRequest,
+  durableRemoteHead: string,
+  observation: FleetRuntimeQueueObservationV2,
+): {
+    ref: FleetRuntimeResumeAdmissionControlHandoffRef
+    readback: { body: string; user: { login: string }; created_at: string; updated_at: string }
+  } {
+  const id = 'CH-ARC-ADF576-N40-LIVE-EXECUTION-20260819-010'
+  const scalar = (value: string) => JSON.stringify(value)
+  const body = [
+    `<!-- shirube-v3:control-handoff:${id} -->`,
+    'schema_version: shirube-v3/control_handoff/v1',
+    `handoff_id: ${id}`,
+    'cell:',
+    `  id: ${id}`,
+    'repository:',
+    '  name: watchout/kodama',
+    `control_source: ${scalar('https://github.com/watchout/ai-dev-framework/issues/576')}`,
+    'from:',
+    '  actor_agent_id: arc',
+    '  active_function: control_artifact_author',
+    'to:',
+    '  actor_agent_id: aun-runtime-executor',
+    '  active_function: runtime_recovery_executor',
+    `  physical_bootstrap: ${scalar('aun seat may bootstrap')}`,
+    'subject_invocation:',
+    `  request_id: ${request.request_id}`,
+    `  request_digest: ${scalar(request.request_digest)}`,
+    `  idempotency_key: ${scalar(request.idempotency_key)}`,
+    `  remote_head: ${durableRemoteHead}`,
+    `  operational_subject_digest: ${scalar(request.predecessor_receipt.subject_digest)}`,
+    'resume_admission_binding:',
+    `  note: ${scalar('admits the one exact fresh observation')}`,
+    '  repository: watchout/kodama',
+    `  stage_id: ${request.stage_id}`,
+    `  operation: ${request.operation}`,
+    `  durable_request_id: ${request.request_id}`,
+    `  request_digest: ${scalar(request.request_digest)}`,
+    `  idempotency_key: ${scalar(request.idempotency_key)}`,
+    `  remote_head: ${durableRemoteHead}`,
+    `  operational_subject_digest: ${scalar(request.predecessor_receipt.subject_digest)}`,
+    `  sealed_queue_revision: ${scalar(request.queue_observation.queue.revision)}`,
+    `  admitted_fresh_queue_revision: ${scalar(observation.queue.revision)}`,
+    `  admitted_fresh_queue_observation_id: ${scalar(observation.queue.queue_observation_id)}`,
+    `  admitted_registry_status_change: ${scalar('registry status drift acknowledged; queue counts remain the safety predicate')}`,
+    `  drift_disposition: ${scalar('the exact observation id is admitted without durable state mutation')}`,
+    '',
+  ].join('\n')
+  const ref = {
+    url: 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-5342500000',
+    raw_api_body_sha256: rawDigest(body),
+  }
+  return {
+    ref,
+    readback: {
+      body,
+      user: { login: 'watchout' },
+      created_at: '2026-08-19T13:03:36Z',
+      updated_at: '2026-08-19T13:03:36Z',
+    },
+  }
 }
 
 function digest(value: unknown): string {
@@ -357,7 +433,7 @@ function semanticPredecessorBody(request: FleetRuntimeRequest): string {
 
 function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceipt {
   return {
-    schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
+    schema_version: 'fleet-runtime-v1/preflight-receipt/v3',
     request_digest: request.request_digest,
     observed_at: request.queue_observation.observed_at,
     owner_decision_readback: structuredClone(request.owner_decision),
@@ -366,6 +442,7 @@ function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceip
     predecessor_receipt_raw_body: PREDECESSOR_BODY,
     target_preimages: structuredClone(request.preimages),
     queue_observation: structuredClone(request.queue_observation),
+    resume_admission_binding: null,
     root_goal_readbacks: [{
       repository: 'watchout/kodama',
       store_path: '/Users/yuji/Developer/kodama/.framework/runtime/goal-convergence.json',
@@ -744,12 +821,22 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
   inspectCount = 0
   readonly inspectModes: FleetRuntimePreflightContext['mode'][] = []
   resumeObservedAt: string | null = null
+  resumeObservation: FleetRuntimeQueueObservationV2 | null = null
+  resumeAdmissionBinding: FleetRuntimeResumeAdmissionBindingReadback | null = null
+  lastResumeControlHandoff: FleetRuntimeResumeAdmissionControlHandoffRef | null = null
+  lastDurableRemoteHead: string | null = null
 
   async inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
     return this.inspectFor(request, 'SEALED_START')
   }
 
-  async inspectResume(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
+  async inspectResume(
+    request: Readonly<FleetRuntimeRequest>,
+    controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+    durableRemoteHead: string | null,
+  ): Promise<FleetRuntimePreflightReceipt> {
+    this.lastResumeControlHandoff = controlHandoff ? structuredClone(controlHandoff) : null
+    this.lastDurableRemoteHead = durableRemoteHead
     return this.inspectFor(request, 'DURABLE_RESUME')
   }
 
@@ -763,6 +850,15 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
     if (mode === 'DURABLE_RESUME' && this.resumeObservedAt) {
       receipt.observed_at = this.resumeObservedAt
       receipt.queue_observation.observed_at = this.resumeObservedAt
+    }
+    if (mode === 'DURABLE_RESUME' && this.resumeObservation) {
+      receipt.observed_at = this.resumeObservation.observed_at
+      receipt.queue_observation = structuredClone(this.resumeObservation)
+    }
+    if (mode === 'DURABLE_RESUME') {
+      receipt.resume_admission_binding = this.resumeAdmissionBinding
+        ? structuredClone(this.resumeAdmissionBinding)
+        : null
     }
     return receipt
   }
@@ -1257,6 +1353,67 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(receipt.operation).toBe('CANARY_COLD_START')
     expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
     expect(system.inspectModes).toEqual(['SEALED_START', 'DURABLE_RESUME'])
+  })
+
+  test('durable resume consumes a canonical handoff binding against the read-only pushed journal head', async () => {
+    const stateDirectory = join(temporary('frv1-resume-admission-binding'), 'state')
+    const request = requestFor()
+    const system = new FixtureSystem()
+    system.mergeAvailable = false
+    await expectProviderCode(
+      () => executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system })),
+      'WAITING_INDEPENDENT_MERGE',
+    )
+    const persistence = new FileFleetRuntimeV1Persistence(stateDirectory, { approvedRoot: stateDirectory })
+    const durableRemoteHead = persistence.readDurableResumeRemoteHead(request)
+    const admitted = structuredClone(request.queue_observation)
+    admitted.observed_at = '2026-08-19T13:04:00.000Z'
+    admitted.queue.revision = '357'
+    admitted.kodama_registry.status = 'busy'
+    refreshQueueObservationId(admitted)
+    const handoff = resumeAdmissionControlHandoffFixture(request, durableRemoteHead, admitted)
+    const binding = parseFleetRuntimeResumeAdmissionBinding(
+      request,
+      durableRemoteHead,
+      handoff.ref,
+      handoff.readback,
+    )
+    system.resumeObservation = admitted
+    system.resumeAdmissionBinding = binding
+    system.mergeAvailable = true
+
+    const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request,
+      stateDirectory,
+      executeProtectedEffects: true,
+      system,
+      resumeAdmissionControlHandoff: handoff.ref,
+    }))
+
+    expect(receipt.operation).toBe('CANARY_COLD_START')
+    expect(system.lastResumeControlHandoff).toEqual(handoff.ref)
+    expect(system.lastDurableRemoteHead).toBe(durableRemoteHead)
+    expect(system.calls.get('PUSH_NORMAL_BRANCH')).toBe(1)
+    expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
+
+    await expectProviderCode(
+      () => Promise.resolve(parseFleetRuntimeResumeAdmissionBinding(
+        request,
+        '8'.repeat(40),
+        handoff.ref,
+        handoff.readback,
+      )),
+      'READBACK_INVALID',
+    )
+    await expectProviderCode(
+      () => Promise.resolve(parseFleetRuntimeResumeAdmissionBinding(
+        request,
+        durableRemoteHead,
+        handoff.ref,
+        { ...handoff.readback, updated_at: '2026-08-19T13:03:37Z' },
+      )),
+      'READBACK_INVALID',
+    )
   })
 
   test.each(['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'] as const)(

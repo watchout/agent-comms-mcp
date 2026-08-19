@@ -672,15 +672,22 @@ load してから live preflight を選ぶ。
 - exact request に `reserved` state がある開始済み invocation は、期限切れの sealed
   observation を live admission に再利用しない。owner decision、predecessor、remote
   preimage、queue、root-goal を再読し、resume 時点の fresh observation が全 admission
-  predicate（正規 schema / sealed binding との一致 / identity / profile / registry / zero queue）
-  を満たす場合だけ再開する。sealed observation の期限は resume の live freshness 判定に使わない。
+  predicate（正規 schema / identity / zero queue）を満たす場合だけ再開する。通常は sealed
+  binding との一致も必須とする。ただし immutable `control_handoff` の URL と raw API body
+  SHA-256 が別入力として明示され、その handoff の canonical `resume_admission_binding` が
+  durable request tuple と journal の `PUSH_NORMAL_BRANCH` head、および実測した fresh
+  observation ID を exact に束縛するときだけ、sealed-vs-fresh equality をその binding に
+  置換できる。sealed observation の期限は resume の live freshness 判定に使わない。
 - exact request に `completed` state がある場合は、永続 receipt を検証してその original
   receipt を返す。live preflight と protected subeffect は再実行しない。
 - same key / different request digest、壊れた durable state、fresh readback 不成立は、
   reservation・journal・sealed request を変更せず fail-closed とする。
 
 resume は残存 phase の reconciliation であり、受領済み protected subeffect を再実行する
-権限ではない。
+権限ではない。`resume_admission_binding` は sealed request、reservation、operation journal
+には格納せず、`fleet-runtime-v1/preflight-receipt/v3` の readback evidence にだけ残す。
+binding が認めた observation ID よりさらに drift した場合、または pending / received /
+in_progress のいずれかが nonzero の場合は、新しい successor binding なしに再試行しない。
 
 ---
 
@@ -1192,6 +1199,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-19 | §10.3 に immutable `resume_admission_binding` の canonical 消費経路を追加。durable request/journal head/exact fresh observation ID/zero queue の束縛、preflight receipt v3、次の drift の fail-closed を固定。 |
 | 2026-08-19 | §10.3 Fleet Runtime V1 の durable STARTED resume 契約を追加。新規 sealed preflight、reserved の fresh re-observation、completed original receipt、same-key collision の境界を固定。 |
 | 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
