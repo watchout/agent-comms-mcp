@@ -22,7 +22,7 @@ export const FLEET_RUNTIME_V1_CONTRACT = {
   release_tree: '10ffb6acb558d9eecaedab7ce3c97ea447a2b1e5',
   release_manifest_digest: 'sha256:b99dc954d2495c2fd081920a1db497da6b33de5499ce323c3b39a9c91ad8e402',
   target_set_digest: 'sha256:fd1bd9ba828b5afd4960d203267c9533d58cb441f2cf3420307700b8bbd52584',
-  payload_digest: 'sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973',
+  payload_digest: 'sha256:59f2a8b1b82eabd38f93ed50467b53bf67d18c6ee06b48adae05293a4ce0ff03',
   precondition_build_decision_url: 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-5260238887',
   precondition_build_decision_sha256: 'sha256:6464a7c19b2fae09d95bb3f6ed9d07a030c38e1b42bc263745065b45c460c6c9',
 } as const

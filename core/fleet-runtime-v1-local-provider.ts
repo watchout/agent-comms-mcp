@@ -56,6 +56,32 @@ export const FLEET_RUNTIME_V1_LOCAL_PROVIDER = Object.freeze({
   payload_path_count: 24,
 })
 
+export const FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT = Object.freeze({
+  repository: 'watchout/ai-dev-framework',
+  ref: 'd3c3be1394f509839db83c6ed57482178ebbaecd',
+  tree: '45c288c35ef0af137b4d313555d7c86bf44b81aa',
+  path: 'releases/shirube-v4.1/target-payload-amendment-20260819-001.json',
+  schema_version: 'shirube-v4.1/target-payload-amendment/v1',
+  artifact_state: 'FINAL_IMMUTABLE',
+  amendment_id: 'TARGET-PAYLOAD-AMENDMENT-20260819-001',
+  amendment_sha256: 'sha256:ab1c6f434637f946172fee97be3b5c084e6cbfde6a82dd9eaaca728c12f21134',
+  amendment_byte_sha256: 'sha256:b9326f5f2eb1b56bed957ee2a0ea36da3beea651dff679c00f79bded9c1f0c55',
+  previous_payload_digest: 'sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973',
+  effective_path_manifest_sha256: 'sha256:c50f3ef1e15d31e57a11c19278607ac70b5a7d59bbf11c1ee87e237f7001fec9',
+  effective_payload_digest: FLEET_RUNTIME_V1_CONTRACT.payload_digest,
+  renderer_path: 'scripts/shirube/render-adoption-pack.mjs',
+  renderer_content_sha256: 'sha256:5a5c0f1723bb13f6f19c27860a917dde8c0e44cee2559db3ffe568c3d53d7061',
+  renderer_blob: 'c3582da60dd8f005f5edbe2277cdc42636c5ec1a',
+  workflow_template_path: 'templates/adoption-pack/hotel-lite/workflow-caller.yml',
+  workflow_template_sha256: 'sha256:33d4c5d911affdca44ab5cf587f8bde556c9732809fc9745048f08050091ee48',
+  workflow_template_blob: '184fadec14095f2ca4420b9fafad2fac2fc2e415',
+  original_immutable_artifacts: Object.freeze([
+    Object.freeze({ path: 'releases/shirube-v4.1/release-manifest.json', byte_sha256: 'sha256:f7c5a8b6012b39f94a1e26ad7a6c120a9330cff185a6bbf1af2b2dc168557a36' }),
+    Object.freeze({ path: 'releases/shirube-v4.1/target-payload-manifest.json', byte_sha256: 'sha256:6a7bce4ab348d3cd4ccc290aed06fe41dff7db4b7c690cd0b031b7ddc30b63a9' }),
+    Object.freeze({ path: 'releases/shirube-v4.1/fleet-runtime-v1-contract.json', byte_sha256: 'sha256:7936bd8d92c73f54f71c67c744a4e8fb5339f69c7070f709449fba178dd73ebd' }),
+  ]),
+})
+
 export const FLEET_RUNTIME_V1_ADF_READBACK_RELEASE = Object.freeze({
   root: '/Users/yuji/.local/share/shirube/releases/07640c9c173b36930434847e1cb6838d56b993c0',
   origin_allowed: Object.freeze([
@@ -72,7 +98,7 @@ export const FLEET_RUNTIME_V1_ADF_READBACK_RELEASE = Object.freeze({
 })
 
 export const FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES = Object.freeze([
-  { bytes: 6894, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:8166ff6d42388a37ea4d170ed08c7204fc540a2bdd1a08548d1c9e378980fcf6' },
+  { bytes: 10912, path: '.github/workflows/shirube-rapid-lite-gates-report.yml', sha256: 'sha256:33d4c5d911affdca44ab5cf587f8bde556c9732809fc9745048f08050091ee48' },
   { bytes: 12331, path: '.shirube/runtime/rapid-lite/build-review-plan.mjs', sha256: 'sha256:e6a152a4bf79ad2dfdb6698ee746256205cdff644a81559efb68da45c79dcf85' },
   { bytes: 25234, path: '.shirube/runtime/rapid-lite/check-adoption.mjs', sha256: 'sha256:80c35f811abdb2d5b5c5653a56eea189244b41c70d0195953b13a4bd6b6369b3' },
   { bytes: 19515, path: '.shirube/runtime/rapid-lite/check-audit-checklist.mjs', sha256: 'sha256:6ac7d94098a2b77a28e52e2b99498def9e8753920604ecb89eb6752bea2c300e' },
@@ -118,7 +144,7 @@ const FLEET_RUNTIME_V1_RENDERER_TARGET_POLICY = Object.freeze({
 const FLEET_RUNTIME_V1_RENDERER_REQUIRED_ACTIONS = Object.freeze([
   'Open a target-repo adoption PR containing only the generated overlay files.',
   'Owner must fill exact-head decision evidence before merge if any gate would block.',
-  'The generated workflow and immutable local runtime bundle must stay report-only; update them together from an audited Shirube release.',
+  'The generated fail-closed workflow and immutable local runtime bundle must be updated together from an audited Shirube release; required-check activation remains separately authorized.',
   'Do not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes into the adoption PR.',
 ])
 
@@ -1419,7 +1445,10 @@ const PHASE_BINDING_KEYS = Object.freeze([
 
 const PHASE_INTENT_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, readonly string[]>> = Object.freeze({
   PREPARE_CLEAN_CHECKOUT: Object.freeze(['expected_head', 'expected_tree']),
-  STAGE_EXACT_PAYLOAD: Object.freeze(['payload_digest', 'path_count', 'raw_output_path', 'release_commit', 'release_tree', 'selected_payload_path']),
+  STAGE_EXACT_PAYLOAD: Object.freeze([
+    'payload_digest', 'path_count', 'raw_output_path', 'release_commit', 'release_tree',
+    'renderer_source_ref', 'renderer_source_tree', 'selected_payload_path',
+  ]),
   VERIFY_EXACT_PAYLOAD: Object.freeze(['payload_digest', 'path_count', 'selected_payload_path']),
   CREATE_LOCAL_COMMIT: Object.freeze(['payload_digest', 'path_count']),
   PUSH_NORMAL_BRANCH: Object.freeze(['branch', 'force', 'head']),
@@ -1438,7 +1467,8 @@ const PHASE_EVIDENCE_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, read
   ]),
   STAGE_EXACT_PAYLOAD: Object.freeze([
     'path_count', 'payload_digest', 'payload_paths', 'raw_output_path', 'raw_path_count', 'raw_paths',
-    'release_checkout_after', 'release_checkout_before', 'renderer_report_sha256', 'selected_blobs', 'selected_payload_path',
+    'renderer_report_sha256', 'renderer_source_checkout_after', 'renderer_source_checkout_before',
+    'selected_blobs', 'selected_payload_path',
   ]),
   VERIFY_EXACT_PAYLOAD: Object.freeze(['checkout_blobs', 'path_count', 'payload_digest', 'payload_paths', 'selected_payload_path']),
   CREATE_LOCAL_COMMIT: Object.freeze(['branch', 'commit_blobs', 'head', 'index_blobs', 'payload_paths']),
@@ -1514,12 +1544,16 @@ function assertCheckoutEvidence(value: Record<string, unknown>, intent: Record<s
 
 function assertReleaseCheckoutEvidence(value: unknown, label: string): void {
   assertPlainRecord(value, label)
-  assertExactKeys(value, ['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree'], label)
+  assertExactKeys(value, [
+    'checkout_path', 'clean', 'detached', 'head', 'remote', 'renderer_blob', 'tree', 'workflow_template_blob',
+  ], label)
   assertString(value.checkout_path, `${label} checkout path`)
   if (!new Set(['https://github.com/watchout/ai-dev-framework.git', 'git@github.com:watchout/ai-dev-framework.git']).has(String(value.remote))
-    || value.head !== FLEET_RUNTIME_V1_CONTRACT.release_commit || value.tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+    || value.head !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref || value.tree !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree
+    || value.renderer_blob !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob
+    || value.workflow_template_blob !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob
     || value.clean !== true || value.detached !== true) {
-    return providerFail('STATE_RECORD_INVALID', `${label} differs from the exact detached release image`)
+    return providerFail('STATE_RECORD_INVALID', `${label} differs from the exact amendment-bound renderer source`)
   }
 }
 
@@ -1575,9 +1609,11 @@ function validatePhaseSemantics(
   }
   if (phaseName === 'STAGE_EXACT_PAYLOAD'
     && (phase.intent.release_commit !== request.subject.release_commit || phase.intent.release_tree !== request.subject.release_tree
+      || phase.intent.renderer_source_ref !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref
+      || phase.intent.renderer_source_tree !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree
       || typeof phase.intent.raw_output_path !== 'string' || typeof phase.intent.selected_payload_path !== 'string'
       || phase.intent.raw_output_path === phase.intent.selected_payload_path)) {
-    return providerFail('STATE_RECORD_INVALID', 'stage intent differs from the exact release or separate output roots')
+    return providerFail('STATE_RECORD_INVALID', 'stage intent differs from the exact release, renderer source, or separate output roots')
   }
   if (phaseName === 'VERIFY_EXACT_PAYLOAD' && typeof phase.intent.selected_payload_path !== 'string') {
     return providerFail('STATE_RECORD_INVALID', 'verify payload intent omits the selected payload root')
@@ -1665,10 +1701,10 @@ function validatePhaseSemantics(
     if (sha256(canonicalFleetRuntimeJson(manifestRows)) !== request.payload_digest) {
       return providerFail('STATE_RECORD_INVALID', 'selected blob manifest does not equal the sealed payload digest')
     }
-    assertReleaseCheckoutEvidence(evidence.release_checkout_before, 'release checkout before renderer')
-    assertReleaseCheckoutEvidence(evidence.release_checkout_after, 'release checkout after renderer')
-    if (canonicalFleetRuntimeJson(evidence.release_checkout_before) !== canonicalFleetRuntimeJson(evidence.release_checkout_after)) {
-      return providerFail('STATE_RECORD_INVALID', 'release checkout changed across renderer execution')
+    assertReleaseCheckoutEvidence(evidence.renderer_source_checkout_before, 'renderer source checkout before renderer')
+    assertReleaseCheckoutEvidence(evidence.renderer_source_checkout_after, 'renderer source checkout after renderer')
+    if (canonicalFleetRuntimeJson(evidence.renderer_source_checkout_before) !== canonicalFleetRuntimeJson(evidence.renderer_source_checkout_after)) {
+      return providerFail('STATE_RECORD_INVALID', 'renderer source checkout changed across renderer execution')
     }
   } else if (phaseName === 'VERIFY_EXACT_PAYLOAD') {
     const paths = assertPathRows(evidence.payload_paths, 'verified payload paths')
@@ -2578,22 +2614,41 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   async verifyReleaseCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
+    return this.verifyRendererSourceCheckout(path, stateDirectory)
+  }
+
+  async verifyRendererSourceCheckout(path: string, stateDirectory: string): Promise<Record<string, unknown>> {
     assertSafeStatePath(stateDirectory, path)
     if (!existsSync(path) || lstatSync(path).isSymbolicLink() || realpathSync(path) !== path
       || path === '/Users/yuji/Developer/ai-dev-framework') {
-      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release checkout must be a dedicated real state descendant')
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer source checkout must be a dedicated real state descendant')
     }
     const remote = (await this.run(['git', 'remote', 'get-url', 'origin'], path)).trim()
     const head = (await this.run(['git', 'rev-parse', 'HEAD'], path)).trim()
     const tree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], path)).trim()
     const status = await this.run(['git', 'status', '--porcelain=v1'], path)
     const branch = (await this.run(['git', 'branch', '--show-current'], path)).trim()
+    const rendererBlob = (await this.run(['git', 'rev-parse', `HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path}`], path)).trim()
+    const workflowTemplateBlob = (await this.run([
+      'git', 'rev-parse', `HEAD:${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_path}`,
+    ], path)).trim()
     if (!new Set(['https://github.com/watchout/ai-dev-framework.git', 'git@github.com:watchout/ai-dev-framework.git']).has(remote)
-      || head !== FLEET_RUNTIME_V1_CONTRACT.release_commit || tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+      || head !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref || tree !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree
+      || rendererBlob !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_blob
+      || workflowTemplateBlob !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.workflow_template_blob
       || status !== '' || branch !== '') {
-      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'release checkout origin, image, detached state, or cleanliness differs')
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer source origin, image, blobs, detached state, or cleanliness differs')
     }
-    return { checkout_path: path, remote, head, tree, clean: true, detached: true }
+    return {
+      checkout_path: path,
+      remote,
+      head,
+      tree,
+      renderer_blob: rendererBlob,
+      workflow_template_blob: workflowTemplateBlob,
+      clean: true,
+      detached: true,
+    }
   }
 
   phaseIntent(
@@ -2625,6 +2680,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         raw_output_path: join(context.invocation_directory, 'renderer-raw-output'),
         release_commit: request.subject.release_commit,
         release_tree: request.subject.release_tree,
+        renderer_source_ref: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref,
+        renderer_source_tree: FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.tree,
         selected_payload_path: join(context.invocation_directory, 'selected-payload'),
       }
     }
@@ -2851,24 +2908,73 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   private async payloadManifest(request: FleetRuntimeRequest): Promise<FleetRuntimePayloadManifest> {
-    const envelope = await this.ghJson<{ encoding: string; content: string }>(
-      'repos/watchout/ai-dev-framework/contents/releases/shirube-v4.1/target-payload-manifest.json?ref=9ab2be2476735d7ccc8bafb105a1dd0e7bff9df3',
-    )
-    if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') {
-      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest API encoding differs')
+    const contentAtPin = async (path: string): Promise<string> => {
+      const envelope = await this.ghJson<{ encoding: string; content: string }>(
+        `repos/${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.repository}/contents/${path}?ref=${FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref}`,
+      )
+      if (envelope.encoding !== 'base64' || typeof envelope.content !== 'string') {
+        return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment API encoding differs')
+      }
+      return Buffer.from(envelope.content.replace(/\s+/g, ''), 'base64').toString('utf8')
     }
-    const manifest = parseJson<FleetRuntimePayloadManifest>(
-      Buffer.from(envelope.content.replace(/\s+/g, ''), 'base64').toString('utf8'),
-      'payload manifest',
-    )
+    const amendmentRaw = await contentAtPin(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.path)
+    if (sha256(amendmentRaw) !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_byte_sha256) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment byte digest differs')
+    }
+    const amendment = parseJson<Record<string, unknown>>(amendmentRaw, 'payload amendment')
+    assertPlainRecord(amendment.original_immutable_artifact_binding, 'payload amendment original binding')
+    assertPlainRecord(amendment.release_binding, 'payload amendment release binding')
+    assertPlainRecord(amendment.previous_selected_payload, 'payload amendment previous selected payload')
+    assertPlainRecord(amendment.effective_selected_payload, 'payload amendment effective selected payload')
+    const originalBinding = amendment.original_immutable_artifact_binding
+    const releaseBinding = amendment.release_binding
+    const previousPayload = amendment.previous_selected_payload
+    const effectivePayload = amendment.effective_selected_payload
+    assertPlainRecord(effectivePayload.construction, 'payload amendment construction')
+    const construction = effectivePayload.construction
+    if (amendment.schema_version !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.schema_version
+      || amendment.artifact_state !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.artifact_state
+      || amendment.amendment_id !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_id
+      || amendment.amendment_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_sha256
+      || canonicalSelfDigest(amendment, 'amendment_sha256') !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.amendment_sha256
+      || originalBinding.path !== 'releases/shirube-v4.1/target-payload-manifest.json'
+      || originalBinding.byte_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.original_immutable_artifacts[1].byte_sha256
+      || originalBinding.mutation_forbidden !== true
+      || releaseBinding.repository !== FLEET_RUNTIME_V1_CONTRACT.release_repository
+      || releaseBinding.commit !== FLEET_RUNTIME_V1_CONTRACT.release_commit
+      || releaseBinding.tree !== FLEET_RUNTIME_V1_CONTRACT.release_tree
+      || releaseBinding.release_manifest_digest !== FLEET_RUNTIME_V1_CONTRACT.release_manifest_digest
+      || previousPayload.payload_records_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.previous_payload_digest
+      || construction.renderer_path !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_path
+      || construction.renderer_content_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.renderer_content_sha256
+      || effectivePayload.path_manifest_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256
+      || effectivePayload.payload_records_sha256 !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_payload_digest
+      || effectivePayload.path_count !== FLEET_RUNTIME_V1_LOCAL_PROVIDER.payload_path_count
+      || !Array.isArray(effectivePayload.files)) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload amendment binding differs')
+    }
+    const manifest: FleetRuntimePayloadManifest = {
+      files: effectivePayload.files as FleetRuntimePayloadManifest['files'],
+      payload_records_sha256: String(effectivePayload.payload_records_sha256),
+      path_count: Number(effectivePayload.path_count),
+    }
     if (!Array.isArray(manifest.files)) return providerFail('PAYLOAD_VERIFICATION_FAILED', 'payload manifest files are absent')
     const paths = manifest.files.map(file => file.path)
     assertExactFleetRuntimePathSet([...paths].sort(), paths, 'manifest ordering')
     if (manifest.path_count !== 24
       || canonicalFleetRuntimeJson(manifest.files) !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES)
       || manifest.files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !SHA256.test(file.sha256))
-      || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest) {
+      || sha256(`${paths.join('\n')}\n`) !== FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.effective_path_manifest_sha256
+      || sha256(canonicalFleetRuntimeJson(manifest.files)) !== request.payload_digest
+      || manifest.payload_records_sha256 !== request.payload_digest) {
       return providerFail('PAYLOAD_VERIFICATION_FAILED', 'aggregate payload manifest differs')
+    }
+    const immutableReadbacks = await Promise.all(FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.original_immutable_artifacts.map(async artifact => ({
+      artifact,
+      raw: await contentAtPin(artifact.path),
+    })))
+    if (immutableReadbacks.some(({ artifact, raw }) => sha256(raw) !== artifact.byte_sha256)) {
+      return providerFail('PAYLOAD_VERIFICATION_FAILED', 'original immutable release artifact byte digest differs')
     }
     return manifest
   }
@@ -2900,20 +3006,21 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       return { evidence: await this.verifyCheckout(checkout, context.state_directory, String(context.current_intent.expected_head ?? '') || undefined, String(context.current_intent.expected_tree ?? '') || undefined), protected_effect_count: 0 }
     }
     if (phase === 'STAGE_EXACT_PAYLOAD' || phase === 'VERIFY_EXACT_PAYLOAD') {
-      // The released renderer is the sole byte source. It is invoked with its
-      // frozen argv contract; the selected 24 records are then checked by the
-      // immutable payload manifest before any push is admitted.
+      // The release identity remains the sealed framework_ref, while the
+      // regenerated payload's renderer/template bytes come only from the
+      // immutable amendment commit. The selected 24 records are checked by the
+      // amendment manifest before any push is admitted.
       const rawOutput = join(context.invocation_directory, 'renderer-raw-output')
       const selectedPayload = join(context.invocation_directory, 'selected-payload')
       if (phase === 'STAGE_EXACT_PAYLOAD') {
         const manifest = await this.payloadManifest(request)
         const payloadPaths = manifest.files.map(file => file.path)
-        const releaseCheckout = join(context.invocation_directory, 'adf-release')
-        if (!existsSync(releaseCheckout)) {
-          await this.run(['git', 'clone', '--no-checkout', 'https://github.com/watchout/ai-dev-framework.git', releaseCheckout])
-          await this.run(['git', 'checkout', '--detach', FLEET_RUNTIME_V1_CONTRACT.release_commit], releaseCheckout)
+        const rendererSourceCheckout = join(context.invocation_directory, 'adf-payload-amendment')
+        if (!existsSync(rendererSourceCheckout)) {
+          await this.run(['git', 'clone', '--no-checkout', 'https://github.com/watchout/ai-dev-framework.git', rendererSourceCheckout])
+          await this.run(['git', 'checkout', '--detach', FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT.ref], rendererSourceCheckout)
         }
-        const releaseBefore = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
+        const rendererSourceBefore = await this.verifyRendererSourceCheckout(rendererSourceCheckout, context.state_directory)
         if (existsSync(rawOutput) || existsSync(selectedPayload)) {
           return providerFail('PAYLOAD_VERIFICATION_FAILED', 'renderer raw and selected payload directories must be newly absent')
         }
@@ -2928,8 +3035,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           '--cell-id', 'N40-P4-CANARY-VERIFY', '--mode', 'render', '--out', rawOutput, '--format', 'json',
           '--generated-at', '2026-08-12T00:00:00.000Z', '--fetched-at', '2026-08-12T00:00:00.000Z',
           '--generated-by', 'codex-cto', '--include-workflow-caller',
-        ], releaseCheckout)
-        const releaseAfter = await this.verifyReleaseCheckout(releaseCheckout, context.state_directory)
+        ], rendererSourceCheckout)
+        const rendererSourceAfter = await this.verifyRendererSourceCheckout(rendererSourceCheckout, context.state_directory)
         const selection = selectFleetRuntimePayloadFromRenderer({
           state_directory: context.state_directory,
           raw_output_path: rawOutput,
@@ -2959,8 +3066,8 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           evidence: {
             raw_output_path: rawOutput,
             selected_payload_path: selectedPayload,
-            release_checkout_before: releaseBefore,
-            release_checkout_after: releaseAfter,
+            renderer_source_checkout_before: rendererSourceBefore,
+            renderer_source_checkout_after: rendererSourceAfter,
             renderer_report_sha256: selection.renderer_report_sha256,
             raw_path_count: selection.raw_paths.length,
             raw_paths: selection.raw_paths,

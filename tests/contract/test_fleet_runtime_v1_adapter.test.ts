@@ -30,6 +30,7 @@ import {
 } from '../../core/fleet-runtime-v1-queue-observation'
 
 const SHA_A = `sha256:${'a'.repeat(64)}`
+const PREVIOUS_PAYLOAD_DIGEST = 'sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973'
 const OWNER_BODY = '{"decision":"N35 PASS","actor":"watchout","fixture":true}'
 const PREDECESSOR_BODY = '{"result":"PASS","fixture":true}'
 const EXECUTOR = { actor_agent_id: 'aun-runtime-executor', active_function: 'runtime_recovery_executor' }
@@ -458,8 +459,21 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
   test('binds the exact ADF release, graph, payload, and precondition contract', () => {
     expect(FLEET_RUNTIME_V1_CONTRACT.contract_sha256).toBe('sha256:da9184b1bd0df20b27c1a7cf19ae906bdd72076bc08f489352d14d1c922dfdf2')
     expect(FLEET_RUNTIME_V1_CONTRACT.graph_digest).toBe('sha256:8301ac86c6e32f642222cb62f6ea91490fe409f3ca767cd79a452f49be22187a')
-    expect(FLEET_RUNTIME_V1_CONTRACT.payload_digest).toBe('sha256:58eb8e4f49a8c2f42087ce17956bbef571d4650321e9c25e15726c0529c58973')
+    expect(FLEET_RUNTIME_V1_CONTRACT.payload_digest).toBe('sha256:59f2a8b1b82eabd38f93ed50467b53bf67d18c6ee06b48adae05293a4ce0ff03')
     expect(FLEET_RUNTIME_V1_TARGETS).toHaveLength(5)
+  })
+
+  test('accepts the regenerated payload tuple and rejects the predecessor tuple before every port', async () => {
+    const effective = requestFor()
+    expect(prepareFleetRuntimeV1Request(effective).payload_digest).toBe(FLEET_RUNTIME_V1_CONTRACT.payload_digest)
+
+    const predecessor = requestFor()
+    predecessor.subject.payload_digest = PREVIOUS_PAYLOAD_DIGEST
+    predecessor.payload_digest = PREVIOUS_PAYLOAD_DIGEST
+    resignRequest(predecessor)
+    const counters = emptyCounters()
+    await expectCode(() => executeFleetRuntimeV1(predecessor, portsFor(counters)), 'SUBJECT_MISMATCH')
+    expectNoPortCalls(counters)
   })
 
   test('binds the merged amendment identity and exact ordered five-target effective view', () => {
