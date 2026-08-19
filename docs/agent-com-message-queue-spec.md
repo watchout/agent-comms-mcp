@@ -1374,7 +1374,7 @@ provider admission を行う。
 | durable state | live admission | 結果 |
 |---|---|---|
 | なし | `SEALED_START`: sealed observation と fresh observation の鮮度・完全一致、zero queue | preflight PASS 後に初回 reservation |
-| `reserved` + exact digest | `DURABLE_RESUME`: owner / predecessor / remote preimage / queue / root-goal をすべて fresh readback。fresh queue observation 自体の鮮度・schema・identity・profile・registry・zero queue と immutable sealed binding との一致を検証する。期限切れ sealed observation は live freshness の根拠や live 観測の代替には使わない | 同じ durable invocation の残存 phase のみ reconciliation / resume |
+| `reserved` + exact digest | `DURABLE_RESUME`: owner / predecessor / remote preimage / queue / root-goal をすべて fresh readback。通常は fresh observation と immutable sealed binding の一致を検証する。canonical `resume_admission_binding` ref が指定された場合は、下記の exact tuple と admitted fresh observation ID を代替 binding として検証する。どちらの場合も fresh schema / identity / zero queue は必須 | 同じ durable invocation の残存 phase のみ reconciliation / resume |
 | `completed` + exact digest | live preflight なし | durable receipt を完全検証して original receipt を返す |
 | same key + different digest、または malformed state | live preflight なし | fail-closed |
 
@@ -1382,6 +1382,31 @@ provider admission を行う。
 preimage、root-goal readback、および preflight zero-write / zero-effect counters の検証を
 省略しない。fresh queue readback が nonzero、stale、または不正なら protected effect 前に
 停止する。
+
+binding 付き resume の入力は sealed request とは別の immutable ref とし、次の 2 値を両方
+指定する。片方だけ、不正 URL、digest 不一致、編集済み comment は fail-closed とする。
+
+- `FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_URL`: `watchout/ai-dev-framework` issue #576 の immutable comment URL
+- `FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_SHA256`: GitHub API が返した raw comment body の `sha256:<64hex>`
+
+provider は comment author `watchout`、`created_at == updated_at`、raw body digest、
+`shirube-v3/control_handoff/v1` identity、from/to function、および canonical
+`subject_invocation` / `resume_admission_binding` を検証する。binding の次の tuple は exact
+でなければならない。
+
+1. `durable_request_id`, `request_digest`, `idempotency_key`, `stage_id`, `operation`,
+   `repository`, `operational_subject_digest` が immutable request と一致する。
+2. `remote_head` が operation journal を read-only validation して得た
+   `PUSH_NORMAL_BRANCH.intent.head` と一致する。
+3. `sealed_queue_revision` が request の sealed revision と一致する。
+4. `admitted_fresh_queue_revision` と `admitted_fresh_queue_observation_id` が実行時に再観測した
+   fresh observation と一致し、pending / received / in_progress がすべて 0 である。
+
+preflight receipt は `fleet-runtime-v1/preflight-receipt/v3` とし、検証した raw handoff body、
+URL、raw digest、actor、timestamp、binding tuple を `resume_admission_binding` に格納する。
+binding なしの resume はこの field を `null` とし、従来の sealed equality を維持する。
+実測 observation が admitted ID からさらに drift した場合は `QUEUE_OBSERVATION_DRIFT` を
+typed fail-closed とし、successor binding が publish されるまで停止する。
 
 provider の durable reservation、operation journal、sealed request は resume 判定のために
 書き換えない。既に completed または readback で受領済みと確定した `PUSH_NORMAL_BRANCH`、
@@ -1657,6 +1682,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
 | 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |
 | 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
 | 2026-04-19 | v2.1.0: §5.3-5.4 run-bot.sh 安定動作要件追加 (end-to-end flow / signal coalescing / graceful shutdown / orphan reclaim / retry+dead-letter / truncate / loop 防止 / consumer 排他 / heartbeat / LLM prompt / subcommand 化 / migration 計画)。§4.1 暗黙 skip 廃止 → fail CLI 明示遷移。§3.2 message_queue に failed_reason + status CHECK 拡張。§4.2 send step 9 を fail/skip 3 分岐に。§8.1 状態遷移表に fail/skip/reclaim 追加。§11 エラーコードに failed_reason 標準値追加。§13.5 polling driver 記述整理。§14 Phase C 完了条件に v2.1.0 テストケース追加。外部 AI 3 round review 反映。 |

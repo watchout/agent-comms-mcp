@@ -20,6 +20,8 @@ import {
   type FleetRuntimePreimage,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
+  type FleetRuntimeResumeAdmissionBindingReadback,
+  type FleetRuntimeResumeAdmissionControlHandoffRef,
   type FleetRuntimeRootGoalReadback,
   type FleetRuntimeStage,
   type FleetRuntimeTarget,
@@ -233,6 +235,53 @@ function queueObservation(): FleetRuntimeQueueObservationV2 {
   }
 }
 
+function refreshQueueObservationId(observation: FleetRuntimeQueueObservationV2): void {
+  observation.queue.active_rows_sha256 = digestFleetRuntimeObservationMaterial(observation.queue.active_rows)
+  const material = { ...observation.queue }
+  delete (material as Partial<typeof material>).queue_observation_id
+  observation.queue.queue_observation_id = digestFleetRuntimeObservationMaterial(
+    fleetRuntimeQueueObservationIdMaterial(observation.source, material),
+  )
+}
+
+function resumeAdmissionFixture(
+  request: FleetRuntimeRequest,
+  observation: FleetRuntimeQueueObservationV2,
+  overrides: Partial<FleetRuntimeResumeAdmissionBindingReadback> = {},
+): { ref: FleetRuntimeResumeAdmissionControlHandoffRef; binding: FleetRuntimeResumeAdmissionBindingReadback } {
+  const controlHandoffId = 'CH-ARC-ADF576-N40-LIVE-EXECUTION-20260819-010'
+  const body = `<!-- shirube-v3:control-handoff:${controlHandoffId} -->\nfixture: true\n`
+  const ref = {
+    url: 'https://github.com/watchout/ai-dev-framework/issues/576#issuecomment-5342500000',
+    raw_api_body_sha256: rawDigest(body),
+  }
+  return {
+    ref,
+    binding: {
+      schema_version: 'fleet-runtime-v1/resume-admission-binding-readback/v1',
+      control_handoff_id: controlHandoffId,
+      control_handoff_url: ref.url,
+      control_handoff_raw_api_body_sha256: ref.raw_api_body_sha256,
+      control_handoff_raw_body: body,
+      control_handoff_actor: 'watchout',
+      control_handoff_created_at: '2026-08-19T13:03:36Z',
+      control_handoff_updated_at: '2026-08-19T13:03:36Z',
+      repository: request.target_scope.repositories[0],
+      stage_id: request.stage_id,
+      operation: request.operation,
+      durable_request_id: request.request_id,
+      request_digest: request.request_digest,
+      idempotency_key: request.idempotency_key,
+      remote_head: '7'.repeat(40),
+      operational_subject_digest: request.predecessor_receipt.subject_digest,
+      sealed_queue_revision: request.queue_observation.queue.revision,
+      admitted_fresh_queue_revision: observation.queue.revision,
+      admitted_fresh_queue_observation_id: observation.queue.queue_observation_id,
+      ...overrides,
+    },
+  }
+}
+
 function requestFor(
   stage: FleetRuntimeStage = 'N40-P4-CANARY-VERIFY',
   operation: FleetRuntimeOperation = 'CANARY_COLD_START',
@@ -297,7 +346,7 @@ function rootGoalReadback(target: FleetRuntimeTarget): FleetRuntimeRootGoalReadb
 
 function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceipt {
   return {
-    schema_version: 'fleet-runtime-v1/preflight-receipt/v2',
+    schema_version: 'fleet-runtime-v1/preflight-receipt/v3',
     request_digest: request.request_digest,
     observed_at: '2026-08-12T01:00:02Z',
     owner_decision_readback: structuredClone(request.owner_decision),
@@ -306,6 +355,7 @@ function preflightFor(request: FleetRuntimeRequest): FleetRuntimePreflightReceip
     predecessor_receipt_raw_body: PREDECESSOR_BODY,
     target_preimages: structuredClone(request.preimages),
     queue_observation: structuredClone(request.queue_observation),
+    resume_admission_binding: null,
     root_goal_readbacks: request.target_scope.repositories.map(rootGoalReadback),
     filesystem_write_count: 0,
     database_write_count: 0,
@@ -395,6 +445,7 @@ function portsFor(
     initialState?: FleetRuntimeInvocationState
     mutatePreflight?: (receipt: FleetRuntimePreflightReceipt, context: FleetRuntimePreflightContext) => void
     mutateReceipt?: (receipt: FleetRuntimeEffectReceipt) => void
+    observeResumeControlHandoff?: (value: FleetRuntimeResumeAdmissionControlHandoffRef | null) => void
   } = {},
 ): FleetRuntimePorts {
   const states = new Map<string, Awaited<ReturnType<FleetRuntimePorts['persistence']['load']>>>()
@@ -412,7 +463,10 @@ function portsFor(
   return {
     preflight: {
       inspect: request => inspect(request, { mode: 'SEALED_START' }),
-      inspectResume: request => inspect(request, { mode: 'DURABLE_RESUME' }),
+      inspectResume: (request, controlHandoff) => {
+        options.observeResumeControlHandoff?.(controlHandoff)
+        return inspect(request, { mode: 'DURABLE_RESUME' })
+      },
     },
     persistence: {
       async load(key) {
@@ -588,6 +642,98 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
       effect_port_calls: 1,
       protected_effects: 0,
     })
+  })
+
+  test('a durable resume consumes one exact control-handoff binding for an admitted fresh observation', async () => {
+    const counters = emptyCounters()
+    const request = requestFor()
+    const admitted = structuredClone(request.queue_observation)
+    admitted.observed_at = '2026-08-19T13:04:00Z'
+    admitted.queue.revision = '357'
+    admitted.kodama_registry.status = 'busy'
+    refreshQueueObservationId(admitted)
+    const fixture = resumeAdmissionFixture(request, admitted)
+    let observedRef: FleetRuntimeResumeAdmissionControlHandoffRef | null = null
+    const ports = portsFor(counters, {
+      initialState: {
+        idempotency_key: request.idempotency_key,
+        request_digest: request.request_digest,
+        status: 'reserved',
+        receipt: null,
+      },
+      observeResumeControlHandoff(value) { observedRef = value },
+      mutatePreflight(receipt) {
+        receipt.observed_at = admitted.observed_at
+        receipt.queue_observation = structuredClone(admitted)
+        receipt.resume_admission_binding = structuredClone(fixture.binding)
+      },
+    })
+
+    const receipt = await executeFleetRuntimeV1(request, ports, {
+      resume_admission_control_handoff: fixture.ref,
+    })
+
+    expect(receipt.result).toBe('PASS')
+    expect(observedRef).toEqual(fixture.ref)
+    expect(counters).toMatchObject({ preflight_reads: 1, invocation_reservations: 0, effect_port_calls: 1 })
+  })
+
+  test('resume admission binding rejects tuple mismatch and observation drift before effect', async () => {
+    for (const mutation of ['tuple', 'observation'] as const) {
+      const counters = emptyCounters()
+      const request = requestFor()
+      const admitted = structuredClone(request.queue_observation)
+      admitted.observed_at = '2026-08-19T13:04:00Z'
+      admitted.queue.revision = '357'
+      refreshQueueObservationId(admitted)
+      const fixture = resumeAdmissionFixture(request, admitted, mutation === 'tuple' ? { request_digest: SHA_A } : {})
+      const ports = portsFor(counters, {
+        initialState: {
+          idempotency_key: request.idempotency_key,
+          request_digest: request.request_digest,
+          status: 'reserved',
+          receipt: null,
+        },
+        mutatePreflight(receipt) {
+          receipt.observed_at = admitted.observed_at
+          receipt.queue_observation = structuredClone(admitted)
+          receipt.resume_admission_binding = structuredClone(fixture.binding)
+          if (mutation === 'observation') {
+            receipt.queue_observation.queue.revision = '358'
+            refreshQueueObservationId(receipt.queue_observation)
+          }
+        },
+      })
+      await expectCode(() => executeFleetRuntimeV1(request, ports, {
+        resume_admission_control_handoff: fixture.ref,
+      }), 'PREFLIGHT_RECEIPT_MISMATCH')
+      expect(counters).toEqual({ ...emptyCounters(), preflight_reads: 1 })
+    }
+  })
+
+  test('resume admission control handoff is rejected for a sealed start but ignored by an exact completed replay', async () => {
+    const request = requestFor()
+    const fixture = resumeAdmissionFixture(request, request.queue_observation)
+    const freshCounters = emptyCounters()
+    await expectCode(() => executeFleetRuntimeV1(request, portsFor(freshCounters), {
+      resume_admission_control_handoff: fixture.ref,
+    }), 'PREFLIGHT_RECEIPT_MISMATCH')
+    expectNoPortCalls(freshCounters)
+
+    const completedCounters = emptyCounters()
+    const completedReceipt = receiptFor(request)
+    const replay = await executeFleetRuntimeV1(request, portsFor(completedCounters, {
+      initialState: {
+        idempotency_key: request.idempotency_key,
+        request_digest: request.request_digest,
+        status: 'completed',
+        receipt: completedReceipt,
+      },
+    }), {
+      resume_admission_control_handoff: { url: 'invalid', raw_api_body_sha256: 'invalid' },
+    })
+    expect(replay).toEqual(completedReceipt)
+    expectNoPortCalls(completedCounters)
   })
 
   test('a durable same-key different-request collision fails before live preflight', async () => {

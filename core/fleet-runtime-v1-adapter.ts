@@ -144,6 +144,33 @@ export interface FleetRuntimePreimage {
 
 export type FleetRuntimeQueuePrecheck = FleetRuntimeQueueObservationV2
 
+export interface FleetRuntimeResumeAdmissionControlHandoffRef {
+  url: string
+  raw_api_body_sha256: string
+}
+
+export interface FleetRuntimeResumeAdmissionBindingReadback {
+  schema_version: 'fleet-runtime-v1/resume-admission-binding-readback/v1'
+  control_handoff_id: string
+  control_handoff_url: string
+  control_handoff_raw_api_body_sha256: string
+  control_handoff_raw_body: string
+  control_handoff_actor: 'watchout'
+  control_handoff_created_at: string
+  control_handoff_updated_at: string
+  repository: FleetRuntimeTarget
+  stage_id: FleetRuntimeStage
+  operation: FleetRuntimeOperation
+  durable_request_id: string
+  request_digest: string
+  idempotency_key: string
+  remote_head: string
+  operational_subject_digest: string
+  sealed_queue_revision: string
+  admitted_fresh_queue_revision: string
+  admitted_fresh_queue_observation_id: string
+}
+
 export interface FleetRuntimeRequest {
   schema_version: 'fleet-runtime-v1/request/v2'
   request_id: string
@@ -174,7 +201,7 @@ export interface FleetRuntimeRootGoalReadback {
 }
 
 export interface FleetRuntimePreflightReceipt {
-  schema_version: 'fleet-runtime-v1/preflight-receipt/v2'
+  schema_version: 'fleet-runtime-v1/preflight-receipt/v3'
   request_digest: string
   observed_at: string
   owner_decision_readback: FleetRuntimeOwnerDecision
@@ -183,6 +210,7 @@ export interface FleetRuntimePreflightReceipt {
   predecessor_receipt_raw_body: string
   target_preimages: FleetRuntimePreimage[]
   queue_observation: FleetRuntimeQueueObservationV2
+  resume_admission_binding: FleetRuntimeResumeAdmissionBindingReadback | null
   root_goal_readbacks: FleetRuntimeRootGoalReadback[]
   filesystem_write_count: 0
   database_write_count: 0
@@ -268,7 +296,14 @@ export interface FleetRuntimePreflightContext {
 
 export interface FleetRuntimePreflightPort {
   inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
-  inspectResume?(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
+  inspectResume?(
+    request: Readonly<FleetRuntimeRequest>,
+    controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+  ): Promise<FleetRuntimePreflightReceipt>
+}
+
+export interface FleetRuntimeExecutionOptions {
+  resume_admission_control_handoff?: FleetRuntimeResumeAdmissionControlHandoffRef | null
 }
 
 export interface FleetRuntimeEffectPort {
@@ -688,21 +723,97 @@ function assertRootGoalReadbacks(readbacks: FleetRuntimeRootGoalReadback[], targ
   })
 }
 
-function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
-  assertPreflightForContext(request, receipt, { mode: 'SEALED_START' })
+export function validateFleetRuntimeResumeAdmissionControlHandoffRef(
+  value: unknown,
+): FleetRuntimeResumeAdmissionControlHandoffRef {
+  assertExactKeys(value, ['url', 'raw_api_body_sha256'], 'resume admission control handoff ref')
+  if (!/^https:\/\/github\.com\/watchout\/ai-dev-framework\/issues\/576#issuecomment-[1-9][0-9]*$/.test(String(value.url ?? ''))) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission control handoff URL differs from the canonical control source')
+  }
+  assertSha256(value.raw_api_body_sha256, 'resume admission control handoff raw_api_body_sha256')
+  return {
+    url: value.url as string,
+    raw_api_body_sha256: value.raw_api_body_sha256 as string,
+  }
 }
 
-function assertResumePreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
-  assertPreflightForContext(request, receipt, { mode: 'DURABLE_RESUME' })
+const RESUME_ADMISSION_BINDING_KEYS = [
+  'schema_version', 'control_handoff_id', 'control_handoff_url', 'control_handoff_raw_api_body_sha256',
+  'control_handoff_raw_body', 'control_handoff_actor', 'control_handoff_created_at', 'control_handoff_updated_at',
+  'repository', 'stage_id', 'operation', 'durable_request_id', 'request_digest', 'idempotency_key', 'remote_head',
+  'operational_subject_digest', 'sealed_queue_revision', 'admitted_fresh_queue_revision',
+  'admitted_fresh_queue_observation_id',
+] as const
+
+export function validateFleetRuntimeResumeAdmissionBindingReadback(
+  request: FleetRuntimeRequest,
+  binding: FleetRuntimeResumeAdmissionBindingReadback,
+  expectedRef: FleetRuntimeResumeAdmissionControlHandoffRef,
+  observation: FleetRuntimeQueueObservationV2,
+): void {
+  assertExactKeys(binding, RESUME_ADMISSION_BINDING_KEYS, 'resume admission binding readback')
+  if (binding.schema_version !== 'fleet-runtime-v1/resume-admission-binding-readback/v1'
+    || !/^CH-ARC-ADF576-N40-LIVE-EXECUTION-[0-9]{8}-[0-9]{3}$/.test(binding.control_handoff_id)
+    || binding.control_handoff_url !== expectedRef.url
+    || binding.control_handoff_raw_api_body_sha256 !== expectedRef.raw_api_body_sha256
+    || typeof binding.control_handoff_raw_body !== 'string'
+    || digestRawBody(binding.control_handoff_raw_body) !== expectedRef.raw_api_body_sha256
+    || !binding.control_handoff_raw_body.startsWith(`<!-- shirube-v3:control-handoff:${binding.control_handoff_id} -->\n`)
+    || binding.control_handoff_actor !== 'watchout') {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission control handoff identity or immutable raw body differs')
+  }
+  assertTimestamp(binding.control_handoff_created_at, 'resume admission control handoff created_at')
+  assertTimestamp(binding.control_handoff_updated_at, 'resume admission control handoff updated_at')
+  if (binding.control_handoff_created_at !== binding.control_handoff_updated_at) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission control handoff was edited after publication')
+  }
+  if (request.target_scope.repositories.length !== 1
+    || binding.repository !== request.target_scope.repositories[0]
+    || binding.stage_id !== request.stage_id
+    || binding.operation !== request.operation
+    || binding.durable_request_id !== request.request_id
+    || binding.request_digest !== request.request_digest
+    || binding.idempotency_key !== request.idempotency_key
+    || binding.operational_subject_digest !== request.predecessor_receipt.subject_digest
+    || binding.sealed_queue_revision !== request.queue_observation.queue.revision) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission binding differs from the durable request tuple')
+  }
+  if (!COMMIT.test(binding.remote_head)) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission binding remote head is invalid')
+  }
+  assertSha256(binding.admitted_fresh_queue_observation_id, 'resume admission binding fresh observation id')
+  try {
+    assertFleetRuntimeFreshResumeObservation(
+      request.queue_observation,
+      observation,
+      Date.parse(observation.observed_at),
+      binding,
+    )
+  } catch (error) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', `resume admission binding does not admit the fresh observation: ${(error as Error).message}`)
+  }
+}
+
+function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
+  assertPreflightForContext(request, receipt, { mode: 'SEALED_START' }, null)
+}
+
+function assertResumePreflight(
+  request: FleetRuntimeRequest,
+  receipt: FleetRuntimePreflightReceipt,
+  controlHandoff: FleetRuntimeResumeAdmissionControlHandoffRef | null,
+): void {
+  assertPreflightForContext(request, receipt, { mode: 'DURABLE_RESUME' }, controlHandoff)
 }
 
 function assertPreflightForContext(
   request: FleetRuntimeRequest,
   receipt: FleetRuntimePreflightReceipt,
   context: FleetRuntimePreflightContext,
+  controlHandoff: FleetRuntimeResumeAdmissionControlHandoffRef | null,
 ): void {
-  assertExactKeys(receipt, ['schema_version', 'request_digest', 'observed_at', 'owner_decision_readback', 'owner_decision_raw_body', 'predecessor_receipt_readback', 'predecessor_receipt_raw_body', 'target_preimages', 'queue_observation', 'root_goal_readbacks', 'filesystem_write_count', 'database_write_count', 'queue_write_count', 'protected_effect_count'], 'preflight receipt')
-  if (receipt.schema_version !== 'fleet-runtime-v1/preflight-receipt/v2' || receipt.request_digest !== request.request_digest) {
+  assertExactKeys(receipt, ['schema_version', 'request_digest', 'observed_at', 'owner_decision_readback', 'owner_decision_raw_body', 'predecessor_receipt_readback', 'predecessor_receipt_raw_body', 'target_preimages', 'queue_observation', 'resume_admission_binding', 'root_goal_readbacks', 'filesystem_write_count', 'database_write_count', 'queue_write_count', 'protected_effect_count'], 'preflight receipt')
+  if (receipt.schema_version !== 'fleet-runtime-v1/preflight-receipt/v3' || receipt.request_digest !== request.request_digest) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'preflight receipt is not bound to the request')
   }
   assertTimestamp(receipt.observed_at, 'preflight.observed_at')
@@ -719,12 +830,30 @@ function assertPreflightForContext(
   if (!exact(receipt.target_preimages, request.preimages)) return fail('PREFLIGHT_RECEIPT_MISMATCH', 'live preimages differ from the request')
   try {
     if (context.mode === 'DURABLE_RESUME') {
-      assertFleetRuntimeFreshResumeObservation(
-        request.queue_observation,
-        receipt.queue_observation,
-        Date.parse(receipt.observed_at),
-      )
+      if (controlHandoff) {
+        if (!receipt.resume_admission_binding) {
+          return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission control handoff was not consumed')
+        }
+        validateFleetRuntimeResumeAdmissionBindingReadback(
+          request,
+          receipt.resume_admission_binding,
+          controlHandoff,
+          receipt.queue_observation,
+        )
+      } else {
+        if (receipt.resume_admission_binding !== null) {
+          return fail('PREFLIGHT_RECEIPT_MISMATCH', 'unrequested resume admission binding was consumed')
+        }
+        assertFleetRuntimeFreshResumeObservation(
+          request.queue_observation,
+          receipt.queue_observation,
+          Date.parse(receipt.observed_at),
+        )
+      }
     } else {
+      if (controlHandoff || receipt.resume_admission_binding !== null) {
+        return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission binding is invalid for a sealed start')
+      }
       const comparisonNow = Math.max(Date.parse(request.queue_observation.observed_at), Date.parse(receipt.queue_observation.observed_at))
       assertFleetRuntimeSealToPreObservation(request.queue_observation, receipt.queue_observation, comparisonNow)
     }
@@ -834,6 +963,7 @@ function assertInvocationState(state: FleetRuntimeInvocationState, request: Flee
 export async function executeFleetRuntimeV1(
   untrustedRequest: FleetRuntimeRequest,
   ports: FleetRuntimePorts,
+  options: FleetRuntimeExecutionOptions = {},
 ): Promise<FleetRuntimeEffectReceipt> {
   const request = prepareFleetRuntimeV1Request(untrustedRequest)
   const existing = await ports.persistence.load(request.idempotency_key)
@@ -845,13 +975,23 @@ export async function executeFleetRuntimeV1(
   const preflightContext: FleetRuntimePreflightContext = {
     mode: existing?.status === 'reserved' ? 'DURABLE_RESUME' : 'SEALED_START',
   }
+  const resumeAdmissionControlHandoff = options.resume_admission_control_handoff === undefined
+    ? null
+    : options.resume_admission_control_handoff === null
+      ? null
+      : validateFleetRuntimeResumeAdmissionControlHandoffRef(options.resume_admission_control_handoff)
+  if (preflightContext.mode === 'SEALED_START' && resumeAdmissionControlHandoff) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'resume admission control handoff is valid only for a durable resume')
+  }
   if (preflightContext.mode === 'DURABLE_RESUME' && !ports.preflight.inspectResume) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'durable resume preflight port is unavailable')
   }
   const preflight = preflightContext.mode === 'DURABLE_RESUME'
-    ? await ports.preflight.inspectResume!(request)
+    ? await ports.preflight.inspectResume!(request, resumeAdmissionControlHandoff)
     : await ports.preflight.inspect(request)
-  if (preflightContext.mode === 'DURABLE_RESUME') assertResumePreflight(request, preflight)
+  if (preflightContext.mode === 'DURABLE_RESUME') {
+    assertResumePreflight(request, preflight, resumeAdmissionControlHandoff)
+  }
   else assertPreflight(request, preflight)
 
   const reservation = await ports.persistence.reserve_once({

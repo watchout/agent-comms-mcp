@@ -9,6 +9,7 @@ import { assertNoProductionDestructiveMigration } from '../../db/destructive-mig
 import {
   FLEET_RUNTIME_QUEUE_OBSERVATION_V2,
   FleetRuntimeObservationError,
+  assertFleetRuntimeFreshResumeObservation,
   assertFleetRuntimePreToPostObservation,
   assertFleetRuntimeQueueObservationV2,
   assertFleetRuntimeSealToPreObservation,
@@ -284,6 +285,56 @@ describe('fleet runtime queue observation v2 semantic core', () => {
     expect(aba.queue.active_rows_sha256).toBe(sealed.queue.active_rows_sha256)
     expect(aba.queue.queue_observation_id).not.toBe(sealed.queue.queue_observation_id)
     expectObservationCode(() => assertFleetRuntimeSealToPreObservation(sealed, aba, now), 'QUEUE_OBSERVATION_DRIFT')
+  })
+
+  test('resume admission binding admits one exact fresh observation but still requires a zero queue', () => {
+    const now = Date.now()
+    const sealed = observation(now - 10_000)
+    const admitted = structuredClone(sealed)
+    admitted.observed_at = new Date(now).toISOString()
+    admitted.queue.revision = '12'
+    admitted.kodama_registry.status = 'busy'
+    refreshQueueIdentity(admitted)
+    const binding = {
+      sealed_queue_revision: sealed.queue.revision,
+      admitted_fresh_queue_revision: admitted.queue.revision,
+      admitted_fresh_queue_observation_id: admitted.queue.queue_observation_id,
+    }
+
+    expect(() => assertFleetRuntimeFreshResumeObservation(sealed, admitted, now, binding)).not.toThrow()
+
+    const drifted = structuredClone(admitted)
+    drifted.queue.revision = '13'
+    refreshQueueIdentity(drifted)
+    expectObservationCode(
+      () => assertFleetRuntimeFreshResumeObservation(sealed, drifted, now, binding),
+      'QUEUE_OBSERVATION_DRIFT',
+    )
+    expectObservationCode(
+      () => assertFleetRuntimeFreshResumeObservation(sealed, admitted, now, {
+        ...binding,
+        admitted_fresh_queue_observation_id: `sha256:${'f'.repeat(64)}`,
+      }),
+      'QUEUE_OBSERVATION_DRIFT',
+    )
+    expectObservationCode(
+      () => assertFleetRuntimeFreshResumeObservation(sealed, admitted, now, {
+        ...binding,
+        sealed_queue_revision: '10',
+      }),
+      'QUEUE_OBSERVATION_DRIFT',
+    )
+    const nonzero = structuredClone(admitted)
+    nonzero.queue.pending_count = 1
+    nonzero.queue.active_rows = [{ id: '1', status: 'pending' }]
+    refreshQueueIdentity(nonzero)
+    expectObservationCode(
+      () => assertFleetRuntimeFreshResumeObservation(sealed, nonzero, now, {
+        ...binding,
+        admitted_fresh_queue_observation_id: nonzero.queue.queue_observation_id,
+      }),
+      'QUEUE_OBSERVATION_DRIFT',
+    )
   })
 
   test('seal/pre and pre/post matrices reject stale, queue/profile/source drift and admit one fresh runtime delta', () => {
