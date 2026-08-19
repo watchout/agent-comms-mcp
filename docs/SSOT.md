@@ -657,6 +657,31 @@ agent_messagesテーブル（DB）ではなく、Discordプラットフォーム
 └── ...
 ```
 
+### 10.3 Fleet Runtime V1 の開始済み invocation 再開
+
+Fleet Runtime V1 provider の canonical executable contract は
+`core/fleet-runtime-v1-adapter.ts` と `core/fleet-runtime-v1-queue-observation.ts`、
+local provider は `core/fleet-runtime-v1-local-provider.ts` とする。詳細な順序と
+fail-closed 条件は従属仕様 `docs/agent-com-message-queue-spec.md` §13.7 に置く。
+
+provider は検証済み request の idempotency key で durable invocation を read-only
+load してから live preflight を選ぶ。
+
+- durable state がない新規 invocation は、request に sealed された queue observation
+  と fresh pre-effect observation の一致・鮮度を従来どおり必須とする。
+- exact request に `reserved` state がある開始済み invocation は、期限切れの sealed
+  observation を live admission に再利用しない。owner decision、predecessor、remote
+  preimage、queue、root-goal を再読し、resume 時点の fresh observation が全 admission
+  predicate（正規 schema / sealed binding との一致 / identity / profile / registry / zero queue）
+  を満たす場合だけ再開する。sealed observation の期限は resume の live freshness 判定に使わない。
+- exact request に `completed` state がある場合は、永続 receipt を検証してその original
+  receipt を返す。live preflight と protected subeffect は再実行しない。
+- same key / different request digest、壊れた durable state、fresh readback 不成立は、
+  reservation・journal・sealed request を変更せず fail-closed とする。
+
+resume は残存 phase の reconciliation であり、受領済み protected subeffect を再実行する
+権限ではない。
+
 ---
 
 ## 11. 開発ロードマップ
@@ -1167,6 +1192,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-19 | §10.3 Fleet Runtime V1 の durable STARTED resume 契約を追加。新規 sealed preflight、reserved の fresh re-observation、completed original receipt、same-key collision の境界を固定。 |
 | 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
 | 2026-03-28 | 追記：§5レート制限/ループ検出のDB永続化、§12エージェントID管理、§13 bot間認証、§14退行テスト |

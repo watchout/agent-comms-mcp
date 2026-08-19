@@ -15,6 +15,7 @@ import {
   type FleetRuntimeEffectReceipt,
   type FleetRuntimeInvocationState,
   type FleetRuntimeOperation,
+  type FleetRuntimePreflightContext,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
 } from '../../core/fleet-runtime-v1-adapter'
@@ -741,10 +742,29 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
   interruptOnceAt: FleetRuntimeLocalPhase | null = null
   reconcileInterrupted = true
   inspectCount = 0
+  readonly inspectModes: FleetRuntimePreflightContext['mode'][] = []
+  resumeObservedAt: string | null = null
 
   async inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
+    return this.inspectFor(request, 'SEALED_START')
+  }
+
+  async inspectResume(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
+    return this.inspectFor(request, 'DURABLE_RESUME')
+  }
+
+  private async inspectFor(
+    request: Readonly<FleetRuntimeRequest>,
+    mode: FleetRuntimePreflightContext['mode'],
+  ): Promise<FleetRuntimePreflightReceipt> {
     this.inspectCount += 1
-    return preflightFor(request as FleetRuntimeRequest)
+    this.inspectModes.push(mode)
+    const receipt = preflightFor(request as FleetRuntimeRequest)
+    if (mode === 'DURABLE_RESUME' && this.resumeObservedAt) {
+      receipt.observed_at = this.resumeObservedAt
+      receipt.queue_observation.observed_at = this.resumeObservedAt
+    }
+    return receipt
   }
 
   phaseIntent(
@@ -1206,7 +1226,8 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     const second = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
     expect(second).toEqual(first)
     expect([...system.calls.entries()]).toEqual(calls)
-    expect(system.inspectCount).toBe(2)
+    expect(system.inspectCount).toBe(1)
+    expect(system.inspectModes).toEqual(['SEALED_START'])
   })
 
   test('same key with another request digest is an atomic collision', async () => {
@@ -1219,7 +1240,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     await expectProviderCode(() => store.reserve_once(second), 'STATE_COLLISION')
   })
 
-  test('a missing external merge receipt stops after Draft PR and resumes only by readback', async () => {
+  test('a missing external merge receipt resumes with a fresh observation after the sealed observation expires', async () => {
     const stateDirectory = join(temporary('frv1-merge-wait'), 'state')
     const request = requestFor()
     const system = new FixtureSystem()
@@ -1230,10 +1251,12 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     )
     expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
     expect(system.calls.has('COLD_START_DISCORD_KODAMA')).toBe(false)
+    system.resumeObservedAt = '2026-08-15T08:40:00.000Z'
     system.mergeAvailable = true
     const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
     expect(receipt.operation).toBe('CANARY_COLD_START')
     expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
+    expect(system.inspectModes).toEqual(['SEALED_START', 'DURABLE_RESUME'])
   })
 
   test.each(['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'] as const)(

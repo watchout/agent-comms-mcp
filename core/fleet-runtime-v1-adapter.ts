@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  assertFleetRuntimeFreshResumeObservation,
   assertFleetRuntimeQueueObservationV2,
   assertFleetRuntimeSealToPreObservation,
   type FleetRuntimeQueueObservationV2,
@@ -259,8 +260,15 @@ export interface FleetRuntimePersistencePort {
   complete_once(state: FleetRuntimeInvocationState): Promise<FleetRuntimeInvocationState>
 }
 
+export type FleetRuntimePreflightMode = 'SEALED_START' | 'DURABLE_RESUME'
+
+export interface FleetRuntimePreflightContext {
+  mode: FleetRuntimePreflightMode
+}
+
 export interface FleetRuntimePreflightPort {
   inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
+  inspectResume?(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
 }
 
 export interface FleetRuntimeEffectPort {
@@ -681,6 +689,18 @@ function assertRootGoalReadbacks(readbacks: FleetRuntimeRootGoalReadback[], targ
 }
 
 function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
+  assertPreflightForContext(request, receipt, { mode: 'SEALED_START' })
+}
+
+function assertResumePreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
+  assertPreflightForContext(request, receipt, { mode: 'DURABLE_RESUME' })
+}
+
+function assertPreflightForContext(
+  request: FleetRuntimeRequest,
+  receipt: FleetRuntimePreflightReceipt,
+  context: FleetRuntimePreflightContext,
+): void {
   assertExactKeys(receipt, ['schema_version', 'request_digest', 'observed_at', 'owner_decision_readback', 'owner_decision_raw_body', 'predecessor_receipt_readback', 'predecessor_receipt_raw_body', 'target_preimages', 'queue_observation', 'root_goal_readbacks', 'filesystem_write_count', 'database_write_count', 'queue_write_count', 'protected_effect_count'], 'preflight receipt')
   if (receipt.schema_version !== 'fleet-runtime-v1/preflight-receipt/v2' || receipt.request_digest !== request.request_digest) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'preflight receipt is not bound to the request')
@@ -698,10 +718,18 @@ function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePref
   }
   if (!exact(receipt.target_preimages, request.preimages)) return fail('PREFLIGHT_RECEIPT_MISMATCH', 'live preimages differ from the request')
   try {
-    const comparisonNow = Math.max(Date.parse(request.queue_observation.observed_at), Date.parse(receipt.queue_observation.observed_at))
-    assertFleetRuntimeSealToPreObservation(request.queue_observation, receipt.queue_observation, comparisonNow)
+    if (context.mode === 'DURABLE_RESUME') {
+      assertFleetRuntimeFreshResumeObservation(
+        request.queue_observation,
+        receipt.queue_observation,
+        Date.parse(receipt.observed_at),
+      )
+    } else {
+      const comparisonNow = Math.max(Date.parse(request.queue_observation.observed_at), Date.parse(receipt.queue_observation.observed_at))
+      assertFleetRuntimeSealToPreObservation(request.queue_observation, receipt.queue_observation, comparisonNow)
+    }
   } catch (error) {
-    return fail('PREFLIGHT_RECEIPT_MISMATCH', `fresh queue observation differs from the request: ${(error as Error).message}`)
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', `queue admission observation is invalid: ${(error as Error).message}`)
   }
   assertQueueObservation(receipt.queue_observation, request.target_scope.repositories)
   assertRootGoalReadbacks(receipt.root_goal_readbacks, request.target_scope.repositories)
@@ -808,14 +836,23 @@ export async function executeFleetRuntimeV1(
   ports: FleetRuntimePorts,
 ): Promise<FleetRuntimeEffectReceipt> {
   const request = prepareFleetRuntimeV1Request(untrustedRequest)
-  const preflight = await ports.preflight.inspect(request)
-  assertPreflight(request, preflight)
-
   const existing = await ports.persistence.load(request.idempotency_key)
   if (existing) {
     assertInvocationState(existing, request)
     if (existing.status === 'completed') return structuredClone(existing.receipt!)
   }
+
+  const preflightContext: FleetRuntimePreflightContext = {
+    mode: existing?.status === 'reserved' ? 'DURABLE_RESUME' : 'SEALED_START',
+  }
+  if (preflightContext.mode === 'DURABLE_RESUME' && !ports.preflight.inspectResume) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'durable resume preflight port is unavailable')
+  }
+  const preflight = preflightContext.mode === 'DURABLE_RESUME'
+    ? await ports.preflight.inspectResume!(request)
+    : await ports.preflight.inspect(request)
+  if (preflightContext.mode === 'DURABLE_RESUME') assertResumePreflight(request, preflight)
+  else assertPreflight(request, preflight)
 
   const reservation = await ports.persistence.reserve_once({
     idempotency_key: request.idempotency_key,

@@ -34,6 +34,7 @@ import {
   type FleetRuntimeRootGoalReadback,
 } from './fleet-runtime-v1-adapter'
 import {
+  assertFleetRuntimeFreshResumeObservation,
   assertFleetRuntimePreToPostObservation,
   assertFleetRuntimeQueueObservationV2,
   assertFleetRuntimeSealToPreObservation,
@@ -1420,6 +1421,7 @@ export interface FleetRuntimeLocalSystem {
     context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<Record<string, unknown>> | Record<string, unknown>
   inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
+  inspectResume?(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt>
   performPhase(
     request: Readonly<FleetRuntimeRequest>,
     preflight: Readonly<FleetRuntimePreflightReceipt>,
@@ -2054,7 +2056,12 @@ export async function executeLocalFleetRuntimeV1(input: {
   ACTIVE_LOCAL_INVOCATIONS.add(input.request.idempotency_key)
   try {
     return await executeFleetRuntimeV1(input.request, {
-      preflight: { inspect: request => input.system.inspect(request) },
+      preflight: {
+        inspect: request => input.system.inspect(request),
+        inspectResume: request => input.system.inspectResume
+          ? input.system.inspectResume(request)
+          : providerFail('READBACK_INVALID', 'local system does not implement durable resume preflight'),
+      },
       persistence,
       effect,
     })
@@ -2532,6 +2539,17 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   async inspect(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
+    return this.inspectAdmission(readonlyRequest, false)
+  }
+
+  async inspectResume(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
+    return this.inspectAdmission(readonlyRequest, true)
+  }
+
+  private async inspectAdmission(
+    readonlyRequest: Readonly<FleetRuntimeRequest>,
+    durableResume: boolean,
+  ): Promise<FleetRuntimePreflightReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
     const [owner, predecessor, preimage, observation, rootRaw] = await Promise.all([
       this.comment(request.owner_decision.url),
@@ -2558,9 +2576,13 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
     validateFleetRuntimeImmutableSemantics(request, owner.body, predecessor.body, companion?.body)
     try {
-      assertFleetRuntimeSealToPreObservation(request.queue_observation, observation, this.nowMs())
+      if (durableResume) {
+        assertFleetRuntimeFreshResumeObservation(request.queue_observation, observation, this.nowMs())
+      } else {
+        assertFleetRuntimeSealToPreObservation(request.queue_observation, observation, this.nowMs())
+      }
     } catch (error) {
-      return providerFail('READBACK_INVALID', `sealed observation preflight differs: ${(error as Error).message}`)
+      return providerFail('READBACK_INVALID', `queue admission preflight differs: ${(error as Error).message}`)
     }
     return {
       schema_version: 'fleet-runtime-v1/preflight-receipt/v2',

@@ -1365,6 +1365,28 @@ client.login(process.env.DISCORD_TOKEN);
 各botのtmuxセッションでバックグラウンド実行。
 メッセージの送受信に影響なし。起動しなくても機能に問題なし。
 
+### 13.7 Fleet Runtime V1 provider resume
+
+本節は `docs/SSOT.md` §10.3 に従属する。Fleet Runtime V1 の request は immutable
+であり、`request_digest` と `idempotency_key` を再計算・検証した後、次の順序で
+provider admission を行う。
+
+| durable state | live admission | 結果 |
+|---|---|---|
+| なし | `SEALED_START`: sealed observation と fresh observation の鮮度・完全一致、zero queue | preflight PASS 後に初回 reservation |
+| `reserved` + exact digest | `DURABLE_RESUME`: owner / predecessor / remote preimage / queue / root-goal をすべて fresh readback。fresh queue observation 自体の鮮度・schema・identity・profile・registry・zero queue と immutable sealed binding との一致を検証する。期限切れ sealed observation は live freshness の根拠や live 観測の代替には使わない | 同じ durable invocation の残存 phase のみ reconciliation / resume |
+| `completed` + exact digest | live preflight なし | durable receipt を完全検証して original receipt を返す |
+| same key + different digest、または malformed state | live preflight なし | fail-closed |
+
+`DURABLE_RESUME` でも immutable owner / predecessor body digest、semantic binding、target
+preimage、root-goal readback、および preflight zero-write / zero-effect counters の検証を
+省略しない。fresh queue readback が nonzero、stale、または不正なら protected effect 前に
+停止する。
+
+provider の durable reservation、operation journal、sealed request は resume 判定のために
+書き換えない。既に completed または readback で受領済みと確定した `PUSH_NORMAL_BRANCH`、
+`CREATE_DRAFT_PR`、`COLD_START_DISCORD_KODAMA` を再実行してはならない。
+
 ---
 
 ## 14. Phase C 完了条件 (CEO 承認 2026-04-17)
@@ -1635,6 +1657,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |
 | 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
 | 2026-04-19 | v2.1.0: §5.3-5.4 run-bot.sh 安定動作要件追加 (end-to-end flow / signal coalescing / graceful shutdown / orphan reclaim / retry+dead-letter / truncate / loop 防止 / consumer 排他 / heartbeat / LLM prompt / subcommand 化 / migration 計画)。§4.1 暗黙 skip 廃止 → fail CLI 明示遷移。§3.2 message_queue に failed_reason + status CHECK 拡張。§4.2 send step 9 を fail/skip 3 分岐に。§8.1 状態遷移表に fail/skip/reclaim 追加。§11 エラーコードに failed_reason 標準値追加。§13.5 polling driver 記述整理。§14 Phase C 完了条件に v2.1.0 テストケース追加。外部 AI 3 round review 反映。 |
 | 2026-04-19 | §13.1 / §13.5.1 / §5.3 / §20 更新。in-process signal bus 抽象を統一実装に整理 (後に ADR-050 で削除、本行は当時の暫定状態の歴史記録)。§13.5.1 を「メッセージ配信メカニズム」に改題、primary=signal / secondary=MCP notification / fallback=polling の 3 層構造化。§5.3 に `run-bot.sh` event-driven bot runner 記述追加、§20 に PgMessageBus / SqliteMessageBus / restart-bot.sh LLM 初期指示 廃止追加。docs-only (実装は後続 PR)。 |

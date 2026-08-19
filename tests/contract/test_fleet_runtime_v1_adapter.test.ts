@@ -13,8 +13,10 @@ import {
   frozenFleetRuntimePreimage,
   prepareFleetRuntimeV1Request,
   type FleetRuntimeEffectReceipt,
+  type FleetRuntimeInvocationState,
   type FleetRuntimeOperation,
   type FleetRuntimePorts,
+  type FleetRuntimePreflightContext,
   type FleetRuntimePreimage,
   type FleetRuntimePreflightReceipt,
   type FleetRuntimeRequest,
@@ -390,20 +392,27 @@ function emptyCounters(): Counters {
 function portsFor(
   counters: Counters,
   options: {
-    mutatePreflight?: (receipt: FleetRuntimePreflightReceipt) => void
+    initialState?: FleetRuntimeInvocationState
+    mutatePreflight?: (receipt: FleetRuntimePreflightReceipt, context: FleetRuntimePreflightContext) => void
     mutateReceipt?: (receipt: FleetRuntimeEffectReceipt) => void
   } = {},
 ): FleetRuntimePorts {
   const states = new Map<string, Awaited<ReturnType<FleetRuntimePorts['persistence']['load']>>>()
+  if (options.initialState) states.set(options.initialState.idempotency_key, structuredClone(options.initialState))
   const effectReceipts = new Map<string, FleetRuntimeEffectReceipt>()
+  const inspect = async (
+    request: Readonly<FleetRuntimeRequest>,
+    context: FleetRuntimePreflightContext,
+  ): Promise<FleetRuntimePreflightReceipt> => {
+    counters.preflight_reads += 1
+    const receipt = preflightFor(request as FleetRuntimeRequest)
+    options.mutatePreflight?.(receipt, context)
+    return receipt
+  }
   return {
     preflight: {
-      async inspect(request) {
-        counters.preflight_reads += 1
-        const receipt = preflightFor(request as FleetRuntimeRequest)
-        options.mutatePreflight?.(receipt)
-        return receipt
-      },
+      inspect: request => inspect(request, { mode: 'SEALED_START' }),
+      inspectResume: request => inspect(request, { mode: 'DURABLE_RESUME' }),
     },
     persistence: {
       async load(key) {
@@ -541,12 +550,82 @@ describe('FLEET_RUNTIME_V1 no-live-effect executable adapter', () => {
     expect(first.result).toBe('PASS')
     expect(first.per_target[0].preimage).toEqual(EFFECTIVE_PREIMAGES[0])
     expect(counters).toEqual({
-      preflight_reads: 2,
+      preflight_reads: 1,
       invocation_reservations: 1,
       invocation_completions: 1,
       effect_port_calls: 1,
       protected_effects: 0,
     })
+  })
+
+  test('a durable reserved exact request uses a fresh resume observation after its seal expires', async () => {
+    const counters = emptyCounters()
+    const request = requestFor('N40-P4-CANARY-VERIFY', 'CANARY_COLD_START', 'watchout/kodama')
+    const modes: string[] = []
+    const ports = portsFor(counters, {
+      initialState: {
+        idempotency_key: request.idempotency_key,
+        request_digest: request.request_digest,
+        status: 'reserved',
+        receipt: null,
+      },
+      mutatePreflight(receipt, context) {
+        modes.push(context.mode)
+        const freshObservedAt = '2026-08-12T01:10:02Z'
+        receipt.observed_at = freshObservedAt
+        receipt.queue_observation.observed_at = freshObservedAt
+      },
+    })
+
+    const receipt = await executeFleetRuntimeV1(request, ports)
+
+    expect(receipt.result).toBe('PASS')
+    expect(modes).toEqual(['DURABLE_RESUME'])
+    expect(counters).toEqual({
+      preflight_reads: 1,
+      invocation_reservations: 0,
+      invocation_completions: 1,
+      effect_port_calls: 1,
+      protected_effects: 0,
+    })
+  })
+
+  test('a durable same-key different-request collision fails before live preflight', async () => {
+    const counters = emptyCounters()
+    const request = requestFor()
+    const ports = portsFor(counters, {
+      initialState: {
+        idempotency_key: request.idempotency_key,
+        request_digest: SHA_A,
+        status: 'reserved',
+        receipt: null,
+      },
+    })
+
+    await expectCode(() => executeFleetRuntimeV1(request, ports), 'PERSISTED_INVOCATION_MISMATCH')
+    expectNoPortCalls(counters)
+  })
+
+  test('a durable resume rejects fresh profile drift before reservation or effect', async () => {
+    const counters = emptyCounters()
+    const request = requestFor()
+    const ports = portsFor(counters, {
+      initialState: {
+        idempotency_key: request.idempotency_key,
+        request_digest: request.request_digest,
+        status: 'reserved',
+        receipt: null,
+      },
+      mutatePreflight(receipt) {
+        const freshObservedAt = '2026-08-12T01:10:02Z'
+        receipt.observed_at = freshObservedAt
+        receipt.queue_observation.observed_at = freshObservedAt
+        receipt.queue_observation.executor_profile.profile_revision += 1
+      },
+    })
+
+    await expectCode(() => executeFleetRuntimeV1(request, ports), 'PREFLIGHT_RECEIPT_MISMATCH')
+    expect(counters).toEqual({ ...emptyCounters(), preflight_reads: 1 })
   })
 
   test('permits five-target placement while preserving aun-platform as placement-only', async () => {
