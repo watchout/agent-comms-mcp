@@ -370,6 +370,74 @@ if (childFixture) {
     expect(readdirSync(dir).filter((name) => name === '.lock' || name.startsWith('.lock.release-'))).toEqual([])
   })
 
+  test('release recovery persists its receipt only after exact same-run lock ownership excludes a competing resume', () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000024')
+    const releasePath = join(dir, `.lock.release-${record.nonce}`)
+    seedDirectory(releasePath, record)
+    const authorizedAt = '2026-08-14T00:00:00.000Z'
+    new FileBootstrapStateStore(root).save(releaseJournal(root, agentId, runId, {
+      lock_release_authorized_at: authorizedAt,
+      lock_released_at: null,
+      lock_release_owner_nonce: null,
+    }))
+
+    let observedOwnedWriteBoundary = false
+    const recovery = new FileBootstrapStateStore(root, {
+      acquireDurability: (event) => {
+        if (event !== 'after-ready-reread') return
+        observedOwnedWriteBoundary = true
+        expect(JSON.parse(readFileSync(join(dir, '.lock', 'owner.json'), 'utf8'))).toMatchObject({
+          agent_id: agentId, run_id: runId, pid: process.pid,
+        })
+        expect(recovery.load(agentId, runId)).toMatchObject({
+          lock_release_authorized_at: authorizedAt,
+          lock_released_at: null,
+          lock_release_owner_nonce: null,
+        })
+        try {
+          new FileBootstrapStateStore(root).acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+          throw new Error('competing resume unexpectedly acquired the live recovery lock')
+        } catch (error) {
+          expect(error).toMatchObject({ blockingRunId: runId })
+        }
+      },
+    })
+
+    recovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(observedOwnedWriteBoundary).toBe(true)
+    expect(recovery.load(agentId, runId)).toMatchObject({
+      lock_release_authorized_at: authorizedAt,
+      lock_release_owner_nonce: record.nonce,
+    })
+    expect(recovery.load(agentId, runId)?.lock_released_at).toBeString()
+    recovery.releaseLock(agentId, runId)
+  })
+
+  test('same-run recovery restores a missing receipt from a completed release archive under its new lock', () => {
+    const { root, agentId, runId } = fixture()
+    const dir = join(root, agentId)
+    const record = deadRecord(agentId, runId, '00000000-0000-4000-8000-000000000025')
+    const completedReleasePath = join(dir, `.lock.completed-release-${record.nonce}`)
+    seedDirectory(completedReleasePath, record)
+    const authorizedAt = '2026-08-14T00:00:00.000Z'
+    new FileBootstrapStateStore(root).save(releaseJournal(root, agentId, runId, {
+      lock_release_authorized_at: authorizedAt,
+      lock_released_at: null,
+      lock_release_owner_nonce: null,
+    }))
+
+    const recovery = new FileBootstrapStateStore(root)
+    recovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
+    expect(recovery.load(agentId, runId)).toMatchObject({
+      lock_release_authorized_at: authorizedAt,
+      lock_release_owner_nonce: record.nonce,
+    })
+    expect(recovery.load(agentId, runId)?.lock_released_at).toBeString()
+    recovery.releaseLock(agentId, runId)
+  })
+
   test('a distinct observer durability-closes a post-archive-rename crash before publishing', () => {
     const { root, agentId } = fixture()
     const dir = join(root, agentId)
@@ -753,15 +821,22 @@ if (childFixture) {
 
     const trace: string[] = []
     const recovery = new FileBootstrapStateStore(root, {
-      readyObserverDurability: (event) => trace.push(event),
+      readyObserverDurability: (event) => {
+        trace.push(`ready:${event}`)
+        if (event === 'after-strict-reread') {
+          expect(readdirSync(dir).some((name) => name.startsWith('.lock.reclaim-'))).toBe(false)
+        }
+      },
+      reclaimDurability: (event) => trace.push(`reclaim:${event}`),
     })
     recovery.acquireLock(agentId, runId, { reclaimStaleSameRun: true })
-    expect(trace).toEqual([
-      'after-marker-fsync',
-      'after-lock-fsync',
-      'after-agent-fsync',
-      'after-strict-reread',
+    expect(trace.slice(0, 4)).toEqual([
+      'ready:after-marker-fsync',
+      'ready:after-lock-fsync',
+      'ready:after-agent-fsync',
+      'ready:after-strict-reread',
     ])
+    expect(trace.indexOf('ready:after-strict-reread')).toBeLessThan(trace.indexOf('reclaim:after-marker-mkdir'))
     const reclaim = readdirSync(dir).find((name) => name.startsWith('.lock.reclaim-'))!
     expect(readdirSync(join(dir, reclaim)).sort()).toEqual([
       'acquire.ready', 'owner.json', 'reclaim.complete',

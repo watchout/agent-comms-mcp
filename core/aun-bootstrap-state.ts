@@ -76,6 +76,10 @@ export function redactBootstrapValue(value: unknown, key = ''): unknown {
   return value
 }
 
+export function bootstrapMutationManifestDigest(mutations: unknown): string {
+  return bootstrapDigest(redactBootstrapValue(mutations))
+}
+
 export function bootstrapStateRoot(home?: string, env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.AUN_HOME?.trim()
   const aunHome = configured
@@ -90,6 +94,16 @@ export interface BootstrapStateStore {
   load(agentId: string, runId: string): BootstrapRunState | null
   save(state: BootstrapRunState): void
   findLatestReady(agentId: string, inputDigest: string): BootstrapRunState | null
+}
+
+export class BootstrapLockBusyError extends Error {
+  readonly blockingRunId: string | null
+
+  constructor(message: string, blockingRunId: string | null = null) {
+    super(message)
+    this.name = 'BootstrapLockBusyError'
+    this.blockingRunId = blockingRunId
+  }
 }
 
 type BootstrapLockRecord = {
@@ -618,7 +632,7 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     const path = this.lockPath(agentId)
     const currentIdentity = processIdentityState(process.pid)
     if (currentIdentity.status !== 'alive') {
-      throw new Error('NO_GO_BOOTSTRAP_BUSY: current process start identity is unavailable')
+      throw new BootstrapLockBusyError('NO_GO_BOOTSTRAP_BUSY: current process start identity is unavailable')
     }
     const record: BootstrapLockRecord = {
       schema_version: 'aun-bootstrap-lock/v1',
@@ -632,6 +646,11 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
     let staged: string | null = null
     let publishedPending = false
     let readyCommitted = false
+    let recoveredReleaseReceipt: {
+      authorizedAt: string
+      releasedAt: string
+      ownerNonce: string
+    } | null = null
     try {
       for (const name of readdirSync(dir).filter((entry) => entry.startsWith('.lock.')).sort()) {
         const candidatePath = join(dir, name)
@@ -642,6 +661,50 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
             throw new Error('completed release archive is corrupt')
           }
           this.closeObservedCompletedRelease(dir, candidatePath, name, archived)
+          if (options.reclaimStaleSameRun && this.exactSameRunStale(archived, agentId, runId)) {
+            const releaseState = this.load(agentId, runId)
+            if (!releaseState || releaseState.agent_id !== agentId || releaseState.run_id !== runId
+              || releaseState.schema_version !== 'shirube-v3/aun-bootstrap-run/v1'
+              || !releaseState.lock_release_authorized_at
+              || !Number.isFinite(Date.parse(releaseState.lock_release_authorized_at))
+              || new Date(releaseState.lock_release_authorized_at).toISOString() !== releaseState.lock_release_authorized_at) {
+              throw new BootstrapLockBusyError('completed release archive journal is corrupt or unauthorized', archived.run_id)
+            }
+            const authorizedAt = Date.parse(releaseState.lock_release_authorized_at)
+            const hasOwnerNonce = Object.prototype.hasOwnProperty.call(releaseState, 'lock_release_owner_nonce')
+            if (releaseState.lock_released_at != null
+              && (!Number.isFinite(Date.parse(releaseState.lock_released_at))
+                || new Date(releaseState.lock_released_at).toISOString() !== releaseState.lock_released_at
+                || Date.parse(releaseState.lock_released_at) < authorizedAt)) {
+              throw new BootstrapLockBusyError('completed release archive journal receipt is corrupt', archived.run_id)
+            }
+            const exactReceiptComplete = releaseState.lock_released_at != null
+              && hasOwnerNonce
+              && releaseState.lock_release_owner_nonce === archived.nonce
+            const supersededArchive = releaseState.lock_released_at != null
+              && hasOwnerNonce
+              && releaseState.lock_release_owner_nonce != null
+              && releaseState.lock_release_owner_nonce !== archived.nonce
+            if (!exactReceiptComplete && !supersededArchive) {
+              if (hasOwnerNonce && releaseState.lock_release_owner_nonce != null
+                && releaseState.lock_release_owner_nonce !== archived.nonce) {
+                throw new BootstrapLockBusyError('completed release archive owner receipt is corrupt', archived.run_id)
+              }
+              if (releaseState.lock_released_at != null && hasOwnerNonce
+                && releaseState.lock_release_owner_nonce == null) {
+                throw new BootstrapLockBusyError('completed release archive owner receipt is incomplete', archived.run_id)
+              }
+              if (recoveredReleaseReceipt) {
+                throw new BootstrapLockBusyError('multiple incomplete release archives block exact recovery', archived.run_id)
+              }
+              recoveredReleaseReceipt = {
+                authorizedAt: releaseState.lock_release_authorized_at,
+                releasedAt: releaseState.lock_released_at
+                  ?? new Date(Math.max(Date.now(), authorizedAt)).toISOString(),
+                ownerNonce: archived.nonce,
+              }
+            }
+          }
           continue
         }
         if (name.startsWith(LOCK_COMPLETED_STAGE_PREFIX)) {
@@ -677,53 +740,50 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
           || !releaseState.lock_release_authorized_at
           || !Number.isFinite(Date.parse(releaseState.lock_release_authorized_at))
           || new Date(releaseState.lock_release_authorized_at).toISOString() !== releaseState.lock_release_authorized_at) {
-          throw new Error('release marker is live, foreign, corrupt, or unauthorized')
+          throw new BootstrapLockBusyError(
+            'release marker is live, foreign, corrupt, or unauthorized',
+            released?.run_id ?? null,
+          )
         }
         const authorizedAt = Date.parse(releaseState.lock_release_authorized_at)
+        let recoveredReleasedAt = releaseState.lock_released_at
         if (!releaseState.lock_released_at) {
           if (releaseState.lock_release_owner_nonce != null
             && releaseState.lock_release_owner_nonce !== released.nonce) {
-            throw new Error('release marker journal owner receipt is corrupt')
+            throw new BootstrapLockBusyError('release marker journal owner receipt is corrupt', released.run_id)
           }
-          releaseState.lock_released_at = new Date(Math.max(Date.now(), authorizedAt)).toISOString()
-          releaseState.lock_release_owner_nonce = released.nonce
-          releaseState.updated_at = releaseState.lock_released_at
-          this.save(releaseState)
-          const persisted = this.load(agentId, runId)
-          if (!persisted || persisted.agent_id !== agentId || persisted.run_id !== runId
-            || persisted.lock_release_authorized_at !== releaseState.lock_release_authorized_at
-            || persisted.lock_released_at !== releaseState.lock_released_at
-            || persisted.lock_release_owner_nonce !== released.nonce) {
-            throw new Error('release marker journal receipt readback mismatch')
-          }
+          recoveredReleasedAt = new Date(Math.max(Date.now(), authorizedAt)).toISOString()
         } else if (!Number.isFinite(Date.parse(releaseState.lock_released_at))
           || new Date(releaseState.lock_released_at).toISOString() !== releaseState.lock_released_at) {
-          throw new Error('release marker journal receipt is corrupt')
+          throw new BootstrapLockBusyError('release marker journal receipt is corrupt', released.run_id)
         }
-        const releasedAt = Date.parse(releaseState.lock_released_at)
-        if (releasedAt < authorizedAt) throw new Error('release marker journal receipt precedes authorization')
+        const releasedAt = Date.parse(recoveredReleasedAt!)
+        if (releasedAt < authorizedAt) {
+          throw new BootstrapLockBusyError('release marker journal receipt precedes authorization', released.run_id)
+        }
 
         const legacyNonceMissing = !Object.prototype.hasOwnProperty.call(releaseState, 'lock_release_owner_nonce')
         if (legacyNonceMissing) {
           const beforeBind = readBootstrapLockRecord(releasePath, agentId)
           if (!beforeBind || !sameLockRecord(beforeBind, released)) {
-            throw new Error('release marker changed before legacy receipt binding')
-          }
-          releaseState.lock_release_owner_nonce = released.nonce
-          this.save(releaseState)
-          const persisted = this.load(agentId, runId)
-          if (!persisted || persisted.agent_id !== agentId || persisted.run_id !== runId
-            || persisted.lock_release_authorized_at !== releaseState.lock_release_authorized_at
-            || persisted.lock_released_at !== releaseState.lock_released_at
-            || persisted.lock_release_owner_nonce !== released.nonce) {
-            throw new Error('legacy release marker journal receipt binding readback mismatch')
+            throw new BootstrapLockBusyError('release marker changed before legacy receipt binding', released.run_id)
           }
         } else if (releaseState.lock_release_owner_nonce !== released.nonce) {
-          throw new Error('release marker journal owner receipt is corrupt')
+          if (releaseState.lock_released_at || releaseState.lock_release_owner_nonce != null) {
+            throw new BootstrapLockBusyError('release marker journal owner receipt is corrupt', released.run_id)
+          }
         }
         const reread = readBootstrapLockRecord(releasePath, agentId)
         if (!reread || !sameLockRecord(reread, released)) {
-          throw new Error('release marker changed before recovery cleanup')
+          throw new BootstrapLockBusyError('release marker changed before recovery cleanup', released.run_id)
+        }
+        if (recoveredReleaseReceipt) {
+          throw new BootstrapLockBusyError('multiple release markers block exact recovery', released.run_id)
+        }
+        recoveredReleaseReceipt = {
+          authorizedAt: releaseState.lock_release_authorized_at,
+          releasedAt: recoveredReleasedAt!,
+          ownerNonce: released.nonce,
         }
         archiveCompletedRelease(dir, releasePath, released, this.testHooks.afterCompletedReleaseRename)
       }
@@ -737,7 +797,10 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
         if (!options.reclaimStaleSameRun || !reclaimed
           || name !== `${LOCK_RECLAIM_PREFIX}${reclaimed.nonce}`
           || !this.exactSameRunStale(reclaimed, agentId, runId)) {
-          throw new Error('reclaim marker is live, foreign, or corrupt')
+          throw new BootstrapLockBusyError(
+            'reclaim marker is live, foreign, or corrupt',
+            reclaimed?.run_id ?? null,
+          )
         }
         this.completeAndVerifyReclaim(reclaimPath, reclaimed)
       }
@@ -750,7 +813,10 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
         } else if (!options.reclaimStaleSameRun || !owner
           || (phase !== 'ready' && phase !== 'legacy_ready')
           || !this.exactSameRunStale(owner, agentId, runId)) {
-          throw new Error(`agent lock is ${owner ? `owned by run ${owner.run_id}` : 'corrupt'}`)
+          throw new BootstrapLockBusyError(
+            `agent lock is ${owner ? `owned by run ${owner.run_id}` : 'corrupt'}`,
+            owner?.run_id ?? null,
+          )
         } else {
           // A visible ready marker is not itself a durability receipt. Close the
           // creator's rename window before moving the generation to reclaim, or
@@ -774,6 +840,35 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       this.finalizePublishedPending(dir, path, record)
       readyCommitted = true
       this.acquiredLocks.set(agentId, record)
+      if (recoveredReleaseReceipt) {
+        const owned = readBootstrapLockRecord(path, agentId)
+        const latest = this.load(agentId, runId)
+        if (!owned || !sameLockRecord(owned, record) || bootstrapLockPhase(path) !== 'ready'
+          || !latest || latest.agent_id !== agentId || latest.run_id !== runId
+          || latest.schema_version !== 'shirube-v3/aun-bootstrap-run/v1'
+          || latest.lock_release_authorized_at !== recoveredReleaseReceipt.authorizedAt
+          || (latest.lock_released_at != null && latest.lock_released_at !== recoveredReleaseReceipt.releasedAt)
+          || (Object.prototype.hasOwnProperty.call(latest, 'lock_release_owner_nonce')
+            && latest.lock_release_owner_nonce != null
+            && latest.lock_release_owner_nonce !== recoveredReleaseReceipt.ownerNonce)) {
+          throw new BootstrapLockBusyError('release recovery journal changed before owned receipt write', runId)
+        }
+        latest.lock_released_at = recoveredReleaseReceipt.releasedAt
+        latest.lock_release_owner_nonce = recoveredReleaseReceipt.ownerNonce
+        latest.updated_at = new Date(Math.max(
+          Date.parse(latest.updated_at),
+          Date.parse(recoveredReleaseReceipt.releasedAt),
+        )).toISOString()
+        this.save(latest)
+        const persisted = this.load(agentId, runId)
+        const stillOwned = readBootstrapLockRecord(path, agentId)
+        if (!persisted || persisted.lock_release_authorized_at !== recoveredReleaseReceipt.authorizedAt
+          || persisted.lock_released_at !== recoveredReleaseReceipt.releasedAt
+          || persisted.lock_release_owner_nonce !== recoveredReleaseReceipt.ownerNonce
+          || !stillOwned || !sameLockRecord(stillOwned, record) || bootstrapLockPhase(path) !== 'ready') {
+          throw new BootstrapLockBusyError('release recovery owned receipt readback mismatch', runId)
+        }
+      }
     } catch (err) {
       if (publishedPending && !readyCommitted && existsSync(path)) {
         try { this.abortPublishedPending(dir, path, record) } catch { /* preserve fail-closed residue */ }
@@ -781,7 +876,10 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
       if (staged && existsSync(staged)) {
         try { this.quarantineStagedLock(dir, staged, basename(staged)) } catch { /* preserve residue for recovery */ }
       }
-      throw new Error(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} lock unavailable: ${(err as Error).message}`)
+      throw new BootstrapLockBusyError(
+        `NO_GO_BOOTSTRAP_BUSY: agent ${agentId} lock unavailable: ${(err as Error).message}`,
+        err instanceof BootstrapLockBusyError ? err.blockingRunId : (readyCommitted ? runId : null),
+      )
     }
   }
 
@@ -835,11 +933,12 @@ export class FileBootstrapStateStore implements BootstrapStateStore {
   }
 
   save(state: BootstrapRunState): void {
-    state.mutation_manifest_digest = bootstrapDigest(state.mutations)
     const path = this.runPath(state.agent_id, state.run_id)
     ensureDurableBootstrapDirectory(dirname(path))
     const temp = `${path}.${process.pid}.${randomUUID()}.tmp`
     const redacted = redactBootstrapValue(state) as BootstrapRunState
+    redacted.mutation_manifest_digest = bootstrapMutationManifestDigest(redacted.mutations)
+    state.mutation_manifest_digest = redacted.mutation_manifest_digest
     let fd: number | null = openSync(temp, 'wx', 0o600)
     try {
       writeFileSync(fd, `${JSON.stringify(redacted, null, 2)}\n`, { encoding: 'utf8' })
@@ -879,7 +978,7 @@ export class MemoryBootstrapStateStore implements BootstrapStateStore {
 
   acquireLock(agentId: string, runId: string, _options: { reclaimStaleSameRun?: boolean } = {}): void {
     const owner = this.locks.get(agentId)
-    if (owner) throw new Error(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} is locked by run ${owner}`)
+    if (owner) throw new BootstrapLockBusyError(`NO_GO_BOOTSTRAP_BUSY: agent ${agentId} is locked by run ${owner}`, owner)
     this.locks.set(agentId, runId)
     this.lockNonces.set(agentId, randomUUID())
   }
@@ -900,8 +999,10 @@ export class MemoryBootstrapStateStore implements BootstrapStateStore {
   }
 
   save(state: BootstrapRunState): void {
-    state.mutation_manifest_digest = bootstrapDigest(state.mutations)
-    this.states.set(`${state.agent_id}/${state.run_id}`, structuredClone(redactBootstrapValue(state) as BootstrapRunState))
+    const redacted = redactBootstrapValue(state) as BootstrapRunState
+    redacted.mutation_manifest_digest = bootstrapMutationManifestDigest(redacted.mutations)
+    state.mutation_manifest_digest = redacted.mutation_manifest_digest
+    this.states.set(`${state.agent_id}/${state.run_id}`, structuredClone(redacted))
   }
 
   findLatestReady(agentId: string, inputDigest: string): BootstrapRunState | null {

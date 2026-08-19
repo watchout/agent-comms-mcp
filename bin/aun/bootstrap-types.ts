@@ -225,6 +225,8 @@ export type BootstrapResult = {
   stage: BootstrapStage
   status: BootstrapTerminalStatus
   reason_codes: BootstrapReasonCode[]
+  /** Exact run that owns the blocking lock generation for NO_GO_BOOTSTRAP_BUSY. */
+  blocking_run_id: string | null
   mutation_manifest_sha256: string
   rollback_manifest_sha256: string
   readiness_predicates: Record<string, boolean>

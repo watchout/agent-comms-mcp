@@ -1,15 +1,22 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../bin/aun/bootstrap'
 import { createCodexBootstrapAdapter } from '../bin/aun/bootstrap-adapter-codex'
-import type {
-  BootstrapExecutionPorts,
-  BootstrapStageContext,
-  BootstrapStageOutcome,
+import {
+  BOOTSTRAP_STAGES,
+  type BootstrapRunState,
+  type BootstrapExecutionPorts,
+  type BootstrapStageContext,
+  type BootstrapStageOutcome,
 } from '../bin/aun/bootstrap-types'
-import { MemoryBootstrapStateStore, bootstrapDigest } from '../core/aun-bootstrap-state'
+import {
+  FileBootstrapStateStore,
+  MemoryBootstrapStateStore,
+  bootstrapDigest,
+  bootstrapMutationManifestDigest,
+} from '../core/aun-bootstrap-state'
 import { selectBootstrapRuntime } from '../core/runtime-inventory'
 
 const HEAD = 'c8eb30805a587a65a794499fa597935f2460c703'
@@ -679,6 +686,240 @@ describe('aun bootstrap B0-B8 state machine', () => {
     expect(rollbackOrder).toEqual(['profile', 'db'])
   })
 
+  test('redacted previous observed fencing state remains digest-stable for idempotent ready and same-run resume', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aun-bootstrap-redacted-journal-'))
+    const store = new FileBootstrapStateStore(root)
+    const agentId = 'redacted-journal-agent'
+    const home = '/tmp/redacted-journal-agent'
+    const input = {
+      agentId, runtime: 'codex' as const, home, repoRoot: process.cwd(),
+      env: { HOME: home },
+    }
+    const secretMutation = {
+      kind: 'configuration' as const,
+      owner_key: 'configuration:redacted-journal-agent',
+      before_digest: 'configuration-before',
+      intended_after_digest: 'configuration-after',
+      actual_after_digest: 'configuration-after',
+      rollback_action: 'restore exact prior observed projection',
+      rollback_payload: {
+        previous_observed_state: {
+          agent_id: agentId,
+          fencing_token: 'sensitive-fencing-token',
+        },
+      },
+    }
+    try {
+      const ports = passingPorts()
+      ports.readbackReady = async () => ({
+        ok: true,
+        readbackDigest: 'redacted-ready-readback',
+        mutation: secretMutation,
+      })
+      const ready = await bootstrap(input, {
+        stateStore: store, ports, run: fakeRun(), uuid: () => 'redacted-ready-source',
+      })
+      expect(ready.status).toBe('READY')
+      const persistedReady = store.load(agentId, ready.run_id)!
+      const persistedConfiguration = persistedReady.mutations.find((mutation) => mutation.kind === 'configuration')!
+      expect(persistedConfiguration.rollback_payload?.previous_observed_state).toMatchObject({
+        fencing_token: '[REDACTED]',
+      })
+      expect(persistedReady.mutation_manifest_digest).toBe(
+        bootstrapMutationManifestDigest(persistedReady.mutations),
+      )
+      expect(readFileSync(join(root, agentId, `${ready.run_id}.json`), 'utf8')).not.toContain('sensitive-fencing-token')
+
+      const idempotent = await bootstrap(input, {
+        stateStore: store, ports, run: fakeRun(), uuid: () => 'redacted-idempotent',
+      })
+      expect(idempotent.status).toBe('IDEMPOTENT_READY')
+
+      const resumeAgentId = 'redacted-resume-agent'
+      const resumeHome = '/tmp/redacted-resume-agent'
+      const resumeInput = {
+        agentId: resumeAgentId, runtime: 'codex' as const, home: resumeHome,
+        repoRoot: process.cwd(), env: { HOME: resumeHome },
+      }
+      const resumePorts = passingPorts()
+      resumePorts.ensureAgentProfile = async () => ({
+        ok: true,
+        readbackDigest: 'redacted-profile-readback',
+        mutation: {
+          ...secretMutation,
+          kind: 'configuration_desired',
+          owner_key: 'configuration-desired:redacted-resume-agent',
+        },
+      })
+      const beforeCrash = await bootstrap(resumeInput, {
+        stateStore: store, ports: resumePorts, run: fakeRun(), uuid: () => 'redacted-resume',
+      })
+      expect(beforeCrash.status).toBe('READY')
+      const interrupted = store.load(resumeAgentId, 'bootstrap-redacted-resume')!
+      interrupted.terminal_status = null
+      const interruptedB8 = interrupted.stages.find((record) => record.stage === 'B8_READY_READBACK')!
+      interruptedB8.status = 'pending'
+      interruptedB8.started_at = '2026-08-19T00:00:00.000Z'
+      interruptedB8.completed_at = null
+      interruptedB8.reason_codes = []
+      interruptedB8.evidence_refs = []
+      interruptedB8.readiness_predicates = {}
+      interruptedB8.readback_digest = null
+      interruptedB8.seal_digest = null
+      store.save(interrupted)
+      const persistedInterrupted = store.load(resumeAgentId, 'bootstrap-redacted-resume')!
+      expect(persistedInterrupted.mutation_manifest_digest).toBe(bootstrapMutationManifestDigest(persistedInterrupted.mutations))
+      expect(persistedInterrupted.stages.filter((record) => record.status === 'passed').every((record) => record.seal_digest)).toBe(true)
+
+      const resumed = await bootstrap({ ...resumeInput, resumeRunId: 'bootstrap-redacted-resume' }, {
+        stateStore: store, ports: resumePorts, run: fakeRun(),
+      })
+      expect(resumed.status).toBe('READY')
+      expect(resumed.reason_codes).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rollback fail-closes every interrupted protected-effect stage with an incomplete mutation receipt', async () => {
+    const protectedStages = [
+      'B2_DB_MIGRATION',
+      'B3_AGENT_PROFILE',
+      'B4_MCP_REGISTRATION',
+      'B6_ORDINARY_DAEMON_INSTALL_START',
+      'B7_QUEUE_SMOKE',
+      'B8_READY_READBACK',
+    ] as const
+    for (const stage of protectedStages) {
+      const store = new MemoryBootstrapStateStore()
+      const ports = passingPorts()
+      for (const candidate of [
+        'migrateDatabase', 'ensureAgentProfile', 'ensureMcpRegistration',
+        'installAndStartDaemon', 'runQueueSmoke', 'readbackReady',
+      ] as const) {
+        ports[candidate] = async () => ({ ok: true, readbackDigest: `pass:${candidate}` })
+      }
+      const agentId = `journal-gap-${stage.toLowerCase().replaceAll('_', '-')}`
+      const input = {
+        agentId, runtime: 'codex' as const, home: `/tmp/${agentId}`,
+        repoRoot: process.cwd(), env: { HOME: `/tmp/${agentId}` },
+      }
+      const ready = await bootstrap(input, {
+        stateStore: store, ports, run: fakeRun(), uuid: () => 'interrupted',
+      })
+      expect(ready.status, stage).toBe('READY')
+      const interrupted = store.load(agentId, ready.run_id)!
+      interrupted.terminal_status = null
+      let atOrAfterCrashStage = false
+      for (const record of interrupted.stages) {
+        if (record.stage === stage) atOrAfterCrashStage = true
+        if (!atOrAfterCrashStage) continue
+        record.status = 'pending'
+        record.started_at = record.stage === stage ? '2026-08-19T00:00:00.000Z' : null
+        record.completed_at = null
+        record.reason_codes = []
+        record.evidence_refs = []
+        record.readiness_predicates = {}
+        record.readback_digest = null
+        record.seal_digest = null
+      }
+      store.save(interrupted)
+
+      const rolledBack = await bootstrap({ ...input, rollbackRunId: 'bootstrap-interrupted' }, {
+        stateStore: store, ports, run: fakeRun(),
+      })
+      expect(rolledBack.status, stage).toBe('PARTIAL_ROLLBACK_NO_GO')
+      expect(rolledBack.reason_codes, stage).toEqual(['NO_GO_ROLLBACK_UNVERIFIED'])
+      expect(rolledBack.evidence_refs, stage).toContain(`protected-effect-journal-gap:${stage}`)
+      expect(rolledBack.next_action.blocking, stage).toBe(true)
+    }
+  })
+
+  test('ready, reclaim, and release dead holders surface one reachable blocking-run resume transition', async () => {
+    for (const lockState of ['ready', 'reclaim', 'release'] as const) {
+      const root = mkdtempSync(join(tmpdir(), `aun-bootstrap-busy-${lockState}-`))
+      const agentId = `busy-dead-${lockState}`
+      const blockingRunId = `bootstrap-blocking-${lockState}`
+      const nonce = `00000000-0000-4000-8000-0000000000${lockState === 'ready' ? '31' : lockState === 'reclaim' ? '32' : '33'}`
+      const dir = join(root, agentId)
+      const lockPath = lockState === 'ready'
+        ? join(dir, '.lock')
+        : join(dir, `.lock.${lockState}-${nonce}`)
+      const owner = {
+        schema_version: 'aun-bootstrap-lock/v1',
+        agent_id: agentId,
+        run_id: blockingRunId,
+        pid: 2_147_483_000,
+        process_start_identity: 'a'.repeat(64),
+        created_at: '2026-08-19T00:00:00.000Z',
+        nonce,
+      }
+      try {
+        const blockingInputDigest = 'b'.repeat(64)
+        const blockingState: BootstrapRunState = {
+          schema_version: 'shirube-v3/aun-bootstrap-run/v1',
+          run_id: blockingRunId,
+          agent_id: agentId,
+          requested_runtime: 'codex',
+          resolved_runtime: 'codex',
+          input_digest: blockingInputDigest,
+          repo_root: process.cwd(),
+          workspace_root: process.cwd(),
+          repo_head: HEAD,
+          created_at: '2026-08-19T00:00:00.000Z',
+          updated_at: '2026-08-19T00:00:00.000Z',
+          terminal_status: null,
+          lock_release_authorized_at: null,
+          lock_released_at: null,
+          lock_release_owner_nonce: null,
+          stages: BOOTSTRAP_STAGES.map((stageName) => ({
+            stage: stageName,
+            status: 'pending',
+            started_at: null,
+            completed_at: null,
+            reason_codes: [],
+            evidence_refs: [],
+            readiness_predicates: {},
+            readback_digest: null,
+            seal_digest: null,
+          })),
+          mutations: [],
+          mutation_manifest_digest: bootstrapDigest([]),
+          readback_bindings: null,
+          evidence_refs: [],
+          safe_D1_readback: {
+            SHIRUBE_D1_ENABLED: '0',
+            SHIRUBE_D1_KILL_SWITCH: '1',
+            SHIRUBE_D1_TARGET_ALLOWLIST: '[]',
+            STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED: '0',
+          },
+        }
+        const stateStore = new FileBootstrapStateStore(root)
+        stateStore.save(blockingState)
+        mkdirSync(lockPath, { recursive: true, mode: 0o700 })
+        writeFileSync(join(lockPath, 'owner.json'), `${JSON.stringify(owner)}\n`, { mode: 0o600 })
+        if (lockState === 'ready') mkdirSync(join(lockPath, 'acquire.ready'), { mode: 0o700 })
+        const result = await bootstrap({
+          agentId, runtime: 'auto', home: `/tmp/${agentId}`, repoRoot: process.cwd(),
+          env: { HOME: `/tmp/${agentId}` },
+        }, {
+          stateStore,
+          ports: passingPorts(),
+          run: fakeRun(),
+          uuid: () => `loser-${lockState}`,
+        })
+        expect(result.reason_codes, lockState).toEqual(['NO_GO_BOOTSTRAP_BUSY'])
+        expect(result.blocking_run_id, lockState).toBe(blockingRunId)
+        expect(result.next_action.blocking, lockState).toBe(true)
+        expect(result.next_action.exact_input_refs, lockState).toEqual([blockingRunId, blockingInputDigest])
+        expect(result.next_action.deliver_via, lockState).toContain('--runtime codex')
+        expect(result.next_action.deliver_via, lockState).toContain(`--resume ${blockingRunId}`)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  })
+
   test('same-agent concurrent run fails closed with NO_GO_BOOTSTRAP_BUSY', async () => {
     const store = new MemoryBootstrapStateStore()
     store.acquireLock('busy-agent', 'existing-run')
@@ -687,6 +928,8 @@ describe('aun bootstrap B0-B8 state machine', () => {
     }, { stateStore: store, ports: passingPorts(), run: fakeRun() })
     expect(result.status).toBe('NO_GO')
     expect(result.reason_codes).toEqual(['NO_GO_BOOTSTRAP_BUSY'])
+    expect(result.blocking_run_id).toBe('existing-run')
+    expect(result.next_action.deliver_via).toContain('--resume existing-run')
     const loserState = store.states.get(`busy-agent/${result.run_id}`)
     expect(loserState).toMatchObject({ run_id: result.run_id, terminal_status: null })
     expect(loserState?.mutations).toEqual([])

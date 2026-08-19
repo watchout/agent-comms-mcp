@@ -32,9 +32,12 @@ import {
 import { buildDefaultAunConfigurationCandidate } from '../../core/aun-configuration-candidate'
 import {
   BOOTSTRAP_SAFE_D1_DEFAULTS,
+  BootstrapLockBusyError,
   FileBootstrapStateStore,
   bootstrapDigest,
+  bootstrapMutationManifestDigest,
   bootstrapStateRoot,
+  redactBootstrapValue,
   validateBootstrapAgentId,
   type BootstrapStateStore,
 } from '../../core/aun-bootstrap-state'
@@ -87,6 +90,15 @@ const STAGE_DEADLINE_MS: Record<BootstrapStage, number> = {
   B7_QUEUE_SMOKE: 120_000,
   B8_READY_READBACK: 120_000,
 }
+
+const PROTECTED_EFFECT_STAGES = new Set<BootstrapStage>([
+  'B2_DB_MIGRATION',
+  'B3_AGENT_PROFILE',
+  'B4_MCP_REGISTRATION',
+  'B6_ORDINARY_DAEMON_INSTALL_START',
+  'B7_QUEUE_SMOKE',
+  'B8_READY_READBACK',
+])
 
 const STAGE_METHOD: Record<BootstrapStage, keyof Pick<BootstrapExecutionPorts,
   'lockAndSnapshot' | 'dependencyPreflight' | 'migrateDatabase' | 'ensureAgentProfile'
@@ -344,7 +356,7 @@ function initialState(input: {
 function stageSealDigest(state: BootstrapRunState, stage: BootstrapStage): string {
   const record = state.stages.find((candidate) => candidate.stage === stage)
   if (!record) return bootstrapDigest({ missing_stage: stage })
-  return bootstrapDigest({
+  return bootstrapDigest(redactBootstrapValue({
     stage: record.stage,
     status: record.status,
     started_at: record.started_at,
@@ -366,7 +378,7 @@ function stageSealDigest(state: BootstrapRunState, stage: BootstrapStage): strin
         rollback_status: mutation.rollback_status,
         rollback_payload: mutation.rollback_payload ?? null,
       })),
-  })
+  }))
 }
 
 function passedStageSealsAreValid(state: BootstrapRunState): boolean {
@@ -394,9 +406,20 @@ function resultFromState(
   stage: BootstrapStage,
   status: BootstrapResult['status'],
   reasonCodes: BootstrapReasonCode[],
+  options: { blockingRunId?: string | null; blockingState?: BootstrapRunState | null } = {},
 ): BootstrapResult {
   const readinessPredicates = Object.assign({}, ...state.stages.map((record) => record.readiness_predicates))
   const blocking = status === 'NO_GO' || status === 'PARTIAL_ROLLBACK_NO_GO'
+  const blockingRunId = reasonCodes.includes('NO_GO_BOOTSTRAP_BUSY')
+    ? options.blockingRunId ?? null
+    : null
+  const blockingRuntime = options.blockingState?.resolved_runtime
+    ?? options.blockingState?.requested_runtime
+    ?? state.resolved_runtime
+    ?? state.requested_runtime
+  const blockingInputRefs = blockingRunId
+    ? [blockingRunId, ...(options.blockingState ? [options.blockingState.input_digest] : [])]
+    : []
   return {
     schema_version: 'shirube-v3/aun-bootstrap-result/v1',
     run_id: state.run_id,
@@ -406,7 +429,8 @@ function resultFromState(
     stage,
     status,
     reason_codes: reasonCodes,
-    mutation_manifest_sha256: bootstrapDigest(state.mutations),
+    blocking_run_id: blockingRunId,
+    mutation_manifest_sha256: bootstrapMutationManifestDigest(state.mutations),
     rollback_manifest_sha256: bootstrapDigest(state.mutations.map((mutation) => ({
       mutation_id: mutation.mutation_id,
       rollback_action: mutation.rollback_action,
@@ -415,7 +439,15 @@ function resultFromState(
     readiness_predicates: readinessPredicates,
     evidence_refs: [...new Set([...state.evidence_refs, ...state.stages.flatMap((record) => record.evidence_refs)])],
     safe_D1_readback: state.safe_D1_readback,
-    next_action: blocking
+    next_action: blockingRunId
+      ? {
+          blocking: true,
+          actor_agent_id: state.agent_id,
+          action: `Resume blocking bootstrap run ${blockingRunId}; do not start another run while its lock generation is unresolved.`,
+          deliver_via: `aun bootstrap --agent-id ${state.agent_id} --runtime ${blockingRuntime} --resume ${blockingRunId} --json`,
+          exact_input_refs: blockingInputRefs,
+        }
+      : blocking
       ? {
           blocking: true,
           actor_agent_id: state.agent_id,
@@ -5024,7 +5056,7 @@ export async function bootstrap(
   if (state && options.runtime !== state.requested_runtime && options.runtime !== state.resolved_runtime) {
     return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
   }
-  if (state && state.mutation_manifest_digest !== bootstrapDigest(state.mutations)) {
+  if (state && state.mutation_manifest_digest !== bootstrapMutationManifestDigest(state.mutations)) {
     return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_RESUME_INPUT_MISMATCH'])
   }
   if (state && (options.resumeRunId || options.rollbackRunId) && !passedStageSealsAreValid(state)) {
@@ -5087,8 +5119,18 @@ export async function bootstrap(
         reclaimStaleSameRun: Boolean(options.resumeRunId || options.rollbackRunId),
       })
       lockHeld = true
-    } catch {
-      return resultFromState(state, 'B0_LOCK_AND_SNAPSHOT', 'NO_GO', ['NO_GO_BOOTSTRAP_BUSY'])
+    } catch (error) {
+      const blockingRunId = error instanceof BootstrapLockBusyError ? error.blockingRunId : null
+      return resultFromState(
+        state,
+        'B0_LOCK_AND_SNAPSHOT',
+        'NO_GO',
+        ['NO_GO_BOOTSTRAP_BUSY'],
+        {
+          blockingRunId,
+          blockingState: blockingRunId ? stateStore.load(agentId, blockingRunId) : null,
+        },
+      )
     }
   }
 
@@ -5168,7 +5210,19 @@ export async function bootstrap(
 
   try {
     if (options.rollbackRunId) {
-      let allVerified = true
+      const interruptedProtectedStages = state.stages
+        .filter((record) => PROTECTED_EFFECT_STAGES.has(record.stage)
+          && record.status === 'pending'
+          && record.started_at !== null
+          && record.completed_at === null)
+        .map((record) => record.stage)
+      let allVerified = interruptedProtectedStages.length === 0
+      if (interruptedProtectedStages.length > 0) {
+        state.evidence_refs = [...new Set([
+          ...state.evidence_refs,
+          ...interruptedProtectedStages.map((stage) => `protected-effect-journal-gap:${stage}`),
+        ])]
+      }
       for (const mutation of [...state.mutations].reverse()) {
         if (mutation.rollback_status === 'verified' || mutation.rollback_status === 'skipped') continue
         const rollbackStartedAt = nowIso()

@@ -37,6 +37,10 @@ aun bootstrap --agent-id <id> --runtime claude --json
 Failed runs are terminal and must never be resumed. After resolving the
 reported predicate and verifying rollback, start one new run. `--resume` is
 retained only for a non-terminal journal interrupted before a terminal result.
+`NO_GO_BOOTSTRAP_BUSY` is the exception to the new-run instruction: it reports
+the exact `blocking_run_id`, and its `next_action` points to
+`--resume <blocking_run_id>` so an interrupted same-run lock generation has a
+reachable recovery transition.
 Rollback targets only mutations owned by the exact run:
 
 ```bash
@@ -170,7 +174,10 @@ ${AUN_HOME:-~/.aun}/bootstrap/<agent_id>/<run_id>.json
 Directories are private and run files are mode `0600`. The journal records
 stage results, each stage's canonical native-readback digest and seal digest,
 and a digest-fenced mutation manifest. A terminal failed run rejects re-entry;
-for a non-terminal interrupted journal, resume is accepted only when the agent,
+the mutation manifest digest and stage seal digests are calculated from the
+same redacted projection that is durably written, so secret-bearing preimages
+cannot make a persisted journal fail its own digest or seal gate.
+For a non-terminal interrupted journal, resume is accepted only when the agent,
 repository/workspace realpaths and head, provider executable/version/config
 scope, intended AUN tuple template, provider-native Wasurezu tuple, home/AUN
 state root, database endpoint, memory project, safe defaults, passed-stage
@@ -183,10 +190,18 @@ queue terminal identity. A missing or changed stage seal returns
 order and refuses
 cross-run or unowned deletion. If any recorded rollback cannot be verified,
 the terminal status is `PARTIAL_ROLLBACK_NO_GO`, never success.
+An interrupted B2, B3, B4, B6, B7, or B8 stage whose protected effect may have
+occurred without a complete mutation receipt is also
+`PARTIAL_ROLLBACK_NO_GO`; an empty recorded manifest is not proof that rollback
+succeeded across that crash window.
 Each surface is durably marked `attempting` before rollback starts, then
 `verified`, `failed`, or `skipped`, with start/completion timestamps, evidence,
 and the final native-readback digest. The run also records lock-release
 authorization before unlocking and the observed release timestamp afterward.
+If recovery encounters an interrupted release marker, it does not write the
+recovered release receipt until it owns the newly published exact same-run
+lock. It then reloads the journal under that ownership before saving, preventing
+a competing resume from reverting a live resume with a stale snapshot.
 
 Run-owned memory evidence is expired with a rollback reason rather than
 deleted, so its audit history remains available. Provider registration and
