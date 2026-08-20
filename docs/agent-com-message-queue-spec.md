@@ -1541,6 +1541,87 @@ Discord REST APIで最新メッセージ取得
 cron不要。receiverプロセスに内蔵。
 ```
 
+### 17.4 N1 通信 SLO 計測装置
+
+N1 は provider や Discord の到達性を試す smoke ではなく、内部
+`agent_messages` / `message_queue` の send → claim → close 往復を定期計測する
+report-only harness である。正本実装は `scripts/n1-slo/`、contract test は
+`tests/contract/test_n1_slo_harness.test.ts` とする。
+
+#### online seat の正準列挙
+
+列挙集合は、計測開始時点で次の両方を満たす `agent_id` のみである。
+
+1. `agents.status = 'online'`
+2. 同一 agent/runtime を holder とする、有効期限内の runtime endpoint lease
+   (`lease_scope_type='runtime_instance'`, `lease_purpose='worker'`,
+   `status='active'`, `expires_at > observed_at`)
+
+正準 query version は `agents-online-valid-runtime-endpoint-lease/v1`。lease の
+`holder_runtime_instance_id`、`lease_scope_id`、`agent_runtime_instances.agent_id`
+は同一 runtime/agent tuple に一致しなければならない。tmux、Discord presence、
+`last_seen_at`、process scan はこの集合の代替 authority にしない。
+
+```sql
+SELECT DISTINCT ON (a.agent_id)
+       a.agent_id, ri.runtime_instance_id, lease.lease_id, lease.expires_at
+  FROM agents a
+  JOIN control_plane_leases lease
+    ON lease.holder_agent_id = a.agent_id
+   AND lease.lease_scope_type = 'runtime_instance'
+   AND lease.lease_purpose = 'worker'
+   AND lease.status = 'active'
+   AND lease.expires_at > $observed_at
+  JOIN agent_runtime_instances ri
+    ON ri.runtime_instance_id = lease.holder_runtime_instance_id
+   AND ri.runtime_instance_id::text = lease.lease_scope_id
+   AND ri.agent_id = a.agent_id
+ WHERE a.status = 'online';
+```
+
+#### probe lifecycle と observation window
+
+- `message_type='probe'`、schema `aun-n1-slo-probe/v1`、content prefix
+  `[AUN-N1-SLO-PROBE/v1]:<run_id>:<agent_id>` を必須とする。
+- probe は対象 seat 自身を `author_id` と `message_queue.agent_id` に置く
+  self-issued no-op である。priority は `-1000000` とし、generic `next` や
+  inbox cursor、`agents.status` を使わない。
+- claim/close は生成直後の exact `(queue_id, message_id, agent_id, prefix)`
+  tuple のみを条件にする。claim は `pending → received`、close は
+  `received → done`。claim fence は close 時に全て NULL に戻す。
+- observation window は各 probe の送信開始から固定 5,000 ms。環境変数や
+  CLI 引数で本番値を変更しない。contract test だけが短い窓を dependency
+  injection できる。
+- window 内に `received` が観測できなければ `failure_type=RETRY_EXHAUSTED`,
+  `failure_stage=claim`、claim 後に `done` が観測できなければ同 type の
+  `failure_stage=close` として `agent_messages.metadata.n1_slo` に保存する。
+
+成功・失敗を問わず、harness は自分が作成した probe row だけを最後に
+`status='done'` へ閉じ、`claimed_by/claimed_at/claim_expires_at` を解除する。
+terminal `done` row は計測 evidence として保持し、「残骸ゼロ」は同一 run の
+non-terminal probe row が 0 件であることを意味する。業務 message の更新・削除、
+agent busy/idle の変更、cursor 前進は禁止する。
+
+#### effect fence と machine report
+
+probe path は `outbound_queue` INSERT、provider/fleet-runtime invocation、Discord
+API を一切行わない。各 run は自分の probe message id に対応する
+`outbound_queue` row が 0、Discord sent/snowflake が 0、non-terminal probe が
+0 であることを readback し、違反時は report publish 前に fail closed する。
+
+machine report schema は `aun-n1-slo-report/v1`。online seat 数、seat 別 RTT、
+成功/失敗、typed silent-failure、p50/p95/max、effect fence count、source commit
+を含み、`watchout/agent-comms-mcp#602` 以外へは publish しない。publisher は
+run id で idempotency を照合し、GitHub の返却 body と raw-body SHA-256 を
+readback する。
+
+定期実行は既存 launchd pattern に合わせた
+`com.watchout.agent-comms.n1-slo` (`StartInterval=900`) とする。plist は
+`DATABASE_URL`、GitHub token、provider/Discord credential を埋め込まない。
+DB は明示 `--database-config`、launchd の GitHub credential は明示
+`--github-token-file` から runtime に解決する（対話実行は環境または `gh`
+credential store も可）。harness 自身は ambient `DATABASE_URL` を読まない。
+
 ---
 
 ## 18. 精度向上対策
@@ -1682,6 +1763,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-20 | §17.4 N1 通信 SLO 計測装置を追加。online+valid endpoint lease の正準集合、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |
 | 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
 | 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |
 | 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
