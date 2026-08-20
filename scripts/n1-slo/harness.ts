@@ -5,6 +5,7 @@ export const N1_PROBE_SCHEMA_VERSION = 'aun-n1-slo-probe/v1' as const
 export const N1_REPORT_SCHEMA_VERSION = 'aun-n1-slo-report/v1' as const
 export const N1_ACTIVE_SEAT_QUERY_VERSION = 'agents-idle-busy-valid-runtime-endpoint-lease/v2' as const
 export const N1_PROBE_PREFIX = '[AUN-N1-SLO-PROBE/v1]'
+export const N1_PROBE_CHANNEL_ID = 'pdca-daily' as const
 export const N1_OBSERVATION_WINDOW_MS = 5_000
 export const N1_PROBE_PRIORITY = -1_000_000
 
@@ -202,10 +203,14 @@ async function sendProbe(
       `INSERT INTO agent_messages
          (id, channel_id, author_id, author_bot, content, message_type,
           metadata, source, direction, role)
-       VALUES ($1, NULL, $2, true, $3, $4, $5::jsonb, 'agent-comms', 'internal', 'system')
+       SELECT $1, c.id, $2, true, $4, $5, $6::jsonb, 'agent-comms', 'internal', 'system'
+         FROM channels c
+        WHERE c.id = $3
+          AND $2 = ANY(COALESCE(c.members, ARRAY[]::text[]))
        RETURNING created_at`,
-      [messageId, seat.agent_id, content, N1_PROBE_MESSAGE_TYPE, JSON.stringify(metadata)],
+      [messageId, seat.agent_id, N1_PROBE_CHANNEL_ID, content, N1_PROBE_MESSAGE_TYPE, JSON.stringify(metadata)],
     )
+    if (insertedMessage.rows.length !== 1) throw new Error('N1_PROBE_CHANNEL_BINDING_NOT_READY')
     const insertedQueue = await db.query(
       `INSERT INTO message_queue (agent_id, message_id, payload, status, priority)
        VALUES ($1, $2, $3, 'pending', $4)
@@ -213,7 +218,7 @@ async function sendProbe(
        RETURNING id::text AS id`,
       [seat.agent_id, messageId, JSON.stringify(payload), N1_PROBE_PRIORITY],
     )
-    if (insertedMessage.rows.length !== 1 || insertedQueue.rows.length !== 1) {
+    if (insertedQueue.rows.length !== 1) {
       throw new Error('N1_PROBE_SEND_NOT_INSERTED')
     }
     return {
