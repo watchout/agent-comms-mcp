@@ -155,6 +155,30 @@ const FLEET_RUNTIME_V1_RENDERER_REQUIRED_ACTIONS = Object.freeze([
 
 export const FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT = '/Users/yuji/Library/Application Support/agent-comms-mcp/fleet-runtime-v1'
 
+export const FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS = Object.freeze([
+  'AGENT_COM_DB',
+  'AGENT_COM_EXPECTED_AGENT_ID',
+  'AGENT_COM_RUNTIME_HEARTBEAT_DISABLED',
+  'AGENT_COM_RUNTIME_SESSION',
+  'AGENT_ID',
+  'DATABASE_URL',
+  'DISCORD_STATE_DIR',
+  'WEBHOOK_PORT',
+] as const)
+
+const FLEET_RUNTIME_V1_PROVIDER_RUNTIME = Object.freeze({
+  schema_version: 'fleet-runtime-v1/provider-runtime-image/v1',
+  repository: 'watchout/agent-comms-mcp',
+  remote: 'https://github.com/watchout/agent-comms-mcp.git',
+  ssh_remote: 'git@github.com:watchout/agent-comms-mcp.git',
+  directory_name: 'provider-runtime',
+  checkout_name: 'provider-checkout',
+  manifest_name: 'runtime-image.json',
+  server_name: 'server.ts',
+  boot_readback_attempts: 30,
+  boot_readback_interval_ms: 1_000,
+})
+
 const STATE_SCHEMA = 'fleet-runtime-v1/local-operation-state/v2' as const
 const INVOCATION_KEY = /^frv1:N40:[a-f0-9]{64}$/
 const SHA256 = /^sha256:[a-f0-9]{64}$/
@@ -181,6 +205,7 @@ export type FleetRuntimeLocalProviderErrorCode =
   | 'PAYLOAD_VERIFICATION_FAILED'
   | 'WAITING_INDEPENDENT_MERGE'
   | 'INTERRUPTED_SUBEFFECT_UNRESOLVED'
+  | 'REALIZE_POSTIMAGE_NOT_ADMITTED'
   | 'OPERATION_STATE_MISMATCH'
 
 export class FleetRuntimeLocalProviderError extends Error {
@@ -1567,6 +1592,13 @@ export type FleetRuntimeLocalPhase =
   | 'COLD_START_DISCORD_KODAMA'
   | 'VERIFY_LIVE_IDENTITY'
 
+export type FleetRuntimePostimageMode = 'NORMAL' | 'REALIZE_POSTIMAGE'
+
+export interface FleetRuntimePostimageRealizationResult {
+  outcome: 'ALREADY_REALIZED' | 'REALIZED'
+  evidence: Record<string, unknown>
+}
+
 const OPERATION_PHASES: Readonly<Record<'CANARY_COLD_START' | 'ROLLBACK' | 'RECOVERY' | 'REAPPLY', readonly FleetRuntimeLocalPhase[]>> = Object.freeze({
   CANARY_COLD_START: Object.freeze([
     'PREPARE_CLEAN_CHECKOUT', 'STAGE_EXACT_PAYLOAD', 'VERIFY_EXACT_PAYLOAD', 'CREATE_LOCAL_COMMIT',
@@ -1662,6 +1694,11 @@ export interface FleetRuntimeLocalSystem {
     phase: FleetRuntimeLocalPhase,
     context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<FleetRuntimeLocalReconcileResult>
+  realizePostimage?(
+    request: Readonly<FleetRuntimeRequest>,
+    preflight: Readonly<FleetRuntimePreflightReceipt>,
+    context: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Promise<FleetRuntimePostimageRealizationResult>
   buildReceipt(
     request: Readonly<FleetRuntimeRequest>,
     preflight: Readonly<FleetRuntimePreflightReceipt>,
@@ -1716,6 +1753,22 @@ const PHASE_EVIDENCE_SPECIFIC_KEYS: Readonly<Record<FleetRuntimeLocalPhase, read
     'runtime_instance_id', 'unauthorized_effect_count',
   ]),
 })
+
+const COLD_START_BOOT_EVIDENCE_SPECIFIC_KEYS = Object.freeze([
+  ...PHASE_EVIDENCE_SPECIFIC_KEYS.COLD_START_DISCORD_KODAMA,
+  'boot_environment_keys',
+  'listener_pids',
+  'listener_port',
+  'postimage_observed_at',
+  'provider_checkout_path',
+  'provider_head',
+  'provider_remote',
+  'provider_tree',
+  'registered_checkout_path',
+  'registered_commit_sha',
+  'runtime_instance_id',
+  'server_path',
+] as const)
 
 function phaseBoundRecord(
   request: FleetRuntimeRequest,
@@ -1897,7 +1950,11 @@ function validatePhaseSemantics(
   assertPlainRecord(phase.evidence, `${phaseName} evidence`)
   const reapplyPrepareKeys = phaseName === 'PREPARE_CLEAN_CHECKOUT' && request.operation === 'REAPPLY'
     ? ['rollback_receipt_raw_body_sha256', 'rollback_receipt_self_sha256', 'rollback_receipt_url'] : []
-  const evidenceKeys = [...PHASE_BINDING_KEYS, 'intent_sha256', ...PHASE_EVIDENCE_SPECIFIC_KEYS[phaseName], ...reapplyPrepareKeys]
+  const phaseEvidenceKeys = phaseName === 'COLD_START_DISCORD_KODAMA'
+    && Object.hasOwn(phase.evidence, 'boot_environment_keys')
+    ? COLD_START_BOOT_EVIDENCE_SPECIFIC_KEYS
+    : PHASE_EVIDENCE_SPECIFIC_KEYS[phaseName]
+  const evidenceKeys = [...PHASE_BINDING_KEYS, 'intent_sha256', ...phaseEvidenceKeys, ...reapplyPrepareKeys]
   assertExactKeys(phase.evidence, evidenceKeys, `${phaseName} evidence`)
   const evidence = phase.evidence
   if (evidence.execution_owner_id !== ownerId || evidence.operation !== request.operation
@@ -1982,6 +2039,34 @@ function validatePhaseSemantics(
     if (evidence.session !== phase.intent.session || evidence.port !== phase.intent.port) {
       return providerFail('STATE_RECORD_INVALID', 'cold-start evidence session or port differs')
     }
+    if (Object.hasOwn(evidence, 'boot_environment_keys')) {
+      if (canonicalFleetRuntimeJson(evidence.boot_environment_keys)
+          !== canonicalFleetRuntimeJson(FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS)
+        || evidence.listener_port !== phase.intent.port
+        || !Array.isArray(evidence.listener_pids)
+        || evidence.listener_pids.length === 0
+        || evidence.listener_pids.some(pid => !Number.isSafeInteger(pid) || Number(pid) <= 0)
+        || new Set(evidence.listener_pids).size !== evidence.listener_pids.length
+        || canonicalFleetRuntimeJson(evidence.listener_pids)
+          !== canonicalFleetRuntimeJson([...evidence.listener_pids].sort((left, right) => Number(left) - Number(right)))
+        || typeof evidence.runtime_instance_id !== 'string'
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(evidence.runtime_instance_id)
+        || evidence.registered_checkout_path !== phase.intent.checkout_path
+        || evidence.registered_commit_sha !== phase.intent.expected_head
+        || typeof evidence.postimage_observed_at !== 'string'
+        || !Number.isFinite(Date.parse(evidence.postimage_observed_at))) {
+        return providerFail('STATE_RECORD_INVALID', 'cold-start boot evidence differs from listener/runtime registration contract')
+      }
+      const providerCheckout = join(dirname(String(phase.intent.checkout_path)), FLEET_RUNTIME_V1_PROVIDER_RUNTIME.directory_name,
+        FLEET_RUNTIME_V1_PROVIDER_RUNTIME.checkout_name)
+      if (evidence.provider_checkout_path !== providerCheckout
+        || evidence.server_path !== join(providerCheckout, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.server_name)
+        || evidence.provider_remote !== FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote
+        || !COMMIT.test(String(evidence.provider_head ?? ''))
+        || !COMMIT.test(String(evidence.provider_tree ?? ''))) {
+        return providerFail('STATE_RECORD_INVALID', 'cold-start provider runtime image evidence differs')
+      }
+    }
   } else if (phaseName === 'VERIFY_LIVE_IDENTITY') {
     assertString(evidence.runtime_instance_id, 'live runtime instance')
     assertPlainRecord(evidence.local_checkout, 'live local checkout')
@@ -2065,6 +2150,7 @@ class FleetRuntimeLocalEffectPort {
     private readonly persistence: FileFleetRuntimeV1Persistence,
     private readonly system: FleetRuntimeLocalSystem,
     private readonly now: () => string,
+    private readonly postimageMode: FleetRuntimePostimageMode = 'NORMAL',
   ) {}
 
   private journalPath(request: FleetRuntimeRequest): string {
@@ -2150,6 +2236,27 @@ class FleetRuntimeLocalEffectPort {
     if (!phases) return providerFail('TARGET_NOT_ADMITTED', 'local provider admits only the four N40 operations')
     const state = this.loadJournal(request)
     assertJournal(state, request, this.persistence.owner.owner_id)
+
+    if (this.postimageMode === 'REALIZE_POSTIMAGE') {
+      const coldStart = state.phases.COLD_START_DISCORD_KODAMA
+      if (coldStart?.status !== 'completed') {
+        return providerFail(
+          'REALIZE_POSTIMAGE_NOT_ADMITTED',
+          'REALIZE_POSTIMAGE requires a completed COLD_START_DISCORD_KODAMA journal phase',
+        )
+      }
+      if (!this.system.realizePostimage) {
+        return providerFail('REALIZE_POSTIMAGE_NOT_ADMITTED', 'local system does not implement REALIZE_POSTIMAGE')
+      }
+      await this.persistence.heartbeatOwner(request.idempotency_key)
+      await this.system.realizePostimage(request, preflight, this.context(
+        request,
+        state,
+        coldStart.intent,
+        preflight.owner_decision_raw_body,
+        preflight.predecessor_receipt_raw_body,
+      ))
+    }
 
     for (const phase of phases) {
       const prior = state.phases[phase]
@@ -2265,6 +2372,7 @@ export async function executeLocalFleetRuntimeV1(input: {
   approvedStateRoot?: string
   executeProtectedEffects: boolean
   system: FleetRuntimeLocalSystem
+  postimageMode?: FleetRuntimePostimageMode
   resumeAdmissionControlHandoff?: FleetRuntimeResumeAdmissionControlHandoffRef | null
   now?: () => string
   persistenceOptions?: Omit<FleetRuntimePersistenceOptions, 'approvedRoot'>
@@ -2278,7 +2386,16 @@ export async function executeLocalFleetRuntimeV1(input: {
     ...input.persistenceOptions,
     approvedRoot: input.approvedStateRoot ?? FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
   })
-  const effect = new FleetRuntimeLocalEffectPort(persistence, input.system, input.now ?? (() => new Date().toISOString()))
+  const postimageMode = input.postimageMode ?? 'NORMAL'
+  if (postimageMode !== 'NORMAL' && postimageMode !== 'REALIZE_POSTIMAGE') {
+    return providerFail('REALIZE_POSTIMAGE_NOT_ADMITTED', 'postimage mode is invalid')
+  }
+  const effect = new FleetRuntimeLocalEffectPort(
+    persistence,
+    input.system,
+    input.now ?? (() => new Date().toISOString()),
+    postimageMode,
+  )
   const resumeAdmissionControlHandoff = input.resumeAdmissionControlHandoff === undefined
     ? process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.url] === undefined
       && process.env[FLEET_RUNTIME_V1_RESUME_ADMISSION_HANDOFF_ENV.raw_api_body_sha256] === undefined
@@ -2689,24 +2806,299 @@ export async function validateFleetRuntimeGitPayloadLayer(input: {
   return { blobs, object_ids: objectIds, changed_paths: changedPaths }
 }
 
+interface FleetRuntimeProviderRuntimeImage {
+  schema_version: typeof FLEET_RUNTIME_V1_PROVIDER_RUNTIME.schema_version
+  repository: typeof FLEET_RUNTIME_V1_PROVIDER_RUNTIME.repository
+  remote: typeof FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote
+  head: string
+  tree: string
+  checkout_path: string
+  server_path: string
+}
+
+interface FleetRuntimeColdStartPostimageEvidence {
+  listener_pids: number[]
+  listener_port: number
+  postimage_observed_at: string
+  registered_checkout_path: string
+  registered_commit_sha: string
+  runtime_instance_id: string
+}
+
+interface FleetRuntimeColdStartPostimageObservation {
+  state: 'ABSENT' | 'PARTIAL' | 'REALIZED'
+  evidence: FleetRuntimeColdStartPostimageEvidence | null
+}
+
 /**
  * The production system is intentionally argv-only. Protected execution is
  * unreachable unless the caller supplies the explicit flag and the adapter
  * admits the exact owner-bound executor/request.
  */
 export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSystem {
+  private readonly realizedPostimages = new Map<string, FleetRuntimeColdStartPostimageEvidence>()
+
   constructor(
     private readonly runner: FleetRuntimeArgvRunner = bunFleetRuntimeArgvRunner,
     private readonly providerRepositoryRoot: string = resolve(import.meta.dir, '..'),
     private readonly nowMs: () => number = Date.now,
     private readonly adfReleaseReader: FleetRuntimeAdfReleaseReader = readFleetRuntimeAdfRelease,
     private readonly databaseUrl: string | undefined = process.env.DATABASE_URL,
+    private readonly bootReadbackAttempts: number = FLEET_RUNTIME_V1_PROVIDER_RUNTIME.boot_readback_attempts,
+    private readonly bootReadbackIntervalMs: number = FLEET_RUNTIME_V1_PROVIDER_RUNTIME.boot_readback_interval_ms,
+    private readonly sleep: (milliseconds: number) => Promise<void> = async milliseconds => {
+      await Bun.sleep(milliseconds)
+    },
   ) {}
 
   private databaseEnvironment(): Record<string, string> {
     if (!this.databaseUrl) return providerFail('READBACK_INVALID', 'DATABASE_URL environment binding is absent')
     const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
     return { ...env, AGENT_COM_DB: 'postgres', DATABASE_URL: this.databaseUrl }
+  }
+
+  private coldStartMcpEnvironment(): Record<(typeof FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS)[number], string> {
+    if (!this.databaseUrl) return providerFail('READBACK_INVALID', 'DATABASE_URL environment binding is absent')
+    return {
+      AGENT_COM_DB: 'postgres',
+      AGENT_COM_EXPECTED_AGENT_ID: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_agent_id,
+      AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '0',
+      AGENT_COM_RUNTIME_SESSION: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session,
+      AGENT_ID: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_agent_id,
+      DATABASE_URL: this.databaseUrl,
+      DISCORD_STATE_DIR: '/Users/yuji/.claude/channels/discord-kodama',
+      WEBHOOK_PORT: String(FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port),
+    }
+  }
+
+  private providerRuntimePaths(context: FleetRuntimeLocalPhaseContext): {
+    directory: string
+    checkout: string
+    manifest: string
+    server: string
+  } {
+    const directory = assertSafeStatePath(
+      context.state_directory,
+      join(context.invocation_directory, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.directory_name),
+    )
+    const checkout = assertSafeStatePath(
+      context.state_directory,
+      join(directory, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.checkout_name),
+    )
+    return {
+      directory,
+      checkout,
+      manifest: assertSafeStatePath(
+        context.state_directory,
+        join(directory, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.manifest_name),
+      ),
+      server: assertSafeStatePath(
+        context.state_directory,
+        join(checkout, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.server_name),
+      ),
+    }
+  }
+
+  private async providerSourceImage(): Promise<{ head: string; tree: string }> {
+    const root = resolve(this.providerRepositoryRoot)
+    if (!existsSync(root) || lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() || realpathSync(root) !== root) {
+      return providerFail('READBACK_INVALID', 'provider source must be a real repository directory')
+    }
+    const remote = (await this.run(['git', 'remote', 'get-url', 'origin'], root)).trim()
+    const head = (await this.run(['git', 'rev-parse', 'HEAD'], root)).trim()
+    const tree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], root)).trim()
+    const status = await this.run(['git', 'status', '--porcelain=v1'], root)
+    const remoteMain = (await this.run([
+      'git', 'ls-remote', FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote, 'refs/heads/main',
+    ], root)).trim()
+    if (!new Set([FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote, FLEET_RUNTIME_V1_PROVIDER_RUNTIME.ssh_remote]).has(remote)
+      || !COMMIT.test(head) || !COMMIT.test(tree) || status !== ''
+      || remoteMain !== `${head}\trefs/heads/main`) {
+      return providerFail('READBACK_INVALID', 'provider source is not clean exact canonical remote main')
+    }
+    return { head, tree }
+  }
+
+  private async verifyProviderRuntimeCheckout(
+    context: FleetRuntimeLocalPhaseContext,
+    image: FleetRuntimeProviderRuntimeImage,
+  ): Promise<FleetRuntimeProviderRuntimeImage> {
+    const paths = this.providerRuntimePaths(context)
+    if (image.schema_version !== FLEET_RUNTIME_V1_PROVIDER_RUNTIME.schema_version
+      || image.repository !== FLEET_RUNTIME_V1_PROVIDER_RUNTIME.repository
+      || image.remote !== FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote
+      || image.checkout_path !== paths.checkout || image.server_path !== paths.server
+      || !COMMIT.test(image.head) || !COMMIT.test(image.tree)
+      || !existsSync(paths.checkout) || lstatSync(paths.checkout).isSymbolicLink()
+      || !lstatSync(paths.checkout).isDirectory() || realpathSync(paths.checkout) !== paths.checkout) {
+      return providerFail('READBACK_INVALID', 'provider runtime image identity or path differs')
+    }
+    const remote = (await this.run(['git', 'remote', 'get-url', 'origin'], paths.checkout)).trim()
+    const head = (await this.run(['git', 'rev-parse', 'HEAD'], paths.checkout)).trim()
+    const tree = (await this.run(['git', 'rev-parse', 'HEAD^{tree}'], paths.checkout)).trim()
+    const status = await this.run(['git', 'status', '--porcelain=v1'], paths.checkout)
+    const branch = (await this.run(['git', 'branch', '--show-current'], paths.checkout)).trim()
+    if (remote !== image.remote || head !== image.head || tree !== image.tree || status !== '' || branch !== '') {
+      return providerFail('READBACK_INVALID', 'provider runtime checkout origin, image, cleanliness, or detached state differs')
+    }
+    if (!existsSync(paths.server) || lstatSync(paths.server).isSymbolicLink()
+      || !lstatSync(paths.server).isFile() || realpathSync(paths.server) !== paths.server) {
+      return providerFail('READBACK_INVALID', 'provider runtime server must be a real regular file')
+    }
+    return clone(image)
+  }
+
+  private async readProviderRuntimeImage(
+    context: FleetRuntimeLocalPhaseContext,
+  ): Promise<FleetRuntimeProviderRuntimeImage | null> {
+    const paths = this.providerRuntimePaths(context)
+    if (!existsSync(paths.manifest)) return null
+    if (lstatSync(paths.manifest).isSymbolicLink() || !lstatSync(paths.manifest).isFile()
+      || realpathSync(paths.manifest) !== paths.manifest) {
+      return providerFail('READBACK_INVALID', 'provider runtime image manifest must be a real regular file')
+    }
+    const raw = readFileSync(paths.manifest, 'utf8')
+    if (!raw.endsWith('\n')) return providerFail('READBACK_INVALID', 'provider runtime image manifest requires canonical JSON plus LF')
+    const body = raw.slice(0, -1)
+    const image = parseCanonicalJson<FleetRuntimeProviderRuntimeImage>(body, 'provider runtime image manifest')
+    assertPlainRecord(image, 'provider runtime image manifest')
+    assertExactKeys(image, [
+      'checkout_path', 'head', 'remote', 'repository', 'schema_version', 'server_path', 'tree',
+    ], 'provider runtime image manifest')
+    if (raw !== `${canonicalFleetRuntimeJson(image)}\n`) {
+      return providerFail('READBACK_INVALID', 'provider runtime image manifest bytes differ')
+    }
+    return this.verifyProviderRuntimeCheckout(context, image)
+  }
+
+  private async providerRuntimeImage(
+    context: FleetRuntimeLocalPhaseContext,
+  ): Promise<FleetRuntimeProviderRuntimeImage> {
+    const existing = await this.readProviderRuntimeImage(context)
+    if (existing) return existing
+    const source = await this.providerSourceImage()
+    const paths = this.providerRuntimePaths(context)
+    safeMkdir(context.state_directory, paths.directory)
+    const image: FleetRuntimeProviderRuntimeImage = {
+      schema_version: FLEET_RUNTIME_V1_PROVIDER_RUNTIME.schema_version,
+      repository: FLEET_RUNTIME_V1_PROVIDER_RUNTIME.repository,
+      remote: FLEET_RUNTIME_V1_PROVIDER_RUNTIME.remote,
+      head: source.head,
+      tree: source.tree,
+      checkout_path: paths.checkout,
+      server_path: paths.server,
+    }
+    if (!existsSync(paths.checkout)) {
+      await this.run([
+        'git', 'clone', '--no-checkout', '--origin', 'origin', image.remote, paths.checkout,
+      ], paths.directory)
+      await this.run(['git', 'checkout', '--detach', image.head], paths.checkout)
+    }
+    await this.verifyProviderRuntimeCheckout(context, image)
+    atomicWrite(context.state_directory, paths.manifest, image, true)
+    const recorded = await this.readProviderRuntimeImage(context)
+    if (!recorded) return providerFail('READBACK_INVALID', 'provider runtime image manifest disappeared after publish')
+    return recorded
+  }
+
+  private coldStartCommand(serverPath: string): string[] {
+    const environment = this.coldStartMcpEnvironment()
+    return [
+      'codex', '--dangerously-bypass-approvals-and-sandbox',
+      '-c', 'mcp_servers.aun.enabled=true',
+      '-c', `mcp_servers.aun.command=${JSON.stringify(process.execPath)}`,
+      '-c', `mcp_servers.aun.args=${JSON.stringify(['run', serverPath])}`,
+      ...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS.flatMap(key => [
+        '-c', `mcp_servers.aun.env.${key}=${JSON.stringify(environment[key])}`,
+      ]),
+    ]
+  }
+
+  private async listenerPids(port: number): Promise<number[]> {
+    const result = await this.runner.run(['lsof', '-nP', '-t', `-iTCP:${port}`, '-sTCP:LISTEN'])
+    if (result.exitCode === 1 && result.stdout.trim() === '' && result.stderr === '') return []
+    if (result.exitCode !== 0) return commandError(['lsof', '-nP', '-t', `-iTCP:${port}`, '-sTCP:LISTEN'], result)
+    const values = result.stdout.trim().split('\n').filter(Boolean)
+    if (values.some(value => !/^[1-9][0-9]*$/.test(value))) {
+      return providerFail('READBACK_INVALID', 'listener readback contains an invalid pid')
+    }
+    return [...new Set(values.map(Number))].sort((left, right) => left - right)
+  }
+
+  private async observeColdStartPostimage(
+    expectedCheckout: string,
+    expectedHead: string,
+  ): Promise<FleetRuntimeColdStartPostimageObservation> {
+    const [listenerPids, observation] = await Promise.all([
+      this.listenerPids(FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port),
+      this.queueObservation(),
+    ])
+    const latest = observation.runtime_inventory.latest_instance
+    const lastSeenAt = Date.parse(String(latest?.last_seen_at ?? ''))
+    const registrationRealized = Boolean(latest
+      && latest.status === 'running'
+      && latest.session_name === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
+      && latest.port === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port
+      && latest.checkout_path === expectedCheckout
+      && latest.commit_sha === expectedHead
+      && latest.stopped_at === null
+      && latest.git_dirty === false
+      && Number.isFinite(lastSeenAt)
+      && this.nowMs() - lastSeenAt <= 30_000
+      && lastSeenAt <= this.nowMs() + 30_000)
+    if (listenerPids.length > 0 && registrationRealized && latest) {
+      return {
+        state: 'REALIZED',
+        evidence: {
+          listener_pids: listenerPids,
+          listener_port: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port,
+          postimage_observed_at: observation.observed_at,
+          registered_checkout_path: expectedCheckout,
+          registered_commit_sha: expectedHead,
+          runtime_instance_id: latest.runtime_instance_id,
+        },
+      }
+    }
+    return {
+      state: listenerPids.length > 0 || registrationRealized ? 'PARTIAL' : 'ABSENT',
+      evidence: null,
+    }
+  }
+
+  private async waitForColdStartPostimage(
+    expectedCheckout: string,
+    expectedHead: string,
+  ): Promise<FleetRuntimeColdStartPostimageEvidence> {
+    if (!Number.isSafeInteger(this.bootReadbackAttempts) || this.bootReadbackAttempts <= 0
+      || !Number.isSafeInteger(this.bootReadbackIntervalMs) || this.bootReadbackIntervalMs < 0) {
+      return providerFail('READBACK_INVALID', 'cold-start boot readback bounds are invalid')
+    }
+    for (let attempt = 0; attempt < this.bootReadbackAttempts; attempt++) {
+      const observed = await this.observeColdStartPostimage(expectedCheckout, expectedHead)
+      if (observed.state === 'REALIZED' && observed.evidence) return observed.evidence
+      if (attempt + 1 < this.bootReadbackAttempts) await this.sleep(this.bootReadbackIntervalMs)
+    }
+    return providerFail('READBACK_INVALID', 'cold-start listener and exact runtime registration did not realize within the bounded window')
+  }
+
+  private async launchColdStartWrapper(
+    context: FleetRuntimeLocalPhaseContext,
+    expectedCheckout: string,
+    expectedHead: string,
+  ): Promise<{ provider: FleetRuntimeProviderRuntimeImage; postimage: FleetRuntimeColdStartPostimageEvidence }> {
+    const provider = await this.providerRuntimeImage(context)
+    const session = FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
+    await this.run(['tmux', 'kill-session', '-t', session]).catch(error => {
+      if (!(error instanceof FleetRuntimeLocalProviderError) || error.code !== 'COMMAND_FAILED') throw error
+    })
+    await this.run([
+      'tmux', 'new-session', '-d', '-s', session, '-c', expectedCheckout,
+      ...this.coldStartCommand(provider.server_path),
+    ], undefined, this.databaseEnvironment())
+    return {
+      provider,
+      postimage: await this.waitForColdStartPostimage(expectedCheckout, expectedHead),
+    }
   }
 
   private async run(argv: readonly string[], cwd?: string, env?: Record<string, string>): Promise<string> {
@@ -3455,22 +3847,30 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         String(context.current_intent.expected_head ?? '') || undefined,
         String(context.current_intent.expected_tree ?? '') || undefined,
       )
-      const session = FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
-      await this.run(['tmux', 'kill-session', '-t', session]).catch(error => {
-        if (!(error instanceof FleetRuntimeLocalProviderError)) throw error
-      })
-      const serverPath = join(this.providerRepositoryRoot, 'server.ts')
-      const command = [
-        'codex', '--dangerously-bypass-approvals-and-sandbox',
-        '-c', 'mcp_servers.aun.enabled=true',
-        '-c', `mcp_servers.aun.command=${JSON.stringify(process.execPath)}`,
-        '-c', `mcp_servers.aun.args=${JSON.stringify(['run', serverPath])}`,
-        '-c', 'mcp_servers.aun.env.AGENT_ID="kodama"',
-        '-c', 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID="kodama"',
-        '-c', 'mcp_servers.aun.env.WEBHOOK_PORT="8803"',
-      ]
-      await this.run(['tmux', 'new-session', '-d', '-s', session, '-c', checkout, ...command], undefined, this.databaseEnvironment())
-      return { evidence: { ...clean, session, port: 8803 }, protected_effect_count: 1 }
+      const expectedHead = String(context.current_intent.expected_head ?? '')
+      if (!COMMIT.test(expectedHead)) return providerFail('STATE_RECORD_INVALID', 'cold-start intent lacks an exact head')
+      const realized = await this.launchColdStartWrapper(context as FleetRuntimeLocalPhaseContext, checkout, expectedHead)
+      this.realizedPostimages.set(request.idempotency_key, clone(realized.postimage))
+      return {
+        evidence: {
+          ...clean,
+          session: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session,
+          port: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port,
+          boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+          listener_pids: realized.postimage.listener_pids,
+          listener_port: realized.postimage.listener_port,
+          postimage_observed_at: realized.postimage.postimage_observed_at,
+          provider_checkout_path: realized.provider.checkout_path,
+          provider_head: realized.provider.head,
+          provider_remote: realized.provider.remote,
+          provider_tree: realized.provider.tree,
+          registered_checkout_path: realized.postimage.registered_checkout_path,
+          registered_commit_sha: realized.postimage.registered_commit_sha,
+          runtime_instance_id: realized.postimage.runtime_instance_id,
+          server_path: realized.provider.server_path,
+        },
+        protected_effect_count: 1,
+      }
     }
     if (phase === 'VERIFY_LIVE_IDENTITY') {
       const checkoutImage = await this.verifyCheckout(
@@ -3480,8 +3880,18 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         String(context.current_intent.expected_tree ?? '') || undefined,
       )
       const postObservation = await this.queueObservation()
+      const coldStartRuntimeInstance = typeof context.prior_evidence.COLD_START_DISCORD_KODAMA?.runtime_instance_id === 'string'
+        ? String(context.prior_evidence.COLD_START_DISCORD_KODAMA.runtime_instance_id)
+        : this.realizedPostimages.get(request.idempotency_key)?.runtime_instance_id ?? null
+      const postRuntimeInstance = postObservation.runtime_inventory.latest_instance?.runtime_instance_id ?? null
+      if (coldStartRuntimeInstance && postRuntimeInstance !== coldStartRuntimeInstance) {
+        return providerFail('READBACK_INVALID', 'live runtime instance differs from the cold-start boot proof')
+      }
+      const preToPostBasis = coldStartRuntimeInstance
+        ? { ...clone(preflight.queue_observation), runtime_inventory: { latest_instance: null } }
+        : preflight.queue_observation
       try {
-        assertFleetRuntimePreToPostObservation(preflight.queue_observation, postObservation, {
+        assertFleetRuntimePreToPostObservation(preToPostBasis, postObservation, {
           approvedStateRoot: FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
           canonicalCheckout: '/Users/yuji/Developer/kodama',
           nowMs: this.nowMs(),
@@ -3522,6 +3932,46 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       }
     }
     return providerFail('COMMAND_FAILED', `unsupported phase ${phase}`)
+  }
+
+  async realizePostimage(
+    readonlyRequest: Readonly<FleetRuntimeRequest>,
+    _preflight: Readonly<FleetRuntimePreflightReceipt>,
+    readonlyContext: Readonly<FleetRuntimeLocalPhaseContext>,
+  ): Promise<FleetRuntimePostimageRealizationResult> {
+    const request = readonlyRequest as FleetRuntimeRequest
+    const context = readonlyContext as FleetRuntimeLocalPhaseContext
+    const expectedCheckout = String(context.current_intent.checkout_path ?? '')
+    const expectedHead = String(context.current_intent.expected_head ?? '')
+    const expectedTree = String(context.current_intent.expected_tree ?? '')
+    if (!isAbsolute(expectedCheckout) || resolve(expectedCheckout) !== expectedCheckout
+      || !COMMIT.test(expectedHead) || !COMMIT.test(expectedTree)) {
+      return providerFail('REALIZE_POSTIMAGE_NOT_ADMITTED', 'completed cold-start intent lacks an exact checkout image')
+    }
+    await this.verifyCheckout(expectedCheckout, context.state_directory, expectedHead, expectedTree)
+    const observed = await this.observeColdStartPostimage(expectedCheckout, expectedHead)
+    if (observed.state === 'REALIZED' && observed.evidence) {
+      this.realizedPostimages.set(request.idempotency_key, clone(observed.evidence))
+      return { outcome: 'ALREADY_REALIZED', evidence: clone(observed.evidence) }
+    }
+    if (observed.state === 'PARTIAL') {
+      const converged = await this.waitForColdStartPostimage(expectedCheckout, expectedHead)
+      this.realizedPostimages.set(request.idempotency_key, clone(converged))
+      return { outcome: 'ALREADY_REALIZED', evidence: clone(converged) }
+    }
+    const realized = await this.launchColdStartWrapper(context, expectedCheckout, expectedHead)
+    this.realizedPostimages.set(request.idempotency_key, clone(realized.postimage))
+    return {
+      outcome: 'REALIZED',
+      evidence: {
+        ...realized.postimage,
+        provider_checkout_path: realized.provider.checkout_path,
+        provider_head: realized.provider.head,
+        provider_remote: realized.provider.remote,
+        provider_tree: realized.provider.tree,
+        server_path: realized.provider.server_path,
+      },
+    }
   }
 
   async reconcilePhase(
