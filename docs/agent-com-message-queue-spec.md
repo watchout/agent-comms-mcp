@@ -1446,6 +1446,21 @@ provider の durable reservation、operation journal、sealed request は resume
 書き換えない。既に completed または readback で受領済みと確定した `PUSH_NORMAL_BRANCH`、
 `CREATE_DRAFT_PR`、`COLD_START_DISCORD_KODAMA` を再実行してはならない。
 
+phase loop は journal status を effect より先に評価する。`completed` phase は intent 構築と
+`performPhase` の両方を skip し、`started` phase は `performPhase` を再実行せず
+`reconcilePhase` だけで readback する。初回 `performPhase` と resume `reconcilePhase` には、
+adapter が当該 invocation 用に検証した同一の `fleet-runtime-v1/preflight-receipt/v3` を渡す。
+とくに `COLD_START_DISCORD_KODAMA=completed` かつ `VERIFY_LIVE_IDENTITY=started` の durable
+invocation は、COLD_START の protected effect を増やさず、preflight の queue observation と
+live runtime/checkout/default-branch postimage の照合だけを再開する。照合に成功したときは
+`VERIFY_LIVE_IDENTITY` を completed にして canonical `CANARY_COLD_START` receipt を生成し、
+照合不能なら completed COLD_START を replay せず typed fail-closed とする。
+
+この crash point の回帰 fixture は、(1) concrete `performPhase` が preflight receipt を実参照
+して `VERIFY_LIVE_IDENTITY` を完了できること、(2) completed COLD_START と started VERIFY を
+持つ resume が COLD_START の call count を増やさず canonical receipt に到達すること、
+(3) resume の protected effect 増分が 0 であることを個別に証明する。
+
 ---
 
 ## 14. Phase C 完了条件 (CEO 承認 2026-04-17)
@@ -1802,6 +1817,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-21 | §13.7 に started `VERIFY_LIVE_IDENTITY` の exact preflight 参照と no-replay reconcile fixture を追加。completed COLD_START を effect 前に skip し、live identity のみを再開して canonical receipt に到達する境界を固定。 |
 | 2026-08-20 | §17.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+valid endpoint lease の正準集合、0席時の typed `NO_DATA` block、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |
 | 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
 | 2026-08-20 | §13.7 に merge-derived postimage basis を追加。`VERIFY_EXTERNAL_MERGE` 未開始時の sealed preimage equality を維持し、started/completed 後だけ immutable journal/external receipt/merged PR/commit tree/live surface を exact 照合して残余 phase を再開する。 |
