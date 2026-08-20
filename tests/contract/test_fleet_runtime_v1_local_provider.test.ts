@@ -20,6 +20,7 @@ import {
   type FleetRuntimeRequest,
   type FleetRuntimeResumeAdmissionBindingReadback,
   type FleetRuntimeResumeAdmissionControlHandoffRef,
+  type FleetRuntimeResumeImageBasis,
 } from '../../core/fleet-runtime-v1-adapter'
 import {
   ConcreteFleetRuntimeV1LocalSystem,
@@ -760,6 +761,22 @@ function fixtureExternalMergeReceipt(request: FleetRuntimeRequest, intent: Recor
   return receipt
 }
 
+function installFixtureExternalMergeReceipt(
+  stateDirectory: string,
+  request: FleetRuntimeRequest,
+): Record<string, unknown> {
+  const invocationDirectory = join(stateDirectory, 'invocations', request.idempotency_key)
+  const journal = JSON.parse(readFileSync(join(invocationDirectory, 'operation-state.json'), 'utf8')) as FleetRuntimeLocalOperationState
+  const mergePhase = journal.phases.VERIFY_EXTERNAL_MERGE
+  expect(['started', 'completed']).toContain(mergePhase?.status)
+  const receipt = fixtureExternalMergeReceipt(request, mergePhase!.intent)
+  writeFileSync(
+    join(invocationDirectory, 'external-merge-receipt.json'),
+    `${canonicalFleetRuntimeJson(receipt)}\n`,
+  )
+  return receipt
+}
+
 function fixtureEvidence(
   request: FleetRuntimeRequest,
   phase: FleetRuntimeLocalPhase,
@@ -823,8 +840,10 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
   resumeObservedAt: string | null = null
   resumeObservation: FleetRuntimeQueueObservationV2 | null = null
   resumeAdmissionBinding: FleetRuntimeResumeAdmissionBindingReadback | null = null
+  resumeTargetImage: FleetRuntimePreflightReceipt['target_preimages'][number] | null = null
   lastResumeControlHandoff: FleetRuntimeResumeAdmissionControlHandoffRef | null = null
   lastDurableRemoteHead: string | null = null
+  lastResumeImageBasis: FleetRuntimeResumeImageBasis | null = null
 
   async inspect(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
     return this.inspectFor(request, 'SEALED_START')
@@ -834,15 +853,18 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
     request: Readonly<FleetRuntimeRequest>,
     controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
     durableRemoteHead: string | null,
+    imageBasis: Readonly<FleetRuntimeResumeImageBasis>,
   ): Promise<FleetRuntimePreflightReceipt> {
     this.lastResumeControlHandoff = controlHandoff ? structuredClone(controlHandoff) : null
     this.lastDurableRemoteHead = durableRemoteHead
-    return this.inspectFor(request, 'DURABLE_RESUME')
+    this.lastResumeImageBasis = structuredClone(imageBasis)
+    return this.inspectFor(request, 'DURABLE_RESUME', imageBasis)
   }
 
   private async inspectFor(
     request: Readonly<FleetRuntimeRequest>,
     mode: FleetRuntimePreflightContext['mode'],
+    imageBasis: Readonly<FleetRuntimeResumeImageBasis> | null = null,
   ): Promise<FleetRuntimePreflightReceipt> {
     this.inspectCount += 1
     this.inspectModes.push(mode)
@@ -859,6 +881,12 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
       receipt.resume_admission_binding = this.resumeAdmissionBinding
         ? structuredClone(this.resumeAdmissionBinding)
         : null
+      if (this.resumeTargetImage) {
+        receipt.target_preimages = [structuredClone(this.resumeTargetImage)]
+      } else if (imageBasis?.kind === 'MERGE_DERIVED_POSTIMAGE') {
+        receipt.target_preimages[0].head_commit = imageBasis.merge_commit
+        receipt.target_preimages[0].tree = imageBasis.merge_tree
+      }
     }
     return receipt
   }
@@ -1336,7 +1364,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     await expectProviderCode(() => store.reserve_once(second), 'STATE_COLLISION')
   })
 
-  test('a missing external merge receipt resumes with a fresh observation after the sealed observation expires', async () => {
+  test('post-merge durable resume validates the journal-derived postimage and reaches remaining phases', async () => {
     const stateDirectory = join(temporary('frv1-merge-wait'), 'state')
     const request = requestFor()
     const system = new FixtureSystem()
@@ -1347,12 +1375,77 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     )
     expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
     expect(system.calls.has('COLD_START_DISCORD_KODAMA')).toBe(false)
+    const externalMerge = installFixtureExternalMergeReceipt(stateDirectory, request)
     system.resumeObservedAt = '2026-08-15T08:40:00.000Z'
     system.mergeAvailable = true
     const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
     expect(receipt.operation).toBe('CANARY_COLD_START')
+    expect(system.lastResumeImageBasis).toMatchObject({
+      kind: 'MERGE_DERIVED_POSTIMAGE',
+      verify_external_merge_status: 'started',
+      merge_commit: externalMerge.merge_commit,
+      merge_tree: externalMerge.merge_tree,
+    })
     expect(system.calls.get('CREATE_DRAFT_PR')).toBe(1)
+    expect(system.calls.get('COLD_START_DISCORD_KODAMA')).toBe(1)
     expect(system.inspectModes).toEqual(['SEALED_START', 'DURABLE_RESUME'])
+  })
+
+  test('pre-merge durable resume preserves sealed preimage drift rejection', async () => {
+    const stateDirectory = join(temporary('frv1-pre-merge-drift'), 'state')
+    const request = requestFor()
+    const persistence = new FileFleetRuntimeV1Persistence(stateDirectory, { approvedRoot: stateDirectory })
+    await persistence.reserve_once({
+      idempotency_key: request.idempotency_key,
+      request_digest: request.request_digest,
+      status: 'reserved',
+      receipt: null,
+    })
+    const system = new FixtureSystem()
+    system.resumeTargetImage = structuredClone(request.preimages[0])
+    system.resumeTargetImage.head_commit = 'f'.repeat(40)
+
+    try {
+      await executeLocalFleetRuntimeV1(protectedFixtureInput({
+        request,
+        stateDirectory,
+        executeProtectedEffects: true,
+        system,
+      }))
+      throw new Error('expected PREFLIGHT_RECEIPT_MISMATCH')
+    } catch (error) {
+      expect(error).toBeInstanceOf(FleetRuntimeV1Error)
+      expect((error as FleetRuntimeV1Error).code).toBe('PREFLIGHT_RECEIPT_MISMATCH')
+    }
+
+    expect(system.lastResumeImageBasis).toEqual({
+      schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+      kind: 'SEALED_PREIMAGE',
+      request_digest: request.request_digest,
+    })
+    expect(system.calls.size).toBe(0)
+  })
+
+  test('post-merge completed replay returns the original receipt without preflight or subeffect replay', async () => {
+    const stateDirectory = join(temporary('frv1-post-merge-replay'), 'state')
+    const request = requestFor()
+    const system = new FixtureSystem()
+    system.mergeAvailable = false
+    await expectProviderCode(
+      () => executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system })),
+      'WAITING_INDEPENDENT_MERGE',
+    )
+    installFixtureExternalMergeReceipt(stateDirectory, request)
+    system.mergeAvailable = true
+    const completed = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
+    const calls = [...system.calls.entries()]
+    const inspectCount = system.inspectCount
+
+    const replay = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
+
+    expect(replay).toEqual(completed)
+    expect(system.inspectCount).toBe(inspectCount)
+    expect([...system.calls.entries()]).toEqual(calls)
   })
 
   test('durable resume consumes a canonical handoff binding against the read-only pushed journal head', async () => {
@@ -1381,6 +1474,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     system.resumeObservation = admitted
     system.resumeAdmissionBinding = binding
     system.mergeAvailable = true
+    installFixtureExternalMergeReceipt(stateDirectory, request)
 
     const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({
       request,
@@ -1424,6 +1518,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       const system = new FixtureSystem()
       system.interruptOnceAt = phase
       await expect(executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))).rejects.toThrow('fixture interruption')
+      if (phase === 'COLD_START_DISCORD_KODAMA') installFixtureExternalMergeReceipt(stateDirectory, request)
       const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }))
       expect(receipt.operation).toBe('CANARY_COLD_START')
       expect(system.calls.get(phase)).toBe(1)
@@ -2044,6 +2139,70 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       'READBACK_INVALID',
     )
     expect(calls).toHaveLength(2)
+  })
+
+  test('concrete durable-resume postimage readback binds the merged PR, pushed head, merge tree, and live image', async () => {
+    const request = requestFor()
+    const basis: Extract<FleetRuntimeResumeImageBasis, { kind: 'MERGE_DERIVED_POSTIMAGE' }> = {
+      schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+      kind: 'MERGE_DERIVED_POSTIMAGE',
+      request_digest: request.request_digest,
+      verify_external_merge_status: 'started',
+      journal_intent_sha256: SHA_A,
+      journal_evidence_sha256: null,
+      repository: 'watchout/kodama',
+      required_base_branch: request.preimages[0].required_base_branch,
+      pr_url: 'https://github.com/watchout/kodama/pull/123',
+      pushed_head: 'e'.repeat(40),
+      external_merge_receipt_sha256: SHA_B,
+      merge_commit: 'c'.repeat(40),
+      merge_tree: 'd'.repeat(40),
+    }
+    const liveImage = {
+      ...structuredClone(request.preimages[0]),
+      head_commit: basis.merge_commit,
+      tree: basis.merge_tree,
+    }
+    const calls: string[][] = []
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv) {
+        calls.push([...argv])
+        if (argv[0] === 'gh' && argv[1] === 'pr') return {
+          exitCode: 0,
+          stderr: '',
+          stdout: JSON.stringify({
+            url: basis.pr_url,
+            state: 'MERGED',
+            mergedAt: '2026-08-15T09:00:00Z',
+            mergeCommit: { oid: basis.merge_commit },
+            headRefOid: basis.pushed_head,
+            baseRefName: basis.required_base_branch,
+            isDraft: false,
+          }),
+        }
+        if (argv[0] === 'gh' && argv[1] === 'api') return {
+          exitCode: 0,
+          stderr: '',
+          stdout: JSON.stringify({ tree: { sha: basis.merge_tree } }),
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected argv ${argv.join(' ')}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(runner)
+
+    await expect((system as any).validateResumePostimageBasis(request, basis, liveImage)).resolves.toBeUndefined()
+    expect(calls).toEqual([
+      [
+        'gh', 'pr', 'view', basis.pr_url, '--repo', 'watchout/kodama',
+        '--json', 'url,state,mergedAt,mergeCommit,headRefOid,baseRefName,isDraft',
+      ],
+      ['gh', 'api', `repos/watchout/kodama/git/commits/${basis.merge_commit}`],
+    ])
+
+    await expectProviderCode(
+      () => (system as any).validateResumePostimageBasis(request, basis, { ...liveImage, tree: 'f'.repeat(40) }),
+      'READBACK_INVALID',
+    )
   })
 
   test('local receipt validates its self-digest, subject, operation, target, predecessor, and runtime image', () => {
@@ -2820,6 +2979,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     const journalPath = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
     const interrupted = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
     expect(interrupted.phases[phase]?.status).toBe('started')
+    installFixtureExternalMergeReceipt(stateDirectory, request)
     const checkout = join(stateDirectory, 'invocations', request.idempotency_key, 'checkout')
     mkdirSync(checkout, { recursive: true })
     await expectProviderCode(() => executeLocalFleetRuntimeV1(protectedFixtureInput({
