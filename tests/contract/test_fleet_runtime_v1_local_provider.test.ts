@@ -27,6 +27,7 @@ import {
   FLEET_RUNTIME_V1_ADF_READBACK_RELEASE,
   FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT,
   FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES,
+  FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
   FileFleetRuntimeV1Persistence,
   FleetRuntimeLocalProviderError,
   buildFleetRuntimeV1DryRunReceipt,
@@ -1322,6 +1323,78 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(canonicalFleetRuntimeObservationJson(readback)).not.toContain(secretSentinel)
   })
 
+  test('concrete VERIFY_LIVE_IDENTITY reads the admitted preflight receipt without a reference failure', async () => {
+    const request = requestFor()
+    const preflight = preflightFor(request)
+    const mergeCommit = 'c'.repeat(40)
+    const mergeTree = 'd'.repeat(40)
+    const invocationDirectory = join(FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT, 'invocations', request.idempotency_key)
+    const checkout = join(invocationDirectory, 'checkout')
+    const observedAt = '2026-08-15T08:24:00.000Z'
+    preflight.observed_at = observedAt
+    preflight.queue_observation.observed_at = observedAt
+    const postObservation = structuredClone(preflight.queue_observation)
+    postObservation.runtime_inventory.latest_instance = {
+      runtime_instance_id: '00000000-0000-4000-8000-000000000001',
+      status: 'running',
+      session_name: 'discord-kodama',
+      port: 8803,
+      checkout_path: checkout,
+      commit_sha: mergeCommit,
+      started_at: '2026-08-15T08:23:59.000Z',
+      stopped_at: null,
+      last_seen_at: observedAt,
+      git_dirty: false,
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(
+      { async run(argv) { return { exitCode: 1, stdout: '', stderr: `unexpected ${argv.join(' ')}` } } },
+      resolveRepo(),
+      () => Date.parse(observedAt),
+      async () => { throw new Error('unused') },
+      'postgresql:///isolated_test',
+    )
+    system.verifyCheckout = async () => ({
+      checkout_path: checkout,
+      remote: 'https://github.com/watchout/kodama.git',
+      head: mergeCommit,
+      tree: mergeTree,
+      clean: true,
+      detached: true,
+    })
+    ;(system as any).queueObservation = async () => structuredClone(postObservation)
+    ;(system as any).remoteSurface = async () => ({
+      head_commit: mergeCommit,
+      tree: mergeTree,
+      runtime_surface_entry_count: request.preimages[0].runtime_surface_entry_count,
+      runtime_surface_sha256: request.preimages[0].runtime_surface_sha256,
+      distribution_surface_entry_count: request.preimages[0].distribution_surface_entry_count,
+      distribution_surface_sha256: request.preimages[0].distribution_surface_sha256,
+    })
+    const result = await system.performPhase(request, preflight, 'VERIFY_LIVE_IDENTITY', {
+      state_directory: FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
+      invocation_directory: invocationDirectory,
+      prior_evidence: { VERIFY_EXTERNAL_MERGE: { merge_commit: mergeCommit, merge_tree: mergeTree } },
+      current_intent: {
+        checkout_path: checkout,
+        expected_head: mergeCommit,
+        expected_tree: mergeTree,
+        port: 8803,
+        session: 'discord-kodama',
+      },
+      execution_owner_id: 'fixture-owner',
+      owner_decision_raw_body: OWNER_BODY,
+      predecessor_receipt_raw_body: PREDECESSOR_BODY,
+    })
+
+    expect(result.protected_effect_count).toBe(0)
+    expect(result.evidence).toMatchObject({
+      runtime_instance_id: postObservation.runtime_inventory.latest_instance.runtime_instance_id,
+      queue_unchanged: true,
+      duplicate_effect_count: 0,
+      unauthorized_effect_count: 0,
+    })
+  })
+
   test.each(['CANARY_COLD_START', 'ROLLBACK', 'RECOVERY', 'REAPPLY'] as const)(
     '%s completes its exact journal and produces an adapter-valid receipt',
     async operation => {
@@ -1446,6 +1519,53 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(replay).toEqual(completed)
     expect(system.inspectCount).toBe(inspectCount)
     expect([...system.calls.entries()]).toEqual(calls)
+  })
+
+  test('resume reconciles started live identity without replaying completed cold start', async () => {
+    const stateDirectory = join(temporary('frv1-live-identity-resume'), 'state')
+    const request = requestFor()
+    const system = new FixtureSystem()
+    system.interruptOnceAt = 'VERIFY_LIVE_IDENTITY'
+    await expect(executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request,
+      stateDirectory,
+      executeProtectedEffects: true,
+      system,
+    }))).rejects.toThrow('fixture interruption at VERIFY_LIVE_IDENTITY')
+
+    const journalPath = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
+    const interrupted = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(interrupted.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
+    expect(interrupted.phases.VERIFY_LIVE_IDENTITY).toMatchObject({ status: 'started', protected_effect_count: 0 })
+    const protectedCallsBefore = new Map(
+      [...system.calls.entries()].filter(([phase]) => ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase)),
+    )
+    installFixtureExternalMergeReceipt(stateDirectory, request)
+
+    const receipt = await executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request,
+      stateDirectory,
+      executeProtectedEffects: true,
+      system,
+    }))
+
+    expect(receipt).toMatchObject({
+      schema_version: 'fleet-runtime-v1/effect-receipt/v2',
+      request_id: request.request_id,
+      request_digest: request.request_digest,
+      idempotency_key: request.idempotency_key,
+      operation: 'CANARY_COLD_START',
+      result: 'PASS',
+      duplicate_effect_count: 0,
+      unauthorized_effect_count: 0,
+    })
+    expect(new Map(
+      [...system.calls.entries()].filter(([phase]) => ['PUSH_NORMAL_BRANCH', 'CREATE_DRAFT_PR', 'COLD_START_DISCORD_KODAMA'].includes(phase)),
+    )).toEqual(protectedCallsBefore)
+    expect(system.calls.get('COLD_START_DISCORD_KODAMA')).toBe(1)
+    expect(system.calls.get('VERIFY_LIVE_IDENTITY')).toBe(1)
+    const completed = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(completed.phases.VERIFY_LIVE_IDENTITY).toMatchObject({ status: 'completed', protected_effect_count: 0 })
   })
 
   test('durable resume consumes a canonical handoff binding against the read-only pushed journal head', async () => {

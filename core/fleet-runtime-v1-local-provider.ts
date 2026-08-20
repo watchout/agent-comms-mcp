@@ -3288,7 +3288,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
 
   async performPhase(
     readonlyRequest: Readonly<FleetRuntimeRequest>,
-    _preflight: Readonly<FleetRuntimePreflightReceipt>,
+    preflight: Readonly<FleetRuntimePreflightReceipt>,
     phase: FleetRuntimeLocalPhase,
     context: Readonly<FleetRuntimeLocalPhaseContext>,
   ): Promise<FleetRuntimeLocalPhaseResult> {
