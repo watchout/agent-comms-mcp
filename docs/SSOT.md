@@ -701,6 +701,16 @@ resume は残存 phase の reconciliation であり、受領済み protected sub
 binding が認めた observation ID よりさらに drift した場合、または pending / received /
 in_progress のいずれかが nonzero の場合は、新しい successor binding なしに再試行しない。
 
+phase loop は、journal 上 `completed` の phase を intent 構築・effect 呼び出しより前に skip
+し、`started` の phase だけを同じ invocation の `reconcilePhase` に渡す。初回実行の
+`performPhase` と started phase の `reconcilePhase` は、いずれもその invocation について
+adapter が検証した同一の `FleetRuntimePreflightReceipt` を参照しなければならない。
+したがって `COLD_START_DISCORD_KODAMA=completed`、`VERIFY_LIVE_IDENTITY=started` で停止した
+resume は COLD_START を再実行せず、同じ preflight の queue observation と live postimage を
+照合して `VERIFY_LIVE_IDENTITY` だけを reconcile する。成功時は canonical receipt を完成し、
+resume による protected effect 増分を 0 に保つ。照合不能時は COLD_START を replay せず
+fail-closed とする。
+
 ### 10.4 N1 通信 SLO 計測
 
 内部通信の current-state 判定は `scripts/n1-slo/` の N1 harness が生成する
@@ -1240,6 +1250,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-21 | §10.3 に started `VERIFY_LIVE_IDENTITY` の preflight 参照と no-replay reconciliation を明記。completed COLD_START を skip し、同一の検証済み preflight で live identity のみ再開して canonical receipt に到達する契約を固定。 |
 | 2026-08-20 | §10.4 N1 probe の canonical internal `channel_id=pdca-daily` 束縛、channel row/member 検証、`N1_PROBE_CHANNEL_BINDING_NOT_READY` fail-closed、隔離 fixture の production `NOT NULL` parity を固定。 |
 | 2026-08-20 | §10.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+endpoint lease 列挙、0席時の typed `NO_DATA` block、内部 no-op probe、typed silent failure、terminal cleanup、zero-effect report publisher の正本関係を固定。 |
 | 2026-08-19 | §10.3 に immutable `resume_admission_binding` の canonical 消費経路を追加。durable request/journal head/exact fresh observation ID/zero queue の束縛、preflight receipt v3、次の drift の fail-closed を固定。 |
