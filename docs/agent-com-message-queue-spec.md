@@ -1588,6 +1588,13 @@ SELECT DISTINCT ON (a.agent_id)
 
 - `message_type='probe'`、schema `aun-n1-slo-probe/v1`、content prefix
   `[AUN-N1-SLO-PROBE/v1]:<run_id>:<agent_id>` を必須とする。
+- `agent_messages.channel_id` は名前 alias ではなく exact canonical internal
+  channel id `pdca-daily` に固定する。INSERT は `channels.id='pdca-daily'` の
+  存在と対象 `agent_id` の `channels.members` 所属を同一 transaction 内で
+  検証する。row 欠落または non-member は
+  `N1_PROBE_CHANNEL_BINDING_NOT_READY` として agent/message queue 両方をロールバックする。
+  この channel 束縛は internal attribution のみで、router、adapter、
+  `outbound_queue`、provider、Discord の起動根拠にしない。
 - probe は対象 seat 自身を `author_id` と `message_queue.agent_id` に置く
   self-issued no-op である。priority は `-1000000` とし、generic `next` や
   inbox cursor、`agents.status` を使わない。
@@ -1626,6 +1633,12 @@ readback する。
 DB は明示 `--database-config`、launchd の GitHub credential は明示
 `--github-token-file` から runtime に解決する（対話実行は環境または `gh`
 credential store も可）。harness 自身は ambient `DATABASE_URL` を読まない。
+
+isolated PostgreSQL fixture は repository migration 適用後に production parity として
+`agent_messages.channel_id NOT NULL` を強制する。regression は少なくとも
+(1) canonical `pdca-daily` row/member で probe INSERT 成功、(2) raw `channel_id=NULL`
+INSERT の拒否、(3) channel row/member 欠落時の typed fail-closed と queue residue 0
+を production-equivalent schema 上で検証する。
 
 ---
 
@@ -1768,6 +1781,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-20 | §17.4 N1 probe の exact canonical `channel_id=pdca-daily` 束縛、channel row/member の transactional validation、typed binding failure、隔離 fixture の production `NOT NULL` parity と3 regression を追加。 |
 | 2026-08-20 | §17.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+valid endpoint lease の正準集合、0席時の typed `NO_DATA` block、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |
 | 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
 | 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |

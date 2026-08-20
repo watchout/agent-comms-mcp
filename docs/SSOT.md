@@ -700,6 +700,11 @@ in_progress のいずれかが nonzero の場合は、新しい successor bindin
 - 各対象は self-issued `message_type='probe'` を exact queue id で
   `pending → received → done` とする no-op 往復。業務 queue、agent status、
   cursor、`outbound_queue` は変更しない。
+- probe の `agent_messages.channel_id` は canonical internal channel id
+  `pdca-daily` に固定する。`channels` row が存在し対象 seat が member であることを
+  INSERT 時に検証し、欠落または non-member なら queue row を作らず
+  `N1_PROBE_CHANNEL_BINDING_NOT_READY` で fail closed する。この束縛は帰属のみで、
+  channel router、adapter、provider、Discord を起動しない。
 - 送信開始から 5,000 ms の固定窓で claim/close 無音を検出し、
   `agent_messages.metadata.n1_slo` に typed `RETRY_EXHAUSTED` を残す。
 - 全 probe は成功・失敗とも `done` に cleanup し、non-terminal residue、
@@ -709,7 +714,9 @@ in_progress のいずれかが nonzero の場合は、新しい successor bindin
   plist に DB URL・GitHub token・provider/Discord credential を埋め込まない。
 
 isolated contract suite は ambient `DATABASE_URL` を使用せず、明示した scratch
-PostgreSQL database を作成・migration・破棄する。
+PostgreSQL database を作成・migration・破棄する。fixture は production parity として
+`agent_messages.channel_id NOT NULL` を強制し、canonical channel 束縛の成功と
+raw `NULL` INSERT の拒否を両方検証する。
 
 ---
 
@@ -1221,6 +1228,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-20 | §10.4 N1 probe の canonical internal `channel_id=pdca-daily` 束縛、channel row/member 検証、`N1_PROBE_CHANNEL_BINDING_NOT_READY` fail-closed、隔離 fixture の production `NOT NULL` parity を固定。 |
 | 2026-08-20 | §10.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+endpoint lease 列挙、0席時の typed `NO_DATA` block、内部 no-op probe、typed silent failure、terminal cleanup、zero-effect report publisher の正本関係を固定。 |
 | 2026-08-19 | §10.3 に immutable `resume_admission_binding` の canonical 消費経路を追加。durable request/journal head/exact fresh observation ID/zero queue の束縛、preflight receipt v3、次の drift の fail-closed を固定。 |
 | 2026-08-19 | §10.3 Fleet Runtime V1 の durable STARTED resume 契約を追加。新規 sealed preflight、reserved の fresh re-observation、completed original receipt、same-key collision の境界を固定。 |
