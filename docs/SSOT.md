@@ -678,6 +678,18 @@ load してから live preflight を選ぶ。
   durable request tuple と journal の `PUSH_NORMAL_BRANCH` head、および実測した fresh
   observation ID を exact に束縛するときだけ、sealed-vs-fresh equality をその binding に
   置換できる。sealed observation の期限は resume の live freshness 判定に使わない。
+- `reserved` invocation の operation journal に `VERIFY_EXTERNAL_MERGE` がまだ存在しない
+  場合、remote preimage は引き続き sealed `request.preimages` と完全一致しなければならない。
+  journal の同 phase が `started` または `completed` の場合だけ、provider は immutable
+  journal intent、canonical external-merge receipt、merged PR readback、merge commit tree、
+  live default-branch surface を read-only に照合し、merge 由来 postimage を resume preflight
+  の比較基準にする。postimage は journal が拘束した PR URL / pushed head / base と、receipt
+  の merge commit / merge tree に exact に一致しなければならない。`completed` phase では
+  external-merge receipt と journal evidence の receipt fields も完全一致させる。
+- merge 由来比較基準は provider 内部の read-only resume context とし、sealed request、
+  reservation、operation journal、preflight receipt の schema を書き換えない。receipt の
+  live `target_preimages` はこの context に対して adapter が検証する。journal/receipt/PR/
+  commit/live surface の欠落・不一致は protected effect 前に fail-closed とする。
 - exact request に `completed` state がある場合は、永続 receipt を検証してその original
   receipt を返す。live preflight と protected subeffect は再実行しない。
 - same key / different request digest、壊れた durable state、fresh readback 不成立は、
@@ -1223,6 +1235,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 |------|------|
 | 2026-08-20 | §10.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+endpoint lease 列挙、0席時の typed `NO_DATA` block、内部 no-op probe、typed silent failure、terminal cleanup、zero-effect report publisher の正本関係を固定。 |
 | 2026-08-19 | §10.3 に immutable `resume_admission_binding` の canonical 消費経路を追加。durable request/journal head/exact fresh observation ID/zero queue の束縛、preflight receipt v3、次の drift の fail-closed を固定。 |
+| 2026-08-20 | §10.3 に post-merge durable resume の read-only preimage basis を追加。`VERIFY_EXTERNAL_MERGE` 前は sealed preimage 完全一致を維持し、started/completed 後だけ journal + external receipt + merged PR + commit tree 由来 postimage を検証する。 |
 | 2026-08-19 | §10.3 Fleet Runtime V1 の durable STARTED resume 契約を追加。新規 sealed preflight、reserved の fresh re-observation、completed original receipt、same-key collision の境界を固定。 |
 | 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |
 | 2026-03-28 | 初版：既存実装の仕様書化 + ADR-022統合プラグイン方針の反映 |
