@@ -22,6 +22,7 @@ import {
   type FleetRuntimeRequest,
   type FleetRuntimeResumeAdmissionBindingReadback,
   type FleetRuntimeResumeAdmissionControlHandoffRef,
+  type FleetRuntimeResumeImageBasis,
   type FleetRuntimeRootGoalReadback,
   type FleetRuntimeStage,
   type FleetRuntimeTarget,
@@ -446,6 +447,7 @@ function portsFor(
     mutatePreflight?: (receipt: FleetRuntimePreflightReceipt, context: FleetRuntimePreflightContext) => void
     mutateReceipt?: (receipt: FleetRuntimeEffectReceipt) => void
     observeResumeControlHandoff?: (value: FleetRuntimeResumeAdmissionControlHandoffRef | null) => void
+    resumeImageBasis?: FleetRuntimeResumeImageBasis
   } = {},
 ): FleetRuntimePorts {
   const states = new Map<string, Awaited<ReturnType<FleetRuntimePorts['persistence']['load']>>>()
@@ -462,16 +464,23 @@ function portsFor(
   }
   return {
     preflight: {
-      inspect: request => inspect(request, { mode: 'SEALED_START' }),
-      inspectResume: (request, controlHandoff) => {
+      inspect: request => inspect(request, { mode: 'SEALED_START', resume_image_basis: null }),
+      inspectResume: (request, controlHandoff, imageBasis) => {
         options.observeResumeControlHandoff?.(controlHandoff)
-        return inspect(request, { mode: 'DURABLE_RESUME' })
+        return inspect(request, { mode: 'DURABLE_RESUME', resume_image_basis: structuredClone(imageBasis) })
       },
     },
     persistence: {
       async load(key) {
         const state = states.get(key)
         return state ? structuredClone(state) : null
+      },
+      async load_resume_image_basis(request) {
+        return structuredClone(options.resumeImageBasis ?? {
+          schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+          kind: 'SEALED_PREIMAGE',
+          request_digest: request.request_digest,
+        })
       },
       async reserve_once(state) {
         const existing = states.get(state.idempotency_key)

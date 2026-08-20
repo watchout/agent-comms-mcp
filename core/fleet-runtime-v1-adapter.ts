@@ -171,6 +171,26 @@ export interface FleetRuntimeResumeAdmissionBindingReadback {
   admitted_fresh_queue_observation_id: string
 }
 
+export type FleetRuntimeResumeImageBasis = {
+  schema_version: 'fleet-runtime-v1/resume-image-basis/v1'
+  kind: 'SEALED_PREIMAGE'
+  request_digest: string
+} | {
+  schema_version: 'fleet-runtime-v1/resume-image-basis/v1'
+  kind: 'MERGE_DERIVED_POSTIMAGE'
+  request_digest: string
+  verify_external_merge_status: 'started' | 'completed'
+  journal_intent_sha256: string
+  journal_evidence_sha256: string | null
+  repository: FleetRuntimeTarget
+  required_base_branch: string
+  pr_url: string
+  pushed_head: string
+  external_merge_receipt_sha256: string
+  merge_commit: string
+  merge_tree: string
+}
+
 export interface FleetRuntimeRequest {
   schema_version: 'fleet-runtime-v1/request/v2'
   request_id: string
@@ -281,6 +301,7 @@ export interface FleetRuntimeInvocationState {
 
 export interface FleetRuntimePersistencePort {
   load(idempotencyKey: string): Promise<FleetRuntimeInvocationState | null>
+  load_resume_image_basis(request: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimeResumeImageBasis>
   reserve_once(state: FleetRuntimeInvocationState): Promise<{
     acquired: boolean
     state: FleetRuntimeInvocationState
@@ -292,6 +313,7 @@ export type FleetRuntimePreflightMode = 'SEALED_START' | 'DURABLE_RESUME'
 
 export interface FleetRuntimePreflightContext {
   mode: FleetRuntimePreflightMode
+  resume_image_basis: FleetRuntimeResumeImageBasis | null
 }
 
 export interface FleetRuntimePreflightPort {
@@ -299,6 +321,7 @@ export interface FleetRuntimePreflightPort {
   inspectResume?(
     request: Readonly<FleetRuntimeRequest>,
     controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
+    imageBasis: Readonly<FleetRuntimeResumeImageBasis>,
   ): Promise<FleetRuntimePreflightReceipt>
 }
 
@@ -795,15 +818,84 @@ export function validateFleetRuntimeResumeAdmissionBindingReadback(
 }
 
 function assertPreflight(request: FleetRuntimeRequest, receipt: FleetRuntimePreflightReceipt): void {
-  assertPreflightForContext(request, receipt, { mode: 'SEALED_START' }, null)
+  assertPreflightForContext(request, receipt, { mode: 'SEALED_START', resume_image_basis: null }, null)
 }
 
 function assertResumePreflight(
   request: FleetRuntimeRequest,
   receipt: FleetRuntimePreflightReceipt,
   controlHandoff: FleetRuntimeResumeAdmissionControlHandoffRef | null,
+  imageBasis: FleetRuntimeResumeImageBasis,
 ): void {
-  assertPreflightForContext(request, receipt, { mode: 'DURABLE_RESUME' }, controlHandoff)
+  assertPreflightForContext(
+    request,
+    receipt,
+    { mode: 'DURABLE_RESUME', resume_image_basis: imageBasis },
+    controlHandoff,
+  )
+}
+
+function assertResumeImageBasis(
+  request: FleetRuntimeRequest,
+  value: unknown,
+): asserts value is FleetRuntimeResumeImageBasis {
+  if (!isRecord(value)
+    || value.schema_version !== 'fleet-runtime-v1/resume-image-basis/v1'
+    || value.request_digest !== request.request_digest) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'durable resume image basis is not bound to the request')
+  }
+  if (value.kind === 'SEALED_PREIMAGE') {
+    if (!exact(Object.keys(value).sort(), ['kind', 'request_digest', 'schema_version'])) {
+      return fail('PREFLIGHT_RECEIPT_MISMATCH', 'sealed resume image basis fields differ')
+    }
+    return
+  }
+  const keys = [
+    'external_merge_receipt_sha256', 'journal_evidence_sha256', 'journal_intent_sha256', 'kind',
+    'merge_commit', 'merge_tree', 'pr_url', 'pushed_head', 'repository', 'request_digest',
+    'required_base_branch', 'schema_version', 'verify_external_merge_status',
+  ].sort()
+  if (value.kind !== 'MERGE_DERIVED_POSTIMAGE' || !exact(Object.keys(value).sort(), keys)
+    || request.stage_id !== 'N40-P4-CANARY-VERIFY'
+    || !['CANARY_COLD_START', 'ROLLBACK', 'REAPPLY'].includes(request.operation)
+    || request.target_scope.repositories.length !== 1
+    || value.repository !== request.target_scope.repositories[0]
+    || value.required_base_branch !== request.preimages[0].required_base_branch
+    || !['started', 'completed'].includes(String(value.verify_external_merge_status ?? ''))
+    || !SHA256.test(String(value.journal_intent_sha256 ?? ''))
+    || (value.verify_external_merge_status === 'started' && value.journal_evidence_sha256 !== null)
+    || (value.verify_external_merge_status === 'completed' && !SHA256.test(String(value.journal_evidence_sha256 ?? '')))
+    || !/^https:\/\/github\.com\/watchout\/kodama\/pull\/[1-9][0-9]*$/.test(String(value.pr_url ?? ''))
+    || !COMMIT.test(String(value.pushed_head ?? ''))
+    || !SHA256.test(String(value.external_merge_receipt_sha256 ?? ''))
+    || !COMMIT.test(String(value.merge_commit ?? ''))
+    || !COMMIT.test(String(value.merge_tree ?? ''))) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'merge-derived resume image basis differs from the exact journal contract')
+  }
+}
+
+function assertLivePostimage(
+  request: FleetRuntimeRequest,
+  targetImages: FleetRuntimePreimage[],
+  basis: Extract<FleetRuntimeResumeImageBasis, { kind: 'MERGE_DERIVED_POSTIMAGE' }>,
+): void {
+  if (!Array.isArray(targetImages) || targetImages.length !== 1) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'merge-derived live image must cover the exact target once')
+  }
+  const image = targetImages[0]
+  if (!isRecord(image)
+    || !exact(Object.keys(image).sort(), [...FLEET_RUNTIME_V1_PREIMAGE_AMENDMENT.required_record_fields_in_order].sort())
+    || image.repository !== basis.repository
+    || image.required_base_branch !== basis.required_base_branch
+    || image.head_commit !== basis.merge_commit
+    || image.tree !== basis.merge_tree
+    || image.repository !== request.target_scope.repositories[0]
+    || !Number.isInteger(image.runtime_surface_entry_count) || image.runtime_surface_entry_count < 0
+    || !Number.isInteger(image.distribution_surface_entry_count) || image.distribution_surface_entry_count < 0
+    || !SHA256.test(String(image.runtime_surface_sha256 ?? ''))
+    || !SHA256.test(String(image.distribution_surface_sha256 ?? ''))) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'live image differs from the merge-derived journal basis')
+  }
 }
 
 function assertPreflightForContext(
@@ -827,7 +919,16 @@ function assertPreflightForContext(
     || digestRawBody(receipt.predecessor_receipt_raw_body) !== request.predecessor_receipt.sha256) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'predecessor receipt raw body digest differs')
   }
-  if (!exact(receipt.target_preimages, request.preimages)) return fail('PREFLIGHT_RECEIPT_MISMATCH', 'live preimages differ from the request')
+  if (context.mode === 'DURABLE_RESUME') {
+    assertResumeImageBasis(request, context.resume_image_basis)
+    if (context.resume_image_basis.kind === 'MERGE_DERIVED_POSTIMAGE') {
+      assertLivePostimage(request, receipt.target_preimages, context.resume_image_basis)
+    } else if (!exact(receipt.target_preimages, request.preimages)) {
+      return fail('PREFLIGHT_RECEIPT_MISMATCH', 'pre-merge live preimages differ from the request')
+    }
+  } else if (context.resume_image_basis !== null || !exact(receipt.target_preimages, request.preimages)) {
+    return fail('PREFLIGHT_RECEIPT_MISMATCH', 'sealed-start live preimages differ from the request')
+  }
   try {
     if (context.mode === 'DURABLE_RESUME') {
       if (controlHandoff) {
@@ -974,6 +1075,7 @@ export async function executeFleetRuntimeV1(
 
   const preflightContext: FleetRuntimePreflightContext = {
     mode: existing?.status === 'reserved' ? 'DURABLE_RESUME' : 'SEALED_START',
+    resume_image_basis: null,
   }
   const resumeAdmissionControlHandoff = options.resume_admission_control_handoff === undefined
     ? null
@@ -986,11 +1088,16 @@ export async function executeFleetRuntimeV1(
   if (preflightContext.mode === 'DURABLE_RESUME' && !ports.preflight.inspectResume) {
     return fail('PREFLIGHT_RECEIPT_MISMATCH', 'durable resume preflight port is unavailable')
   }
+  if (preflightContext.mode === 'DURABLE_RESUME') {
+    const basis = await ports.persistence.load_resume_image_basis(request)
+    assertResumeImageBasis(request, basis)
+    preflightContext.resume_image_basis = structuredClone(basis)
+  }
   const preflight = preflightContext.mode === 'DURABLE_RESUME'
-    ? await ports.preflight.inspectResume!(request, resumeAdmissionControlHandoff)
+    ? await ports.preflight.inspectResume!(request, resumeAdmissionControlHandoff, preflightContext.resume_image_basis!)
     : await ports.preflight.inspect(request)
   if (preflightContext.mode === 'DURABLE_RESUME') {
-    assertResumePreflight(request, preflight, resumeAdmissionControlHandoff)
+    assertResumePreflight(request, preflight, resumeAdmissionControlHandoff, preflightContext.resume_image_basis!)
   }
   else assertPreflight(request, preflight)
 

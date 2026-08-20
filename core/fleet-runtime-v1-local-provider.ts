@@ -34,6 +34,7 @@ import {
   type FleetRuntimeRequest,
   type FleetRuntimeResumeAdmissionBindingReadback,
   type FleetRuntimeResumeAdmissionControlHandoffRef,
+  type FleetRuntimeResumeImageBasis,
   type FleetRuntimeRootGoalReadback,
 } from './fleet-runtime-v1-adapter'
 import {
@@ -509,6 +510,37 @@ export function validateFleetRuntimeExternalMergeReceipt(
     return providerFail('READBACK_INVALID', 'external merge receipt tuple or canonical self digest differs')
   }
   return receipt
+}
+
+function readFleetRuntimeExternalMergeReceiptFile(input: {
+  stateDirectory: string
+  invocationDirectory: string
+  request: FleetRuntimeRequest
+  createdPrUrl: string
+  pushedHead: string
+}): Record<string, unknown> {
+  const path = join(input.invocationDirectory, 'external-merge-receipt.json')
+  if (!existsSync(path)) return providerFail('WAITING_INDEPENDENT_MERGE', 'exact external merge receipt is not present')
+  assertSafeStatePath(input.stateDirectory, path)
+  const before = lstatSync(path)
+  if (before.isSymbolicLink() || !before.isFile() || realpathSync(path) !== path) {
+    return providerFail('READBACK_INVALID', 'external merge receipt must be a real regular file')
+  }
+  const raw = readFileSync(path, 'utf8')
+  assertSafeStatePath(input.stateDirectory, path)
+  const after = lstatSync(path)
+  if (after.isSymbolicLink() || !after.isFile() || realpathSync(path) !== path
+    || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    return providerFail('READBACK_INVALID', 'external merge receipt changed during readback')
+  }
+  const receipt = parseJson<Record<string, unknown>>(raw, 'external merge receipt')
+  if (raw !== `${canonicalFleetRuntimeJson(receipt)}\n`) {
+    return providerFail('READBACK_INVALID', 'external merge receipt bytes are not canonical JSON plus LF')
+  }
+  return validateFleetRuntimeExternalMergeReceipt(input.request, receipt, {
+    createdPrUrl: input.createdPrUrl,
+    pushedHead: input.pushedHead,
+  })
 }
 
 function yamlTopScalar(body: string, key: string): string {
@@ -1373,6 +1405,59 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     return clone(state)
   }
 
+  async load_resume_image_basis(
+    readonlyRequest: Readonly<FleetRuntimeRequest>,
+  ): Promise<FleetRuntimeResumeImageBasis> {
+    const request = readonlyRequest as FleetRuntimeRequest
+    const invocationDirectory = this.invocationDirectory(request.idempotency_key)
+    const journalPath = join(invocationDirectory, 'operation-state.json')
+    if (!existsSync(journalPath)) {
+      return {
+        schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+        kind: 'SEALED_PREIMAGE',
+        request_digest: request.request_digest,
+      }
+    }
+    const state = readState<FleetRuntimeLocalOperationState>(this.root, journalPath, 'operation state')
+    assertJournal(state, request, state.execution_owner_id)
+    const mergePhase = state.phases.VERIFY_EXTERNAL_MERGE
+    if (!mergePhase) {
+      return {
+        schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+        kind: 'SEALED_PREIMAGE',
+        request_digest: request.request_digest,
+      }
+    }
+    const receipt = readFleetRuntimeExternalMergeReceiptFile({
+      stateDirectory: this.root,
+      invocationDirectory,
+      request,
+      createdPrUrl: String(mergePhase.intent.pr_url ?? ''),
+      pushedHead: String(mergePhase.intent.pushed_head ?? ''),
+    })
+    if (mergePhase.status === 'completed') {
+      const journalReceipt = Object.fromEntries(EXTERNAL_MERGE_RECEIPT_KEYS.map(key => [key, mergePhase.evidence?.[key]]))
+      if (canonicalFleetRuntimeJson(journalReceipt) !== canonicalFleetRuntimeJson(receipt)) {
+        return providerFail('STATE_RECORD_INVALID', 'completed merge journal evidence differs from the external merge receipt')
+      }
+    }
+    return {
+      schema_version: 'fleet-runtime-v1/resume-image-basis/v1',
+      kind: 'MERGE_DERIVED_POSTIMAGE',
+      request_digest: request.request_digest,
+      verify_external_merge_status: mergePhase.status,
+      journal_intent_sha256: mergePhase.intent_sha256,
+      journal_evidence_sha256: mergePhase.evidence_sha256,
+      repository: request.target_scope.repositories[0],
+      required_base_branch: request.preimages[0].required_base_branch,
+      pr_url: String(receipt.pr_url),
+      pushed_head: String(receipt.pushed_head),
+      external_merge_receipt_sha256: String(receipt.receipt_sha256),
+      merge_commit: String(receipt.merge_commit),
+      merge_tree: String(receipt.merge_tree),
+    }
+  }
+
   async reserve_once(state: FleetRuntimeInvocationState): Promise<{ acquired: boolean; state: FleetRuntimeInvocationState }> {
     assertInvocationStateShape(state)
     if (state.status !== 'reserved') return providerFail('STATE_RECORD_INVALID', 'reservation must use reserved state')
@@ -1563,6 +1648,7 @@ export interface FleetRuntimeLocalSystem {
     request: Readonly<FleetRuntimeRequest>,
     controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
     durableRemoteHead: string | null,
+    imageBasis: Readonly<FleetRuntimeResumeImageBasis>,
   ): Promise<FleetRuntimePreflightReceipt>
   performPhase(
     request: Readonly<FleetRuntimeRequest>,
@@ -2210,11 +2296,12 @@ export async function executeLocalFleetRuntimeV1(input: {
     return await executeFleetRuntimeV1(input.request, {
       preflight: {
         inspect: request => input.system.inspect(request),
-        inspectResume: (request, controlHandoff) => input.system.inspectResume
+        inspectResume: (request, controlHandoff, imageBasis) => input.system.inspectResume
           ? input.system.inspectResume(
               request,
               controlHandoff,
               controlHandoff ? persistence.readDurableResumeRemoteHead(request as FleetRuntimeRequest) : null,
+              imageBasis,
             )
           : providerFail('READBACK_INVALID', 'local system does not implement durable resume preflight'),
       },
@@ -2695,15 +2782,16 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   async inspect(readonlyRequest: Readonly<FleetRuntimeRequest>): Promise<FleetRuntimePreflightReceipt> {
-    return this.inspectAdmission(readonlyRequest, false, null, null)
+    return this.inspectAdmission(readonlyRequest, false, null, null, null)
   }
 
   async inspectResume(
     readonlyRequest: Readonly<FleetRuntimeRequest>,
     controlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
     durableRemoteHead: string | null,
+    imageBasis: Readonly<FleetRuntimeResumeImageBasis>,
   ): Promise<FleetRuntimePreflightReceipt> {
-    return this.inspectAdmission(readonlyRequest, true, controlHandoff, durableRemoteHead)
+    return this.inspectAdmission(readonlyRequest, true, controlHandoff, durableRemoteHead, imageBasis)
   }
 
   private async inspectAdmission(
@@ -2711,11 +2799,16 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     durableResume: boolean,
     readonlyControlHandoff: Readonly<FleetRuntimeResumeAdmissionControlHandoffRef> | null,
     durableRemoteHead: string | null,
+    readonlyImageBasis: Readonly<FleetRuntimeResumeImageBasis> | null,
   ): Promise<FleetRuntimePreflightReceipt> {
     const request = readonlyRequest as FleetRuntimeRequest
     const controlHandoff = readonlyControlHandoff as FleetRuntimeResumeAdmissionControlHandoffRef | null
-    if (!durableResume && (controlHandoff || durableRemoteHead)) {
+    const imageBasis = readonlyImageBasis as FleetRuntimeResumeImageBasis | null
+    if (!durableResume && (controlHandoff || durableRemoteHead || imageBasis)) {
       return providerFail('READBACK_INVALID', 'resume admission binding is invalid for a sealed start')
+    }
+    if (durableResume && !imageBasis) {
+      return providerFail('READBACK_INVALID', 'durable resume image basis is absent')
     }
     if (durableResume && Boolean(controlHandoff) !== Boolean(durableRemoteHead)) {
       return providerFail('READBACK_INVALID', 'resume admission binding and durable remote head must be supplied together')
@@ -2748,6 +2841,9 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     const resumeAdmissionBinding = controlHandoff && resumeHandoff && durableRemoteHead
       ? parseFleetRuntimeResumeAdmissionBinding(request, durableRemoteHead, controlHandoff, resumeHandoff)
       : null
+    if (imageBasis?.kind === 'MERGE_DERIVED_POSTIMAGE') {
+      await this.validateResumePostimageBasis(request, imageBasis, preimage)
+    }
     try {
       if (durableResume) {
         assertFleetRuntimeFreshResumeObservation(
@@ -2778,6 +2874,31 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       database_write_count: 0,
       queue_write_count: 0,
       protected_effect_count: 0,
+    }
+  }
+
+  private async validateResumePostimageBasis(
+    request: FleetRuntimeRequest,
+    basis: Extract<FleetRuntimeResumeImageBasis, { kind: 'MERGE_DERIVED_POSTIMAGE' }>,
+    liveImage: FleetRuntimePreflightReceipt['target_preimages'][number],
+  ): Promise<void> {
+    const pr = parseJson<Record<string, unknown>>(await this.run([
+      'gh', 'pr', 'view', basis.pr_url, '--repo', 'watchout/kodama',
+      '--json', 'url,state,mergedAt,mergeCommit,headRefOid,baseRefName,isDraft',
+    ]), 'resume merged PR readback')
+    const commit = await this.ghJson<{ tree: { sha: string } }>(`repos/watchout/kodama/git/commits/${basis.merge_commit}`)
+    const mergeCommit = pr.mergeCommit as Record<string, unknown> | null
+    if (basis.request_digest !== request.request_digest
+      || basis.repository !== request.target_scope.repositories[0]
+      || basis.required_base_branch !== request.preimages[0].required_base_branch
+      || pr.url !== basis.pr_url || pr.headRefOid !== basis.pushed_head
+      || pr.state !== 'MERGED' || typeof pr.mergedAt !== 'string' || !Number.isFinite(Date.parse(pr.mergedAt))
+      || pr.isDraft !== false || pr.baseRefName !== basis.required_base_branch
+      || mergeCommit?.oid !== basis.merge_commit || commit.tree.sha !== basis.merge_tree
+      || liveImage.repository !== basis.repository
+      || liveImage.required_base_branch !== basis.required_base_branch
+      || liveImage.head_commit !== basis.merge_commit || liveImage.tree !== basis.merge_tree) {
+      return providerFail('READBACK_INVALID', 'live postimage is not the exact journal-derived external merge')
     }
   }
 
@@ -3070,25 +3191,10 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
   }
 
   private async externalMerge(request: FleetRuntimeRequest, context: FleetRuntimeLocalPhaseContext): Promise<Record<string, unknown>> {
-    const path = join(context.invocation_directory, 'external-merge-receipt.json')
-    if (!existsSync(path)) return providerFail('WAITING_INDEPENDENT_MERGE', 'exact external merge receipt is not present')
-    assertSafeStatePath(context.state_directory, path)
-    const before = lstatSync(path)
-    if (before.isSymbolicLink() || !before.isFile() || realpathSync(path) !== path) {
-      return providerFail('READBACK_INVALID', 'external merge receipt must be a real regular file')
-    }
-    const raw = readFileSync(path, 'utf8')
-    assertSafeStatePath(context.state_directory, path)
-    const after = lstatSync(path)
-    if (after.isSymbolicLink() || !after.isFile() || realpathSync(path) !== path
-      || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-      return providerFail('READBACK_INVALID', 'external merge receipt changed during readback')
-    }
-    const receipt = parseJson<Record<string, unknown>>(raw, 'external merge receipt')
-    if (raw !== `${canonicalFleetRuntimeJson(receipt)}\n`) {
-      return providerFail('READBACK_INVALID', 'external merge receipt bytes are not canonical JSON plus LF')
-    }
-    validateFleetRuntimeExternalMergeReceipt(request, receipt, {
+    const receipt = readFleetRuntimeExternalMergeReceiptFile({
+      stateDirectory: context.state_directory,
+      invocationDirectory: context.invocation_directory,
+      request,
       createdPrUrl: String(context.current_intent.pr_url ?? ''),
       pushedHead: String(context.current_intent.pushed_head ?? ''),
     })
