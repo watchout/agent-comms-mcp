@@ -1374,14 +1374,48 @@ provider admission を行う。
 | durable state | live admission | 結果 |
 |---|---|---|
 | なし | `SEALED_START`: sealed observation と fresh observation の鮮度・完全一致、zero queue | preflight PASS 後に初回 reservation |
-| `reserved` + exact digest | `DURABLE_RESUME`: owner / predecessor / remote preimage / queue / root-goal をすべて fresh readback。通常は fresh observation と immutable sealed binding の一致を検証する。canonical `resume_admission_binding` ref が指定された場合は、下記の exact tuple と admitted fresh observation ID を代替 binding として検証する。どちらの場合も fresh schema / identity / zero queue は必須 | 同じ durable invocation の残存 phase のみ reconciliation / resume |
+| `reserved` + exact digest | `DURABLE_RESUME`: owner / predecessor / remote image / queue / root-goal をすべて fresh readback。`VERIFY_EXTERNAL_MERGE` 前は remote image と sealed preimage の完全一致を維持する。同 phase の started/completed 後だけ、下記の merge-derived postimage basis と照合する。canonical `resume_admission_binding` ref が指定された場合は、queue について下記の exact tuple と admitted fresh observation ID を代替 binding として検証する。どの場合も fresh schema / identity / zero queue は必須 | 同じ durable invocation の残存 phase のみ reconciliation / resume |
 | `completed` + exact digest | live preflight なし | durable receipt を完全検証して original receipt を返す |
 | same key + different digest、または malformed state | live preflight なし | fail-closed |
 
 `DURABLE_RESUME` でも immutable owner / predecessor body digest、semantic binding、target
-preimage、root-goal readback、および preflight zero-write / zero-effect counters の検証を
+image、root-goal readback、および preflight zero-write / zero-effect counters の検証を
 省略しない。fresh queue readback が nonzero、stale、または不正なら protected effect 前に
 停止する。
+
+### Merge-derived postimage basis
+
+provider は durable reservation を load した後、live preflight より先に operation journal を
+read-only validation し、次のどちらか一方の resume image basis を決定する。
+
+1. `SEALED_PREIMAGE`: journal に `VERIFY_EXTERNAL_MERGE` phase が存在しない。live
+   `target_preimages` は immutable `request.preimages` と field/order を含め完全一致する。
+   branch/head/tree/surface digest の drift は従来どおり `PREFLIGHT_RECEIPT_MISMATCH` で停止する。
+2. `MERGE_DERIVED_POSTIMAGE`: journal の `VERIFY_EXTERNAL_MERGE` phase が `started` または
+   `completed`。basis は request digest、phase status、journal intent/evidence digest、target
+   repository、base、PR URL、pushed head、external-merge receipt self digest、merge commit、
+   merge tree を exact に拘束する。canonical external-merge receipt は immutable journal
+   intent の PR URL / pushed head と一致し、GitHub readback は同 PR が non-draft の MERGED、
+   exact base/head/merge commit であること、commit API は exact merge tree を返すこと、live
+   default branch は exact merge commit/tree であることを証明しなければならない。surface
+   count/digest はその exact live tree から再計算する。phase が `completed` の場合は receipt
+   fields と journal evidence も完全一致させる。
+
+この basis は adapter と provider の同一 invocation 内でだけ渡す read-only context であり、
+sealed request、reservation、operation journal、または
+`fleet-runtime-v1/preflight-receipt/v3` に保存しない。basis の欠落・malformed、journal digest
+不一致、external receipt 不一致、PR/commit/live postimage drift は preflight で fail-closed とし、
+filesystem/database/queue/protected-effect counter はすべて 0 のままにする。`completed`
+invocation の same-key same-request replay は basis load と live preflight より前に original
+receipt を返し、受領済み subeffect を再実行しない。
+
+回帰 fixture は次を個別に証明する。
+
+- merge receipt が journal の started/completed `VERIFY_EXTERNAL_MERGE` に exact に束縛され、
+  live postimage が一致する resume は `CANARY_COLD_START` を含む残余 phase に進む。
+- 同 phase が未開始の resume で sealed preimage 外 drift がある場合は effect 前に拒否する。
+- post-merge resume 完了後の same-key same-request は original receipt を返し、preflight と
+  protected subeffect の回数を増やさない。
 
 binding 付き resume の入力は sealed request とは別の immutable ref とし、次の 2 値を両方
 指定する。片方だけ、不正 URL、digest 不一致、編集済み comment は fail-closed とする。
@@ -1683,6 +1717,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 | 日付 | 内容 |
 |------|------|
 | 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
+| 2026-08-20 | §13.7 に merge-derived postimage basis を追加。`VERIFY_EXTERNAL_MERGE` 未開始時の sealed preimage equality を維持し、started/completed 後だけ immutable journal/external receipt/merged PR/commit tree/live surface を exact 照合して残余 phase を再開する。 |
 | 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |
 | 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |
 | 2026-04-19 | v2.1.0: §5.3-5.4 run-bot.sh 安定動作要件追加 (end-to-end flow / signal coalescing / graceful shutdown / orphan reclaim / retry+dead-letter / truncate / loop 防止 / consumer 排他 / heartbeat / LLM prompt / subcommand 化 / migration 計画)。§4.1 暗黙 skip 廃止 → fail CLI 明示遷移。§3.2 message_queue に failed_reason + status CHECK 拡張。§4.2 send step 9 を fail/skip 3 分岐に。§8.1 状態遷移表に fail/skip/reclaim 追加。§11 エラーコードに failed_reason 標準値追加。§13.5 polling driver 記述整理。§14 Phase C 完了条件に v2.1.0 テストケース追加。外部 AI 3 round review 反映。 |
