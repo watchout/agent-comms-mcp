@@ -23,7 +23,10 @@ import {
 import { resolveExplicitDatabaseUrl } from '../../scripts/n1-slo/run'
 
 const REPO_ROOT = realpathSync(join(import.meta.dir, '..', '..'))
-const SCRATCH_BASE_URL = 'postgresql:///postgres?host=/tmp'
+const SCRATCH_BASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL
+  ?? (process.env.GITHUB_ACTIONS === 'true'
+    ? 'postgresql://postgres:postgres@localhost:5432/postgres'
+    : 'postgresql:///postgres?host=/tmp')
 const SOURCE_COMMIT = 'a'.repeat(40)
 let scratch: PostgresTestDatabase
 let db: Client
@@ -85,7 +88,8 @@ async function seedBusinessMessage(agentId: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  // The maintenance URL is explicit and cannot inherit ambient DATABASE_URL.
+  // The maintenance URL is explicit (local socket, test override, or the
+  // repository's fixed Actions service) and cannot inherit ambient DATABASE_URL.
   scratch = createPostgresTestDatabase(scratchDatabaseName(), {
     AGENT_COM_TEST_DATABASE_URL: SCRATCH_BASE_URL,
     DATABASE_URL: undefined,
