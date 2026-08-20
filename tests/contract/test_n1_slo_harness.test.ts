@@ -7,6 +7,7 @@ import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helper
 import {
   N1_OBSERVATION_WINDOW_MS,
   N1_ACTIVE_SEAT_QUERY_VERSION,
+  N1_PROBE_CHANNEL_ID,
   N1_PROBE_MESSAGE_TYPE,
   N1_PROBE_PREFIX,
   listCanonicalActiveSeats,
@@ -49,6 +50,13 @@ async function seedSeat(input: {
      VALUES ($1, $1, 'bot', 'codex', $2)`,
     [input.agentId, input.agentStatus ?? 'idle'],
   )
+  const membership = await db.query(
+    `UPDATE channels
+        SET members = array_append(COALESCE(members, ARRAY[]::text[]), $1)
+      WHERE id = $2`,
+    [input.agentId, N1_PROBE_CHANNEL_ID],
+  )
+  if (membership.rowCount !== 1) throw new Error('test probe channel is missing')
   await db.query(
     `INSERT INTO agent_runtime_instances
        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, endpoint_uri, status, last_seen_at)
@@ -75,9 +83,9 @@ async function seedSeat(input: {
 async function seedBusinessMessage(agentId: string): Promise<string> {
   const messageId = randomUUID()
   await db.query(
-    `INSERT INTO agent_messages (id, author_id, content, message_type)
-     VALUES ($1, 'business-author', 'real business work', 'instruction')`,
-    [messageId],
+    `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type)
+     VALUES ($1, $2, 'business-author', 'real business work', 'instruction')`,
+    [messageId, N1_PROBE_CHANNEL_ID],
   )
   await db.query(
     `INSERT INTO message_queue (agent_id, message_id, payload, status, priority)
@@ -105,12 +113,18 @@ beforeAll(async () => {
   }
   db = new Client({ connectionString: scratch.databaseUrl })
   await db.connect()
+  await db.query('ALTER TABLE agent_messages ALTER COLUMN channel_id SET NOT NULL')
 })
 
 beforeEach(async () => {
   await db.query(`TRUNCATE TABLE
     outbound_queue, message_queue, agent_messages, control_plane_leases,
-    agent_runtime_instances, agents RESTART IDENTITY CASCADE`)
+    agent_runtime_instances, agents, channels RESTART IDENTITY CASCADE`)
+  await db.query(
+    `INSERT INTO channels (id, org_id, type, name, members, created_by)
+     VALUES ($1, 'default', 'channel', 'N1 canonical internal probe channel', ARRAY[]::text[], 'test')`,
+    [N1_PROBE_CHANNEL_ID],
+  )
 })
 
 afterAll(async () => {
@@ -119,6 +133,57 @@ afterAll(async () => {
 })
 
 describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => {
+  test('isolated migration has production channel_id NOT NULL parity and rejects a raw NULL insert', async () => {
+    const column = (await db.query(
+      `SELECT is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'agent_messages'
+          AND column_name = 'channel_id'`,
+    )).rows[0]!
+
+    expect(column.is_nullable).toBe('NO')
+    await expect(db.query(
+      `INSERT INTO agent_messages (channel_id, author_id, content, message_type)
+       VALUES (NULL, 'null-probe', 'must fail', 'probe')`,
+    )).rejects.toThrow(/channel_id.*not-null constraint/i)
+    expect(Number((await db.query(`SELECT count(*) FROM agent_messages`)).rows[0]!.count)).toBe(0)
+  })
+
+  test('production-equivalent schema stores every probe on the exact canonical internal channel', async () => {
+    await seedSeat({ agentId: 'channel-bound-seat' })
+
+    const report = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
+    const stored = (await db.query(
+      `SELECT am.channel_id, c.id AS canonical_channel_id,
+              am.author_id = ANY(c.members) AS author_is_member
+         FROM agent_messages am
+         JOIN channels c ON c.id = am.channel_id
+        WHERE am.id::text = $1`,
+      [report.results[0]!.message_id],
+    )).rows[0]!
+
+    expect(report.verdict).toBe('PASS')
+    expect(stored).toEqual({
+      channel_id: N1_PROBE_CHANNEL_ID,
+      canonical_channel_id: N1_PROBE_CHANNEL_ID,
+      author_is_member: true,
+    })
+  })
+
+  test('missing canonical channel membership fails closed before message or queue residue', async () => {
+    await seedSeat({ agentId: 'channel-nonmember-seat' })
+    await db.query(
+      `UPDATE channels SET members = ARRAY[]::text[] WHERE id = $1`,
+      [N1_PROBE_CHANNEL_ID],
+    )
+
+    await expect(runN1Measurement(db, { sourceCommit: SOURCE_COMMIT }))
+      .rejects.toThrow('N1_PROBE_CHANNEL_BINDING_NOT_READY')
+    expect(Number((await db.query(`SELECT count(*) FROM agent_messages`)).rows[0]!.count)).toBe(0)
+    expect(Number((await db.query(`SELECT count(*) FROM message_queue`)).rows[0]!.count)).toBe(0)
+  })
+
   test('canonical active-seat query includes idle/busy with a valid runtime endpoint worker lease and excludes other statuses', async () => {
     const idle = await seedSeat({ agentId: 'idle-seat' })
     const busy = await seedSeat({ agentId: 'busy-seat', agentStatus: 'busy' })
@@ -167,12 +232,13 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
     })
 
     const probe = (await db.query(
-      `SELECT am.author_id, am.content, am.message_type, am.metadata,
+      `SELECT am.channel_id, am.author_id, am.content, am.message_type, am.metadata,
               mq.agent_id, mq.status, mq.priority, mq.claimed_by, mq.claimed_at, mq.claim_expires_at
          FROM agent_messages am JOIN message_queue mq ON mq.message_id = am.id::text
         WHERE am.id::text = $1`,
       [report.results[0]!.message_id],
     )).rows[0]!
+    expect(probe.channel_id).toBe(N1_PROBE_CHANNEL_ID)
     expect(probe.author_id).toBe('probe-seat')
     expect(probe.agent_id).toBe('probe-seat')
     expect(probe.message_type).toBe(N1_PROBE_MESSAGE_TYPE)
