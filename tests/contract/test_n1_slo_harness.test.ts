@@ -6,10 +6,10 @@ import { Client } from 'pg'
 import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
 import {
   N1_OBSERVATION_WINDOW_MS,
-  N1_ONLINE_SEAT_QUERY_VERSION,
+  N1_ACTIVE_SEAT_QUERY_VERSION,
   N1_PROBE_MESSAGE_TYPE,
   N1_PROBE_PREFIX,
-  listCanonicalOnlineSeats,
+  listCanonicalActiveSeats,
   runN1Measurement,
   type N1MeasurementReport,
 } from '../../scripts/n1-slo/harness'
@@ -47,7 +47,7 @@ async function seedSeat(input: {
   await db.query(
     `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
      VALUES ($1, $1, 'bot', 'codex', $2)`,
-    [input.agentId, input.agentStatus ?? 'online'],
+    [input.agentId, input.agentStatus ?? 'idle'],
   )
   await db.query(
     `INSERT INTO agent_runtime_instances
@@ -119,21 +119,32 @@ afterAll(async () => {
 })
 
 describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => {
-  test('canonical online-seat query requires agents.status=online and a valid runtime endpoint worker lease', async () => {
-    const live = await seedSeat({ agentId: 'live-seat' })
+  test('canonical active-seat query includes idle/busy with a valid runtime endpoint worker lease and excludes other statuses', async () => {
+    const idle = await seedSeat({ agentId: 'idle-seat' })
+    const busy = await seedSeat({ agentId: 'busy-seat', agentStatus: 'busy' })
+    await seedSeat({ agentId: 'online-seat', agentStatus: 'online' })
     await seedSeat({ agentId: 'offline-seat', agentStatus: 'offline' })
+    await seedSeat({ agentId: 'disabled-seat', agentStatus: 'disabled' })
     await seedSeat({ agentId: 'expired-seat', expiresAt: '2000-01-01T00:00:00.000Z' })
     await seedSeat({ agentId: 'released-seat', leaseStatus: 'released' })
     await seedSeat({ agentId: 'presence-only-seat', purpose: 'presence' })
 
-    const seats = await listCanonicalOnlineSeats(db, new Date('2026-08-20T00:00:00.000Z'))
+    const seats = await listCanonicalActiveSeats(db, new Date('2026-08-20T00:00:00.000Z'))
 
-    expect(seats).toEqual([{
-      agent_id: 'live-seat',
-      runtime_instance_id: live.runtimeId,
-      lease_id: live.leaseId,
-      lease_expires_at: '2099-01-01T00:00:00.000Z',
-    }])
+    expect(seats).toEqual([
+      {
+        agent_id: 'busy-seat',
+        runtime_instance_id: busy.runtimeId,
+        lease_id: busy.leaseId,
+        lease_expires_at: '2099-01-01T00:00:00.000Z',
+      },
+      {
+        agent_id: 'idle-seat',
+        runtime_instance_id: idle.runtimeId,
+        lease_id: idle.leaseId,
+        lease_expires_at: '2099-01-01T00:00:00.000Z',
+      },
+    ])
   })
 
   test('self-issued no-op probe completes send→claim→close without consuming business work or creating outbound effects', async () => {
@@ -143,9 +154,9 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
     const report = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
 
     expect(report.verdict).toBe('PASS')
-    expect(report.online_seat_query_version).toBe(N1_ONLINE_SEAT_QUERY_VERSION)
+    expect(report.active_seat_query_version).toBe(N1_ACTIVE_SEAT_QUERY_VERSION)
     expect(report.observation_window_ms).toBe(N1_OBSERVATION_WINDOW_MS)
-    expect(report.summary).toMatchObject({ online_seat_count: 1, success_count: 1, failure_count: 0, success_rate: 1 })
+    expect(report.summary).toMatchObject({ active_seat_count: 1, success_count: 1, failure_count: 0, success_rate: 1 })
     expect(report.effects).toEqual({
       internal_probe_rows_created: 1,
       terminal_done_rows: 1,
@@ -301,7 +312,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
   test('zero eligible seats produces an explicit NO_DATA report with zero effects', async () => {
     const report: N1MeasurementReport = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
     expect(report.verdict).toBe('NO_DATA')
-    expect(report.summary.online_seat_count).toBe(0)
+    expect(report.summary.active_seat_count).toBe(0)
     expect(report.effects).toMatchObject({
       internal_probe_rows_created: 0,
       terminal_done_rows: 0,

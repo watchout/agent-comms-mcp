@@ -1548,16 +1548,17 @@ N1 は provider や Discord の到達性を試す smoke ではなく、内部
 report-only harness である。正本実装は `scripts/n1-slo/`、contract test は
 `tests/contract/test_n1_slo_harness.test.ts` とする。
 
-#### online seat の正準列挙
+#### active seat の正準列挙
 
 列挙集合は、計測開始時点で次の両方を満たす `agent_id` のみである。
 
-1. `agents.status = 'online'`
+1. `agents.status IN ('idle', 'busy')`。`online`、`offline`、`disabled` および
+   その他の status は対象外
 2. 同一 agent/runtime を holder とする、有効期限内の runtime endpoint lease
    (`lease_scope_type='runtime_instance'`, `lease_purpose='worker'`,
    `status='active'`, `expires_at > observed_at`)
 
-正準 query version は `agents-online-valid-runtime-endpoint-lease/v1`。lease の
+正準 query version は `agents-idle-busy-valid-runtime-endpoint-lease/v2`。lease の
 `holder_runtime_instance_id`、`lease_scope_id`、`agent_runtime_instances.agent_id`
 は同一 runtime/agent tuple に一致しなければならない。tmux、Discord presence、
 `last_seen_at`、process scan はこの集合の代替 authority にしない。
@@ -1576,8 +1577,12 @@ SELECT DISTINCT ON (a.agent_id)
     ON ri.runtime_instance_id = lease.holder_runtime_instance_id
    AND ri.runtime_instance_id::text = lease.lease_scope_id
    AND ri.agent_id = a.agent_id
- WHERE a.status = 'online';
+ WHERE a.status IN ('idle', 'busy');
 ```
+
+この query が 0 席を返した場合、probe は 1 件も作成せず、report は typed
+`verdict='NO_DATA'` を返して実行を block する。merge 前 live preflight では 1 席以上を
+必須とし、0 席を成功として扱ってはならない。
 
 #### probe lifecycle と observation window
 
@@ -1609,7 +1614,7 @@ API を一切行わない。各 run は自分の probe message id に対応す�
 `outbound_queue` row が 0、Discord sent/snowflake が 0、non-terminal probe が
 0 であることを readback し、違反時は report publish 前に fail closed する。
 
-machine report schema は `aun-n1-slo-report/v1`。online seat 数、seat 別 RTT、
+machine report schema は `aun-n1-slo-report/v1`。active seat 数、seat 別 RTT、
 成功/失敗、typed silent-failure、p50/p95/max、effect fence count、source commit
 を含み、`watchout/agent-comms-mcp#602` 以外へは publish しない。publisher は
 run id で idempotency を照合し、GitHub の返却 body と raw-body SHA-256 を
@@ -1763,7 +1768,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
-| 2026-08-20 | §17.4 N1 通信 SLO 計測装置を追加。online+valid endpoint lease の正準集合、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |
+| 2026-08-20 | §17.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+valid endpoint lease の正準集合、0席時の typed `NO_DATA` block、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |
 | 2026-08-19 | §13.7 に canonical `resume_admission_binding` 消費を追加。immutable URL+raw digest ref、durable request/journal head/admitted fresh observation ID の exact tuple、zero queue、preflight receipt v3、次の drift の fail-closed を規定。 |
 | 2026-08-19 | §13.7 Fleet Runtime V1 provider resume を追加。durable state を先に read-only load し、reserved は fresh admission、completed は original receipt、collision は live preflight 前 fail-closed と規定。 |
 | 2026-05-05 | ADR-050 (UnixSignalBus removal + spec §13.5.1 honesty audit) を反映。§13.1 を「state-daemon (primary delivery mechanism)」に改題、in-process signal bus 抽象 (PID file + SIGUSR1 機構) を削除し state-daemon (`bin/state-daemon.ts`、tmux send-keys) を de jure primary 化。§13.5.1 の primary 記述を state-daemon に整合、fallback を「bot LLM judgement による polling」に変更。§5.3 / §6 / §13.5 / §20 の関連箇所も同期更新。CEO directive (msg `1d03f8bd`「監査通過 governance gap」) 解消。 |

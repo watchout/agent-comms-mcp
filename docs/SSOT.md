@@ -695,7 +695,7 @@ in_progress のいずれかが nonzero の場合は、新しい successor bindin
 `aun-n1-slo-report/v1` を用いる。詳細契約の正本は
 `docs/agent-com-message-queue-spec.md` §17.4。
 
-- 対象 seat は `agents.status='online'` かつ同一 runtime tuple の有効
+- 対象 seat は `agents.status IN ('idle','busy')` かつ同一 runtime tuple の有効
   `control_plane_leases` endpoint worker lease を持つ agent のみ。
 - 各対象は self-issued `message_type='probe'` を exact queue id で
   `pending → received → done` とする no-op 往復。業務 queue、agent status、
@@ -1221,7 +1221,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
-| 2026-08-20 | §10.4 N1 通信 SLO 計測を追加。online+endpoint lease 列挙、内部 no-op probe、typed silent failure、terminal cleanup、zero-effect report publisher の正本関係を固定。 |
+| 2026-08-20 | §10.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+endpoint lease 列挙、0席時の typed `NO_DATA` block、内部 no-op probe、typed silent failure、terminal cleanup、zero-effect report publisher の正本関係を固定。 |
 | 2026-08-19 | §10.3 に immutable `resume_admission_binding` の canonical 消費経路を追加。durable request/journal head/exact fresh observation ID/zero queue の束縛、preflight receipt v3、次の drift の fail-closed を固定。 |
 | 2026-08-19 | §10.3 Fleet Runtime V1 の durable STARTED resume 契約を追加。新規 sealed preflight、reserved の fresh re-observation、completed original receipt、same-key collision の境界を固定。 |
 | 2026-04-19 | Phase C I6: §8.1 を OSS Quick Start に書き換え（`npx agent-comms-mcp init/start/status`）。§8.2 を社内運用に限定。§16.5 起動コマンドに OSS 版を追加。 |

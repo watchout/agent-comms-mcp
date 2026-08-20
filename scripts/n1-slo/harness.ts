@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 export const N1_PROBE_MESSAGE_TYPE = 'probe' as const
 export const N1_PROBE_SCHEMA_VERSION = 'aun-n1-slo-probe/v1' as const
 export const N1_REPORT_SCHEMA_VERSION = 'aun-n1-slo-report/v1' as const
-export const N1_ONLINE_SEAT_QUERY_VERSION = 'agents-online-valid-runtime-endpoint-lease/v1' as const
+export const N1_ACTIVE_SEAT_QUERY_VERSION = 'agents-idle-busy-valid-runtime-endpoint-lease/v2' as const
 export const N1_PROBE_PREFIX = '[AUN-N1-SLO-PROBE/v1]'
 export const N1_OBSERVATION_WINDOW_MS = 5_000
 export const N1_PROBE_PRIORITY = -1_000_000
@@ -12,7 +12,7 @@ export interface N1Queryable {
   query(sql: string, params?: unknown[]): Promise<{ rows: any[]; rowCount?: number | null }>
 }
 
-export interface N1OnlineSeat {
+export interface N1ActiveSeat {
   agent_id: string
   runtime_instance_id: string
   lease_id: string
@@ -44,11 +44,11 @@ export interface N1MeasurementReport {
   generated_at: string
   source_commit: string
   control_source: 'https://github.com/watchout/agent-comms-mcp/issues/602'
-  online_seat_query_version: typeof N1_ONLINE_SEAT_QUERY_VERSION
+  active_seat_query_version: typeof N1_ACTIVE_SEAT_QUERY_VERSION
   observation_window_ms: number
   verdict: 'PASS' | 'FAIL' | 'NO_DATA'
   summary: {
-    online_seat_count: number
+    active_seat_count: number
     success_count: number
     failure_count: number
     success_rate: number | null
@@ -120,10 +120,10 @@ function sleepDefault(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export async function listCanonicalOnlineSeats(
+export async function listCanonicalActiveSeats(
   db: N1Queryable,
   observedAt: Date = new Date(),
-): Promise<N1OnlineSeat[]> {
+): Promise<N1ActiveSeat[]> {
   const result = await db.query(
     `SELECT DISTINCT ON (a.agent_id)
             a.agent_id,
@@ -141,7 +141,7 @@ export async function listCanonicalOnlineSeats(
          ON ri.runtime_instance_id = lease.holder_runtime_instance_id
         AND ri.runtime_instance_id::text = lease.lease_scope_id
         AND ri.agent_id = a.agent_id
-      WHERE a.status = 'online'
+      WHERE a.status IN ('idle', 'busy')
       ORDER BY a.agent_id, lease.expires_at DESC, lease.fencing_token DESC`,
     [observedAt.toISOString()],
   )
@@ -167,7 +167,7 @@ async function inTransaction<T>(db: N1Queryable, operation: () => Promise<T>): P
 
 async function sendProbe(
   db: N1Queryable,
-  seat: N1OnlineSeat,
+  seat: N1ActiveSeat,
   runId: string,
   observationWindowMs: number,
   monotonicNow: () => number,
@@ -386,7 +386,7 @@ async function cleanupProbeToDone(db: N1Queryable, probe: ProbeRef): Promise<Pro
 
 async function runSeatProbe(
   db: N1Queryable,
-  seat: N1OnlineSeat,
+  seat: N1ActiveSeat,
   runId: string,
   options: Required<Pick<RunN1MeasurementOptions,
     'observationWindowMs' | 'pollIntervalMs' | 'monotonicNow' | 'sleep' | 'processor'>>,
@@ -493,7 +493,7 @@ export async function runN1Measurement(
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runId)) {
     throw new Error('N1_RUN_ID_INVALID')
   }
-  const seats = await listCanonicalOnlineSeats(db, now())
+  const seats = await listCanonicalActiveSeats(db, now())
   const results: N1SeatResult[] = []
   for (const seat of seats) {
     results.push(await runSeatProbe(db, seat, runId, {
@@ -519,11 +519,11 @@ export async function runN1Measurement(
     generated_at: now().toISOString(),
     source_commit: options.sourceCommit.toLowerCase(),
     control_source: 'https://github.com/watchout/agent-comms-mcp/issues/602',
-    online_seat_query_version: N1_ONLINE_SEAT_QUERY_VERSION,
+    active_seat_query_version: N1_ACTIVE_SEAT_QUERY_VERSION,
     observation_window_ms: observationWindowMs,
     verdict: results.length === 0 ? 'NO_DATA' : failureCount === 0 ? 'PASS' : 'FAIL',
     summary: {
-      online_seat_count: results.length,
+      active_seat_count: results.length,
       success_count: successful.length,
       failure_count: failureCount,
       success_rate: results.length === 0 ? null : Number((successful.length / results.length).toFixed(6)),
