@@ -740,6 +740,12 @@ evidence を記録する。evidence は listener pid 集合、runtime instance I
 pinned provider checkout/head/tree/server path、および必須 env key 集合を含む。window 内で
 両方が揃わなければ phase は started のまま typed fail-closed とする。
 
+effect 後 crash で同 phase が `started` のまま残った場合も、`reconcilePhase` は wrapper を
+再起動せず、既存の durable provider image manifest を exact に再検証したうえで、上記と同じ
+bounded listener＋fresh exact runtime registration の AND 条件を満たすまで `completed` にしては
+ならない。session/port/checkout だけの旧 readback evidence、provider manifest の欠落、または
+boot evidence の一部欠落を reconciliation success として扱うことを禁止する。
+
 過去実装が boot 証明なしで COLD_START を completed にした durable invocation に限り、明示
 `REALIZE_POSTIMAGE` mode を認める。この mode 自体は COLD_START phase を再度 started/completed
 にせず、effect-specific evidence と protected effect count を増減しない。既存 resume の

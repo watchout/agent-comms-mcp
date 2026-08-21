@@ -1503,6 +1503,12 @@ COLD_START の postimage は次の AND 条件でのみ realized とする。
 key 集合を phase evidence に含め、その evidence が構成できたときだけ completed journal を
 書く。timeout/error の場合は started journal を維持し、completed を先書きしない。
 
+effect 後 crash からの `started` COLD_START reconciliation も同じ boot AND 条件と evidence key
+集合を使う。`reconcilePhase` は wrapper を再起動せず、既存の durable provider image manifest
+を exact readback し、bounded window 内に listener と fresh exact runtime registration の両方を
+確認したときだけ completed を返す。session/port/checkout だけを照合する旧 evidence への
+downgrade、provider manifest 欠落時の completion、または部分 postimage の success 扱いは禁止する。
+
 CLI の明示 `--realize-postimage` は `--execute-protected-effects` と exact executor/resume admission
 を同時に満たす場合だけ `REALIZE_POSTIMAGE` mode を選ぶ。この mode は次の状態機械を持つ。
 
