@@ -1351,6 +1351,81 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 
 §13.5 の「将来 Claude Code が MCP notification のコンテキスト注入をサポートした時点で push 方式に完全移行可能」のうち、**件数シグナル** 部分は secondary として実装済み (message 本体は依然 `next` pull 一択、spec §4.1)。**primary は state-daemon** だが、LLM TUI への自然言語 prompt 注入ではなく typed observation / approved runner に限定する。
 
+#### 13.5.1.1 Memory-ready evidence supply and gate retry
+
+`memory_ready` は approved runner の必須 gate であり、その evidence 供給も
+state-daemon 配送面の一部として扱う。供給 job、gate、運用設定の正本はこの repository
+に置き、home directory 配下だけに存在する script を本番 entrypoint にしてはならない。
+refresher の launchd plist は repository 内 template から生成し、生成元 commit と設定
+digest を readback できなければならない。
+
+**対象席と batch 契約**
+
+- inventory は `agents.status IN ('idle','busy')`、`profile_enabled = true`、
+  `disabled_at IS NULL` の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
+  typed `DENYLISTED` として除外できる。本機能が denylist の値を変更してはならない。
+- denylist 外の inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
+  session、port、runtime、workspace 又は project が欠ける席も silent に落とさず、typed
+  failure reason と repair signal を記録する。
+- 1 席の resolver / bootstrap / readback failure はその席の result だけを失敗にし、残りの
+  席を継続する。batch summary は inventory、eligible、ready、failed、skipped の各件数と
+  policy schema version / digest を持つ。全席処理後に failed が残る場合、process は非 zero
+  で終了してよいが、途中 abort はしない。
+
+**Current-runtime resolver (single implementation)**
+
+refresher と gate は同じ exported resolver を使用する。profile tuple の schema mapping は
+次で固定する。`agents.runtime` は legacy 名だが登録 runtime kind を保持し、その instance
+側の表現である `agent_runtime_instances.runtime_engine` と exact 比較する。
+
+```text
+profile tuple = {
+  runtime_kind: agents.runtime          <=> instance.runtime_engine,
+  session:      agents.metadata.tmux_session <=> instance.session_name,
+  home:         agents.home_directory   <=> instance.checkout_path
+}
+```
+
+profile tuple の各登録値が非空であり、かつ 3 項目すべてが一致した row だけを current にできる。
+resolver はまず `status IN ('running','active')` かつ valid heartbeat (`last_seen_at`) が
+`LIVENESS_TTL` 内の row だけを candidate にする。その中の exact tuple match を選び、複数なら
+`last_seen_at DESC, started_at DESC, runtime_instance_id ASC` で決定的に 1 行を選ぶ。一致が
+なければ freshest profile-mismatch row に fallback せず typed
+`NO_CURRENT_RUNTIME_FOR_PROFILE` で fail-closed にする。これは runtime 再登録を要求する
+repair signal である。profile match でも heartbeat が stale なら current ではない。
+
+`LIVENESS_TTL` は `(runtime_kind, source)` group の登録 `heartbeat_interval * 6` とする。
+`source` は instance `metadata.source`、それが空なら `runtime_engine`。group 登録がない場合は
+30 分を使用する。heartbeat interval、既定値、backoff 値は schema version を持つ repository
+config から読み、resolver/refresher report と daemon startup readback に schema version と
+content digest を出す。config が absent / malformed / unsupported version なら fail-closed とする。
+
+**Stale runtime reap**
+
+reap の equivalence group は
+`(agent_id, agent_runtime_instances.runtime_kind, metadata.source || runtime_engine)` とする。
+cross-group reap、および単に current に選ばれなかったことを理由とする reap は禁止する。
+running/active row を `stopped` に訂正できるのは次のどちらかだけである。
+
+1. absolute: heartbeat age が `REAP_TTL = max(24h, heartbeat_interval * 12)` を超える。
+   未登録 group の `REAP_TTL` は 24 時間。
+2. supersession: 同一 equivalence group に `LIVENESS_TTL` 内の row があり、対象 row 自身は
+   `LIVENESS_TTL` を超える。
+
+mutation は observed `runtime_instance_id`、status、`last_seen_at` を compare-and-set 条件にし、
+`status='stopped'` と `stopped_at` のみを冪等更新する。process kill、tmux kill、cross-group
+変更は行わない。生きている process は次回 register / heartbeat で `running` に自然回復する。
+
+**Gate backoff and alert dedup**
+
+同一 queue row の同一 blocked fingerprint (`reason`、current runtime/evidence identity、typed
+details の stable digest) は 30 秒から指数 backoff し、30 分で cap する。backoff 中は gate
+query、blocked metric、alert を再発火しない。alert は unblocked→blocked、blocked fingerprint
+change、blocked→ready の状態遷移時だけ許可する。同一 fingerprint の再評価 failure は retry
+schedule だけを更新する。state は daemon process 内で queue id ごとに bounded に保持し、
+ready/terminal row で破棄するため、この契約は新しい DB schema を要求しない。daemon restart
+後の最初の観測は新しい transition として 1 回だけ alert してよい。
+
 ### 13.6 Presence Client
 
 Presence Client は将来拡張、現行は opt-in。
