@@ -70,7 +70,7 @@ async function seedMemoryReadyAgent(client: Client, agentId: string, agentType =
         checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
      VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
              $5, 'session-drain-test-head', 'running',
-             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
+             clock_timestamp() - interval '1 second', clock_timestamp(),
              '{"source":"session-start-drain-test"}'::jsonb)`,
     [runtimeId, agentId, sessionName, port, checkoutPath],
   )
@@ -83,7 +83,7 @@ async function seedMemoryReadyAgent(client: Client, agentId: string, agentType =
      VALUES
        ($1, 'agent-comms-mcp', $2, 1, 'legacy',
         $3, $4, $1, $5, 'session-drain-test-head',
-        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
+        'test:mcp__wasurezu__recover_context', 'ready', clock_timestamp(),
         '/tmp/session-start-drain-memory-ready.json', 'session-start-drain-memory-ready',
         '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
         '{"fixture":true}'::jsonb)`,

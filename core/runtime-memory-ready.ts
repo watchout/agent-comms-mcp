@@ -4,6 +4,7 @@ import {
   loadRuntimeMemoryReadyPolicy,
   resolveRuntimeMemoryReadyCurrent,
   type RuntimeMemoryReadyPolicy,
+  type SealedBootstrapRuntimeReceipt,
 } from './runtime-current-resolver'
 
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
@@ -652,6 +653,8 @@ export async function evaluateRuntimeMemoryReadyGate(
     now?: Date
     queue_scope?: RuntimeMemoryReadyQueueScopeInput | null
     policy?: RuntimeMemoryReadyPolicy
+    requested_runtime_kind?: string
+    selected_bootstrap_receipt?: SealedBootstrapRuntimeReceipt | null
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -717,6 +720,8 @@ export async function evaluateRuntimeMemoryReadyGate(
   try {
     currentResolution = await resolveRuntimeMemoryReadyCurrent(db, {
       agentId: input.agent_id,
+      requestedRuntimeKind: input.requested_runtime_kind?.trim() || 'local_process',
+      selectedBootstrapReceipt: input.selected_bootstrap_receipt,
       now,
       policy,
     })

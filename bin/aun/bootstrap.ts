@@ -1098,15 +1098,6 @@ type SelectedMemoryReadySubject = {
   evidenceId?: string | number | null
 }
 
-function isCurrentRuntimeSelection(sql: string): boolean {
-  const normalized = sql.replace(/\s+/g, ' ').trim()
-  return normalized.includes('FROM agent_runtime_instances')
-    && normalized.includes('WHERE agent_id = $1')
-    && normalized.includes("status IN ('running', 'active')")
-    && normalized.includes('ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC')
-    && normalized.endsWith('LIMIT 1')
-}
-
 function isCurrentMemoryEvidenceSelection(sql: string): boolean {
   const normalized = sql.replace(/\s+/g, ' ').trim()
   return normalized.includes('FROM runtime_memory_ready_evidence')
@@ -1147,18 +1138,6 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
 
   const selectedDb = {
     query: <T = any>(sql: string, params?: any[]): Promise<T[]> => {
-      if (isCurrentRuntimeSelection(sql)) {
-        return db.query<T>(
-          `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha,
-                  started_at, last_seen_at, status
-             FROM agent_runtime_instances
-            WHERE agent_id = $1
-              AND runtime_instance_id = $2
-              AND status IN ('running', 'active')
-            LIMIT 1`,
-          [input.agent_id, subject.runtimeInstanceId],
-        )
-      }
       if (isCurrentMemoryEvidenceSelection(sql)) {
         const evidenceIdClause = subject.evidenceId === undefined || subject.evidenceId === null
           ? ''
@@ -1183,7 +1162,18 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
       return db.query<T>(sql, params)
     },
   }
-  const gate = await evaluateRuntimeMemoryReadyGate(selectedDb, input)
+  const gate = await evaluateRuntimeMemoryReadyGate(selectedDb, {
+    ...input,
+    requested_runtime_kind: 'bootstrap_bound_provider',
+    selected_bootstrap_receipt: expectedTuple
+      ? {
+          runtime_instance_id: subject.runtimeInstanceId,
+          runtime_engine: expectedTuple.runtime_engine,
+          session_name: expectedTuple.session_name,
+          checkout_path: expectedTuple.checkout_path,
+        }
+      : null,
+  })
   if (gate.runtime_instance_id !== subject.runtimeInstanceId) {
     return {
       ...gate,

@@ -160,7 +160,12 @@ export async function runRuntimeMemoryReadyFleetRefresh(
     let reaped: RuntimeMemoryReadySeatResult['reaped_runtime_instances'] = []
     let reapDetails: Record<string, unknown> = {}
     try {
-      resolution = await resolveCurrent(db, { agentId, now, policy })
+      resolution = await resolveCurrent(db, {
+        agentId,
+        requestedRuntimeKind: 'local_process',
+        now,
+        policy,
+      })
       let allReapResults: RuntimeMemoryReadySeatResult['reaped_runtime_instances']
       if (!dryRun && resolution.reap_candidates.length > 0) {
         allReapResults = (await reapRuntimeMemoryReadyStaleRows(db, resolution.reap_candidates, now)).map(row => ({

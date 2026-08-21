@@ -97,6 +97,7 @@ describe('runtime current resolver', () => {
 
     const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
       policy,
     })
@@ -130,6 +131,7 @@ describe('runtime current resolver', () => {
 
     const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
       policy,
     })
@@ -137,6 +139,106 @@ describe('runtime current resolver', () => {
     expect(resolution.ok).toBe(true)
     expect(resolution.code).toBe('RESOLVED')
     expect(resolution.current_runtime?.runtime_instance_id).toBe('newer-exact')
+  })
+
+  test('ordinary current resolution excludes a fresher bootstrap-bound receipt', async () => {
+    await seedProfile('codex-cto')
+    await seedRuntime({ id: 'ordinary-exact', seen: '2026-08-21T00:08:00.000Z' })
+    await seedRuntime({
+      id: 'bootstrap-fresher',
+      kind: 'bootstrap_bound_provider',
+      seen: '2026-08-21T00:09:59.000Z',
+    })
+
+    const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+
+    expect(resolution.current_runtime?.runtime_instance_id).toBe('ordinary-exact')
+    expect(resolution.runtime_rows.map(row => row.runtime_instance_id)).toEqual(['ordinary-exact'])
+  })
+
+  test('requested kind defines an independent ordinary ranking surface', async () => {
+    await seedProfile('codex-cto')
+    await seedRuntime({ id: 'local-process-fresher', seen: '2026-08-21T00:09:59.000Z' })
+    await seedRuntime({
+      id: 'local-tmux-requested',
+      kind: 'local_tmux',
+      seen: '2026-08-21T00:08:00.000Z',
+    })
+
+    const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_tmux',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+
+    expect(resolution.requested_runtime_kind).toBe('local_tmux')
+    expect(resolution.current_runtime?.runtime_instance_id).toBe('local-tmux-requested')
+    expect(resolution.runtime_rows.map(row => row.runtime_instance_id)).toEqual(['local-tmux-requested'])
+  })
+
+  test('bootstrap-bound current resolves only the sealed selected receipt exact binding', async () => {
+    await seedProfile('codex-cto')
+    await seedRuntime({
+      id: 'selected-bootstrap',
+      engine: 'codex',
+      kind: 'bootstrap_bound_provider',
+      seen: '2026-08-21T00:09:00.000Z',
+    })
+
+    const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'bootstrap_bound_provider',
+      selectedBootstrapReceipt: {
+        runtime_instance_id: 'selected-bootstrap',
+        runtime_engine: 'codex',
+        session_name: 'discord-cto',
+        checkout_path: '/work/codex',
+      },
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+
+    expect(resolution.ok).toBe(true)
+    expect(resolution.current_runtime?.runtime_instance_id).toBe('selected-bootstrap')
+    expect(resolution.profile?.runtime_kind).toBe('TUI')
+  })
+
+  test('bootstrap-bound current fails closed without an exact sealed receipt row', async () => {
+    await seedProfile('codex-cto')
+    await seedRuntime({
+      id: 'selected-bootstrap',
+      engine: 'codex',
+      kind: 'bootstrap_bound_provider',
+      seen: '2026-08-21T00:09:00.000Z',
+    })
+
+    const missingReceipt = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'bootstrap_bound_provider',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+    const wrongBinding = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'bootstrap_bound_provider',
+      selectedBootstrapReceipt: {
+        runtime_instance_id: 'selected-bootstrap',
+        runtime_engine: 'codex',
+        session_name: 'discord-cto',
+        checkout_path: '/work/not-the-sealed-receipt',
+      },
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+
+    expect(missingReceipt).toMatchObject({ ok: false, code: 'NO_BOOTSTRAP_BOUND_ROW' })
+    expect(wrongBinding).toMatchObject({ ok: false, code: 'NO_BOOTSTRAP_BOUND_ROW' })
   })
 
   test('unknown group uses the frozen 30m/24h defaults', async () => {
@@ -149,6 +251,7 @@ describe('runtime current resolver', () => {
     })
     const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_tmux',
       now: new Date('2026-08-21T00:10:00.000Z'),
       policy,
     })

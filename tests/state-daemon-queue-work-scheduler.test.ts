@@ -226,11 +226,12 @@ class PendingLlmDb implements DBClient {
       return {
         rows: [{
           agent_id: this.agentId,
+          runtime: 'codex',
           profile_revision: null,
           profile_source: null,
           channel_port: null,
           home_directory: '/repo',
-          metadata: {},
+          metadata: { tmux_session: `${this.agentId}-session` },
         }] as T[],
         rowCount: 1,
       }
@@ -240,13 +241,16 @@ class PendingLlmDb implements DBClient {
         rows: [{
           runtime_instance_id: 'rt-queue-scheduler',
           agent_id: this.agentId,
-          session_name: null,
+          runtime_engine: 'codex',
+          runtime_kind: 'local_process',
+          session_name: `${this.agentId}-session`,
           port: null,
           checkout_path: '/repo',
           commit_sha: null,
           started_at: '2026-05-07T23:50:00.000Z',
-          last_seen_at: '2026-05-07T23:59:00.000Z',
+          last_seen_at: '2030-05-07T23:59:00.000Z',
           status: 'running',
+          metadata: { source: 'state-daemon-queue-work-fixture' },
         }] as T[],
         rowCount: 1,
       }
@@ -261,7 +265,7 @@ class PendingLlmDb implements DBClient {
           runtime_instance_id: 'rt-queue-scheduler',
           profile_revision: null,
           profile_source: null,
-          session_name: null,
+          session_name: `${this.agentId}-session`,
           port: null,
           expected_agent_id: this.agentId,
           checkout_path: '/repo',

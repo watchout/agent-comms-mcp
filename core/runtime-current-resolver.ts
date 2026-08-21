@@ -82,8 +82,14 @@ export type RuntimeStaleReapCandidate = {
 
 export type RuntimeCurrentResolution = {
   ok: boolean
-  code: 'RESOLVED' | 'AGENT_MISSING' | 'PROFILE_TUPLE_INCOMPLETE' | 'NO_CURRENT_RUNTIME_FOR_PROFILE'
+  code:
+    | 'RESOLVED'
+    | 'AGENT_MISSING'
+    | 'PROFILE_TUPLE_INCOMPLETE'
+    | 'NO_CURRENT_RUNTIME_FOR_PROFILE'
+    | 'NO_BOOTSTRAP_BOUND_ROW'
   agent_id: string
+  requested_runtime_kind: string
   checked_at: string
   profile: RuntimeCurrentProfile | null
   current_runtime: RuntimeCurrentInstance | null
@@ -91,6 +97,21 @@ export type RuntimeCurrentResolution = {
   reap_candidates: RuntimeStaleReapCandidate[]
   policy: RuntimeMemoryReadyPolicy['readback'] & { schema_version: string }
   details: Record<string, unknown>
+}
+
+export type SealedBootstrapRuntimeReceipt = {
+  runtime_instance_id: string
+  runtime_engine: string
+  session_name: string
+  checkout_path: string
+}
+
+export type RuntimeCurrentResolverInput = {
+  agentId: string
+  requestedRuntimeKind: string
+  selectedBootstrapReceipt?: SealedBootstrapRuntimeReceipt | null
+  now?: Date
+  policy?: RuntimeMemoryReadyPolicy
 }
 
 type AgentRow = {
@@ -247,10 +268,17 @@ async function rows<T>(db: RuntimeCurrentResolverDb, sql: string, params?: any[]
 
 export async function resolveRuntimeMemoryReadyCurrent(
   db: RuntimeCurrentResolverDb,
-  input: { agentId: string; now?: Date; policy?: RuntimeMemoryReadyPolicy },
+  input: RuntimeCurrentResolverInput,
 ): Promise<RuntimeCurrentResolution> {
   const now = input.now ?? new Date()
   const policy = input.policy ?? loadRuntimeMemoryReadyPolicy()
+  const requestedRuntimeKind = text(input.requestedRuntimeKind)
+  if (!requestedRuntimeKind) {
+    throw new Error('RUNTIME_MEMORY_READY_KIND_REQUIRED')
+  }
+  const bootstrapSelection = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? input.selectedBootstrapReceipt ?? null
+    : null
   const policyReadback = { schema_version: policy.schema_version, ...policy.readback }
   const agentRows = await rows<AgentRow>(
     db,
@@ -266,6 +294,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
       ok: false,
       code: 'AGENT_MISSING',
       agent_id: input.agentId,
+      requested_runtime_kind: requestedRuntimeKind,
       checked_at: now.toISOString(),
       profile: null,
       current_runtime: null,
@@ -293,9 +322,10 @@ export async function resolveRuntimeMemoryReadyCurrent(
             started_at, last_seen_at, status, metadata
        FROM agent_runtime_instances
       WHERE agent_id = $1
+        AND runtime_kind = $2
         AND status IN ('running', 'active')
       ORDER BY last_seen_at DESC, started_at DESC, runtime_instance_id ASC`,
-    [input.agentId],
+    [input.agentId, requestedRuntimeKind],
   )
   const nowMs = now.getTime()
   const normalized = runtimeRows.map((row): RuntimeCurrentInstance => {
@@ -326,14 +356,21 @@ export async function resolveRuntimeMemoryReadyCurrent(
       profile_match: false,
       live: age !== null && age <= ttl.livenessTtlMs,
     }
-    instance.profile_match = Boolean(
-      profile.runtime_kind &&
-      profile.session_name &&
-      profile.home_directory &&
-      instance.runtime_engine === profile.runtime_kind &&
-      instance.session_name === profile.session_name &&
-      instance.checkout_path === profile.home_directory,
-    )
+    instance.profile_match = bootstrapSelection
+      ? Boolean(
+          instance.runtime_instance_id === bootstrapSelection.runtime_instance_id &&
+          instance.runtime_engine === bootstrapSelection.runtime_engine &&
+          instance.session_name === bootstrapSelection.session_name &&
+          instance.checkout_path === bootstrapSelection.checkout_path,
+        )
+      : Boolean(
+          profile.runtime_kind &&
+          profile.session_name &&
+          profile.home_directory &&
+          instance.runtime_engine === profile.runtime_kind &&
+          instance.session_name === profile.session_name &&
+          instance.checkout_path === profile.home_directory,
+        )
     return instance
   })
 
@@ -363,21 +400,33 @@ export async function resolveRuntimeMemoryReadyCurrent(
     })
   }
 
-  const tupleMissing = [
-    profile.runtime_kind ? null : 'runtime_kind',
-    profile.session_name ? null : 'session',
-    profile.home_directory ? null : 'home',
-  ].filter((value): value is string => value !== null)
+  const tupleMissing = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? [
+        bootstrapSelection?.runtime_instance_id ? null : 'sealed_receipt.runtime_instance_id',
+        bootstrapSelection?.runtime_engine ? null : 'sealed_receipt.runtime_engine',
+        bootstrapSelection?.session_name ? null : 'sealed_receipt.session_name',
+        bootstrapSelection?.checkout_path ? null : 'sealed_receipt.checkout_path',
+      ].filter((value): value is string => value !== null)
+    : [
+        profile.runtime_kind ? null : 'runtime_kind',
+        profile.session_name ? null : 'session',
+        profile.home_directory ? null : 'home',
+      ].filter((value): value is string => value !== null)
   const current = normalized.find(row => row.live && row.profile_match) ?? null
-  const code = tupleMissing.length > 0
-    ? 'PROFILE_TUPLE_INCOMPLETE' as const
-    : current
+  const code = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? current
       ? 'RESOLVED' as const
-      : 'NO_CURRENT_RUNTIME_FOR_PROFILE' as const
+      : 'NO_BOOTSTRAP_BOUND_ROW' as const
+    : tupleMissing.length > 0
+      ? 'PROFILE_TUPLE_INCOMPLETE' as const
+      : current
+        ? 'RESOLVED' as const
+        : 'NO_CURRENT_RUNTIME_FOR_PROFILE' as const
   return {
     ok: current !== null && tupleMissing.length === 0,
     code,
     agent_id: input.agentId,
+    requested_runtime_kind: requestedRuntimeKind,
     checked_at: now.toISOString(),
     profile,
     current_runtime: tupleMissing.length === 0 ? current : null,
@@ -386,6 +435,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     policy: policyReadback,
     details: {
       missing_profile_fields: tupleMissing,
+      bootstrap_receipt_bound: bootstrapSelection !== null,
       active_runtime_rows: normalized.length,
       live_runtime_rows: normalized.filter(row => row.live).length,
       live_profile_matches: normalized.filter(row => row.live && row.profile_match).length,
