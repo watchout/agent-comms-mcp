@@ -750,11 +750,14 @@ boot evidence の一部欠落を reconciliation success として扱うことを
 `REALIZE_POSTIMAGE` mode を認める。この mode 自体は COLD_START phase を再度 started/completed
 にせず、effect-specific evidence と protected effect count を増減しない。既存 resume の
 execution-owner fencing と、成功後の VERIFY phase completion は通常規則どおりである。
-COLD_START が未 completed なら effect 前に拒否する。listener と exact runtime 登録が既に
+COLD_START が未 completed、または completed evidence が `boot_environment_keys` を持つ modern
+boot-proof schema なら effect 前に拒否する。legacy eligibility は exact legacy evidence schema
+（boot-proof keys がすべて absent）で判定する。listener と exact runtime 登録が既に
 両方揃っていれば wrapper を起動せず
 no-op とし、両方とも未実現なら上記 durable provider image と explicit MCP env で wrapper を
 1 回だけ起動して同じ bounded boot readback を行う。片方だけ存在する状態、競合 listener、
-不一致または stale な exact-checkout 登録は bounded readback 後も収束しなければ fail-closed
+または latest runtime row が存在するが不一致・stale な exact-checkout 登録は、listener が absent
+でも `ABSENT` に分類せず、bounded readback 後も収束しなければ fail-closed
 とする。通常 resume の no-replay 規則は維持し、再実現は successor control が明示した
 `REALIZE_POSTIMAGE` mode 以外から到達不能とする。
 

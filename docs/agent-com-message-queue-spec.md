@@ -1515,9 +1515,16 @@ CLI の明示 `--realize-postimage` は `--execute-protected-effects` と exact 
 | durable COLD_START / live postimage | result |
 |---|---|
 | 未 completed | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
-| completed / listener+exact registration とも realized | `ALREADY_REALIZED`; wrapper effect 0、VERIFY だけ継続 |
-| completed / listener+exact registration とも absent | durable provider image から wrapper を 1 回起動し bounded readback。成功後 VERIFY だけ継続 |
-| completed / 片方だけ存在、または listener/registration conflict | bounded convergence readback 後も不一致なら typed fail-closed; wrapper effect 0 |
+| modern completed / boot-proof evidence あり | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
+| legacy completed / listener+exact registration とも realized | `ALREADY_REALIZED`; wrapper effect 0、VERIFY だけ継続 |
+| legacy completed / listener+runtime registration row とも absent | durable provider image から wrapper を 1 回起動し bounded readback。成功後 VERIFY だけ継続 |
+| legacy completed / 片方だけ存在、または listener/registration conflict | bounded convergence readback 後も不一致なら typed fail-closed; wrapper effect 0 |
+
+legacy eligibility は completed evidence の exact legacy schema、すなわち `boot_environment_keys`
+以下の boot-proof key 集合が存在しないことから判定する。latest runtime row が 1 件でも存在する
+場合、その row が stale、stopped、dirty、wrong commit/checkout/session/port のいずれであっても
+postimage を `ABSENT` と分類してはならず、conflict/partial として wrapper effect 0 の bounded
+convergence readback に送る。
 
 この経路は COLD_START phase を再度 started/completed にせず、COLD_START の effect-specific
 evidence と `protected_effect_count=1` を増減しない。durable resume に伴う既存 execution-owner
