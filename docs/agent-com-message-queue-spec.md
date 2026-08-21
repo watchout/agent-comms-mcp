@@ -1444,22 +1444,99 @@ typed fail-closed とし、successor binding が publish されるまで停止�
 
 provider の durable reservation、operation journal、sealed request は resume 判定のために
 書き換えない。既に completed または readback で受領済みと確定した `PUSH_NORMAL_BRANCH`、
-`CREATE_DRAFT_PR`、`COLD_START_DISCORD_KODAMA` を再実行してはならない。
+`CREATE_DRAFT_PR`、`COLD_START_DISCORD_KODAMA` を通常 resume から再実行してはならない。
 
 phase loop は journal status を effect より先に評価する。`completed` phase は intent 構築と
 `performPhase` の両方を skip し、`started` phase は `performPhase` を再実行せず
 `reconcilePhase` だけで readback する。初回 `performPhase` と resume `reconcilePhase` には、
 adapter が当該 invocation 用に検証した同一の `fleet-runtime-v1/preflight-receipt/v3` を渡す。
-とくに `COLD_START_DISCORD_KODAMA=completed` かつ `VERIFY_LIVE_IDENTITY=started` の durable
-invocation は、COLD_START の protected effect を増やさず、preflight の queue observation と
-live runtime/checkout/default-branch postimage の照合だけを再開する。照合に成功したときは
-`VERIFY_LIVE_IDENTITY` を completed にして canonical `CANARY_COLD_START` receipt を生成し、
-照合不能なら completed COLD_START を replay せず typed fail-closed とする。
+通常 mode では、とくに `COLD_START_DISCORD_KODAMA=completed` かつ
+`VERIFY_LIVE_IDENTITY=started` の durable invocation は、COLD_START の protected effect を
+増やさず、preflight の queue observation と live runtime/checkout/default-branch postimage の
+照合だけを再開する。照合に成功したときは `VERIFY_LIVE_IDENTITY` を completed にして
+canonical `CANARY_COLD_START` receipt を生成し、照合不能なら completed COLD_START を replay
+せず typed fail-closed とする。
 
 この crash point の回帰 fixture は、(1) concrete `performPhase` が preflight receipt を実参照
 して `VERIFY_LIVE_IDENTITY` を完了できること、(2) completed COLD_START と started VERIFY を
 持つ resume が COLD_START の call count を増やさず canonical receipt に到達すること、
 (3) resume の protected effect 増分が 0 であることを個別に証明する。
+
+### COLD_START boot configuration と `REALIZE_POSTIMAGE`
+
+`COLD_START_DISCORD_KODAMA` の Codex command は、tmux client に渡した ambient env が tmux
+server/session または MCP child に継承されることを仮定しない。`mcp_servers.aun.env` に次の
+exact key/value を組み立てる。
+
+| key | value source |
+|---|---|
+| `AGENT_ID` | literal `kodama` |
+| `AGENT_COM_EXPECTED_AGENT_ID` | literal `kodama` |
+| `AGENT_COM_DB` | literal `postgres` |
+| `DATABASE_URL` | provider admission/queue readback に用いた同じ nonempty binding |
+| `AGENT_COM_RUNTIME_HEARTBEAT_DISABLED` | literal `0` |
+| `WEBHOOK_PORT` | decimal string `8803` |
+| `DISCORD_STATE_DIR` | `/Users/yuji/.claude/channels/discord-kodama` |
+| `AGENT_COM_RUNTIME_SESSION` | literal `discord-kodama` |
+
+全値は Codex config scalar として escape し、DB URL 自体を journal evidence へ保存しない。
+completed evidence には上表の exact key 集合だけを残す。`DATABASE_URL` がない場合は checkout、
+tmux、DB、queue の effect 前に `READBACK_INVALID` で停止する。
+
+server path は `${invocation_directory}/provider-runtime/provider-checkout/server.ts` に固定する。
+provider は canonical origin `https://github.com/watchout/agent-comms-mcp.git` または同一 SSH origin
+の remote `main` と実行 source HEAD が一致することを確認し、その head/tree を state root 配下の
+real、detached、clean checkout と canonical runtime-image manifest に pin する。既存 manifest は
+canonical JSON+LF、exact schema/key set、state-root containment、non-symlink、origin/head/tree/
+clean/detached/server-file readback がすべて一致するときだけ再利用する。provider process の cwd、
+session worktree path、ambient `AGENT_COMMS_SERVER_PATH` は runtime server path の source にしない。
+
+COLD_START の postimage は次の AND 条件でのみ realized とする。
+
+1. port 8803 に LISTEN pid が 1 件以上ある。
+2. official PostgreSQL queue observation の latest runtime instance が fresh `running`、
+   `session_name=discord-kodama`、`port=8803`、`checkout_path` が当該 invocation の Kodama checkout、
+   `commit_sha` が phase の exact expected head、`stopped_at=null`、`git_dirty=false` である。
+
+初回 COLD_START は `tmux new-session` 後、最大 30 回・1 秒間隔の bounded readback でこの AND
+条件を待つ。LISTEN pid 集合、runtime instance ID、登録 checkout/head、provider pin と必須 env
+key 集合を phase evidence に含め、その evidence が構成できたときだけ completed journal を
+書く。timeout/error の場合は started journal を維持し、completed を先書きしない。
+
+effect 後 crash からの `started` COLD_START reconciliation も同じ boot AND 条件と evidence key
+集合を使う。`reconcilePhase` は wrapper を再起動せず、既存の durable provider image manifest
+を exact readback し、bounded window 内に listener と fresh exact runtime registration の両方を
+確認したときだけ completed を返す。session/port/checkout だけを照合する旧 evidence への
+downgrade、provider manifest 欠落時の completion、または部分 postimage の success 扱いは禁止する。
+
+CLI の明示 `--realize-postimage` は `--execute-protected-effects` と exact executor/resume admission
+を同時に満たす場合だけ `REALIZE_POSTIMAGE` mode を選ぶ。この mode は次の状態機械を持つ。
+
+| durable COLD_START / live postimage | result |
+|---|---|
+| 未 completed | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
+| modern completed / boot-proof evidence あり | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
+| legacy completed / listener+exact registration とも realized | `ALREADY_REALIZED`; wrapper effect 0、VERIFY だけ継続 |
+| legacy completed / listener+runtime registration row とも absent | durable provider image から wrapper を 1 回起動し bounded readback。成功後 VERIFY だけ継続 |
+| legacy completed / 片方だけ存在、または listener/registration conflict | bounded convergence readback 後も不一致なら typed fail-closed; wrapper effect 0 |
+
+legacy eligibility は completed evidence の exact legacy schema、すなわち `boot_environment_keys`
+以下の boot-proof key 集合が存在しないことから判定する。latest runtime row が 1 件でも存在する
+場合、その row が stale、stopped、dirty、wrong commit/checkout/session/port のいずれであっても
+postimage を `ABSENT` と分類してはならず、conflict/partial として wrapper effect 0 の bounded
+convergence readback に送る。
+
+この経路は COLD_START phase を再度 started/completed にせず、COLD_START の effect-specific
+evidence と `protected_effect_count=1` を増減しない。durable resume に伴う既存 execution-owner
+fencing と、成功後の VERIFY phase completion は通常契約どおりであり、COLD_START effect の
+再記録には数えない。再実現した live runtime instance は同じ executor process 内の VERIFY readback にだけ束縛し、canonical receipt の
+`duplicate_effect_count=0` / `unauthorized_effect_count=0` を維持する。completed invocation の
+original-receipt replay と、通常 mode の completed-phase skip/no-replay は変えない。
+
+回帰 fixture は少なくとも (1) command の必須 env exact key/value、(2) server path が provider
+source cwd ではなく state-root provider checkout を指すこと、(3) completed+absent の 1 回だけの
+再実現成功、(4) completed+realized の no-op、(5) uncompleted の effect-before reject、(6) 新規
+COLD_START が listener+registration evidence なしでは completed にならないことを個別に証明する。
 
 ---
 
@@ -1830,6 +1907,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-08-21 | §13.7 に COLD_START の explicit MCP env、state-root pinned provider checkout/server path、listener+exact runtime 登録の completed boot proof、legacy completed phase だけに限定した bounded `REALIZE_POSTIMAGE` state machine を追加。 |
 | 2026-08-21 | §13.7 に started `VERIFY_LIVE_IDENTITY` の exact preflight 参照と no-replay reconcile fixture を追加。completed COLD_START を effect 前に skip し、live identity のみを再開して canonical receipt に到達する境界を固定。 |
 | 2026-08-20 | §17.4 N1 probe の exact canonical `channel_id=pdca-daily` 束縛、channel row/member の transactional validation、typed binding failure、隔離 fixture の production `NOT NULL` parity と3 regression を追加。 |
 | 2026-08-20 | §17.4 N1 正準 seat query を実稼働 status 語彙に修正。idle/busy+valid endpoint lease の正準集合、0席時の typed `NO_DATA` block、self-issued no-op probe、5,000 ms 固定窓、typed RETRY_EXHAUSTED、terminal cleanup、zero provider/Discord effect、#602 machine publisher と 900 秒 launchd 契約を固定。 |

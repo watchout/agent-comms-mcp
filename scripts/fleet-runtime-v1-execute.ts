@@ -14,6 +14,7 @@ interface CommandArgs {
   stateDirectory?: string
   format?: string
   executeProtectedEffects: boolean
+  realizePostimage: boolean
   help: boolean
 }
 
@@ -21,7 +22,7 @@ export function fleetRuntimeV1Usage(): string {
   return `FLEET_RUNTIME_V1 local provider
 
 Usage:
-  bun scripts/fleet-runtime-v1-execute.ts --request <ABSOLUTE_REQUEST_JSON> --state-dir <ABSOLUTE_STATE_DIR> --format json [--execute-protected-effects]
+  bun scripts/fleet-runtime-v1-execute.ts --request <ABSOLUTE_REQUEST_JSON> --state-dir <ABSOLUTE_STATE_DIR> --format json [--execute-protected-effects] [--realize-postimage]
 
 Safety:
   Protected effects are denied by default. Without --execute-protected-effects,
@@ -29,11 +30,13 @@ Safety:
   deterministic typed block receipt before reservation or filesystem mutation.
   The protected flag is still insufficient unless the request binds the exact
   registered aun-runtime-executor / runtime_recovery_executor identity.
+  --realize-postimage is admitted only with --execute-protected-effects and a
+  durable invocation whose COLD_START_DISCORD_KODAMA phase is completed.
 `
 }
 
 export function parseFleetRuntimeV1Args(argv: readonly string[]): CommandArgs {
-  const parsed: CommandArgs = { executeProtectedEffects: false, help: false }
+  const parsed: CommandArgs = { executeProtectedEffects: false, realizePostimage: false, help: false }
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]
     const value = () => {
@@ -45,6 +48,7 @@ export function parseFleetRuntimeV1Args(argv: readonly string[]): CommandArgs {
     else if (argument === '--state-dir') parsed.stateDirectory = value()
     else if (argument === '--format') parsed.format = value()
     else if (argument === '--execute-protected-effects') parsed.executeProtectedEffects = true
+    else if (argument === '--realize-postimage') parsed.realizePostimage = true
     else if (argument === '--help' || argument === '-h') parsed.help = true
     else throw new Error(`unknown argument: ${argument}`)
   }
@@ -77,6 +81,12 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
       return 0
     }
     if (args.format !== 'json') throw new Error('--format json is required')
+    if (args.realizePostimage && !args.executeProtectedEffects) {
+      throw new FleetRuntimeLocalProviderError(
+        'REALIZE_POSTIMAGE_NOT_ADMITTED',
+        '--realize-postimage requires --execute-protected-effects',
+      )
+    }
     const requestPath = absoluteNormalized(args.requestPath, '--request')
     const stateDirectory = absoluteNormalized(args.stateDirectory, '--state-dir')
     if (args.executeProtectedEffects && stateDirectory !== FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT) {
@@ -87,6 +97,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
       stateDirectory,
       approvedStateRoot: FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
       executeProtectedEffects: args.executeProtectedEffects,
+      postimageMode: args.realizePostimage ? 'REALIZE_POSTIMAGE' : 'NORMAL',
       system: new ConcreteFleetRuntimeV1LocalSystem(),
     })
     printJson(result)

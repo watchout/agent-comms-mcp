@@ -25,6 +25,7 @@ import {
 import {
   ConcreteFleetRuntimeV1LocalSystem,
   FLEET_RUNTIME_V1_ADF_READBACK_RELEASE,
+  FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS,
   FLEET_RUNTIME_V1_PAYLOAD_AMENDMENT,
   FLEET_RUNTIME_V1_PAYLOAD_MANIFEST_FILES,
   FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT,
@@ -54,6 +55,7 @@ import {
   type FleetRuntimeLocalPhaseResult,
   type FleetRuntimeLocalReconcileResult,
   type FleetRuntimeLocalSystem,
+  type FleetRuntimePostimageRealizationResult,
   type FleetRuntimeArgvRunner,
   type FleetRuntimeAdfReleaseReadback,
 } from '../../core/fleet-runtime-v1-local-provider'
@@ -941,6 +943,15 @@ class FixtureSystem implements FleetRuntimeLocalSystem {
   }
 }
 
+class RealizePostimageFixtureSystem extends FixtureSystem {
+  realizeCalls = 0
+
+  async realizePostimage(): Promise<FleetRuntimePostimageRealizationResult> {
+    this.realizeCalls += 1
+    return { outcome: 'REALIZED', evidence: { runtime_instance_id: '11111111-1111-4111-8111-111111111111' } }
+  }
+}
+
 class BlockingProtectedFixtureSystem extends FixtureSystem {
   protectedActive = 0
   maxProtectedActive = 0
@@ -1055,6 +1066,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     const output = result.stdout.toString()
     expect(output).toContain('--request <ABSOLUTE_REQUEST_JSON> --state-dir <ABSOLUTE_STATE_DIR> --format json')
     expect(output).toContain('--execute-protected-effects')
+    expect(output).toContain('--realize-postimage')
   })
 
   test('CLI dry-run emits a typed block and leaves the supplied state path absent', () => {
@@ -1068,6 +1080,23 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     ], { cwd: resolveRepo() })
     expect(result.exitCode).toBe(2)
     expect(JSON.parse(result.stdout.toString())).toMatchObject({ code: 'PROTECTED_EFFECTS_DISABLED', protected_effect_count: 0 })
+    expect(existsSync(statePath)).toBe(false)
+  })
+
+  test('CLI rejects REALIZE_POSTIMAGE without the protected executor flag before state creation', () => {
+    const root = temporary('frv1-cli-realize-deny')
+    const requestPath = join(root, 'request.json')
+    const statePath = join(root, 'state')
+    writeFileSync(requestPath, `${JSON.stringify(requestFor())}\n`)
+    const result = Bun.spawnSync([
+      process.execPath, 'scripts/fleet-runtime-v1-execute.ts', '--request', requestPath,
+      '--state-dir', statePath, '--format', 'json', '--realize-postimage',
+    ], { cwd: resolveRepo() })
+    expect(result.exitCode).toBe(1)
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      code: 'REALIZE_POSTIMAGE_NOT_ADMITTED',
+      protected_effect_count: 0,
+    })
     expect(existsSync(statePath)).toBe(false)
   })
 
@@ -1323,6 +1352,263 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(canonicalFleetRuntimeObservationJson(readback)).not.toContain(secretSentinel)
   })
 
+  test('concrete COLD_START and started-phase reconcile require the same full boot proof without replay', async () => {
+    const root = temporary('frv1-cold-start-runtime-image')
+    const stateDirectory = join(root, 'state')
+    const invocationDirectory = join(stateDirectory, 'invocations', requestFor().idempotency_key)
+    const checkout = join(invocationDirectory, 'checkout')
+    const providerSource = join(root, 'provider-source')
+    const providerCheckout = join(invocationDirectory, 'provider-runtime/provider-checkout')
+    const durableServer = join(providerCheckout, 'server.ts')
+    mkdirSync(checkout, { recursive: true })
+    mkdirSync(providerSource)
+    const request = requestFor()
+    const expectedHead = 'c'.repeat(40)
+    const expectedTree = 'd'.repeat(40)
+    const providerHead = 'e'.repeat(40)
+    const providerTree = 'f'.repeat(40)
+    const observedAt = '2026-08-15T08:24:00.000Z'
+    const locator = 'postgresql:///isolated_cold_start_test'
+    let wrapperRealized = false
+    let listenerRealized = false
+    let registeredCommit = expectedHead
+    let registeredLastSeenAt = observedAt
+    let registeredStatus: 'running' | 'stopped' = 'running'
+    let registeredStoppedAt: string | null = null
+    let registeredDirty = false
+    let allowBootPostimage = true
+    let wrapperStartCount = 0
+    const calls: Array<{ argv: string[]; cwd?: string; env?: Record<string, string> }> = []
+    const postObservation = () => {
+      const observed = queueObservation(observedAt)
+      if (wrapperRealized) {
+        observed.runtime_inventory.latest_instance = {
+          runtime_instance_id: '11111111-1111-4111-8111-111111111111',
+          status: registeredStatus,
+          session_name: 'discord-kodama',
+          port: 8803,
+          checkout_path: checkout,
+          commit_sha: registeredCommit,
+          started_at: '2026-08-15T08:23:59.000Z',
+          stopped_at: registeredStoppedAt,
+          last_seen_at: registeredLastSeenAt,
+          git_dirty: registeredDirty,
+        }
+      }
+      return observed
+    }
+    const runner: FleetRuntimeArgvRunner = {
+      async run(argv, options) {
+        const args = [...argv]
+        calls.push({ argv: args, cwd: options?.cwd, env: options?.env })
+        const command = args.join(' ')
+        if (command === 'git remote get-url origin') {
+          return {
+            exitCode: 0,
+            stdout: options?.cwd === checkout
+              ? 'https://github.com/watchout/kodama.git\n'
+              : 'https://github.com/watchout/agent-comms-mcp.git\n',
+            stderr: '',
+          }
+        }
+        if (command === 'git rev-parse HEAD') return {
+          exitCode: 0,
+          stdout: `${options?.cwd === checkout ? expectedHead : providerHead}\n`,
+          stderr: '',
+        }
+        if (command === 'git rev-parse HEAD^{tree}') return {
+          exitCode: 0,
+          stdout: `${options?.cwd === checkout ? expectedTree : providerTree}\n`,
+          stderr: '',
+        }
+        if (command === 'git status --porcelain=v1' || command === 'git branch --show-current') {
+          return { exitCode: 0, stdout: '', stderr: '' }
+        }
+        if (args[0] === 'git' && args[1] === 'ls-remote') {
+          return { exitCode: 0, stdout: `${providerHead}\trefs/heads/main\n`, stderr: '' }
+        }
+        if (args[0] === 'git' && args[1] === 'clone') {
+          mkdirSync(providerCheckout, { recursive: true })
+          writeFileSync(durableServer, '#!/usr/bin/env bun\n')
+          return { exitCode: 0, stdout: '', stderr: '' }
+        }
+        if (args[0] === 'git' && args[1] === 'checkout') return { exitCode: 0, stdout: '', stderr: '' }
+        if (args[0] === 'tmux' && args[1] === 'kill-session') {
+          return { exitCode: 1, stdout: '', stderr: 'no server running' }
+        }
+        if (args[0] === 'tmux' && args[1] === 'new-session') {
+          wrapperStartCount += 1
+          wrapperRealized = allowBootPostimage
+          listenerRealized = allowBootPostimage
+          return { exitCode: 0, stdout: '', stderr: '' }
+        }
+        if (args[0] === 'lsof') {
+          return listenerRealized
+            ? { exitCode: 0, stdout: '43210\n', stderr: '' }
+            : { exitCode: 1, stdout: '', stderr: '' }
+        }
+        if (args[0] === process.execPath && args[1] === 'cli/index.ts') {
+          return { exitCode: 0, stdout: canonicalFleetRuntimeObservationJson(postObservation()), stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected ${command}` }
+      },
+    }
+    const system = new ConcreteFleetRuntimeV1LocalSystem(
+      runner,
+      providerSource,
+      () => Date.parse(observedAt),
+      async () => { throw new Error('unused') },
+      locator,
+      1,
+      0,
+      async () => {},
+    )
+    const context: FleetRuntimeLocalPhaseContext = {
+      state_directory: stateDirectory,
+      invocation_directory: invocationDirectory,
+      prior_evidence: {},
+      current_intent: {
+        checkout_path: checkout,
+        expected_head: expectedHead,
+        expected_tree: expectedTree,
+        session: 'discord-kodama',
+        port: 8803,
+      },
+      execution_owner_id: 'fixture-owner',
+      owner_decision_raw_body: '',
+      predecessor_receipt_raw_body: '',
+    }
+
+    const result = await system.performPhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context)
+
+    expect(result.protected_effect_count).toBe(1)
+    expect(result.evidence).toMatchObject({
+      boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+      listener_pids: [43210],
+      listener_port: 8803,
+      provider_checkout_path: providerCheckout,
+      provider_head: providerHead,
+      provider_tree: providerTree,
+      registered_checkout_path: checkout,
+      registered_commit_sha: expectedHead,
+      runtime_instance_id: '11111111-1111-4111-8111-111111111111',
+      server_path: durableServer,
+    })
+    const runtimeManifest = join(invocationDirectory, 'provider-runtime/runtime-image.json')
+    expect(existsSync(runtimeManifest)).toBe(true)
+    const tmuxStart = calls.find(call => call.argv[0] === 'tmux' && call.argv[1] === 'new-session')
+    expect(tmuxStart).toBeDefined()
+    expect(tmuxStart!.argv).toContain(`mcp_servers.aun.args=${JSON.stringify(['run', durableServer])}`)
+    expect(tmuxStart!.argv.join('\n')).not.toContain(join(providerSource, 'server.ts'))
+    const expectedEnvironment: Record<string, string> = {
+      AGENT_COM_DB: 'postgres',
+      AGENT_COM_EXPECTED_AGENT_ID: 'kodama',
+      AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '0',
+      AGENT_COM_RUNTIME_SESSION: 'discord-kodama',
+      AGENT_ID: 'kodama',
+      DATABASE_URL: locator,
+      DISCORD_STATE_DIR: '/Users/yuji/.claude/channels/discord-kodama',
+      WEBHOOK_PORT: '8803',
+    }
+    for (const key of FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS) {
+      expect(tmuxStart!.argv).toContain(`mcp_servers.aun.env.${key}=${JSON.stringify(expectedEnvironment[key])}`)
+    }
+
+    const reconciled = await system.reconcilePhase(
+      request,
+      preflightFor(request),
+      'COLD_START_DISCORD_KODAMA',
+      context,
+    )
+    expect(reconciled).toMatchObject({
+      completed: true,
+      protected_effect_count: 1,
+      evidence: {
+        boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+        listener_pids: [43210],
+        listener_port: 8803,
+        provider_checkout_path: providerCheckout,
+        provider_head: providerHead,
+        provider_tree: providerTree,
+        registered_checkout_path: checkout,
+        registered_commit_sha: expectedHead,
+        runtime_instance_id: '11111111-1111-4111-8111-111111111111',
+        server_path: durableServer,
+      },
+    })
+    expect(wrapperStartCount).toBe(1)
+
+    const runtimeManifestBytes = readFileSync(runtimeManifest)
+    rmSync(runtimeManifest)
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'INTERRUPTED_SUBEFFECT_UNRESOLVED',
+    )
+    writeFileSync(runtimeManifest, runtimeManifestBytes)
+    listenerRealized = false
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    listenerRealized = true
+    registeredCommit = '9'.repeat(40)
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredCommit = expectedHead
+    registeredLastSeenAt = '2026-08-15T08:22:00.000Z'
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredLastSeenAt = observedAt
+    registeredStatus = 'stopped'
+    registeredStoppedAt = observedAt
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredStatus = 'running'
+    registeredStoppedAt = null
+    registeredDirty = true
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredDirty = false
+    expect(wrapperStartCount).toBe(1)
+
+    listenerRealized = false
+    registeredCommit = '9'.repeat(40)
+    await expectProviderCode(
+      () => system.realizePostimage(request, preflightFor(request), context),
+      'READBACK_INVALID',
+    )
+    listenerRealized = true
+    registeredCommit = expectedHead
+    expect(wrapperStartCount).toBe(1)
+
+    const replay = await system.realizePostimage(request, preflightFor(request), context)
+    expect(replay.outcome).toBe('ALREADY_REALIZED')
+    expect(wrapperStartCount).toBe(1)
+
+    wrapperRealized = false
+    listenerRealized = false
+    const repaired = await system.realizePostimage(request, preflightFor(request), context)
+    expect(repaired.outcome).toBe('REALIZED')
+    expect(wrapperStartCount).toBe(2)
+    expect(calls.filter(call => call.argv[0] === 'git' && call.argv[1] === 'clone')).toHaveLength(1)
+
+    allowBootPostimage = false
+    wrapperRealized = false
+    listenerRealized = false
+    await expectProviderCode(
+      () => system.performPhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+  })
+
   test('concrete VERIFY_LIVE_IDENTITY reads the admitted preflight receipt without a reference failure', async () => {
     const request = requestFor()
     const preflight = preflightFor(request)
@@ -1566,6 +1852,76 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(system.calls.get('VERIFY_LIVE_IDENTITY')).toBe(1)
     const completed = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
     expect(completed.phases.VERIFY_LIVE_IDENTITY).toMatchObject({ status: 'completed', protected_effect_count: 0 })
+  })
+
+  test('REALIZE_POSTIMAGE admits a completed cold start without adding a second cold-start journal effect', async () => {
+    const stateDirectory = join(temporary('frv1-realize-completed'), 'state')
+    const request = requestFor()
+    const system = new RealizePostimageFixtureSystem()
+    system.interruptOnceAt = 'VERIFY_LIVE_IDENTITY'
+    await expect(executeLocalFleetRuntimeV1(protectedFixtureInput({
+      request,
+      stateDirectory,
+      executeProtectedEffects: true,
+      system,
+    }))).rejects.toThrow('fixture interruption at VERIFY_LIVE_IDENTITY')
+    installFixtureExternalMergeReceipt(stateDirectory, request)
+
+    const journalPath = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
+    const legacy = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(legacy.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
+    const modern = structuredClone(legacy)
+    const cold = modern.phases.COLD_START_DISCORD_KODAMA!
+    const invocationDirectory = join(stateDirectory, 'invocations', request.idempotency_key)
+    Object.assign(cold.evidence!, {
+      boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+      listener_pids: [43210],
+      listener_port: 8803,
+      postimage_observed_at: '2026-08-15T08:40:00.000Z',
+      provider_checkout_path: join(invocationDirectory, 'provider-runtime/provider-checkout'),
+      provider_head: 'a'.repeat(40),
+      provider_remote: 'https://github.com/watchout/agent-comms-mcp.git',
+      provider_tree: 'b'.repeat(40),
+      registered_checkout_path: cold.intent.checkout_path,
+      registered_commit_sha: cold.intent.expected_head,
+      runtime_instance_id: '11111111-1111-4111-8111-111111111111',
+      server_path: join(invocationDirectory, 'provider-runtime/provider-checkout/server.ts'),
+    })
+    cold.evidence_sha256 = digest(cold.evidence)
+    expect(() => validateFleetRuntimeLocalOperationState(modern, request, modern.execution_owner_id)).not.toThrow()
+    writeFileSync(journalPath, `${canonicalFleetRuntimeJson(modern)}\n`)
+
+    await expectProviderCode(() => executeLocalFleetRuntimeV1({
+      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
+      postimageMode: 'REALIZE_POSTIMAGE',
+    }), 'REALIZE_POSTIMAGE_NOT_ADMITTED')
+    expect(system.realizeCalls).toBe(0)
+    writeFileSync(journalPath, `${canonicalFleetRuntimeJson(legacy)}\n`)
+
+    const receipt = await executeLocalFleetRuntimeV1({
+      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
+      postimageMode: 'REALIZE_POSTIMAGE',
+    })
+
+    expect(receipt).toMatchObject({ result: 'PASS', duplicate_effect_count: 0, unauthorized_effect_count: 0 })
+    expect(system.realizeCalls).toBe(1)
+    expect(system.calls.get('COLD_START_DISCORD_KODAMA')).toBe(1)
+    const completed = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(completed.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
+  })
+
+  test('REALIZE_POSTIMAGE rejects an uncompleted cold start before any phase or wrapper call', async () => {
+    const stateDirectory = join(temporary('frv1-realize-uncompleted'), 'state')
+    const request = requestFor()
+    const system = new RealizePostimageFixtureSystem()
+
+    await expectProviderCode(() => executeLocalFleetRuntimeV1({
+      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
+      postimageMode: 'REALIZE_POSTIMAGE',
+    }), 'REALIZE_POSTIMAGE_NOT_ADMITTED')
+
+    expect(system.realizeCalls).toBe(0)
+    expect(system.calls.size).toBe(0)
   })
 
   test('durable resume consumes a canonical handoff binding against the read-only pushed journal head', async () => {
