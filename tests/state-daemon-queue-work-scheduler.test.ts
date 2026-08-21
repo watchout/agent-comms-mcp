@@ -1749,6 +1749,8 @@ describe('state_daemon queue work scheduler boundary', () => {
 
     const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
     const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+    expect(update?.sql).toContain('GREATEST')
+    expect(update?.sql).toContain('mq.claim_expires_at')
     expect(update?.sql).toContain('mq.payload NOT LIKE')
     expect(update?.sql).toContain('mq.payload NOT LIKE \'%"source":"state-daemon-d1-auto-receive"%\'')
     expect(update?.sql).toContain("a.status IN ('online', 'busy')")
