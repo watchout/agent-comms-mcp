@@ -15,6 +15,10 @@ type RenderOptions = {
   templatePath?: string
 }
 
+type MainOptions = {
+  lintPlist?: (path: string) => void
+}
+
 function xml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -70,7 +74,10 @@ adds or removes denylist entries.
 `
 }
 
-export async function main(argv = process.argv.slice(2)): Promise<number> {
+export async function main(
+  argv = process.argv.slice(2),
+  options: MainOptions = {},
+): Promise<number> {
   try {
     const command = argv.shift()
     if (command === '--help' || command === '-h') {
@@ -110,7 +117,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       mkdirSync(logRoot, { recursive: true })
       const staged = `${output}.new`
       writeFileSync(staged, rendered.content, { mode: 0o600 })
-      execFileSync('/usr/bin/plutil', ['-lint', staged], { stdio: 'ignore' })
+      const lintPlist = options.lintPlist ?? ((path: string) => {
+        execFileSync('/usr/bin/plutil', ['-lint', path], { stdio: 'ignore' })
+      })
+      lintPlist(staged)
       if (existsSync(output)) {
         const prior = readFileSync(output)
         priorPlistSha256 = createHash('sha256').update(prior).digest('hex')

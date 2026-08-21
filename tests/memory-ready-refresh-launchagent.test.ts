@@ -32,6 +32,7 @@ describe('memory-ready refresh LaunchAgent template', () => {
     const output = join(temp, 'refresh.plist')
     const prior = '<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>prior</string></dict></plist>\n'
     writeFileSync(output, prior)
+    let lintedPath: string | null = null
 
     expect(await main([
       'install',
@@ -41,7 +42,13 @@ describe('memory-ready refresh LaunchAgent template', () => {
       '--log-root', join(temp, 'logs'),
       '--output', output,
       '--execute',
-    ])).toBe(0)
+    ], {
+      lintPlist(path) {
+        lintedPath = path
+        expect(readFileSync(path, 'utf8')).toContain('com.agent-comms.operator.memory-ready-refresh')
+      },
+    })).toBe(0)
+    expect(lintedPath).toBe(`${output}.new`)
     expect(readFileSync(output, 'utf8')).toContain('com.agent-comms.operator.memory-ready-refresh')
     const rollback = readdirSync(temp).filter(name => name.startsWith('refresh.plist.rollback-'))
     expect(rollback).toHaveLength(1)
