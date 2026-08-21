@@ -1579,6 +1579,16 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     registeredDirty = false
     expect(wrapperStartCount).toBe(1)
 
+    listenerRealized = false
+    registeredCommit = '9'.repeat(40)
+    await expectProviderCode(
+      () => system.realizePostimage(request, preflightFor(request), context),
+      'READBACK_INVALID',
+    )
+    listenerRealized = true
+    registeredCommit = expectedHead
+    expect(wrapperStartCount).toBe(1)
+
     const replay = await system.realizePostimage(request, preflightFor(request), context)
     expect(replay.outcome).toBe('ALREADY_REALIZED')
     expect(wrapperStartCount).toBe(1)
@@ -1857,19 +1867,10 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     }))).rejects.toThrow('fixture interruption at VERIFY_LIVE_IDENTITY')
     installFixtureExternalMergeReceipt(stateDirectory, request)
 
-    const receipt = await executeLocalFleetRuntimeV1({
-      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
-      postimageMode: 'REALIZE_POSTIMAGE',
-    })
-
-    expect(receipt).toMatchObject({ result: 'PASS', duplicate_effect_count: 0, unauthorized_effect_count: 0 })
-    expect(system.realizeCalls).toBe(1)
-    expect(system.calls.get('COLD_START_DISCORD_KODAMA')).toBe(1)
-    const journal = JSON.parse(readFileSync(join(
-      stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json',
-    ), 'utf8')) as FleetRuntimeLocalOperationState
-    expect(journal.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
-    const modern = structuredClone(journal)
+    const journalPath = join(stateDirectory, 'invocations', request.idempotency_key, 'operation-state.json')
+    const legacy = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(legacy.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
+    const modern = structuredClone(legacy)
     const cold = modern.phases.COLD_START_DISCORD_KODAMA!
     const invocationDirectory = join(stateDirectory, 'invocations', request.idempotency_key)
     Object.assign(cold.evidence!, {
@@ -1888,6 +1889,25 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     })
     cold.evidence_sha256 = digest(cold.evidence)
     expect(() => validateFleetRuntimeLocalOperationState(modern, request, modern.execution_owner_id)).not.toThrow()
+    writeFileSync(journalPath, `${canonicalFleetRuntimeJson(modern)}\n`)
+
+    await expectProviderCode(() => executeLocalFleetRuntimeV1({
+      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
+      postimageMode: 'REALIZE_POSTIMAGE',
+    }), 'REALIZE_POSTIMAGE_NOT_ADMITTED')
+    expect(system.realizeCalls).toBe(0)
+    writeFileSync(journalPath, `${canonicalFleetRuntimeJson(legacy)}\n`)
+
+    const receipt = await executeLocalFleetRuntimeV1({
+      ...protectedFixtureInput({ request, stateDirectory, executeProtectedEffects: true, system }),
+      postimageMode: 'REALIZE_POSTIMAGE',
+    })
+
+    expect(receipt).toMatchObject({ result: 'PASS', duplicate_effect_count: 0, unauthorized_effect_count: 0 })
+    expect(system.realizeCalls).toBe(1)
+    expect(system.calls.get('COLD_START_DISCORD_KODAMA')).toBe(1)
+    const completed = JSON.parse(readFileSync(journalPath, 'utf8')) as FleetRuntimeLocalOperationState
+    expect(completed.phases.COLD_START_DISCORD_KODAMA).toMatchObject({ status: 'completed', protected_effect_count: 1 })
   })
 
   test('REALIZE_POSTIMAGE rejects an uncompleted cold start before any phase or wrapper call', async () => {

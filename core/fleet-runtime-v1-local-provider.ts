@@ -2239,10 +2239,11 @@ class FleetRuntimeLocalEffectPort {
 
     if (this.postimageMode === 'REALIZE_POSTIMAGE') {
       const coldStart = state.phases.COLD_START_DISCORD_KODAMA
-      if (coldStart?.status !== 'completed') {
+      if (coldStart?.status !== 'completed' || !coldStart.evidence
+        || Object.hasOwn(coldStart.evidence, 'boot_environment_keys')) {
         return providerFail(
           'REALIZE_POSTIMAGE_NOT_ADMITTED',
-          'REALIZE_POSTIMAGE requires a completed COLD_START_DISCORD_KODAMA journal phase',
+          'REALIZE_POSTIMAGE requires a legacy completed COLD_START_DISCORD_KODAMA phase without boot-proof evidence',
         )
       }
       if (!this.system.realizePostimage) {
@@ -3060,7 +3061,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       }
     }
     return {
-      state: listenerPids.length > 0 || registrationRealized ? 'PARTIAL' : 'ABSENT',
+      state: listenerPids.length > 0 || latest ? 'PARTIAL' : 'ABSENT',
       evidence: null,
     }
   }
