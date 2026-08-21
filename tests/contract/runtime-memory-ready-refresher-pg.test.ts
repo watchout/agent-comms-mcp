@@ -1,24 +1,49 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
 import { runRuntimeMemoryReadyFleetRefresh } from '../../core/runtime-memory-ready-refresher'
 import { loadRuntimeMemoryReadyPolicy } from '../../core/runtime-current-resolver'
+import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
 
-const databaseUrl = process.env.DATABASE_URL?.trim()
-const describePg = databaseUrl ? describe : describe.skip
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+let databaseUrl: string
+let scratchDatabase: PostgresTestDatabase | null = null
 let pg: Client
 const prefix = `sd-c2a-pg-${randomUUID().slice(0, 8)}`
 
-describePg('memory-ready refresher PostgreSQL parity', () => {
+describe('memory-ready refresher PostgreSQL parity', () => {
   beforeAll(async () => {
-    pg = new Client({ connectionString: databaseUrl! })
-    await pg.connect()
+    scratchDatabase = createPostgresTestDatabase(
+      `agent_comms_sd_c2a_${process.pid}_${Date.now()}_test`,
+    )
+    databaseUrl = scratchDatabase.databaseUrl
+    try {
+      const migrated = Bun.spawnSync([process.execPath, 'db/migrate.ts'], {
+        cwd: repoRoot,
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      if (migrated.exitCode !== 0) {
+        throw new Error(`scratch PostgreSQL migration failed: ${migrated.stderr.toString().trim()}`)
+      }
+      pg = new Client({ connectionString: databaseUrl })
+      await pg.connect()
+    } catch (error) {
+      scratchDatabase.drop()
+      scratchDatabase = null
+      throw error
+    }
   })
 
   afterAll(async () => {
-    if (!pg) return
-    await pg.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${prefix}-%`])
-    await pg.end()
+    try {
+      if (pg) await pg.end()
+    } finally {
+      scratchDatabase?.drop()
+    }
   })
 
   test('records and reads back ready evidence for every eligible seat on migrated PostgreSQL', async () => {
