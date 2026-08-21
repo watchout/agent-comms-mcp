@@ -1387,6 +1387,19 @@ profile tuple = {
 ```
 
 profile tuple の各登録値が非空であり、かつ 3 項目すべてが一致した row だけを current にできる。
+resolver の呼出側は `requested_runtime_kind` を必ず指定する。candidate、current selection、
+freshness ranking、stale reap はその kind の行だけを対象にし、異なる kind を同じ ranking に
+参加させてはならない。ordinary runtime kind では上記 profile tuple と A1 の freshness / ranking
+規則をそのまま適用する。
+
+`bootstrap_bound_provider` は ordinary freshest-profile candidate から常に除外する。この kind は
+sealed selected bootstrap receipt が指定する exact `runtime_instance_id` だけを候補とし、その行の
+`runtime_kind`、`runtime_engine`、`session_name`、`checkout_path` が receipt の束縛と完全一致する場合に
+のみ current として解決する。`agents.runtime` と `runtime_engine_preference` は bootstrap profile key
+ではない。receipt が指定する有効な exact row が 0 件なら typed `NO_BOOTSTRAP_BOUND_ROW` で
+fail-closed にする。bootstrap と ordinary の間に cross-kind current ranking 又は cross-kind reap を
+定義してはならない。
+
 resolver はまず `status IN ('running','active')` かつ valid heartbeat (`last_seen_at`) が
 `LIVENESS_TTL` 内の row だけを candidate にする。その中の exact tuple match を選び、複数なら
 `last_seen_at DESC, started_at DESC, runtime_instance_id ASC` で決定的に 1 行を選ぶ。一致が
