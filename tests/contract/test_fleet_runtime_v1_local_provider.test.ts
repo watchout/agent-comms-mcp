@@ -1352,7 +1352,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(canonicalFleetRuntimeObservationJson(readback)).not.toContain(secretSentinel)
   })
 
-  test('concrete COLD_START uses explicit MCP env, a durable pinned server path, and boot proof; realized replay is a no-op', async () => {
+  test('concrete COLD_START and started-phase reconcile require the same full boot proof without replay', async () => {
     const root = temporary('frv1-cold-start-runtime-image')
     const stateDirectory = join(root, 'state')
     const invocationDirectory = join(stateDirectory, 'invocations', requestFor().idempotency_key)
@@ -1370,6 +1370,12 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     const observedAt = '2026-08-15T08:24:00.000Z'
     const locator = 'postgresql:///isolated_cold_start_test'
     let wrapperRealized = false
+    let listenerRealized = false
+    let registeredCommit = expectedHead
+    let registeredLastSeenAt = observedAt
+    let registeredStatus: 'running' | 'stopped' = 'running'
+    let registeredStoppedAt: string | null = null
+    let registeredDirty = false
     let allowBootPostimage = true
     let wrapperStartCount = 0
     const calls: Array<{ argv: string[]; cwd?: string; env?: Record<string, string> }> = []
@@ -1378,15 +1384,15 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       if (wrapperRealized) {
         observed.runtime_inventory.latest_instance = {
           runtime_instance_id: '11111111-1111-4111-8111-111111111111',
-          status: 'running',
+          status: registeredStatus,
           session_name: 'discord-kodama',
           port: 8803,
           checkout_path: checkout,
-          commit_sha: expectedHead,
+          commit_sha: registeredCommit,
           started_at: '2026-08-15T08:23:59.000Z',
-          stopped_at: null,
-          last_seen_at: observedAt,
-          git_dirty: false,
+          stopped_at: registeredStoppedAt,
+          last_seen_at: registeredLastSeenAt,
+          git_dirty: registeredDirty,
         }
       }
       return observed
@@ -1433,10 +1439,11 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
         if (args[0] === 'tmux' && args[1] === 'new-session') {
           wrapperStartCount += 1
           wrapperRealized = allowBootPostimage
+          listenerRealized = allowBootPostimage
           return { exitCode: 0, stdout: '', stderr: '' }
         }
         if (args[0] === 'lsof') {
-          return wrapperRealized
+          return listenerRealized
             ? { exitCode: 0, stdout: '43210\n', stderr: '' }
             : { exitCode: 1, stdout: '', stderr: '' }
         }
@@ -1487,7 +1494,8 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       runtime_instance_id: '11111111-1111-4111-8111-111111111111',
       server_path: durableServer,
     })
-    expect(existsSync(join(invocationDirectory, 'provider-runtime/runtime-image.json'))).toBe(true)
+    const runtimeManifest = join(invocationDirectory, 'provider-runtime/runtime-image.json')
+    expect(existsSync(runtimeManifest)).toBe(true)
     const tmuxStart = calls.find(call => call.argv[0] === 'tmux' && call.argv[1] === 'new-session')
     expect(tmuxStart).toBeDefined()
     expect(tmuxStart!.argv).toContain(`mcp_servers.aun.args=${JSON.stringify(['run', durableServer])}`)
@@ -1506,11 +1514,77 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       expect(tmuxStart!.argv).toContain(`mcp_servers.aun.env.${key}=${JSON.stringify(expectedEnvironment[key])}`)
     }
 
+    const reconciled = await system.reconcilePhase(
+      request,
+      preflightFor(request),
+      'COLD_START_DISCORD_KODAMA',
+      context,
+    )
+    expect(reconciled).toMatchObject({
+      completed: true,
+      protected_effect_count: 1,
+      evidence: {
+        boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+        listener_pids: [43210],
+        listener_port: 8803,
+        provider_checkout_path: providerCheckout,
+        provider_head: providerHead,
+        provider_tree: providerTree,
+        registered_checkout_path: checkout,
+        registered_commit_sha: expectedHead,
+        runtime_instance_id: '11111111-1111-4111-8111-111111111111',
+        server_path: durableServer,
+      },
+    })
+    expect(wrapperStartCount).toBe(1)
+
+    const runtimeManifestBytes = readFileSync(runtimeManifest)
+    rmSync(runtimeManifest)
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'INTERRUPTED_SUBEFFECT_UNRESOLVED',
+    )
+    writeFileSync(runtimeManifest, runtimeManifestBytes)
+    listenerRealized = false
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    listenerRealized = true
+    registeredCommit = '9'.repeat(40)
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredCommit = expectedHead
+    registeredLastSeenAt = '2026-08-15T08:22:00.000Z'
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredLastSeenAt = observedAt
+    registeredStatus = 'stopped'
+    registeredStoppedAt = observedAt
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredStatus = 'running'
+    registeredStoppedAt = null
+    registeredDirty = true
+    await expectProviderCode(
+      () => system.reconcilePhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
+      'READBACK_INVALID',
+    )
+    registeredDirty = false
+    expect(wrapperStartCount).toBe(1)
+
     const replay = await system.realizePostimage(request, preflightFor(request), context)
     expect(replay.outcome).toBe('ALREADY_REALIZED')
     expect(wrapperStartCount).toBe(1)
 
     wrapperRealized = false
+    listenerRealized = false
     const repaired = await system.realizePostimage(request, preflightFor(request), context)
     expect(repaired.outcome).toBe('REALIZED')
     expect(wrapperStartCount).toBe(2)
@@ -1518,6 +1592,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
 
     allowBootPostimage = false
     wrapperRealized = false
+    listenerRealized = false
     await expectProviderCode(
       () => system.performPhase(request, preflightFor(request), 'COLD_START_DISCORD_KODAMA', context),
       'READBACK_INVALID',

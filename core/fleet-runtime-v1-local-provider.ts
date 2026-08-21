@@ -4057,20 +4057,32 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       if (!COMMIT.test(expectedHead) || !COMMIT.test(expectedTree)) {
         return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'cold-start intent lacks exact checkout image')
       }
-      const checkoutImage = await this.verifyCheckout(this.checkoutPath(mutable), mutable.state_directory, expectedHead, expectedTree)
-      const observation = await this.queueObservation()
-      const live = observation.runtime_inventory.latest_instance
-      if (live?.session_name !== mutable.current_intent.session
-        || live?.port !== mutable.current_intent.port
-        || live?.checkout_path !== mutable.current_intent.checkout_path) {
-        return { completed: false, evidence: null, protected_effect_count: 1 }
+      const checkout = this.checkoutPath(mutable)
+      const checkoutImage = await this.verifyCheckout(checkout, mutable.state_directory, expectedHead, expectedTree)
+      const provider = await this.readProviderRuntimeImage(mutable)
+      if (!provider) {
+        return providerFail('INTERRUPTED_SUBEFFECT_UNRESOLVED', 'cold-start provider runtime image is absent')
       }
+      const postimage = await this.waitForColdStartPostimage(checkout, expectedHead)
+      this.realizedPostimages.set(request.idempotency_key, clone(postimage))
       return {
         completed: true,
         evidence: {
           ...checkoutImage,
           session: mutable.current_intent.session,
           port: mutable.current_intent.port,
+          boot_environment_keys: [...FLEET_RUNTIME_V1_COLD_START_REQUIRED_ENV_KEYS],
+          listener_pids: postimage.listener_pids,
+          listener_port: postimage.listener_port,
+          postimage_observed_at: postimage.postimage_observed_at,
+          provider_checkout_path: provider.checkout_path,
+          provider_head: provider.head,
+          provider_remote: provider.remote,
+          provider_tree: provider.tree,
+          registered_checkout_path: postimage.registered_checkout_path,
+          registered_commit_sha: postimage.registered_commit_sha,
+          runtime_instance_id: postimage.runtime_instance_id,
+          server_path: provider.server_path,
         },
         protected_effect_count: 1,
       }
