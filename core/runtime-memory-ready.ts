@@ -1,5 +1,10 @@
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute } from 'node:path'
+import {
+  loadRuntimeMemoryReadyPolicy,
+  resolveRuntimeMemoryReadyCurrent,
+  type RuntimeMemoryReadyPolicy,
+} from './runtime-current-resolver'
 
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
 
@@ -62,6 +67,7 @@ export interface RuntimeMemoryReadyGateResult {
     | 'bypassed'
     | 'agent_missing'
     | 'missing_current_runtime'
+    | 'no_current_runtime_for_profile'
     | 'missing_read_model'
     | 'missing_evidence'
     | 'not_ready'
@@ -645,6 +651,7 @@ export async function evaluateRuntimeMemoryReadyGate(
     expected_agent_id?: string | null
     now?: Date
     queue_scope?: RuntimeMemoryReadyQueueScopeInput | null
+    policy?: RuntimeMemoryReadyPolicy
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -705,6 +712,35 @@ export async function evaluateRuntimeMemoryReadyGate(
     }
   }
 
+  const policy = input.policy ?? loadRuntimeMemoryReadyPolicy()
+  let currentResolution
+  try {
+    currentResolution = await resolveRuntimeMemoryReadyCurrent(db, {
+      agentId: input.agent_id,
+      now,
+      policy,
+    })
+  } catch (err) {
+    return fail(base, 'read_error', {
+      code: 'CURRENT_RUNTIME_RESOLUTION_ERROR',
+      error: (err as Error).message ?? String(err),
+    })
+  }
+  if (!currentResolution.ok || !currentResolution.current_runtime) {
+    return fail(base, 'no_current_runtime_for_profile', {
+      code: currentResolution.code,
+      repair_signal: 'RUNTIME_REREGISTRATION_REQUIRED',
+      policy: currentResolution.policy,
+      profile: currentResolution.profile,
+      reap_candidates: currentResolution.reap_candidates.map(candidate => ({
+        runtime_instance_id: candidate.runtime_instance_id,
+        reason: candidate.reason,
+      })),
+      ...currentResolution.details,
+    })
+  }
+  const selectedRuntime = currentResolution.current_runtime
+
   let evidenceRows: EvidenceRow[]
   try {
     evidenceRows = await queryRows<EvidenceRow>(
@@ -748,39 +784,26 @@ export async function evaluateRuntimeMemoryReadyGate(
     return fail(withEvidenceBase, 'expired')
   }
 
-  const runtimeRows = await queryRows<RuntimeRow>(
-    db,
-    `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
-       FROM agent_runtime_instances
-      WHERE CAST(runtime_instance_id AS TEXT) = $1
-        AND agent_id = $2
-        AND status IN ('running', 'active')
-      LIMIT 1`,
-    [evidence.runtime_instance_id, input.agent_id],
-  ).catch(() => [])
-  const runtime = runtimeRows[0] ?? null
-  if (!runtime) {
-    return fail(withEvidenceBase, 'runtime_instance_mismatch', {
-      evidence_runtime_instance_id: evidence.runtime_instance_id,
-    })
-  }
-
   const currentRuntime: RuntimeMemoryReadyCurrentRuntime = {
     agent_id: input.agent_id,
-    runtime_instance_id: normalizeText(runtime.runtime_instance_id),
+    runtime_instance_id: normalizeText(selectedRuntime.runtime_instance_id),
     profile_revision: normalizeNumber(agent.profile_revision),
     profile_source: normalizeText(agent.profile_source),
-    session_name: normalizeText(runtime.session_name),
-    port: normalizeNumber(runtime.port),
-    checkout_path: normalizeText(runtime.checkout_path),
-    commit_sha: normalizeText(runtime.commit_sha),
-    started_at: runtime.started_at,
-    status: normalizeText(runtime.status),
+    session_name: normalizeText(selectedRuntime.session_name),
+    port: normalizeNumber(selectedRuntime.port),
+    checkout_path: normalizeText(selectedRuntime.checkout_path),
+    commit_sha: normalizeText(selectedRuntime.commit_sha),
+    started_at: selectedRuntime.started_at,
+    status: normalizeText(selectedRuntime.status),
   }
   const withEvidence = {
     ...withEvidenceBase,
     runtime_instance_id: currentRuntime.runtime_instance_id,
     current_runtime: currentRuntime,
+    details: {
+      policy: currentResolution.policy,
+      resolver_code: currentResolution.code,
+    },
   }
   if (!currentRuntime.runtime_instance_id) {
     return fail(withEvidence, 'runtime_instance_mismatch', {

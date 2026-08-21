@@ -202,7 +202,7 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.evidence_path).toBe('/tmp/agent-com-dev-memory-ready.json')
   })
 
-  test('exact-project evidence selects the same-profile runtime regardless of heartbeat order', async () => {
+  test('gate follows the common freshest exact-profile resolver instead of evidence-bound precedence', async () => {
     await seedRuntime('aun', 8811)
     await db.execute(
       `UPDATE agents
@@ -242,8 +242,9 @@ describe('runtime memory-ready evidence gate', () => {
       now: new Date('2026-06-01T00:00:06.000Z'),
     })
     const competingNewest = await evaluate()
-    expect(competingNewest.ok).toBe(true)
-    expect(competingNewest.runtime_instance_id).toBe('runtime-aun-canonical')
+    expect(competingNewest.ok).toBe(false)
+    expect(competingNewest.reason).toBe('runtime_instance_mismatch')
+    expect(competingNewest.runtime_instance_id).toBe('runtime-aun-competing')
     expect(competingNewest.evidence_id).not.toBeNull()
 
     await db.execute(
@@ -370,8 +371,16 @@ describe('runtime memory-ready evidence gate', () => {
       })
 
       expect(gate.ok).toBe(false)
-      expect(gate.reason).toBe(profileMismatch.reason)
-      expect(gate.details).toMatchObject(profileMismatch.details)
+      if (profileMismatch.label === 'port') {
+        expect(gate.reason).toBe(profileMismatch.reason)
+        expect(gate.details).toMatchObject(profileMismatch.details)
+      } else {
+        expect(gate.reason).toBe('no_current_runtime_for_profile')
+        expect(gate.details).toMatchObject({
+          code: 'NO_CURRENT_RUNTIME_FOR_PROFILE',
+          repair_signal: 'RUNTIME_REREGISTRATION_REQUIRED',
+        })
+      }
     })
   }
 
@@ -557,6 +566,10 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('Wasurezu bootstrap command records ready evidence without queue or live activation dependencies', async () => {
     await seedRuntime('wasurezu', 39120)
+    await db.execute(
+      `UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'`,
+      [new Date().toISOString()],
+    )
 
     const result = await memoryReadyBootstrap({
       agentId: 'wasurezu',

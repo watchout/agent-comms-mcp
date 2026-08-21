@@ -284,6 +284,66 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
+  test('repeated identical memory-ready blocks are exponentially deferred and alert only on transitions', async () => {
+    const agent = makeAgentId('memory-backoff-dedup')
+    const runtimeInstanceId = '11111111-2222-4333-8444-555555555555'
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'idle',
+      runtime_instance_id: runtimeInstanceId,
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    await deleteMemoryReadyEvidence(agent)
+    const id = await seedQueueRow(pg, {
+      agent_id: agent,
+      status: 'pending',
+      message_id: '11111111-1111-4111-8111-555555555555',
+      payload: JSON.stringify({ author_id: 'arc', content: 'backoff fixture', message_type: 'instruction' }),
+      created_at: new Date('2026-05-18T00:00:00.000Z'),
+    })
+    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const runner = new FakeCodexRunner()
+    const h = daemon(clock, runner)
+    const event = { op: 'INSERT' as const, id, agent_id: agent, status: 'pending', claim_expires_at: null }
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent(event)
+      await h.daemon.__testHandleEvent(event)
+      await h.daemon.__testHandleEvent(event)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        reason: 'missing_evidence',
+      })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_memory_ready_backoff_total', { result: 'deferred' })).toBe(2)
+      expect(h.alert.alerts.filter(value => value.includes('memory_ready gate blocked'))).toHaveLength(1)
+
+      clock.advance(30_000)
+      await h.daemon.__testHandleEvent(event)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {
+        result: 'memory_ready_blocked',
+        reason: 'missing_evidence',
+      })).toBe(2)
+      expect(h.alert.alerts.filter(value => value.includes('memory_ready gate blocked'))).toHaveLength(1)
+
+      await seedAgent(pg, {
+        agent_id: agent,
+        runtime: 'codex',
+        tmux_session: null,
+        status: 'idle',
+        runtime_instance_id: runtimeInstanceId,
+        last_seen_at: '2026-05-18T00:01:31.000Z',
+      })
+      clock.advance(60_000)
+      await h.daemon.__testHandleEvent(event)
+      expect(runner.invocations).toHaveLength(1)
+      expect(h.alert.alerts.filter(value => value.includes('memory_ready gate recovered'))).toHaveLength(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
+
   test('disabled memory-ready gate config fails closed instead of bypassing dispatch', async () => {
     const agent = makeAgentId('codex-config-bypass')
     await seedAgent(pg, {
