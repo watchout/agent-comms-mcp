@@ -333,6 +333,12 @@ describe('aun bootstrap clean-host journal', () => {
     expect(profileSet.exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
     await db.execute(
+      `UPDATE agents
+          SET status = 'idle', status_updated_at = now()
+        WHERE agent_id = $1 AND status = 'offline'`,
+      ['b5-concurrency'],
+    )
+    await db.execute(
       `INSERT INTO agent_runtime_instances
          (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
           process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
@@ -935,7 +941,15 @@ describe('aun bootstrap clean-host journal', () => {
 
     const input = { agentId: 'clean-default', runtime: 'codex' as const, home, repoRoot, workspaceRoot: repoRoot, env }
     const first = await bootstrap(input, { run })
-    expect(first.status).toBe('READY')
+    expect({ status: first.status, stage: first.stage, reason_codes: first.reason_codes }).toEqual({
+      status: 'READY', stage: 'B8_READY_READBACK', reason_codes: [],
+    })
+    const activeProfile = await run(
+      process.execPath,
+      ['cli/index.ts', 'agent', 'profile', 'get', 'clean-default'],
+      { cwd: repoRoot, env, timeoutMs: 30_000 },
+    )
+    expect(JSON.parse(activeProfile.stdout).profile.status).toBe('idle')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
@@ -1003,7 +1017,9 @@ describe('aun bootstrap clean-host journal', () => {
     ])).exitCode).toBe(0)
 
     const second = await bootstrap(input, { run })
-    expect(second.status).toBe('IDEMPOTENT_READY')
+    expect({ status: second.status, stage: second.stage, reason_codes: second.reason_codes }).toEqual({
+      status: 'IDEMPOTENT_READY', stage: 'B8_READY_READBACK', reason_codes: [],
+    })
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
     expect(stateDaemonReadinessCalls.length).toBeGreaterThanOrEqual(2)
@@ -1032,7 +1048,9 @@ describe('aun bootstrap clean-host journal', () => {
       await ownedDb.close()
     }
     const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run })
-    expect(rolledBack.status).toBe('ROLLED_BACK')
+    expect({ status: rolledBack.status, stage: rolledBack.stage, reason_codes: rolledBack.reason_codes }).toEqual({
+      status: 'ROLLED_BACK', stage: 'B0_LOCK_AND_SNAPSHOT', reason_codes: [],
+    })
     expect(rolledBack.reason_codes).toEqual([])
     if (fixture === 'sqlite-new') {
       expect([dbPath, `${dbPath}-wal`, `${dbPath}-shm`].every((path) => !existsSync(path))).toBe(true)

@@ -49,6 +49,7 @@ import {
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
 } from '../../core/runtime-memory-ready'
+import { isActiveExecutionSeat } from '../../core/active-execution-seats'
 import {
   selectBootstrapRuntime,
   type BootstrapRuntimeSignal,
@@ -2104,7 +2105,16 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     let runtimeBeforeIdentities: Array<{ runtime_instance_id: string; row_digest: string }> = []
     let evidenceId: string | number | null = null
     let runtimeTupleDigest: string | null = null
+    let agentStatusTransition: {
+      before_status: string
+      after_status: 'idle'
+    } | null = null
     let failureDiscriminator = 'runtime_receipt_input_invalid'
+    const ownsNewProfile = context.priorState.mutations.some((mutation) =>
+      mutation.kind === 'profile'
+      && mutation.owner_key === `profile:${context.runId}:${context.agentId}`
+      && mutation.rollback_payload?.created_by_run === true,
+    )
     try {
       const profile = await profileGet(context.agentId)
       const sessionName = env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session
@@ -2156,8 +2166,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       runtimeTupleDigest = bootstrapDigest(runtimeTuple)
       failureDiscriminator = 'runtime_receipt_db_read'
       const runtime = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
-        const agent = await tx.queryOne<{ agent_id: string }>(
-          'SELECT agent_id FROM agents WHERE agent_id = $1 FOR UPDATE',
+        const agent = await tx.queryOne<any>(
+          `SELECT agent_id, agent_type, status,
+                  profile_enabled, disabled_at, metadata
+             FROM agents
+            WHERE agent_id = $1
+            FOR UPDATE`,
           [context.agentId],
         )
         if (!agent) throw new Error('runtime receipt agent unavailable')
@@ -2196,6 +2210,44 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const postInsert = classifyRuntimeReceiptRows(await readActive(), runtimeTuple)
         if (!postInsert.ok || postInsert.action !== 'reuse' || postInsert.runtimeInstanceId !== insertedId) {
           throw new RuntimeReceiptSelectionError('runtime_receipt_post_insert_readback', postInsert.evidenceDigest)
+        }
+        if (!isActiveExecutionSeat(agent)) {
+          const eligibleAfterActivation = isActiveExecutionSeat({ ...agent, status: 'idle' })
+          if (!ownsNewProfile || agent.status !== 'offline' || !eligibleAfterActivation) {
+            throw new RuntimeReceiptSelectionError(
+              'bootstrap_agent_activation_not_authorized',
+              bootstrapDigest({
+                agent_id: context.agentId,
+                owns_new_profile: ownsNewProfile,
+                eligible_after_activation: eligibleAfterActivation,
+                status: agent.status,
+                profile_enabled: agent.profile_enabled,
+                disabled_at: agent.disabled_at,
+                agent_type: agent.agent_type,
+              }),
+            )
+          }
+          const activated = await tx.query<any>(
+            `UPDATE agents
+                SET status = 'idle'
+              WHERE agent_id = $1
+                AND status = 'offline'
+                AND COALESCE(profile_enabled, true) = true
+                AND disabled_at IS NULL
+                AND COALESCE(agent_type, '') <> 'human'
+              RETURNING status`,
+            [context.agentId],
+          )
+          if (activated.length !== 1) {
+            throw new RuntimeReceiptSelectionError(
+              'bootstrap_agent_activation_fence_rejected',
+              bootstrapDigest({ agent_id: context.agentId, prior_status: agent.status }),
+            )
+          }
+          agentStatusTransition = {
+            before_status: String(agent.status),
+            after_status: 'idle',
+          }
         }
         return { id: insertedId, created: true, decisionDigest: postInsert.evidenceDigest }
       }))
@@ -2258,6 +2310,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         provider_tuple_digest: transport.tupleDigest,
         recovery_response_digest: recovery.responseDigest,
         runtime_tuple_digest: runtimeTupleDigest,
+        agent_status_transition: agentStatusTransition
+          ? { status: agentStatusTransition.after_status }
+          : null,
       }
       const mutation = {
         kind: 'memory_readiness' as const,
@@ -2272,6 +2327,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           provider_tuple_digest: transport.tupleDigest,
           valid_until: result.validUntil,
           runtime_before_identities: runtimeBeforeIdentities,
+          agent_status_transition: agentStatusTransition,
         },
       }
       return result.gate.ok
@@ -2308,6 +2364,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           runtime_instance_id: runtimeInstanceId, runtime_created: runtimeCreated, evidence_id: evidenceId,
           bootstrap_run_id: context.runId, post_error_readback_digest: observed ? bootstrapDigest(observed) : null,
           runtime_before_identities: runtimeBeforeIdentities,
+          agent_status_transition: agentStatusTransition,
         },
       } : undefined
       const discriminator = err instanceof RuntimeReceiptSelectionError ? err.discriminator : failureDiscriminator
@@ -2439,6 +2496,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             WHERE id = $1 AND runtime_instance_id = $2`,
           [payload.evidence_id, payload.runtime_instance_id],
         ))
+        const expectedStatusTransition = payload.agent_status_transition
+          && typeof payload.agent_status_transition === 'object'
+          ? payload.agent_status_transition as Record<string, unknown>
+          : null
+        const agentStatus = expectedStatusTransition
+          ? await withBootstrapDb(env, (db) => db.queryOne<any>(
+              `SELECT status
+                 FROM agents
+                WHERE agent_id = $1`,
+              [context.agentId],
+            ))
+          : null
         const metadata = parseJsonRecord(evidence?.metadata)
         const nativeTransport = await readConfiguredWasurezuTransport(context, run)
         const readbackDigest = bootstrapDigest({
@@ -2449,12 +2518,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           provider_tuple_digest: metadata.provider_tuple_digest ?? null,
           recovery_response_digest: metadata.recovery_response_digest ?? null,
           runtime_tuple_digest: metadata.runtime_tuple_digest ?? null,
+          agent_status_transition: expectedStatusTransition
+            ? { status: agentStatus?.status ?? null }
+            : null,
         })
+        const statusTransitionMatches = !expectedStatusTransition
+          || agentStatus?.status === expectedStatusTransition.after_status
         mutationMatches = evidence?.result_status === 'ready'
           && metadata.bootstrap_run_id === payload.bootstrap_run_id
           && Boolean(evidence?.valid_until) && Date.parse(String(evidence.valid_until)) > Date.now()
           && nativeTransport?.tupleDigest === payload.provider_tuple_digest
           && metadata.provider_tuple_digest === payload.provider_tuple_digest
+          && statusTransitionMatches
           && readbackDigest === mutation.actual_after_digest
       }
       return gate.ok && runtimeMatches && mutationMatches
@@ -3686,6 +3761,31 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const runtimeId = String(payload.runtime_instance_id ?? '')
         const evidenceId = payload.evidence_id
         const rollback = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
+          const statusTransition = payload.agent_status_transition
+            && typeof payload.agent_status_transition === 'object'
+            ? payload.agent_status_transition as Record<string, unknown>
+            : null
+          let agentStatusRestored = true
+          if (statusTransition) {
+            const restored = await tx.execute(
+              `UPDATE agents
+                  SET status = $2
+                WHERE agent_id = $1
+                  AND status = $3`,
+              [
+                context.agentId,
+                String(statusTransition.before_status ?? ''),
+                String(statusTransition.after_status ?? ''),
+              ],
+            )
+            if (restored.rowCount !== 1) return false
+            const restoredAgent = await tx.queryOne<any>(
+              'SELECT status FROM agents WHERE agent_id = $1',
+              [context.agentId],
+            )
+            agentStatusRestored = restoredAgent?.status === statusTransition.before_status
+            if (!agentStatusRestored) return false
+          }
           if (evidenceId !== null && evidenceId !== undefined) {
             const evidence = await tx.queryOne<any>(
               'SELECT result_status, failure_reason, metadata FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
@@ -3744,19 +3844,25 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }))).every(Boolean)
           return {
             ok: (!evidence || (evidence.result_status === 'failed' && evidence.failure_reason === 'BOOTSTRAP_ROLLBACK'))
-              && !active && preexistingRuntimeUnchanged,
+              && !active && preexistingRuntimeUnchanged && agentStatusRestored,
             preexistingRuntimeUnchanged,
+            agentStatusRestored,
           }
         })).catch(() => false)
         return rollback && rollback.ok
           ? {
               ok: true,
-              readinessPredicates: { rollback_verified: true, preexisting_runtime_unchanged: rollback.preexistingRuntimeUnchanged },
+              readinessPredicates: {
+                rollback_verified: true,
+                preexisting_runtime_unchanged: rollback.preexistingRuntimeUnchanged,
+                agent_status_restored: rollback.agentStatusRestored,
+              },
               readbackDigest: bootstrapDigest({
                 runtime_id: runtimeId,
                 evidence_id: evidenceId,
                 active: false,
                 preexisting_runtime_unchanged: rollback.preexistingRuntimeUnchanged,
+                agent_status_restored: rollback.agentStatusRestored,
               }),
             }
           : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
