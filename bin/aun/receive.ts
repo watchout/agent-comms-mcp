@@ -1667,7 +1667,9 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             },
             skipped_non_action_count: 0,
             unknown_type_count: 0,
-            selection_reason: `memory_ready_${memoryReady.reason}`,
+            selection_reason: memoryReady.reason === 'agent_inactive'
+              ? 'disabled_agent'
+              : `memory_ready_${memoryReady.reason}`,
             memory_ready: memoryReady,
           }
         }
