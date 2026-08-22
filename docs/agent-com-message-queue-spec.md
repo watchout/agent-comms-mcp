@@ -1439,6 +1439,75 @@ schedule だけを更新する。state は daemon process 内で queue id ごと
 ready/terminal row で破棄するため、この契約は新しい DB schema を要求しない。daemon restart
 後の最初の観測は新しい transition として 1 回だけ alert してよい。
 
+#### 13.5.1.2 Queue-work runtime selection, adapter fallback, and retry
+
+state-daemon の queue-work scheduler は、全席を process-wide の単一 provider に送っては
+ならない。各 invocation の engine は enabled な対象席の
+`agents.runtime_engine_preference` から次の exact mapping で解決する。
+
+| `runtime_engine_preference` | queue-work runtime |
+|---|---|
+| `codex`, `codex-runner` | `codex-exec` |
+| `claude`, `claude-code` | `claude-code` |
+
+空値は `RUNTIME_ENGINE_PREFERENCE_REQUIRED`、未知値は
+`RUNTIME_ENGINE_PREFERENCE_UNSUPPORTED` として fail-closed にする。scheduler はこの場合に
+process-wide `STATE_DAEMON_QUEUE_WORK_RUNTIME` 又は `agents.runtime` へ fallback してはならない。
+manual runner の明示 `--runtime` はこの per-seat scheduler 契約の外であり、従来どおり使用できる。
+
+**Codex output fallback**
+
+Codex primary success は `exit_status = 0`、`--output-last-message` file が存在し、その内容が
+有効な `queue_work_result_v1` であることを要求する。`exit_status = 0` でも file が無い場合、
+adapter は同じ `codex exec --json` invocation の stdout JSONL にある最後の
+`item.completed.item.type = agent_message` の `text` だけを代替取得経路として使用できる。
+これは engine fallback ではなく、同一 invocation の secondary result transport である。
+
+JSONL fallback が有効な `queue_work_result_v1` を返した場合、runner result の evidence に
+`runtime_adapter_fallback=codex_jsonl_agent_message` と
+`runtime_adapter_primary_failure=CODEX_OUTPUT_LAST_MESSAGE_MISSING` を追加する。JSONL に exact
+agent message がない、stream が malformed、又は取得した message が result contract を満たさない
+場合は `CODEX_OUTPUT_LAST_MESSAGE_MISSING` を `retryable=false` で記録する。汎用
+`ADAPTER_ERROR` への丸め込み、別 provider への暗黙退避、空 result の成功扱いは禁止する。
+
+**Claude Code adapter**
+
+`claude-code` 席は `claude -p --output-format stream-json --json-schema` の headless adapter を
+使用し、Codex と同じ queue-work envelope / result / claim fence / finalizer を共有する。
+untrusted queue body は argv に入れず stdin で渡す。final `result` event の
+`structured_output`（又は exact result text）だけを `queue_work_result_v1` として受理する。
+Codex への暗黙 provider fallback は行わない。
+
+**Failure classification and retry**
+
+新規 runner error は `runner_error.code`、`runner_error.retryable`、`runtime_id`、
+`invocation_source`、claim fence を durable に記録する。少なくとも次を状態不変 failure とし、
+reclaim/re-invoke せず同じ sweep で typed `failed` へ遷移させる。
+
+- `CODEX_OUTPUT_LAST_MESSAGE_MISSING`
+- `ADAPTER_RESULT_INVALID`
+- `RUNTIME_ENGINE_PREFERENCE_REQUIRED`
+- `RUNTIME_ENGINE_PREFERENCE_UNSUPPORTED`
+
+この即時 terminal は失敗を成功へ変換しない。`status='failed'`、
+`failed_reason=<runner_error.code>`、`queue_work_runner_error_recovery.last_action =
+failed_non_retryable` を残し、`done` / `replied` にはしない。non-zero exit、timeout、provider
+availability のように外部状態が変化しうる failure だけを `retryable=true` とし、既存の bounded
+reclaim cap を適用する。model の `ok=false` result は `next_action='retry'` のときだけ retryable
+であり、それ以外は `ADAPTER_RESULT_NOT_OK` の typed failed とする。旧 row に
+`runner_error.retryable` が無い場合だけ backward-compatible bounded retry を維持する。
+
+失敗分類は schema 変更なしで次の canonical query により数えられなければならない。
+
+```sql
+SELECT payload::jsonb #>> '{runner_error,code}' AS failure_code,
+       count(*)
+  FROM message_queue
+ WHERE payload::jsonb ? 'runner_error'
+ GROUP BY 1
+ ORDER BY 1;
+```
+
 ### 13.6 Presence Client
 
 Presence Client は将来拡張、現行は opt-in。
