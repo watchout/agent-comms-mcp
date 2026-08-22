@@ -1407,11 +1407,46 @@ resolver はまず `status IN ('running','active')` かつ valid heartbeat (`las
 `NO_CURRENT_RUNTIME_FOR_PROFILE` で fail-closed にする。これは runtime 再登録を要求する
 repair signal である。profile match でも heartbeat が stale なら current ではない。
 
+ここでいう candidate は requested kind の active row 全体ではなく、**live かつ exact profile
+match の row だけ**である。同一 `agent_id` / requested kind でも runtime engine、registered tmux
+session、又は home checkout のいずれかが一致しない row は current candidate から除外する。
+resolver は各除外を typed `PROFILE_MISMATCH_EXCLUDED` とし、不一致 field、observed value、expected
+value、runtime instance identity を readback に残す。foreign row が heartbeat を継続していても
+扱いは warning-only とする。その row を current に昇格せず、不一致だけを理由とする quarantine、
+status mutation、reap、物理削除は行わない。
+
+current candidate が 0 件の場合も原因を潰してはならない。requested kind の active row 自体が
+0 件なら `NO_RUNTIME_ROWS`、live row が profile mismatch により除外されたなら
+`PROFILE_MISMATCH_EXCLUDED`、profile match row はあるが全て heartbeat stale なら
+`ONLY_STALE_PROFILE_MATCHES` を `NO_CURRENT_RUNTIME_FOR_PROFILE` の typed subreason として返す。
+refresher report、gate detail、daemon log/metric、read-only identity monitor は同じ resolver の
+subreason と exclusion records を使い、独自の profile 判定を再実装してはならない。
+
 `LIVENESS_TTL` は `(runtime_kind, source)` group の登録 `heartbeat_interval * 6` とする。
 `source` は instance `metadata.source`、それが空なら `runtime_engine`。group 登録がない場合は
 30 分を使用する。heartbeat interval、既定値、backoff 値は schema version を持つ repository
 config から読み、resolver/refresher report と daemon startup readback に schema version と
 content digest を出す。config が absent / malformed / unsupported version なら fail-closed とする。
+
+**Runtime rotation と memory-ready evidence rebinding**
+
+ordinary runtime heartbeat の upsert 後、heartbeat writer は同じ exported current-runtime resolver
+で当該席を再解決する。heartbeat row が新しい current candidate で、当該席/project の最新
+`runtime_memory_ready_evidence.runtime_instance_id` が current instance と異なる場合、それを typed
+`SUPERSEDED_EVIDENCE_BINDING` として検出し、同じ single-seat refresher/readback 経路で evidence を
+current instance に再束縛する。再取得後は gate readback が `ready` にならなければ成功として扱わない。
+profile mismatch により除外された heartbeat は evidence を再束縛できず、typed warning のみを残す。
+
+rotation refresh は heartbeat event が主契機であり、固定周期 refresher の次回実行待ちにしては
+ならない。daemon 起動時にも 1 回 reconciliation を行い、daemon 配備前に生じた rotation を回収する。
+heartbeat event と起動時 reconciliation は冪等で、latest evidence が current instance に既に束縛
+されている場合は新しい evidence を作らない。refresh failure は typed terminal result/log として残し、
+heartbeat row、旧 evidence、又は queue row を手動修復しない。
+
+read-only identity monitor は少なくとも `PROFILE_MISMATCH_EXCLUDED` と
+`SUPERSEDED_EVIDENCE_BINDING` を席別に列挙・集計できなければならない。後者は latest evidence と
+common resolver が選ぶ current instance の不一致で判定し、stopped row に束縛された evidence も
+同じ typed finding とする。
 
 **Stale runtime reap**
 

@@ -13,6 +13,7 @@ import {
 describe('runtime heartbeat evidence', () => {
   test('upserts runtime instance and connector rows from connector evidence', async () => {
     const calls: string[] = []
+    let reconcileInput: { agentId: string; observedRuntimeInstanceId?: string | null } | null = null
     const db = {
       async query(sql: string) {
         calls.push(sql)
@@ -59,19 +60,38 @@ describe('runtime heartbeat evidence', () => {
       },
     }
 
-    const result = await heartbeatRuntimeInstance(db, {
-      runtimeInstanceId: '00000000-0000-4000-8000-000000000001',
-      agentId: 'agent-com-dev',
-      runtimeEngine: 'claude-code',
-      sessionName: 'discord-agent-com',
-      processId: 123,
-      port: 8795,
-      checkoutPath: '/repo',
-      connectorProvider: 'discord',
-      connectorUri: 'discord://agents/agent-com-dev',
-      connectorMetadata: { token_fingerprint: 'fingerprint' },
-      metadata: { source: 'test' },
-    })
+    const result = await heartbeatRuntimeInstance(
+      db,
+      {
+        runtimeInstanceId: '00000000-0000-4000-8000-000000000001',
+        agentId: 'agent-com-dev',
+        runtimeEngine: 'claude-code',
+        sessionName: 'discord-agent-com',
+        processId: 123,
+        port: 8795,
+        checkoutPath: '/repo',
+        connectorProvider: 'discord',
+        connectorUri: 'discord://agents/agent-com-dev',
+        connectorMetadata: { token_fingerprint: 'fingerprint' },
+        metadata: { source: 'test' },
+      },
+      {
+        reconcileMemoryReadyIdentity: async (_db, input) => {
+          reconcileInput = input
+          return {
+            agent_id: input.agentId,
+            observed_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+            current_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+            previous_evidence_runtime_instance_id: 'previous-runtime',
+            status: 'REFRESHED',
+            code: 'EVIDENCE_BINDING_REFRESHED',
+            evidence_id: 42,
+            evidence_log_id: 'audit-42',
+            details: {},
+          }
+        },
+      },
+    )
 
     expect(result.ok).toBe(true)
     expect(result.runtime_instance_id).toBe('00000000-0000-4000-8000-000000000001')
@@ -79,6 +99,12 @@ describe('runtime heartbeat evidence', () => {
     expect(result.connector_rows_upserted).toBe(1)
     expect(result.connector_rows_updated).toBe(0)
     expect(result.endpoint_lease_id).toBe('lease-1')
+    expect(result.memory_ready_identity?.status).toBe('REFRESHED')
+    expect(reconcileInput).toEqual({
+      agentId: 'agent-com-dev',
+      observedRuntimeInstanceId: '00000000-0000-4000-8000-000000000001',
+      requestedRuntimeKind: 'local_process',
+    })
     expect(calls.join('\n')).toContain('INSERT INTO agent_workspaces')
     expect(calls.join('\n')).toContain('INSERT INTO agent_workspace_bindings')
     expect(calls.join('\n')).toContain('INSERT INTO agent_runtime_instances')

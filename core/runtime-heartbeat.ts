@@ -2,6 +2,10 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
 import { basename, resolve } from 'node:path'
+import {
+  reconcileRuntimeMemoryReadyIdentity,
+  type RuntimeMemoryReadyIdentityReconcileResult,
+} from './runtime-memory-ready-identity'
 
 export type RuntimeHeartbeatDb = {
   query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }>
@@ -43,6 +47,11 @@ export type RuntimeHeartbeatResult = {
   endpoint_lease_id: string | null
   endpoint_lease_expires_at: string | Date | null
   endpoint_lease_heartbeat_at: string | Date | null
+  memory_ready_identity: RuntimeMemoryReadyIdentityReconcileResult | null
+}
+
+export type RuntimeHeartbeatOptions = {
+  reconcileMemoryReadyIdentity?: typeof reconcileRuntimeMemoryReadyIdentity
 }
 
 type AgentWorkspaceProfile = {
@@ -428,6 +437,7 @@ export function hasRuntimeConnectorIdentityEvidence(env: NodeJS.ProcessEnv = pro
 export async function heartbeatRuntimeInstance(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
+  options: RuntimeHeartbeatOptions = {},
 ): Promise<RuntimeHeartbeatResult> {
   const workspaceId = await ensureWorkspaceBinding(db, input)
   const metadata = JSON.stringify(input.metadata ?? {})
@@ -474,6 +484,16 @@ export async function heartbeatRuntimeInstance(
     ],
   )
 
+  const requestedRuntimeKind = input.runtimeKind?.trim() || 'local_process'
+  const reconcileMemoryReadyIdentity = options.reconcileMemoryReadyIdentity ?? reconcileRuntimeMemoryReadyIdentity
+  const memoryReadyIdentity = requestedRuntimeKind === 'local_process'
+    ? await reconcileMemoryReadyIdentity(db, {
+        agentId: input.agentId,
+        observedRuntimeInstanceId: input.runtimeInstanceId,
+        requestedRuntimeKind,
+      })
+    : null
+
   const connectorRowsUpserted = await ensureRuntimeConnector(db, input)
   const holderConnectorInstanceId = connectorRowsUpserted.connectorInstanceId
   const endpointLease = await heartbeatRuntimeEndpointLease(db, input, holderConnectorInstanceId)
@@ -491,5 +511,6 @@ export async function heartbeatRuntimeInstance(
     endpoint_lease_id: endpointLease?.leaseId ?? null,
     endpoint_lease_expires_at: endpointLease?.expiresAt ?? null,
     endpoint_lease_heartbeat_at: endpointLease?.heartbeatAt ?? null,
+    memory_ready_identity: memoryReadyIdentity,
   }
 }

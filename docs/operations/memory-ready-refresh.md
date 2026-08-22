@@ -20,6 +20,25 @@ The report must satisfy `summary.terminal_results == summary.inventory`.
 `summary.ready == summary.eligible` is the readiness target. A failed seat is a
 typed repair signal and does not prevent later seats from being evaluated.
 
+## Runtime identity monitor
+
+Use the read-only monitor to count foreign heartbeat exclusions and evidence
+still bound to a superseded runtime instance. It opens an explicit read-only
+transaction and requires a PostgreSQL URL.
+
+```sh
+bun scripts/operator/memory-ready-identity-monitor.ts \
+  --database-url 'postgresql:///agent_comms?host=/tmp'
+```
+
+`PROFILE_MISMATCH_EXCLUDED` is warning-only: the row is not a current
+candidate, but the monitor does not quarantine, stop, reap, or delete it.
+`SUPERSEDED_EVIDENCE_BINDING` means the common resolver selected a live exact
+profile runtime while the latest evidence still names another instance.
+Ordinary runtime heartbeats repair the latter through the single-seat
+refresher, and state-daemon startup runs the same idempotent reconciliation once
+to cover rotations that predate deployment.
+
 ## Render and install the LaunchAgent
 
 First read `STATE_DAEMON_AGENT_DENYLIST` from the installed state-daemon plist.

@@ -116,6 +116,8 @@ async function defaultRefreshSeat(input: {
   return recorded
 }
 
+export { defaultRefreshSeat as refreshRuntimeMemoryReadySeat }
+
 export async function runRuntimeMemoryReadyFleetRefresh(
   db: RuntimeMemoryReadyDb,
   options: RuntimeMemoryReadyFleetRefreshOptions,
