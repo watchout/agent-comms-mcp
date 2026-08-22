@@ -1361,8 +1361,15 @@ digest を readback できなければならない。
 
 **対象席と batch 契約**
 
-- inventory は `agents.status IN ('idle','busy')`、`profile_enabled = true`、
-  `disabled_at IS NULL` の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
+- active execution seat は、登録 identity のうち次の条件をすべて満たす行である。
+  `status IN ('idle','busy')`、`profile_enabled = true`、`disabled_at IS NULL`、
+  `agent_type <> 'human'`、かつ `metadata.retired` が true でないこと。これは「現在たまたま
+  process が見える席」ではなく、実行実体を持ち liveness を報告しうる登録席の集合である。
+  tmux/process/lease の一時的な欠落を理由に母集団から外してはならない。
+- この判定の実装正本は `core/active-execution-seats.ts` とする。refresher、memory-ready gate、
+  被覆計測はそれぞれ同モジュールの selector/predicate を import し、独自 SQL や独自 status
+  判定を持ってはならない。
+- inventory は active execution seat の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
   typed `DENYLISTED` として除外できる。本機能が denylist の値を変更してはならない。
 - denylist 外の inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
   session、port、runtime、workspace 又は project が欠ける席も silent に落とさず、typed
@@ -1371,6 +1378,32 @@ digest を readback できなければならない。
   席を継続する。batch summary は inventory、eligible、ready、failed、skipped の各件数と
   policy schema version / digest を持つ。全席処理後に failed が残る場合、process は非 zero
   で終了してよいが、途中 abort はしない。
+
+**Registry retirement と復帰**
+
+- SD-C8 の retirement cohort は次の exact 12 identities に固定する。自動 naming heuristic、
+  runtime 値、last_seen_at の古さから列挙外の identity を追加してはならない。
+  `lead-override-163445f2`、`lead-override-f020ad60`、`lead-test-2001c9a4`、
+  `lead-test-52d6b47f`、`test-self-kick-22844`、`test-self-kick-43791`、
+  `test-self-kick-5562`、`test-self-kick-62185`、`ceo`、`auditor`、`lead-sus`、
+  `codex-aun`。
+- retirement は物理削除ではなく、既存列だけを使う可逆な registry transition である。
+  `status='retired'`、`profile_enabled=false`、`disabled_at=<transition time>`、
+  `metadata.retired=true` とし、metadata 内に transition schema/cell/control-source と
+  `status`、`profile_enabled`、`disabled_at`、metadata 全体の exact preimage を保存する。
+  同じ transaction で `audit_log` に identity ごとの retirement event を記録する。
+- retirement の preflight は exact 12 行が存在し、未退役で、active claim を持たないことを
+  fail-closed に検証する。1 行でも不一致なら全件 rollback し、部分適用しない。
+- 復帰は保存済み exact preimage を同じ transaction で復元し、復帰 audit event を記録する。
+  cell の transition record が欠ける行、別 cell の record、又は壊れた preimage は復帰させない。
+- retirement/reinstatement は `agents` と `audit_log` だけを変更する。既存の `message_queue`、
+  runtime/evidence row、denylist、channel membership を暗黙に drain、close、delete、又は変更しない。
+  退役先に残る open queue の disposition は別の明示的 repair authority を要する。
+- state-daemon liveness alert は active execution seat だけを対象にする。`retired` 行を dead bot
+  として alert してはならない。
+- memory-ready coverage は active execution seat の各行を同じ strict gate で評価した `ready/N`
+  であり、`N` 自体を達成状況に応じて変更しない。retirement は誤登録行を母集団から除く
+  registry correction であって、ready 判定や N/N の測度を緩和するものではない。
 
 **Current-runtime resolver (single implementation)**
 
