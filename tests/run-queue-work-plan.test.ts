@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
+  QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS,
   buildCodexExecQueueWorkCommand,
   buildClaudeCodeQueueWorkCommand,
   buildRunQueueWorkPlan,
@@ -166,12 +167,14 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
   })
 
   test('codex-exec queue-work command uses schema, output-last-message, sandbox, cd, and stdin prompt', () => {
+    const subjectRoot = new URL('..', import.meta.url).pathname
+    const schemaPath = new URL('../schemas/queue-work-result-v1.schema.json', import.meta.url).pathname
     const command = buildCodexExecQueueWorkCommand({
       cwd: '/agent-workspace',
-      subjectRoot: '/repo',
+      subjectRoot,
       outputLastMessagePath: '/tmp/final-message.json',
       env: {
-        AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA: '/repo/schemas/queue-work-result-v1.schema.json',
+        AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA: schemaPath,
         AUN_QUEUE_WORK_CODEX_SANDBOX: 'read-only',
         AUN_QUEUE_WORK_CODEX_EXECUTABLE: '/opt/homebrew/bin/codex',
         AUN_QUEUE_WORK_CODEX_IGNORE_RULES: '1',
@@ -205,11 +208,17 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       },
     })
 
+    expect(command.runtimeId).toBe('codex-exec')
+    expect(QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS['codex-exec']).toEqual({
+      runtime_id: 'codex-exec',
+      result_schema: 'file',
+      mcp_config_mode: 'none',
+    })
     expect(command.command).toBe('/opt/homebrew/bin/codex')
     expect(command.args).toEqual([
       'exec',
       '--json',
-      '--output-schema', '/repo/schemas/queue-work-result-v1.schema.json',
+      '--output-schema', schemaPath,
       '--output-last-message', '/tmp/final-message.json',
       '--sandbox', 'read-only',
       '--cd', '/agent-workspace',
@@ -221,7 +230,7 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(command.stdin).toContain('Return only JSON matching queue_work_result_v1')
     expect(command.stdin).toContain('A negative audit, gate, or domain finding is still successfully completed work')
     expect(command.stdin).toContain('Use ok=false only when the requested inspection or work itself could not be completed safely')
-    expect(command.stdin).toContain('immutable implementation subject is available read-only at /repo')
+    expect(command.stdin).toContain(`immutable implementation subject is available read-only at ${subjectRoot}`)
     expect(command.stdin).toContain('"queue_id":"42"')
     expect(command.stdin).toContain('Do not call next, inbox')
   })
@@ -310,11 +319,69 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     })
 
     expect(command.command).toBe('/opt/homebrew/bin/claude')
+    expect(command.runtimeId).toBe('claude-code')
+    expect(command.mcpConfigSource).toBe('generated')
+    expect(QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS['claude-code']).toEqual({
+      runtime_id: 'claude-code',
+      result_schema: 'inline-json-from-file',
+      mcp_config_mode: 'strict',
+    })
     expect(command.args).toContain('stream-json')
     expect(command.args).toContain('--json-schema')
     expect(command.args).toContain('--strict-mcp-config')
+    const mcpConfigIndex = command.args.indexOf('--mcp-config')
+    expect(mcpConfigIndex).toBeGreaterThan(-1)
+    expect(command.args[mcpConfigIndex + 1]).toBe('{"mcpServers":{}}')
+    expect(JSON.parse(command.args[mcpConfigIndex + 1]!)).toEqual({ mcpServers: {} })
     expect(command.args.join(' ')).not.toContain('private queue content')
     expect(command.stdin).toContain('private queue content')
+  })
+
+  test('claude-code missing mcpServers fails closed before process launch with the missing input typed', () => {
+    const subjectRoot = new URL('..', import.meta.url).pathname
+    let failure: unknown
+    try {
+      buildClaudeCodeQueueWorkCommand({
+        cwd: '/agent-workspace',
+        subjectRoot,
+        env: {
+          AUN_QUEUE_WORK_CLAUDE_MCP_CONFIG: '{}',
+        } as NodeJS.ProcessEnv,
+        envelope: {
+          schema_version: 'queue_work_envelope_v1',
+          queue_id: '44',
+          message_id: 'msg-44',
+          agent_id: 'devauditor',
+          channel: 'audit',
+          thread_id: null,
+          requester: 'arc',
+          content: 'must never reach a runtime process',
+          reply_contract: { required: false, reply_to: 'msg-44', mention: 'arc' },
+          runtime_contract: {
+            do_not_call_next: true,
+            do_not_call_inbox: true,
+            return_schema: 'queue_work_result_v1',
+          },
+          handoff_contract: {
+            kind: 'plain_queue_work',
+            github_backed: false,
+            required_writebacks: [],
+            posting_mode: 'none',
+            detected_from: [],
+          },
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(QueueWorkAdapterInvocationError)
+    expect(failure).toMatchObject({
+      code: 'ADAPTER_CONFIGURATION_INVALID',
+      retryable: false,
+    })
+    expect((failure as Error).message).toContain('mcpServers')
+    expect((failure as Error).message).not.toContain('must never reach a runtime process')
   })
 
   test('claude stream-json accepts only the final structured result and records its runtime evidence', () => {

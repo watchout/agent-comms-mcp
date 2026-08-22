@@ -12,7 +12,10 @@ import {
   type QueueWorkResult,
   type QueueWorkWritebackSender,
 } from '../core/queue-work'
-import { parseCodexJsonlQueueWorkFallback } from '../bin/aun/run-queue-work'
+import {
+  classifyQueueWorkRuntimeExecFailure,
+  parseCodexJsonlQueueWorkFallback,
+} from '../bin/aun/run-queue-work'
 
 const capabilities = {
   input: 'stdin_prompt',
@@ -548,6 +551,53 @@ describe('runReceivedQueueWork', () => {
       max_reclaims: 0,
       last_action: 'failed_non_retryable',
       reason: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+    })
+  })
+
+  test('claude invalid MCP configuration is typed non-retryable and consumes no reclaim attempt', async () => {
+    const db = new FakeQueueDb(receivedRow())
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'claude-code',
+      capabilities,
+      async invoke() {
+        throw classifyQueueWorkRuntimeExecFailure({
+          runtimeId: 'claude-code',
+          result: {
+            status: 1,
+            stdout: '',
+            stderr: 'Invalid MCP configuration: mcpServers: expected record, received undefined',
+          },
+          detail: 'raw runtime detail must not become retryable',
+        })
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'ADAPTER_CONFIGURATION_INVALID',
+    })
+    expect(db.row.status).toBe('failed')
+    expect(db.row.failed_reason).toBe('ADAPTER_CONFIGURATION_INVALID')
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.runner_result).toBeUndefined()
+    expect(payload.runner_error).toMatchObject({
+      code: 'ADAPTER_CONFIGURATION_INVALID',
+      detail: 'claude-code runtime rejected deterministic configuration input: mcpServers',
+      retryable: false,
+      runtime_id: 'claude-code',
+    })
+    expect(payload.queue_work_runner_error_recovery).toMatchObject({
+      attempts: 0,
+      max_reclaims: 0,
+      last_action: 'failed_non_retryable',
+      reason: 'ADAPTER_CONFIGURATION_INVALID',
     })
   })
 
