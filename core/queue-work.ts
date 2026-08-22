@@ -524,7 +524,7 @@ export function writebackLooksValid(value: unknown): value is QueueWorkGithubIss
   )
 }
 
-export function queueWorkResultLooksValid(value: unknown): value is QueueWorkResult {
+function resultLooksValid(value: unknown): value is QueueWorkResult {
   return (
     value &&
     typeof value === 'object' &&
@@ -980,7 +980,7 @@ export async function runReceivedQueueWork(
     }
   }
 
-  if (!queueWorkResultLooksValid(result)) {
+  if (!resultLooksValid(result)) {
     const persisted = await persistRunnerError(
       db,
       row,
@@ -1153,7 +1153,7 @@ export async function finalizeDoneQueueWork(
 
     let payload = parsePayload(row.payload)
     const result = payload.runner_result as QueueWorkResult | undefined
-    if (!queueWorkResultLooksValid(result)) {
+    if (!resultLooksValid(result)) {
       await db.query('ROLLBACK')
       committed = true
       return {
@@ -1637,3 +1637,5 @@ export async function finalizeDoneQueueWork(
     throw err
   }
 }
+
+export { resultLooksValid as queueWorkResultLooksValid }

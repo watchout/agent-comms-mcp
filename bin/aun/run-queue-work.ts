@@ -227,7 +227,7 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope, subjectRoot: string): stri
   ].join('\n')
 }
 
-export function parseQueueWorkResultJson(raw: string): QueueWorkResult {
+function parseQueueWorkResultJson(raw: string): QueueWorkResult {
   const trimmed = raw.trim()
   if (!trimmed) throw new Error('codex exec produced an empty final message')
   try {
@@ -460,7 +460,7 @@ export function buildCodexExecQueueWorkCommand(input: {
   }
 }
 
-export class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
+class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'codex-exec'
   capabilities = {
     input: 'stdin_context',
@@ -714,7 +714,7 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
   return parsed
 }
 
-export function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
+function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
   if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
   if (plan.runtime === 'claude-code') return new ClaudeCodeRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
