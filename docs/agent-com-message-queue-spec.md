@@ -1369,6 +1369,13 @@ digest を readback できなければならない。
 - この判定の実装正本は `core/active-execution-seats.ts` とする。refresher、memory-ready gate、
   被覆計測はそれぞれ同モジュールの selector/predicate を import し、独自 SQL や独自 status
   判定を持ってはならない。
+- clean-host bootstrap が同じ run の B3 で新規作成した profile は、作成直後は liveness を
+  未証明のため `offline` である。B5 は exact target-provider receipt（agent、engine、session、
+  process、port、checkout、commit の全束縛）を transaction 内で readback できた場合に限り、
+  その same-run-created profile を `offline` から `idle` へ遷移させてから strict memory-ready
+  gate を評価する。この遷移は status preimage と postimage fence を B5 mutation record に保存し、
+  rollback で exact preimage へ戻す。pre-existing profile、`disabled` / `retired`、又は exact receipt
+  を欠く行を bootstrap が active に昇格させてはならない。
 - inventory は active execution seat の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
   typed `DENYLISTED` として除外できる。本機能が denylist の値を変更してはならない。
 - denylist 外の inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
