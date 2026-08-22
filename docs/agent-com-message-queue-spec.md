@@ -1455,6 +1455,30 @@ state-daemon の queue-work scheduler は、全席を process-wide の単一 pro
 process-wide `STATE_DAEMON_QUEUE_WORK_RUNTIME` 又は `agents.runtime` へ fallback してはならない。
 manual runner の明示 `--runtime` はこの per-seat scheduler 契約の外であり、従来どおり使用できる。
 
+**Engine configuration contract**
+
+queue-work runtime を追加又は変更する実装は、process 起動前に engine ごとの設定契約を
+解決しなければならない。契約は少なくとも runtime id、result schema の形式、MCP 設定 mode を
+宣言する。現行の exact contract は次のとおりである。
+
+| queue-work runtime | result schema | MCP 設定 mode |
+|---|---|---|
+| `codex-exec` | readable JSON schema file | `none` |
+| `claude-code` | readable JSON schema file converted to inline JSON | `strict` |
+
+`strict` mode の Claude MCP 設定は、明示された inline JSON 又は runtime cwd 相対の file ref を
+使用する。明示値がない場合は least-privilege な canonical no-server 設定
+`{"mcpServers":{}}` を生成する。いずれの場合も top-level object の必須 field
+`mcpServers` が object であることを起動前に検証し、空文字、`{}`、missing/unreadable file、
+malformed JSON、又は malformed result schema を runtime process に渡してはならない。
+
+設定契約を満たさない場合は欠落又は不正な項目名を detail に含む typed
+`ADAPTER_CONFIGURATION_INVALID`、`retryable=false` とし、process を起動せず同じ sweep で
+`failed` にする。Claude CLI が起動後に `Invalid MCP configuration` と判定した場合も、外部状態で
+変化する provider failure ではなく同じ決定的分類にする。設定値そのものや secret は error
+detail に含めない。engine 追加時に個別 builder だけを足すことは禁止し、上記共通設定契約へ
+runtime id と schema/MCP mode を登録しなければならない。
+
 **Codex output fallback**
 
 Codex primary success は `exit_status = 0`、`--output-last-message` file が存在し、その内容が
@@ -1476,6 +1500,7 @@ agent message がない、stream が malformed、又は取得した message が 
 使用し、Codex と同じ queue-work envelope / result / claim fence / finalizer を共有する。
 untrusted queue body は argv に入れず stdin で渡す。final `result` event の
 `structured_output`（又は exact result text）だけを `queue_work_result_v1` として受理する。
+MCP 設定は上記 `strict` contract で解決した値だけを `--mcp-config` に渡す。
 Codex への暗黙 provider fallback は行わない。
 
 **Failure classification and retry**
@@ -1486,12 +1511,13 @@ reclaim/re-invoke せず同じ sweep で typed `failed` へ遷移させる。
 
 - `CODEX_OUTPUT_LAST_MESSAGE_MISSING`
 - `ADAPTER_RESULT_INVALID`
+- `ADAPTER_CONFIGURATION_INVALID`
 - `RUNTIME_ENGINE_PREFERENCE_REQUIRED`
 - `RUNTIME_ENGINE_PREFERENCE_UNSUPPORTED`
 
 この即時 terminal は失敗を成功へ変換しない。`status='failed'`、
 `failed_reason=<runner_error.code>`、`queue_work_runner_error_recovery.last_action =
-failed_non_retryable` を残し、`done` / `replied` にはしない。non-zero exit、timeout、provider
+failed_non_retryable` を残し、`done` / `replied` にはしない。設定契約違反を除く non-zero exit、timeout、provider
 availability のように外部状態が変化しうる failure だけを `retryable=true` とし、既存の bounded
 reclaim cap を適用する。model の `ok=false` result は `next_action='retry'` のときだけ retryable
 であり、それ以外は `ADAPTER_RESULT_NOT_OK` の typed failed とする。旧 row に

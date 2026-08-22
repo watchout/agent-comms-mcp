@@ -190,7 +190,50 @@ function execFileAsync(
   })
 }
 
+export type QueueWorkRuntimeEngineId = 'codex-exec' | 'claude-code'
+
+export interface QueueWorkRuntimeEngineConfigurationContract {
+  runtime_id: QueueWorkRuntimeEngineId
+  result_schema: 'file' | 'inline-json-from-file'
+  mcp_config_mode: 'none' | 'strict'
+}
+
+/**
+ * Every queue-work engine must declare its configuration surface here before
+ * a command builder can use it. This keeps schema and MCP requirements from
+ * becoming implicit, engine-local defaults.
+ */
+export const QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS = Object.freeze({
+  'codex-exec': Object.freeze({
+    runtime_id: 'codex-exec',
+    result_schema: 'file',
+    mcp_config_mode: 'none',
+  }),
+  'claude-code': Object.freeze({
+    runtime_id: 'claude-code',
+    result_schema: 'inline-json-from-file',
+    mcp_config_mode: 'strict',
+  }),
+} satisfies Record<QueueWorkRuntimeEngineId, QueueWorkRuntimeEngineConfigurationContract>)
+
+export interface ResolvedQueueWorkRuntimeEngineConfiguration {
+  contract: QueueWorkRuntimeEngineConfigurationContract
+  schemaPath: string
+  schemaJson: string
+  mcpConfig: string | null
+  mcpConfigSource: 'not-applicable' | 'generated' | 'inline' | 'file'
+}
+
+export interface QueueWorkRuntimeCommand {
+  runtimeId: QueueWorkRuntimeEngineId
+  command: string
+  args: string[]
+  stdin: string
+  schemaPath: string
+}
+
 export interface CodexExecQueueWorkCommand {
+  runtimeId: 'codex-exec'
   command: string
   args: string[]
   stdin: string
@@ -204,6 +247,131 @@ function truthyEnv(value: string | undefined): boolean {
 
 function defaultQueueWorkResultSchemaPath(cwd: string): string {
   return resolve(cwd, 'schemas', 'queue-work-result-v1.schema.json')
+}
+
+const CANONICAL_CLAUDE_NO_SERVER_MCP_CONFIG = JSON.stringify({ mcpServers: {} })
+
+function configurationInvalid(detail: string): never {
+  throw new QueueWorkAdapterInvocationError(
+    'ADAPTER_CONFIGURATION_INVALID',
+    detail,
+    false,
+  )
+}
+
+function jsonRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function readJsonConfigFile(path: string, label: string): unknown {
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return configurationInvalid(`${label} unreadable: ${path}`)
+  }
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return configurationInvalid(`${label} malformed JSON: ${path}`)
+  }
+}
+
+function resolveResultSchema(input: {
+  runtimeId: QueueWorkRuntimeEngineId
+  subjectRoot: string
+  configuredPath: string | undefined
+}): { schemaPath: string; schemaJson: string } {
+  if (input.configuredPath !== undefined && !input.configuredPath.trim()) {
+    configurationInvalid(`${input.runtimeId} missing required configuration input: result schema path`)
+  }
+  const schemaPath = resolve(
+    input.subjectRoot,
+    input.configuredPath ?? defaultQueueWorkResultSchemaPath(input.subjectRoot),
+  )
+  if (!existsSync(schemaPath)) {
+    configurationInvalid(`${input.runtimeId} result schema missing: ${schemaPath}`)
+  }
+  const schema = readJsonConfigFile(schemaPath, `${input.runtimeId} result schema`)
+  if (!jsonRecord(schema)) {
+    configurationInvalid(`${input.runtimeId} invalid required configuration input: result schema object`)
+  }
+  return { schemaPath, schemaJson: JSON.stringify(schema) }
+}
+
+function resolveClaudeMcpConfig(input: {
+  cwd: string
+  configuredValue: string | undefined
+}): Pick<ResolvedQueueWorkRuntimeEngineConfiguration, 'mcpConfig' | 'mcpConfigSource'> {
+  if (input.configuredValue === undefined) {
+    return {
+      mcpConfig: CANONICAL_CLAUDE_NO_SERVER_MCP_CONFIG,
+      mcpConfigSource: 'generated',
+    }
+  }
+  const configured = input.configuredValue.trim()
+  if (!configured) {
+    configurationInvalid('claude-code missing required configuration input: mcpServers')
+  }
+
+  let parsed: unknown
+  let mcpConfig: string
+  let mcpConfigSource: 'inline' | 'file'
+  if (configured.startsWith('{') || configured.startsWith('[')) {
+    try {
+      parsed = JSON.parse(configured)
+    } catch {
+      return configurationInvalid('claude-code malformed required configuration input: MCP config JSON')
+    }
+    mcpConfig = JSON.stringify(parsed)
+    mcpConfigSource = 'inline'
+  } else {
+    const configPath = resolve(input.cwd, configured)
+    if (!existsSync(configPath)) {
+      configurationInvalid(`claude-code MCP config file missing: ${configPath}`)
+    }
+    parsed = readJsonConfigFile(configPath, 'claude-code MCP config')
+    mcpConfig = configPath
+    mcpConfigSource = 'file'
+  }
+
+  if (!jsonRecord(parsed)) {
+    configurationInvalid('claude-code invalid required configuration input: MCP config object')
+  }
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'mcpServers')) {
+    configurationInvalid('claude-code missing required configuration input: mcpServers')
+  }
+  if (!jsonRecord(parsed.mcpServers)) {
+    configurationInvalid('claude-code invalid required configuration input type: mcpServers')
+  }
+  return { mcpConfig, mcpConfigSource }
+}
+
+export function resolveQueueWorkRuntimeEngineConfiguration(input: {
+  runtimeId: QueueWorkRuntimeEngineId
+  cwd: string
+  subjectRoot: string
+  env: NodeJS.ProcessEnv
+}): ResolvedQueueWorkRuntimeEngineConfiguration {
+  const contract = QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS[input.runtimeId]
+  const configuredSchemaPath = input.runtimeId === 'codex-exec'
+    ? input.env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
+    : input.env.AUN_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
+  const schema = resolveResultSchema({
+    runtimeId: input.runtimeId,
+    subjectRoot: input.subjectRoot,
+    configuredPath: configuredSchemaPath,
+  })
+  const mcp = contract.mcp_config_mode === 'strict'
+    ? resolveClaudeMcpConfig({
+        cwd: input.cwd,
+        configuredValue: input.env.AUN_QUEUE_WORK_CLAUDE_MCP_CONFIG
+          ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_MCP_CONFIG,
+      })
+    : { mcpConfig: null, mcpConfigSource: 'not-applicable' as const }
+  return { contract, ...schema, ...mcp }
 }
 
 function queueWorkPrompt(envelope: QueueWorkEnvelope, subjectRoot: string): string {
@@ -413,12 +581,14 @@ export function buildCodexExecQueueWorkCommand(input: {
   env: NodeJS.ProcessEnv
   outputLastMessagePath: string
 }): CodexExecQueueWorkCommand {
-  const schemaPath = resolve(
-    input.subjectRoot ?? input.cwd,
-    input.env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
-      ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
-      ?? defaultQueueWorkResultSchemaPath(input.subjectRoot ?? input.cwd),
-  )
+  const subjectRoot = input.subjectRoot ?? input.cwd
+  const configuration = resolveQueueWorkRuntimeEngineConfiguration({
+    runtimeId: 'codex-exec',
+    cwd: input.cwd,
+    subjectRoot,
+    env: input.env,
+  })
+  const schemaPath = configuration.schemaPath
   const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
     ?? 'read-only'
@@ -452,9 +622,10 @@ export function buildCodexExecQueueWorkCommand(input: {
   args.push('-')
 
   return {
+    runtimeId: 'codex-exec',
     command,
     args,
-    stdin: queueWorkPrompt(input.envelope, input.subjectRoot ?? input.cwd),
+    stdin: queueWorkPrompt(input.envelope, subjectRoot),
     outputLastMessagePath: input.outputLastMessagePath,
     schemaPath,
   }
@@ -489,13 +660,6 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         env: this.env,
         outputLastMessagePath,
       })
-      if (!existsSync(plan.schemaPath)) {
-        throw new QueueWorkAdapterInvocationError(
-          'ADAPTER_CONFIGURATION_INVALID',
-          `queue work result schema missing: ${plan.schemaPath}`,
-          false,
-        )
-      }
       const child = await execFileAsync(plan.command, plan.args, {
         cwd: this.cwd,
         env: this.env,
@@ -504,11 +668,11 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         maxBuffer: 1024 * 1024 * 20,
       })
       if (child.status !== 0) {
-        throw new QueueWorkAdapterInvocationError(
-          child.killed || child.signal ? 'RUNTIME_TIMEOUT' : 'RUNTIME_NONZERO_EXIT',
-          describeCodexExecFailure({ result: child, outputLastMessagePath }),
-          true,
-        )
+        throw classifyQueueWorkRuntimeExecFailure({
+          runtimeId: plan.runtimeId,
+          result: child,
+          detail: describeCodexExecFailure({ result: child, outputLastMessagePath }),
+        })
       }
       if (!existsSync(outputLastMessagePath)) {
         return parseCodexJsonlQueueWorkFallback(child.stdout)
@@ -529,10 +693,12 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
 }
 
 export interface ClaudeCodeQueueWorkCommand {
+  runtimeId: 'claude-code'
   command: string
   args: string[]
   stdin: string
   schemaPath: string
+  mcpConfigSource: 'generated' | 'inline' | 'file'
 }
 
 export function buildClaudeCodeQueueWorkCommand(input: {
@@ -542,27 +708,22 @@ export function buildClaudeCodeQueueWorkCommand(input: {
   env: NodeJS.ProcessEnv
 }): ClaudeCodeQueueWorkCommand {
   const subjectRoot = input.subjectRoot ?? input.cwd
-  const schemaPath = resolve(
+  const configuration = resolveQueueWorkRuntimeEngineConfiguration({
+    runtimeId: 'claude-code',
+    cwd: input.cwd,
     subjectRoot,
-    input.env.AUN_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
-      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
-      ?? defaultQueueWorkResultSchemaPath(subjectRoot),
-  )
-  if (!existsSync(schemaPath)) {
-    throw new QueueWorkAdapterInvocationError(
-      'ADAPTER_CONFIGURATION_INVALID',
-      `queue work result schema missing: ${schemaPath}`,
-      false,
-    )
+    env: input.env,
+  })
+  if (configuration.mcpConfig === null || configuration.mcpConfigSource === 'not-applicable') {
+    configurationInvalid('claude-code missing required configuration input: strict MCP config')
   }
-  const schemaJson = JSON.stringify(JSON.parse(readFileSync(schemaPath, 'utf8')))
   const command = input.env.AUN_QUEUE_WORK_CLAUDE_EXECUTABLE
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_EXECUTABLE
     ?? 'claude'
   const args = [
     '-p',
     '--output-format', 'stream-json',
-    '--json-schema', schemaJson,
+    '--json-schema', configuration.schemaJson,
     '--permission-mode', input.env.AUN_QUEUE_WORK_CLAUDE_PERMISSION_MODE
       ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_PERMISSION_MODE
       ?? 'dontAsk',
@@ -572,9 +733,7 @@ export function buildClaudeCodeQueueWorkCommand(input: {
     '--allowedTools', input.env.AUN_QUEUE_WORK_CLAUDE_ALLOWED_TOOLS
       ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_ALLOWED_TOOLS
       ?? '',
-    '--mcp-config', input.env.AUN_QUEUE_WORK_CLAUDE_MCP_CONFIG
-      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_MCP_CONFIG
-      ?? '{}',
+    '--mcp-config', configuration.mcpConfig,
     '--strict-mcp-config',
     '--safe-mode',
     '--no-session-persistence',
@@ -584,11 +743,46 @@ export function buildClaudeCodeQueueWorkCommand(input: {
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_MODEL
   if (model) args.push('--model', model)
   return {
+    runtimeId: 'claude-code',
     command,
     args,
     stdin: queueWorkPrompt(input.envelope, subjectRoot),
-    schemaPath,
+    schemaPath: configuration.schemaPath,
+    mcpConfigSource: configuration.mcpConfigSource,
   }
+}
+
+function claudeConfigurationFailureItem(result: ExecResult): string | null {
+  const diagnostic = [result.stderr, result.stdout, result.errorMessage].filter(Boolean).join('\n')
+  if (/invalid mcp configuration/i.test(diagnostic) || /mcpServers\s*:\s*expected (?:a )?record/i.test(diagnostic)) {
+    return 'mcpServers'
+  }
+  if (/invalid (?:json )?schema/i.test(diagnostic) || /json schema[^\n]*invalid/i.test(diagnostic)) {
+    return 'result schema'
+  }
+  if (/\bENOENT\b/.test(diagnostic)) return 'executable'
+  return null
+}
+
+export function classifyQueueWorkRuntimeExecFailure(input: {
+  runtimeId: QueueWorkRuntimeEngineId
+  result: ExecResult
+  detail: string
+}): QueueWorkAdapterInvocationError {
+  if (input.result.killed || input.result.signal) {
+    return new QueueWorkAdapterInvocationError('RUNTIME_TIMEOUT', input.detail, true)
+  }
+  if (input.runtimeId === 'claude-code') {
+    const item = claudeConfigurationFailureItem(input.result)
+    if (item) {
+      return new QueueWorkAdapterInvocationError(
+        'ADAPTER_CONFIGURATION_INVALID',
+        `claude-code runtime rejected deterministic configuration input: ${item}`,
+        false,
+      )
+    }
+  }
+  return new QueueWorkAdapterInvocationError('RUNTIME_NONZERO_EXIT', input.detail, true)
 }
 
 export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
@@ -631,13 +825,15 @@ export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
       maxBuffer: 1024 * 1024 * 20,
     })
     if (child.status !== 0) {
-      throw new QueueWorkAdapterInvocationError(
-        child.killed || child.signal ? 'RUNTIME_TIMEOUT' : 'RUNTIME_NONZERO_EXIT',
-        `claude -p failed status=${child.status} ${snippet('stderr', child.stderr)} ${snippet('stdout', child.stdout)}`,
-        true,
-      )
+      throw classifyQueueWorkRuntimeExecFailure({
+        runtimeId: plan.runtimeId,
+        result: child,
+        detail: `claude -p failed status=${child.status} ${snippet('stderr', child.stderr)} ${snippet('stdout', child.stdout)}`,
+      })
     }
-    return parseClaudeStreamJsonQueueWorkResult(child.stdout)
+    return withAdapterEvidence(parseClaudeStreamJsonQueueWorkResult(child.stdout), [
+      `runtime_adapter_mcp_config_source=${plan.mcpConfigSource}`,
+    ])
   }
 }
 
@@ -714,10 +910,21 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
   return parsed
 }
 
+type QueueWorkRuntimeAdapterFactory = (
+  plan: RunQueueWorkPlan,
+  env: NodeJS.ProcessEnv,
+) => LlmRuntimeAdapter
+
+const QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES = Object.freeze({
+  'codex-exec': (plan, env) => new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env),
+  'claude-code': (plan, env) => new ClaudeCodeRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env),
+} satisfies Record<QueueWorkRuntimeEngineId, QueueWorkRuntimeAdapterFactory>)
+
 function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
-  if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
-  if (plan.runtime === 'claude-code') return new ClaudeCodeRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
+  if (Object.prototype.hasOwnProperty.call(QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES, plan.runtime)) {
+    return QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES[plan.runtime as QueueWorkRuntimeEngineId](plan, env)
+  }
   if (plan.runtime === 'runtime-preference-required' || plan.runtime === 'runtime-preference-unsupported') {
     return new FailClosedRuntimePreferenceAdapter(plan.runtime)
   }
