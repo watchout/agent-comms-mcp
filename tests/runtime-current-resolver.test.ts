@@ -67,7 +67,7 @@ async function seedRuntime(input: {
       input.id,
       input.engine ?? 'TUI',
       input.kind ?? 'local_process',
-      input.session ?? 'discord-cto',
+      Object.hasOwn(input, 'session') ? input.session ?? null : 'discord-cto',
       input.home ?? '/work/codex',
       input.seen,
       JSON.stringify({ source: input.source ?? 'server.ts' }),
@@ -105,6 +105,16 @@ describe('runtime current resolver', () => {
     expect(resolution.ok).toBe(false)
     expect(resolution.code).toBe('NO_CURRENT_RUNTIME_FOR_PROFILE')
     expect(resolution.current_runtime).toBeNull()
+    expect(resolution.candidate_absence_reason).toBe('PROFILE_MISMATCH_EXCLUDED')
+    expect(resolution.current_candidates).toHaveLength(0)
+    expect(resolution.candidate_exclusions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'PROFILE_MISMATCH_EXCLUDED',
+        runtime_instance_id: 'fresh-profile-mismatch',
+        live: true,
+        handling: 'WARN_ONLY',
+      }),
+    ]))
     expect(resolution.reap_candidates.map(row => [row.runtime_instance_id, row.reason])).toEqual([
       ['stale-profile-match', 'absolute'],
     ])
@@ -139,6 +149,66 @@ describe('runtime current resolver', () => {
     expect(resolution.ok).toBe(true)
     expect(resolution.code).toBe('RESOLVED')
     expect(resolution.current_runtime?.runtime_instance_id).toBe('newer-exact')
+  })
+
+  test('excludes a newer foreign heartbeat before ranking exact profile candidates', async () => {
+    await seedProfile('codex-cto')
+    await seedRuntime({
+      id: 'newest-foreign-heartbeat',
+      session: null,
+      home: '/work/agent-comms-mcp',
+      seen: '2026-08-21T00:09:59.000Z',
+    })
+    await seedRuntime({ id: 'older-exact-current', seen: '2026-08-21T00:09:00.000Z' })
+
+    const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+
+    expect(resolution.ok).toBe(true)
+    expect(resolution.current_runtime?.runtime_instance_id).toBe('older-exact-current')
+    expect(resolution.current_candidates.map(row => row.runtime_instance_id)).toEqual(['older-exact-current'])
+    expect(resolution.candidate_exclusions.find(row => row.runtime_instance_id === 'newest-foreign-heartbeat')).toMatchObject({
+      code: 'PROFILE_MISMATCH_EXCLUDED',
+      live: true,
+      handling: 'WARN_ONLY',
+      mismatches: expect.arrayContaining([
+        expect.objectContaining({ field: 'session_name', expected: 'discord-cto', observed: null }),
+        expect.objectContaining({ field: 'checkout_path', expected: '/work/codex', observed: '/work/agent-comms-mcp' }),
+      ]),
+    })
+  })
+
+  test('distinguishes no runtime rows from rows excluded by profile', async () => {
+    await seedProfile('codex-cto')
+    const noRows = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+    expect(noRows.code).toBe('NO_CURRENT_RUNTIME_FOR_PROFILE')
+    expect(noRows.candidate_absence_reason).toBe('NO_RUNTIME_ROWS')
+    expect(noRows.candidate_exclusions).toHaveLength(0)
+
+    await seedRuntime({
+      id: 'foreign-only',
+      session: null,
+      home: '/work/agent-comms-mcp',
+      seen: '2026-08-21T00:09:59.000Z',
+    })
+    const excluded = await resolveRuntimeMemoryReadyCurrent(db as any, {
+      agentId: 'codex-cto',
+      requestedRuntimeKind: 'local_process',
+      now: new Date('2026-08-21T00:10:00.000Z'),
+      policy,
+    })
+    expect(excluded.code).toBe('NO_CURRENT_RUNTIME_FOR_PROFILE')
+    expect(excluded.candidate_absence_reason).toBe('PROFILE_MISMATCH_EXCLUDED')
+    expect(excluded.candidate_exclusions).toHaveLength(1)
   })
 
   test('ordinary current resolution excludes a fresher bootstrap-bound receipt', async () => {

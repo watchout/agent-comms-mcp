@@ -70,6 +70,7 @@ import type { QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
+import { reconcileRuntimeMemoryReadyFleetIdentity } from '../core/runtime-memory-ready-identity'
 import type {
   AlertSink,
   DBClient,
@@ -1109,6 +1110,23 @@ export async function main(): Promise<void> {
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),
     config,
   })
+
+  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, {
+    denylist: config.agentDenylist ?? [],
+  }).catch((error) => [{
+    agent_id: 'fleet',
+    observed_runtime_instance_id: null,
+    current_runtime_instance_id: null,
+    previous_evidence_runtime_instance_id: null,
+    status: 'REFRESH_FAILED' as const,
+    code: 'FLEET_IDENTITY_RECONCILIATION_ERROR',
+    evidence_id: null,
+    evidence_log_id: null,
+    details: { error: (error as Error).message ?? String(error) },
+  }])
+  for (const result of identityResults) {
+    process.stderr.write(`[state-daemon] memory-ready identity ${JSON.stringify(result)}\n`)
+  }
 
   let stopping = false
   const shutdown = async (signal: string) => {

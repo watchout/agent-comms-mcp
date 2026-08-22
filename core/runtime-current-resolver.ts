@@ -67,6 +67,25 @@ export type RuntimeCurrentInstance = {
   live: boolean
 }
 
+export type RuntimeProfileMismatch = {
+  field: 'runtime_engine' | 'session_name' | 'checkout_path' | 'sealed_receipt'
+  expected: string | null
+  observed: string | null
+}
+
+export type RuntimeCandidateExclusion = {
+  code: 'PROFILE_MISMATCH_EXCLUDED'
+  runtime_instance_id: string
+  live: boolean
+  mismatches: RuntimeProfileMismatch[]
+  handling: 'WARN_ONLY'
+}
+
+export type RuntimeCandidateAbsenceReason =
+  | 'NO_RUNTIME_ROWS'
+  | 'PROFILE_MISMATCH_EXCLUDED'
+  | 'ONLY_STALE_PROFILE_MATCHES'
+
 export type RuntimeStaleReapCandidate = {
   runtime_instance_id: string
   agent_id: string
@@ -93,6 +112,9 @@ export type RuntimeCurrentResolution = {
   checked_at: string
   profile: RuntimeCurrentProfile | null
   current_runtime: RuntimeCurrentInstance | null
+  current_candidates: RuntimeCurrentInstance[]
+  candidate_exclusions: RuntimeCandidateExclusion[]
+  candidate_absence_reason: RuntimeCandidateAbsenceReason | null
   runtime_rows: RuntimeCurrentInstance[]
   reap_candidates: RuntimeStaleReapCandidate[]
   policy: RuntimeMemoryReadyPolicy['readback'] & { schema_version: string }
@@ -298,6 +320,9 @@ export async function resolveRuntimeMemoryReadyCurrent(
       checked_at: now.toISOString(),
       profile: null,
       current_runtime: null,
+      current_candidates: [],
+      candidate_exclusions: [],
+      candidate_absence_reason: 'NO_RUNTIME_ROWS',
       runtime_rows: [],
       reap_candidates: [],
       policy: policyReadback,
@@ -328,6 +353,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     [input.agentId, requestedRuntimeKind],
   )
   const nowMs = now.getTime()
+  const candidateExclusions: RuntimeCandidateExclusion[] = []
   const normalized = runtimeRows.map((row): RuntimeCurrentInstance => {
     const rowMetadata = object(row.metadata)
     const runtimeKind = text(row.runtime_kind) ?? 'unknown'
@@ -356,21 +382,59 @@ export async function resolveRuntimeMemoryReadyCurrent(
       profile_match: false,
       live: age !== null && age <= ttl.livenessTtlMs,
     }
-    instance.profile_match = bootstrapSelection
-      ? Boolean(
-          instance.runtime_instance_id === bootstrapSelection.runtime_instance_id &&
-          instance.runtime_engine === bootstrapSelection.runtime_engine &&
-          instance.session_name === bootstrapSelection.session_name &&
-          instance.checkout_path === bootstrapSelection.checkout_path,
-        )
-      : Boolean(
-          profile.runtime_kind &&
-          profile.session_name &&
-          profile.home_directory &&
-          instance.runtime_engine === profile.runtime_kind &&
-          instance.session_name === profile.session_name &&
-          instance.checkout_path === profile.home_directory,
-        )
+    const mismatches: RuntimeProfileMismatch[] = []
+    if (requestedRuntimeKind === 'bootstrap_bound_provider' && !bootstrapSelection) {
+      mismatches.push({ field: 'sealed_receipt', expected: null, observed: instance.runtime_instance_id })
+    } else if (bootstrapSelection) {
+      if (instance.runtime_instance_id !== bootstrapSelection.runtime_instance_id) {
+        mismatches.push({
+          field: 'sealed_receipt',
+          expected: bootstrapSelection.runtime_instance_id,
+          observed: instance.runtime_instance_id,
+        })
+      }
+      if (instance.runtime_engine !== bootstrapSelection.runtime_engine) {
+        mismatches.push({
+          field: 'runtime_engine',
+          expected: bootstrapSelection.runtime_engine,
+          observed: instance.runtime_engine,
+        })
+      }
+      if (instance.session_name !== bootstrapSelection.session_name) {
+        mismatches.push({
+          field: 'session_name',
+          expected: bootstrapSelection.session_name,
+          observed: instance.session_name,
+        })
+      }
+      if (instance.checkout_path !== bootstrapSelection.checkout_path) {
+        mismatches.push({
+          field: 'checkout_path',
+          expected: bootstrapSelection.checkout_path,
+          observed: instance.checkout_path,
+        })
+      }
+    } else {
+      if (instance.runtime_engine !== profile.runtime_kind) {
+        mismatches.push({ field: 'runtime_engine', expected: profile.runtime_kind, observed: instance.runtime_engine })
+      }
+      if (instance.session_name !== profile.session_name) {
+        mismatches.push({ field: 'session_name', expected: profile.session_name, observed: instance.session_name })
+      }
+      if (instance.checkout_path !== profile.home_directory) {
+        mismatches.push({ field: 'checkout_path', expected: profile.home_directory, observed: instance.checkout_path })
+      }
+    }
+    instance.profile_match = mismatches.length === 0
+    if (!instance.profile_match) {
+      candidateExclusions.push({
+        code: 'PROFILE_MISMATCH_EXCLUDED',
+        runtime_instance_id: instance.runtime_instance_id,
+        live: instance.live,
+        mismatches,
+        handling: 'WARN_ONLY',
+      })
+    }
     return instance
   })
 
@@ -412,7 +476,18 @@ export async function resolveRuntimeMemoryReadyCurrent(
         profile.session_name ? null : 'session',
         profile.home_directory ? null : 'home',
       ].filter((value): value is string => value !== null)
-  const current = normalized.find(row => row.live && row.profile_match) ?? null
+  const currentCandidates = normalized.filter(row => row.live && row.profile_match)
+  const current = currentCandidates[0] ?? null
+  const candidateAbsenceReason: RuntimeCandidateAbsenceReason | null = current
+    ? null
+    : normalized.length === 0
+      ? 'NO_RUNTIME_ROWS'
+      : candidateExclusions.some(row => row.live)
+        ? 'PROFILE_MISMATCH_EXCLUDED'
+        : normalized.some(row => row.profile_match)
+          ? 'ONLY_STALE_PROFILE_MATCHES'
+          : 'PROFILE_MISMATCH_EXCLUDED'
+  const liveCandidateExclusions = candidateExclusions.filter(row => row.live)
   const code = requestedRuntimeKind === 'bootstrap_bound_provider'
     ? current
       ? 'RESOLVED' as const
@@ -430,6 +505,9 @@ export async function resolveRuntimeMemoryReadyCurrent(
     checked_at: now.toISOString(),
     profile,
     current_runtime: tupleMissing.length === 0 ? current : null,
+    current_candidates: tupleMissing.length === 0 ? currentCandidates : [],
+    candidate_exclusions: candidateExclusions,
+    candidate_absence_reason: candidateAbsenceReason,
     runtime_rows: normalized,
     reap_candidates: reapCandidates,
     policy: policyReadback,
@@ -439,6 +517,11 @@ export async function resolveRuntimeMemoryReadyCurrent(
       active_runtime_rows: normalized.length,
       live_runtime_rows: normalized.filter(row => row.live).length,
       live_profile_matches: normalized.filter(row => row.live && row.profile_match).length,
+      current_candidate_count: currentCandidates.length,
+      candidate_absence_reason: candidateAbsenceReason,
+      candidate_exclusions_total: candidateExclusions.length,
+      live_candidate_exclusions: liveCandidateExclusions,
+      foreign_heartbeat_handling: 'WARN_ONLY_NO_QUARANTINE',
     },
   }
 }
