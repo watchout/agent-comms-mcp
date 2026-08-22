@@ -86,6 +86,8 @@ import {
   RuntimeMemoryReadyProjectResolutionError,
   type RuntimeMemoryReadyGateResult,
 } from '../runtime-memory-ready'
+import { loadRuntimeMemoryReadyPolicy } from '../runtime-current-resolver'
+import { MemoryReadyBackoff } from './memory-ready-backoff'
 import {
   buildTerminalBaton,
   detectNoReplyIntent,
@@ -220,6 +222,8 @@ export class StateDaemon {
   private readonly alert: AlertSink
   private readonly config: StateDaemonConfig
   private readonly wakePool: WakePool
+  private readonly memoryReadyPolicy
+  private readonly memoryReadyBackoff: MemoryReadyBackoff
   // v0.9 sub-PR 2: wake-time stall gate (§1.3a 3-layer abstraction). Sits
   // before queue action execution; if it returns a non-empty verdict array,
   // wake is skipped and a metric is emitted tagged with the verdict kind.
@@ -264,6 +268,11 @@ export class StateDaemon {
       metrics: this.metrics,
       alert: this.alert,
     })
+    this.memoryReadyPolicy = loadRuntimeMemoryReadyPolicy()
+    this.memoryReadyBackoff = new MemoryReadyBackoff(
+      this.memoryReadyPolicy.backoff.base_ms,
+      this.memoryReadyPolicy.backoff.cap_ms,
+    )
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -279,6 +288,11 @@ export class StateDaemon {
     }
     this.status = 'running'
     try {
+
+    this.metrics.inc('state_daemon_memory_ready_policy_info', {
+      schema_version: this.memoryReadyPolicy.schema_version,
+      sha256: this.memoryReadyPolicy.readback.sha256,
+    })
 
     await this.pgListen.listen('queue_event', (raw) => {
       try {
@@ -421,6 +435,8 @@ export class StateDaemon {
       || (row.status === 'done' && (this.shirubeD1AutoReceive || this.queueWorkScheduler?.runDone))
     ) {
       await this.runWakeIfNotSuppressed(row)
+    } else {
+      this.memoryReadyBackoff.forget(row.id)
     }
     // For other status values, the cron sweep handles (idempotent overlap OK).
   }
@@ -493,10 +509,12 @@ export class StateDaemon {
       const action = this.planAction(row, null, false, this.clock.now())
       this.recordQueueAction(action, row)
       const memoryReady = await this.checkMemoryReadyGate(row, action)
+      if (memoryReady === null) continue
       if (!memoryReady.ok) {
         this.recordMemoryReadyBlocked(action, row, memoryReady)
         continue
       }
+      this.recordMemoryReadyRecovered(action, row)
       await this.reclaimRow(row)
       result.reclaimed++
     }
@@ -920,10 +938,12 @@ export class StateDaemon {
     })
     this.recordQueueAction(action, row)
     const memoryReady = await this.checkMemoryReadyGate(row, action)
+    if (memoryReady === null) return false
     if (!memoryReady.ok) {
       this.recordMemoryReadyBlocked(action, row, memoryReady)
       return false
     }
+    this.recordMemoryReadyRecovered(action, row)
     if (action.kind !== 'agent_missing' && row.status !== 'pending' && await this.completeNoReplyIfRequired(row)) {
       return true
     }
@@ -1063,7 +1083,7 @@ export class StateDaemon {
     })
   }
 
-  private async checkMemoryReadyGate(row: QueueRow, action: PlannedQueueAction): Promise<RuntimeMemoryReadyGateResult> {
+  private async checkMemoryReadyGate(row: QueueRow, action: PlannedQueueAction): Promise<RuntimeMemoryReadyGateResult | null> {
     const gateRequired = action.gates.some((gate) => gate.kind === 'memory_ready' && gate.required)
     if (!gateRequired) {
       return {
@@ -1082,6 +1102,13 @@ export class StateDaemon {
         current_runtime: null,
         details: { gate_required: false },
       }
+    }
+    if (!this.memoryReadyBackoff.shouldEvaluate(row.id, this.clock.now())) {
+      this.metrics.inc('state_daemon_memory_ready_backoff_total', {
+        result: 'deferred',
+        action: action.kind,
+      })
+      return null
     }
     if (!this.config.memoryReadyGateEnabled) {
       return {
@@ -1140,6 +1167,7 @@ export class StateDaemon {
         status: row.status,
         action_kind: action.kind,
       },
+      policy: this.memoryReadyPolicy,
     })
     return {
       ...gate,
@@ -1156,13 +1184,34 @@ export class StateDaemon {
     row: QueueRow,
     gate: RuntimeMemoryReadyGateResult,
   ): void {
+    const transition = this.memoryReadyBackoff.recordBlocked(row.id, gate, this.clock.now())
     this.metrics.inc('state_daemon_wake_actions_total', {
       result: 'memory_ready_blocked',
       action: action.kind,
       reason: gate.reason,
     })
+    this.metrics.inc('state_daemon_memory_ready_backoff_total', {
+      result: 'scheduled',
+      action: action.kind,
+      reason: gate.reason,
+      attempts: transition.attempts,
+    })
+    if (transition.alert) {
+      void this.alert.alert(
+        `memory_ready gate blocked ${action.kind} for ${row.agent_id} queue_id=${row.id}: ${gate.reason}; ` +
+        `retry_at=${transition.next_evaluate_at}`,
+      )
+    }
+  }
+
+  private recordMemoryReadyRecovered(action: PlannedQueueAction, row: QueueRow): void {
+    if (!this.memoryReadyBackoff.recordReady(row.id)) return
+    this.metrics.inc('state_daemon_memory_ready_backoff_total', {
+      result: 'recovered',
+      action: action.kind,
+    })
     void this.alert.alert(
-      `memory_ready gate blocked ${action.kind} for ${row.agent_id} queue_id=${row.id}: ${gate.reason}`,
+      `memory_ready gate recovered ${action.kind} for ${row.agent_id} queue_id=${row.id}`,
     )
   }
 

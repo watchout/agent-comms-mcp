@@ -1,0 +1,16 @@
+{
+  "schema_version": "runtime-memory-ready-policy/v1",
+  "default_liveness_ttl_ms": 1800000,
+  "default_reap_ttl_ms": 86400000,
+  "backoff": {
+    "base_ms": 30000,
+    "cap_ms": 1800000
+  },
+  "groups": [
+    {
+      "runtime_kind": "local_process",
+      "source": "server.ts",
+      "heartbeat_interval_ms": 300000
+    }
+  ]
+}

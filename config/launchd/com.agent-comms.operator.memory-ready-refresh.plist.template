@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agent-comms.operator.memory-ready-refresh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BUN_PATH__</string>
+    <string>__REPO_ROOT__/scripts/operator/memory-ready-refresh.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_ROOT__/memory-ready-refresh.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_ROOT__/memory-ready-refresh.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DATABASE_URL</key>
+    <string>__DATABASE_URL__</string>
+    <key>STATE_DAEMON_AGENT_DENYLIST</key>
+    <string>__STATE_DAEMON_AGENT_DENYLIST__</string>
+    <key>RUNTIME_MEMORY_READY_POLICY_FILE</key>
+    <string>__REPO_ROOT__/config/runtime-memory-ready-policy.json</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

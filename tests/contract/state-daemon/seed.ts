@@ -94,9 +94,12 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   // metadata key で abstract). status / last_seen_at / runtime はそれぞれ既存 column.
   const metadata: Record<string, unknown> = {}
   metadata.memory_project = 'agent-comms-mcp'
-  if (a.tmux_session !== null) {
-    metadata.tmux_session = a.tmux_session ?? `${a.agent_id}-session`
-  }
+  // A session identity remains part of the registered memory-ready tuple even
+  // for a non-TUI runner. `tmux_session: null` means the planner must not use a
+  // tmux wake path; it does not make the runtime instance anonymous.
+  metadata.tmux_session = a.tmux_session === null
+    ? `${a.agent_id}-codex`
+    : a.tmux_session ?? `${a.agent_id}-session`
   if (a.discord_id) {
     metadata.discord_id = a.discord_id
   }
@@ -105,8 +108,8 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
     `INSERT INTO agents
        (agent_id, display_name, agent_type, runtime, status, last_seen_at,
         last_wake_attempt_at, channel_port, metadata, runtime_engine_preference,
-        profile_enabled, disabled_at)
-     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL)
+        profile_enabled, disabled_at, home_directory)
+     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL, $8)
      ON CONFLICT (agent_id) DO UPDATE SET
        runtime = EXCLUDED.runtime,
        runtime_engine_preference = EXCLUDED.runtime_engine_preference,
@@ -114,6 +117,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
        last_seen_at = EXCLUDED.last_seen_at,
        last_wake_attempt_at = NULL,
        metadata = EXCLUDED.metadata,
+       home_directory = EXCLUDED.home_directory,
        profile_enabled = TRUE,
        disabled_at = NULL`,
     [
@@ -124,13 +128,14 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
       a.last_seen_at ?? new Date(),
       JSON.stringify(metadata),
       a.runtime_engine_preference ?? null,
+      '/tmp/state-daemon-test-checkout',
     ],
   )
   await c.query(`UPDATE agents SET channel_port=$2 WHERE agent_id=$1`, [a.agent_id, port])
   if (a.memoryReady === false || port === null) return
 
   const runtimeInstanceId = a.runtime_instance_id ?? randomUUID()
-  const sessionName = a.tmux_session === null ? `${a.agent_id}-codex` : metadata.tmux_session as string
+  const sessionName = metadata.tmux_session as string
   const runtimeStartedAt = '2026-05-01T00:00:00.000Z'
   const completedAt = '2026-05-01T00:00:01.000Z'
   await c.query(
@@ -150,11 +155,11 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
     [
       runtimeInstanceId,
       a.agent_id,
-      a.runtime_engine_preference ?? a.runtime ?? 'TUI',
+      a.runtime ?? 'TUI',
       sessionName,
       port,
       runtimeStartedAt,
-      a.last_seen_at ?? completedAt,
+      a.last_seen_at ?? '2099-01-01T00:00:00.000Z',
     ],
   )
   await c.query(
