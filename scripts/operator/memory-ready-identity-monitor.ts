@@ -17,7 +17,8 @@ Usage:
     --database-url <postgres-url> [--policy <path>]
 
 The command runs in an explicit read-only transaction and reports typed
-PROFILE_MISMATCH_EXCLUDED and SUPERSEDED_EVIDENCE_BINDING findings.
+REGISTRATION_PROFILE_MISMATCH, PROFILE_MISMATCH_DEPRIORITIZED, and
+SUPERSEDED_EVIDENCE_BINDING findings.
 `
 }
 

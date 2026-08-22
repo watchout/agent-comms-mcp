@@ -35,6 +35,26 @@ export type RuntimeHeartbeatInput = {
   connectorMetadata?: Record<string, unknown>
 }
 
+export const RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA = 'runtime-registration-metadata-provenance/v1' as const
+
+export type RuntimeRegistrationValueSource = 'registered' | 'ambient' | 'missing'
+
+export type RuntimeRegistrationFieldProvenance = {
+  source: RuntimeRegistrationValueSource
+  effective_value: string | null
+  registered_value: string | null
+  ambient_value: string | null
+  mismatch: boolean
+}
+
+export type RuntimeRegistrationMetadataProvenance = {
+  schema_version: typeof RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA
+  agent_id: string
+  profile_found: boolean
+  session_name: RuntimeRegistrationFieldProvenance
+  checkout_path: RuntimeRegistrationFieldProvenance
+}
+
 export type RuntimeHeartbeatResult = {
   ok: true
   runtime_instance_id: string
@@ -48,6 +68,7 @@ export type RuntimeHeartbeatResult = {
   endpoint_lease_expires_at: string | Date | null
   endpoint_lease_heartbeat_at: string | Date | null
   memory_ready_identity: RuntimeMemoryReadyIdentityReconcileResult | null
+  registration_metadata_provenance: RuntimeRegistrationMetadataProvenance
 }
 
 export type RuntimeHeartbeatOptions = {
@@ -59,6 +80,7 @@ type AgentWorkspaceProfile = {
   home_directory: string | null
   profile_revision: number | null
   profile_source: string | null
+  metadata: Record<string, unknown>
 }
 
 type RuntimeConnectorHeartbeatResult = {
@@ -126,15 +148,26 @@ async function selectAgentWorkspaceProfile(
   agentId: string,
 ): Promise<AgentWorkspaceProfile | null> {
   const result = await db.query(
-    `SELECT org_id, home_directory, profile_revision, profile_source
+    `SELECT org_id, home_directory, profile_revision, profile_source, metadata
        FROM agents
       WHERE agent_id = $1
         AND COALESCE(profile_enabled, true) = true
       LIMIT 1`,
     [agentId],
-  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
+  )
   const row = result.rows[0]
   if (!row) return null
+  let metadata: Record<string, unknown> = {}
+  if (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) {
+    metadata = row.metadata as Record<string, unknown>
+  } else if (typeof row.metadata === 'string' && row.metadata.trim()) {
+    try {
+      const parsed = JSON.parse(row.metadata)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed
+    } catch {
+      metadata = {}
+    }
+  }
   return {
     org_id: typeof row.org_id === 'string' ? row.org_id : null,
     home_directory: typeof row.home_directory === 'string' ? row.home_directory : null,
@@ -142,16 +175,75 @@ async function selectAgentWorkspaceProfile(
       ? null
       : Number(row.profile_revision),
     profile_source: typeof row.profile_source === 'string' ? row.profile_source : null,
+    metadata,
+  }
+}
+
+function normalizedText(value: string | null | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+function registrationField(
+  registeredValue: string | null,
+  ambientValue: string | null,
+  preferRegistered: boolean,
+): RuntimeRegistrationFieldProvenance {
+  const source: RuntimeRegistrationValueSource = preferRegistered && registeredValue
+    ? 'registered'
+    : ambientValue
+      ? 'ambient'
+      : 'missing'
+  return {
+    source,
+    effective_value: preferRegistered ? registeredValue ?? ambientValue : ambientValue,
+    registered_value: registeredValue,
+    ambient_value: ambientValue,
+    mismatch: registeredValue !== ambientValue,
+  }
+}
+
+function resolveRuntimeRegistrationMetadata(
+  input: RuntimeHeartbeatInput,
+  profile: AgentWorkspaceProfile | null,
+): {
+  sessionName: string | null
+  checkoutPath: string | null
+  provenance: RuntimeRegistrationMetadataProvenance
+} {
+  const ambientSession = normalizedText(input.sessionName)
+  const ambientCheckout = normalizeCheckoutPath(input.checkoutPath)
+  const registeredSession = normalizedText(
+    typeof profile?.metadata.tmux_session === 'string' ? profile.metadata.tmux_session : null,
+  )
+  const registeredCheckout = normalizeCheckoutPath(profile?.home_directory)
+  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process'
+  const sessionName = registrationField(registeredSession, ambientSession, preferRegistered)
+  const checkoutPath = registrationField(registeredCheckout, ambientCheckout, preferRegistered)
+  return {
+    sessionName: sessionName.effective_value,
+    checkoutPath: checkoutPath.effective_value,
+    provenance: {
+      schema_version: RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA,
+      agent_id: input.agentId,
+      profile_found: profile !== null,
+      session_name: sessionName,
+      checkout_path: checkoutPath,
+    },
   }
 }
 
 async function ensureWorkspaceBinding(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
+  profileInput?: AgentWorkspaceProfile | null,
+  observedCheckoutPath?: string | null,
 ): Promise<string | null> {
   const checkoutPath = normalizeCheckoutPath(input.checkoutPath)
   const explicitWorkspaceId = input.workspaceId?.trim() || null
-  const profile = await selectAgentWorkspaceProfile(db, input.agentId)
+  const profile = profileInput === undefined
+    ? await selectAgentWorkspaceProfile(db, input.agentId)
+    : profileInput
   const profileHomeDirectory = normalizeCheckoutPath(profile?.home_directory)
   const workspacePath = profileHomeDirectory ?? checkoutPath
   if (!workspacePath && !explicitWorkspaceId) return null
@@ -169,7 +261,9 @@ async function ensureWorkspaceBinding(
       workspace_path_source: profileHomeDirectory ? 'agent_profile.home_directory' : 'runtime.checkout_path',
       profile_revision: profile?.profile_revision ?? null,
       profile_source: profile?.profile_source ?? null,
-      runtime_checkout_path: checkoutPath,
+      runtime_checkout_path: observedCheckoutPath === undefined
+        ? checkoutPath
+        : normalizeCheckoutPath(observedCheckoutPath),
     })
     const workspace = await db.query<{ workspace_id: string }>(
       `INSERT INTO agent_workspaces
@@ -439,8 +533,19 @@ export async function heartbeatRuntimeInstance(
   input: RuntimeHeartbeatInput,
   options: RuntimeHeartbeatOptions = {},
 ): Promise<RuntimeHeartbeatResult> {
-  const workspaceId = await ensureWorkspaceBinding(db, input)
-  const metadata = JSON.stringify(input.metadata ?? {})
+  const profile = await selectAgentWorkspaceProfile(db, input.agentId)
+  const registration = resolveRuntimeRegistrationMetadata(input, profile)
+  const effectiveInput: RuntimeHeartbeatInput = {
+    ...input,
+    sessionName: registration.sessionName,
+    checkoutPath: registration.checkoutPath,
+    metadata: {
+      ...(input.metadata ?? {}),
+      registration_metadata_provenance: registration.provenance,
+    },
+  }
+  const workspaceId = await ensureWorkspaceBinding(db, effectiveInput, profile, input.checkoutPath)
+  const metadata = JSON.stringify(effectiveInput.metadata ?? {})
   const runtime = await db.query(
     `INSERT INTO agent_runtime_instances
        (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
@@ -468,41 +573,41 @@ export async function heartbeatRuntimeInstance(
        metadata = COALESCE(agent_runtime_instances.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
      RETURNING runtime_instance_id, agent_id, status, last_seen_at`,
     [
-      input.runtimeInstanceId,
-      input.agentId,
+      effectiveInput.runtimeInstanceId,
+      effectiveInput.agentId,
       workspaceId,
-      input.runtimeEngine ?? 'unknown',
-      input.runtimeKind ?? 'local_process',
-      input.hostId ?? hostname(),
-      input.sessionName ?? null,
-      input.processId ?? null,
-      input.port ?? null,
-      input.checkoutPath ?? null,
-      input.commitSha ?? null,
-      input.endpointUri ?? null,
+      effectiveInput.runtimeEngine ?? 'unknown',
+      effectiveInput.runtimeKind ?? 'local_process',
+      effectiveInput.hostId ?? hostname(),
+      effectiveInput.sessionName ?? null,
+      effectiveInput.processId ?? null,
+      effectiveInput.port ?? null,
+      effectiveInput.checkoutPath ?? null,
+      effectiveInput.commitSha ?? null,
+      effectiveInput.endpointUri ?? null,
       metadata,
     ],
   )
 
-  const requestedRuntimeKind = input.runtimeKind?.trim() || 'local_process'
+  const requestedRuntimeKind = effectiveInput.runtimeKind?.trim() || 'local_process'
   const reconcileMemoryReadyIdentity = options.reconcileMemoryReadyIdentity ?? reconcileRuntimeMemoryReadyIdentity
   const memoryReadyIdentity = requestedRuntimeKind === 'local_process'
     ? await reconcileMemoryReadyIdentity(db, {
-        agentId: input.agentId,
-        observedRuntimeInstanceId: input.runtimeInstanceId,
+        agentId: effectiveInput.agentId,
+        observedRuntimeInstanceId: effectiveInput.runtimeInstanceId,
         requestedRuntimeKind,
       })
     : null
 
-  const connectorRowsUpserted = await ensureRuntimeConnector(db, input)
+  const connectorRowsUpserted = await ensureRuntimeConnector(db, effectiveInput)
   const holderConnectorInstanceId = connectorRowsUpserted.connectorInstanceId
-  const endpointLease = await heartbeatRuntimeEndpointLease(db, input, holderConnectorInstanceId)
+  const endpointLease = await heartbeatRuntimeEndpointLease(db, effectiveInput, holderConnectorInstanceId)
 
   const row = runtime.rows[0]
   return {
     ok: true,
-    runtime_instance_id: String(row?.runtime_instance_id ?? input.runtimeInstanceId),
-    agent_id: String(row?.agent_id ?? input.agentId),
+    runtime_instance_id: String(row?.runtime_instance_id ?? effectiveInput.runtimeInstanceId),
+    agent_id: String(row?.agent_id ?? effectiveInput.agentId),
     workspace_id: workspaceId,
     status: String(row?.status ?? 'running'),
     last_seen_at: row?.last_seen_at ?? null,
@@ -512,5 +617,6 @@ export async function heartbeatRuntimeInstance(
     endpoint_lease_expires_at: endpointLease?.expiresAt ?? null,
     endpoint_lease_heartbeat_at: endpointLease?.heartbeatAt ?? null,
     memory_ready_identity: memoryReadyIdentity,
+    registration_metadata_provenance: registration.provenance,
   }
 }

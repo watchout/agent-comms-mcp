@@ -808,6 +808,7 @@ export async function evaluateRuntimeMemoryReadyGate(
     details: {
       policy: currentResolution.policy,
       resolver_code: currentResolution.code,
+      ...currentResolution.details,
     },
   }
   if (!currentRuntime.runtime_instance_id) {

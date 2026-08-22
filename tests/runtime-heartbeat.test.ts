@@ -338,6 +338,7 @@ describe('runtime heartbeat evidence', () => {
               home_directory: profileHome,
               profile_revision: 7,
               profile_source: 'agent.profile.set',
+              metadata: { tmux_session: 'discord-agent-memory' },
             }],
             rowCount: 1,
           }
@@ -375,6 +376,7 @@ describe('runtime heartbeat evidence', () => {
       runtimeInstanceId: '00000000-0000-4000-8000-000000000002',
       agentId: 'agent-mem-dev',
       runtimeEngine: 'codex',
+      sessionName: 'ambient-server-session',
       checkoutPath: runtimeCheckout,
       metadata: { source: 'test' },
     })
@@ -390,7 +392,164 @@ describe('runtime heartbeat evidence', () => {
       runtime_checkout_path: runtimeCheckout,
     })
     expect(runtimeInsertParams?.[2]).toBe(expectedWorkspaceId)
-    expect(runtimeInsertParams?.[9]).toBe(runtimeCheckout)
+    expect(runtimeInsertParams?.[6]).toBe('discord-agent-memory')
+    expect(runtimeInsertParams?.[9]).toBe(profileHome)
+    expect(JSON.parse(runtimeInsertParams?.[12])).toMatchObject({
+      source: 'test',
+      registration_metadata_provenance: {
+        schema_version: 'runtime-registration-metadata-provenance/v1',
+        agent_id: 'agent-mem-dev',
+        profile_found: true,
+        session_name: {
+          source: 'registered',
+          effective_value: 'discord-agent-memory',
+          registered_value: 'discord-agent-memory',
+          ambient_value: 'ambient-server-session',
+          mismatch: true,
+        },
+        checkout_path: {
+          source: 'registered',
+          effective_value: profileHome,
+          registered_value: profileHome,
+          ambient_value: runtimeCheckout,
+          mismatch: true,
+        },
+      },
+    })
+    expect(result.registration_metadata_provenance).toEqual(
+      JSON.parse(runtimeInsertParams?.[12]).registration_metadata_provenance,
+    )
+  })
+
+  test('registers the codex-cto MCP runtime from its seat profile without PWD or TMUX metadata', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = []
+    const db = {
+      async query(sql: string, params: any[] = []) {
+        calls.push({ sql, params })
+        if (sql.includes('FROM agents')) {
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/Users/yuji/Developer/codex',
+              profile_revision: 12,
+              profile_source: 'registered-seat',
+              metadata: JSON.stringify({ tmux_session: 'discord-cto' }),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO agent_workspaces')) {
+          return { rows: [{ workspace_id: 'local:codex-cto' }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO agent_workspace_bindings')) return { rows: [], rowCount: 1 }
+        if (sql.includes('INSERT INTO agent_runtime_instances')) {
+          return {
+            rows: [{
+              runtime_instance_id: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
+              agent_id: 'codex-cto',
+              status: 'running',
+              last_seen_at: '2026-08-23T00:00:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('SELECT lease_id, fencing_token, expires_at')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT COALESCE(MAX(fencing_token), 0)')) {
+          return { rows: [{ max_token: 0 }], rowCount: 1 }
+        }
+        if (sql.includes('INSERT INTO control_plane_leases')) {
+          return {
+            rows: [{
+              lease_id: 'lease-codex-cto',
+              heartbeat_at: '2026-08-23T00:00:00.000Z',
+              expires_at: '2026-08-23T00:10:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+
+    const result = await heartbeatRuntimeInstance(
+      db,
+      {
+        runtimeInstanceId: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
+        agentId: 'codex-cto',
+        runtimeEngine: 'TUI',
+        runtimeKind: 'local_process',
+        sessionName: null,
+        checkoutPath: '/Users/yuji/Developer/agent-comms-mcp',
+        processId: 35296,
+        port: 8808,
+        metadata: { source: 'server.ts' },
+      },
+      {
+        reconcileMemoryReadyIdentity: async (_db, input) => ({
+          agent_id: input.agentId,
+          observed_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+          current_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+          previous_evidence_runtime_instance_id: null,
+          status: 'UNCHANGED',
+          code: 'EVIDENCE_ALREADY_CURRENT',
+          evidence_id: 1,
+          evidence_log_id: null,
+          details: {},
+        }),
+      },
+    )
+
+    const runtimeInsert = calls.find(call => call.sql.includes('INSERT INTO agent_runtime_instances'))
+    expect(runtimeInsert?.params[6]).toBe('discord-cto')
+    expect(runtimeInsert?.params[9]).toBe('/Users/yuji/Developer/codex')
+    expect(JSON.parse(runtimeInsert?.params[12]).registration_metadata_provenance).toEqual({
+      schema_version: 'runtime-registration-metadata-provenance/v1',
+      agent_id: 'codex-cto',
+      profile_found: true,
+      session_name: {
+        source: 'registered',
+        effective_value: 'discord-cto',
+        registered_value: 'discord-cto',
+        ambient_value: null,
+        mismatch: true,
+      },
+      checkout_path: {
+        source: 'registered',
+        effective_value: '/Users/yuji/Developer/codex',
+        registered_value: '/Users/yuji/Developer/codex',
+        ambient_value: '/Users/yuji/Developer/agent-comms-mcp',
+        mismatch: true,
+      },
+    })
+    expect(result.registration_metadata_provenance.session_name.source).toBe('registered')
+    expect(result.registration_metadata_provenance.checkout_path.source).toBe('registered')
+
+    await heartbeatRuntimeInstance(db, {
+      runtimeInstanceId: '00000000-0000-4000-8000-000000000099',
+      agentId: 'codex-cto',
+      runtimeEngine: 'codex',
+      runtimeKind: 'bootstrap_bound_provider',
+      sessionName: 'sealed-bootstrap-session',
+      checkoutPath: '/tmp/sealed-bootstrap-checkout',
+      processId: 40000,
+      port: 9808,
+      metadata: { source: 'provider' },
+    })
+    const bootstrapInsert = calls.filter(call => call.sql.includes('INSERT INTO agent_runtime_instances')).at(-1)
+    expect(bootstrapInsert?.params[6]).toBe('sealed-bootstrap-session')
+    expect(bootstrapInsert?.params[9]).toBe('/tmp/sealed-bootstrap-checkout')
+    expect(JSON.parse(bootstrapInsert?.params[12]).registration_metadata_provenance).toMatchObject({
+      session_name: {
+        source: 'ambient',
+        effective_value: 'sealed-bootstrap-session',
+        registered_value: 'discord-cto',
+      },
+      checkout_path: {
+        source: 'ambient',
+        effective_value: '/tmp/sealed-bootstrap-checkout',
+        registered_value: '/Users/yuji/Developer/codex',
+      },
+    })
   })
 
   test('infers session name and port from runtime environment', () => {

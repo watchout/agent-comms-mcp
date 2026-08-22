@@ -58,6 +58,7 @@ async function seedRuntime(input: {
   port: number
   status: 'running' | 'stopped'
   seen: string
+  metadata?: Record<string, unknown>
 }): Promise<void> {
   await db.execute(
     `INSERT INTO agent_runtime_instances
@@ -73,7 +74,7 @@ async function seedRuntime(input: {
       input.status,
       input.status === 'stopped' ? input.seen : null,
       input.seen,
-      JSON.stringify({ source: 'server.ts' }),
+      JSON.stringify({ source: 'server.ts', ...(input.metadata ?? {}) }),
     ],
   )
 }
@@ -184,7 +185,7 @@ describe('runtime memory-ready identity reconciliation', () => {
     expect(idempotent.status).toBe('UNCHANGED')
   })
 
-  test('read-only monitor lists codex-cto foreign heartbeat and devauditor superseded binding', async () => {
+  test('read-only monitor types codex-cto registration drift and devauditor superseded binding', async () => {
     await seedAgent({ agentId: 'codex-cto', session: 'discord-cto', home: '/work/codex', port: 8808 })
     await seedRuntime({
       runtimeId: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
@@ -194,6 +195,27 @@ describe('runtime memory-ready identity reconciliation', () => {
       port: 8808,
       status: 'running',
       seen: '2026-08-23T00:09:59.000Z',
+      metadata: {
+        registration_metadata_provenance: {
+          schema_version: 'runtime-registration-metadata-provenance/v1',
+          agent_id: 'codex-cto',
+          profile_found: true,
+          session_name: {
+            source: 'missing',
+            effective_value: null,
+            registered_value: 'discord-cto',
+            ambient_value: null,
+            mismatch: true,
+          },
+          checkout_path: {
+            source: 'ambient',
+            effective_value: '/work/agent-comms-mcp',
+            registered_value: '/work/codex',
+            ambient_value: '/work/agent-comms-mcp',
+            mismatch: true,
+          },
+        },
+      },
     })
 
     await seedAgent({ agentId: 'devauditor', session: 'discord-auditor', home: '/work/dev-auditor', port: 8810 })
@@ -231,14 +253,23 @@ describe('runtime memory-ready identity reconciliation', () => {
     expect(report.read_only).toBe(true)
     expect(report.summary).toEqual({
       inventory: 2,
-      profile_mismatch_excluded: 1,
+      profile_mismatch_excluded: 0,
+      registration_profile_mismatch: 1,
+      profile_mismatch_deprioritized: 0,
       superseded_evidence_binding: 1,
     })
     expect(report.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        code: 'PROFILE_MISMATCH_EXCLUDED',
+        code: 'REGISTRATION_PROFILE_MISMATCH',
         agent_id: 'codex-cto',
         runtime_instance_id: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
+        details: expect.objectContaining({
+          current: true,
+          handling: 'WARN_ONLY_CURRENT_FALLBACK',
+          registration_metadata_provenance: expect.objectContaining({
+            schema_version: 'runtime-registration-metadata-provenance/v1',
+          }),
+        }),
       }),
       expect.objectContaining({
         code: 'SUPERSEDED_EVIDENCE_BINDING',

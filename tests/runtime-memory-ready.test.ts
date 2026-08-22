@@ -371,14 +371,15 @@ describe('runtime memory-ready evidence gate', () => {
       })
 
       expect(gate.ok).toBe(false)
-      if (profileMismatch.label === 'port') {
-        expect(gate.reason).toBe(profileMismatch.reason)
-        expect(gate.details).toMatchObject(profileMismatch.details)
-      } else {
-        expect(gate.reason).toBe('no_current_runtime_for_profile')
+      expect(gate.reason).toBe(profileMismatch.reason)
+      expect(gate.details).toMatchObject(profileMismatch.details)
+      if (profileMismatch.label !== 'port') {
         expect(gate.details).toMatchObject({
-          code: 'NO_CURRENT_RUNTIME_FOR_PROFILE',
-          repair_signal: 'RUNTIME_REREGISTRATION_REQUIRED',
+          profile_mismatch_observations: [expect.objectContaining({
+            code: 'REGISTRATION_PROFILE_MISMATCH',
+            current: true,
+            handling: 'WARN_ONLY_CURRENT_FALLBACK',
+          })],
         })
       }
     })
