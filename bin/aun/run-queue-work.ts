@@ -6,6 +6,7 @@ import { createDbAdapter } from '../../core/db'
 import {
   QUEUE_WORK_RESULT_VERSION,
   finalizeDoneQueueWork,
+  queueWorkResultLooksValid,
   runReceivedQueueWork,
   type LlmRuntimeAdapter,
   type QueueWorkClaimFence,
@@ -16,6 +17,7 @@ import {
   type QueueWorkRuntimeResultSummary,
   type QueueWorkResult,
   type QueueWorkWritebackSender,
+  QueueWorkAdapterInvocationError,
 } from '../../core/queue-work'
 
 export interface RunQueueWorkOptions {
@@ -225,7 +227,7 @@ function queueWorkPrompt(envelope: QueueWorkEnvelope, subjectRoot: string): stri
   ].join('\n')
 }
 
-function parseQueueWorkResultJson(raw: string): QueueWorkResult {
+export function parseQueueWorkResultJson(raw: string): QueueWorkResult {
   const trimmed = raw.trim()
   if (!trimmed) throw new Error('codex exec produced an empty final message')
   try {
@@ -238,6 +240,141 @@ function parseQueueWorkResultJson(raw: string): QueueWorkResult {
     }
     throw new Error('codex exec final message was not JSON')
   }
+}
+
+function withAdapterEvidence(result: QueueWorkResult, evidence: string[]): QueueWorkResult {
+  return {
+    ...result,
+    evidence: Array.from(new Set([...(result.evidence ?? []), ...evidence])),
+  }
+}
+
+/**
+ * Secondary result transport for a successful Codex invocation whose
+ * --output-last-message file was not materialized. Only the exact final
+ * agent_message item from the same JSONL stream is eligible.
+ */
+export function parseCodexJsonlQueueWorkFallback(stdout: string): QueueWorkResult {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  let finalText: string | null = null
+  for (const [index, line] of lines.entries()) {
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      throw new QueueWorkAdapterInvocationError(
+        'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+        `codex output-last-message missing and JSONL fallback is malformed at line ${index + 1}`,
+        false,
+      )
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+    const record = event as Record<string, unknown>
+    const item = record.item && typeof record.item === 'object' && !Array.isArray(record.item)
+      ? record.item as Record<string, unknown>
+      : null
+    if (
+      record.type === 'item.completed'
+      && item?.type === 'agent_message'
+      && typeof item.text === 'string'
+      && item.text.trim()
+    ) {
+      finalText = item.text
+    }
+  }
+  if (!finalText) {
+    throw new QueueWorkAdapterInvocationError(
+      'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      'codex output-last-message missing and JSONL fallback has no completed agent_message',
+      false,
+    )
+  }
+  let parsed: QueueWorkResult
+  try {
+    parsed = parseQueueWorkResultJson(finalText)
+  } catch {
+    throw new QueueWorkAdapterInvocationError(
+      'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      'codex output-last-message missing and JSONL agent_message violates queue_work_result_v1',
+      false,
+    )
+  }
+  if (!queueWorkResultLooksValid(parsed)) {
+    throw new QueueWorkAdapterInvocationError(
+      'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      'codex output-last-message missing and JSONL agent_message violates queue_work_result_v1',
+      false,
+    )
+  }
+  return withAdapterEvidence(parsed, [
+    'runtime_adapter_fallback=codex_jsonl_agent_message',
+    'runtime_adapter_primary_failure=CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+  ])
+}
+
+export function parseClaudeStreamJsonQueueWorkResult(stdout: string): QueueWorkResult {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  let finalEvent: Record<string, unknown> | null = null
+  for (const [index, line] of lines.entries()) {
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      throw new QueueWorkAdapterInvocationError(
+        'CLAUDE_FINAL_RESULT_MISSING',
+        `claude stream-json is malformed at line ${index + 1}`,
+        false,
+      )
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+    const record = event as Record<string, unknown>
+    if (record.type === 'result') finalEvent = record
+  }
+  if (!finalEvent) {
+    throw new QueueWorkAdapterInvocationError(
+      'CLAUDE_FINAL_RESULT_MISSING',
+      'claude stream-json has no final result event',
+      false,
+    )
+  }
+  if (finalEvent.is_error === true) {
+    throw new QueueWorkAdapterInvocationError(
+      'RUNTIME_NONZERO_EXIT',
+      'claude final result event reports is_error=true',
+      true,
+    )
+  }
+  const structured = finalEvent.structured_output
+  let parsed: QueueWorkResult
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    parsed = structured as QueueWorkResult
+  } else if (typeof finalEvent.result === 'string') {
+    try {
+      parsed = parseQueueWorkResultJson(finalEvent.result)
+    } catch {
+      throw new QueueWorkAdapterInvocationError(
+        'ADAPTER_RESULT_INVALID',
+        'claude final result violates queue_work_result_v1',
+        false,
+      )
+    }
+  } else if (finalEvent.result && typeof finalEvent.result === 'object' && !Array.isArray(finalEvent.result)) {
+    parsed = finalEvent.result as QueueWorkResult
+  } else {
+    throw new QueueWorkAdapterInvocationError(
+      'CLAUDE_FINAL_RESULT_MISSING',
+      'claude final result event has no structured_output or result',
+      false,
+    )
+  }
+  if (!queueWorkResultLooksValid(parsed)) {
+    throw new QueueWorkAdapterInvocationError(
+      'ADAPTER_RESULT_INVALID',
+      'claude final result violates queue_work_result_v1',
+      false,
+    )
+  }
+  return withAdapterEvidence(parsed, ['runtime_adapter_engine=claude-code'])
 }
 
 function snippet(label: string, value: string | undefined): string {
@@ -323,7 +460,7 @@ export function buildCodexExecQueueWorkCommand(input: {
   }
 }
 
-class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
+export class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'codex-exec'
   capabilities = {
     input: 'stdin_context',
@@ -353,7 +490,11 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         outputLastMessagePath,
       })
       if (!existsSync(plan.schemaPath)) {
-        throw new Error(`queue work result schema missing: ${plan.schemaPath}`)
+        throw new QueueWorkAdapterInvocationError(
+          'ADAPTER_CONFIGURATION_INVALID',
+          `queue work result schema missing: ${plan.schemaPath}`,
+          false,
+        )
       }
       const child = await execFileAsync(plan.command, plan.args, {
         cwd: this.cwd,
@@ -363,18 +504,163 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         maxBuffer: 1024 * 1024 * 20,
       })
       if (child.status !== 0) {
-        throw new Error(describeCodexExecFailure({
-          result: child,
-          outputLastMessagePath,
-        }))
+        throw new QueueWorkAdapterInvocationError(
+          child.killed || child.signal ? 'RUNTIME_TIMEOUT' : 'RUNTIME_NONZERO_EXIT',
+          describeCodexExecFailure({ result: child, outputLastMessagePath }),
+          true,
+        )
       }
       if (!existsSync(outputLastMessagePath)) {
-        throw new Error('codex exec did not write --output-last-message')
+        return parseCodexJsonlQueueWorkFallback(child.stdout)
       }
-      return parseQueueWorkResultJson(readFileSync(outputLastMessagePath, 'utf8'))
+      try {
+        return parseQueueWorkResultJson(readFileSync(outputLastMessagePath, 'utf8'))
+      } catch {
+        throw new QueueWorkAdapterInvocationError(
+          'ADAPTER_RESULT_INVALID',
+          'codex output-last-message violates queue_work_result_v1',
+          false,
+        )
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  }
+}
+
+export interface ClaudeCodeQueueWorkCommand {
+  command: string
+  args: string[]
+  stdin: string
+  schemaPath: string
+}
+
+export function buildClaudeCodeQueueWorkCommand(input: {
+  envelope: QueueWorkEnvelope
+  cwd: string
+  subjectRoot?: string
+  env: NodeJS.ProcessEnv
+}): ClaudeCodeQueueWorkCommand {
+  const subjectRoot = input.subjectRoot ?? input.cwd
+  const schemaPath = resolve(
+    subjectRoot,
+    input.env.AUN_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_OUTPUT_SCHEMA
+      ?? defaultQueueWorkResultSchemaPath(subjectRoot),
+  )
+  if (!existsSync(schemaPath)) {
+    throw new QueueWorkAdapterInvocationError(
+      'ADAPTER_CONFIGURATION_INVALID',
+      `queue work result schema missing: ${schemaPath}`,
+      false,
+    )
+  }
+  const schemaJson = JSON.stringify(JSON.parse(readFileSync(schemaPath, 'utf8')))
+  const command = input.env.AUN_QUEUE_WORK_CLAUDE_EXECUTABLE
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_EXECUTABLE
+    ?? 'claude'
+  const args = [
+    '-p',
+    '--output-format', 'stream-json',
+    '--json-schema', schemaJson,
+    '--permission-mode', input.env.AUN_QUEUE_WORK_CLAUDE_PERMISSION_MODE
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_PERMISSION_MODE
+      ?? 'dontAsk',
+    '--tools', input.env.AUN_QUEUE_WORK_CLAUDE_TOOLS
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TOOLS
+      ?? '',
+    '--allowedTools', input.env.AUN_QUEUE_WORK_CLAUDE_ALLOWED_TOOLS
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_ALLOWED_TOOLS
+      ?? '',
+    '--mcp-config', input.env.AUN_QUEUE_WORK_CLAUDE_MCP_CONFIG
+      ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_MCP_CONFIG
+      ?? '{}',
+    '--strict-mcp-config',
+    '--safe-mode',
+    '--no-session-persistence',
+    '--verbose',
+  ]
+  const model = input.env.AUN_QUEUE_WORK_CLAUDE_MODEL
+    ?? input.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_MODEL
+  if (model) args.push('--model', model)
+  return {
+    command,
+    args,
+    stdin: queueWorkPrompt(input.envelope, subjectRoot),
+    schemaPath,
+  }
+}
+
+export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
+  runtime_id = 'claude-code'
+  capabilities = {
+    input: 'stdin_context',
+    output: 'jsonl_events',
+    supportsBareMode: true,
+    supportsResume: false,
+    supportsToolAllowlist: true,
+    supportsSandbox: true,
+    supportsUsageMetadata: true,
+  } as const
+
+  constructor(
+    private readonly cwd: string,
+    private readonly subjectRoot: string,
+    private readonly env: NodeJS.ProcessEnv,
+  ) {}
+
+  async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
+    const plan = buildClaudeCodeQueueWorkCommand({
+      envelope,
+      cwd: this.cwd,
+      subjectRoot: this.subjectRoot,
+      env: this.env,
+    })
+    const child = await execFileAsync(plan.command, plan.args, {
+      cwd: this.cwd,
+      env: this.env,
+      input: plan.stdin,
+      timeout: Number.parseInt(
+        this.env.AUN_QUEUE_WORK_CLAUDE_TIMEOUT_MS
+          ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS
+          ?? this.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS
+          ?? this.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS
+          ?? '600000',
+        10,
+      ),
+      maxBuffer: 1024 * 1024 * 20,
+    })
+    if (child.status !== 0) {
+      throw new QueueWorkAdapterInvocationError(
+        child.killed || child.signal ? 'RUNTIME_TIMEOUT' : 'RUNTIME_NONZERO_EXIT',
+        `claude -p failed status=${child.status} ${snippet('stderr', child.stderr)} ${snippet('stdout', child.stdout)}`,
+        true,
+      )
+    }
+    return parseClaudeStreamJsonQueueWorkResult(child.stdout)
+  }
+}
+
+class FailClosedRuntimePreferenceAdapter implements LlmRuntimeAdapter {
+  capabilities = {
+    input: 'stdin_context',
+    output: 'schema_json',
+    supportsBareMode: true,
+    supportsResume: false,
+    supportsToolAllowlist: false,
+    supportsSandbox: true,
+    supportsUsageMetadata: false,
+  } as const
+
+  constructor(
+    readonly runtime_id: 'runtime-preference-required' | 'runtime-preference-unsupported',
+  ) {}
+
+  async invoke(): Promise<QueueWorkResult> {
+    const code = this.runtime_id === 'runtime-preference-required'
+      ? 'RUNTIME_ENGINE_PREFERENCE_REQUIRED'
+      : 'RUNTIME_ENGINE_PREFERENCE_UNSUPPORTED'
+    throw new QueueWorkAdapterInvocationError(code, code, false)
   }
 }
 
@@ -428,9 +714,13 @@ function commandArgsFromEnv(env: NodeJS.ProcessEnv): string[] {
   return parsed
 }
 
-function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
+export function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
   if (plan.runtime === 'codex-exec') return new CodexExecRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
+  if (plan.runtime === 'claude-code') return new ClaudeCodeRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env)
+  if (plan.runtime === 'runtime-preference-required' || plan.runtime === 'runtime-preference-unsupported') {
+    return new FailClosedRuntimePreferenceAdapter(plan.runtime)
+  }
   if (plan.runtime === 'command-json') {
     const command = env.AUN_QUEUE_WORK_COMMAND ?? env.STATE_DAEMON_QUEUE_WORK_COMMAND
     if (!command) {

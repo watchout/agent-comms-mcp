@@ -399,7 +399,39 @@ export async function resolveQueueWorkRuntimeWorkspace(
   return realpathSync(configured)
 }
 
+export type QueueWorkRuntimeSelection =
+  | 'codex-exec'
+  | 'claude-code'
+  | 'runtime-preference-required'
+  | 'runtime-preference-unsupported'
+
+export function queueWorkRuntimeForPreference(preference: unknown): QueueWorkRuntimeSelection {
+  const normalized = typeof preference === 'string' ? preference.trim().toLowerCase() : ''
+  if (!normalized) return 'runtime-preference-required'
+  if (normalized === 'codex' || normalized === 'codex-runner') return 'codex-exec'
+  if (normalized === 'claude' || normalized === 'claude-code') return 'claude-code'
+  return 'runtime-preference-unsupported'
+}
+
+export async function resolveQueueWorkRuntimeForAgent(
+  db: QueueWorkRuntimeWorkspaceDb,
+  agentId: string,
+): Promise<QueueWorkRuntimeSelection> {
+  const result = await db.query<{ runtime_engine_preference: string | null }>(
+    `SELECT runtime_engine_preference
+       FROM agents
+      WHERE agent_id = $1
+        AND profile_enabled = true
+        AND disabled_at IS NULL`,
+    [agentId],
+  )
+  return queueWorkRuntimeForPreference(result.rows[0]?.runtime_engine_preference ?? null)
+}
+
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
+  private readonly resolveRuntime: (agentId: string) => Promise<string>
+  private readonly executeQueueWork: typeof runQueueWork
+
   constructor(
     private readonly env: NodeJS.ProcessEnv,
     private readonly cwd: string,
@@ -407,7 +439,12 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     private readonly resolveMemoryReadyProject: (agentId: string) => Promise<string> = async () => {
       throw new Error('queue-work memory-ready project resolver is required')
     },
-  ) {}
+    resolveRuntime?: (agentId: string) => Promise<string>,
+    executeQueueWork: typeof runQueueWork = runQueueWork,
+  ) {
+    this.resolveRuntime = resolveRuntime ?? (async () => this.runtime() ?? 'runtime-preference-required')
+    this.executeQueueWork = executeQueueWork
+  }
 
   async runPending(input: { queueId: number; agentId: string }): Promise<void> {
     const project = await this.resolveMemoryReadyProject(input.agentId)
@@ -429,12 +466,15 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
   }
 
   async runDone(input: { queueId: number; agentId: string }): Promise<void> {
-    const project = await this.resolveMemoryReadyProject(input.agentId)
+    const [project, runtime] = await Promise.all([
+      this.resolveMemoryReadyProject(input.agentId),
+      this.resolveRuntime(input.agentId),
+    ])
     const env = this.envFor(input.agentId, project)
-    const result = await runQueueWork({
+    const result = await this.executeQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
-      runtime: this.runtime(),
+      runtime,
       requireClaimFence: true,
       finalize: true,
       finalizeOnly: true,
@@ -448,18 +488,19 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     input: { queueId: number; agentId: string },
     claimFence?: QueueWorkClaimFence,
   ): Promise<void> {
-    const [runtimeCwd, project] = await Promise.all([
+    const [runtimeCwd, project, runtime] = await Promise.all([
       this.resolveRuntimeWorkspace(input.agentId),
       this.resolveMemoryReadyProject(input.agentId),
+      this.resolveRuntime(input.agentId),
     ])
     const env = {
       ...this.envFor(input.agentId, project),
       AUN_QUEUE_WORK_RUNTIME_CWD: runtimeCwd,
     }
-    const result = await runQueueWork({
+    const result = await this.executeQueueWork({
       agentId: input.agentId,
       queueId: String(input.queueId),
-      runtime: this.runtime(),
+      runtime,
       claimFence,
       requireClaimFence: true,
       finalize: env.STATE_DAEMON_QUEUE_WORK_FINALIZE === '1',
@@ -497,6 +538,14 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       'CODEX_EPHEMERAL',
       'CODEX_IGNORE_RULES',
       'CODEX_TIMEOUT_MS',
+      'CLAUDE_EXECUTABLE',
+      'CLAUDE_OUTPUT_SCHEMA',
+      'CLAUDE_PERMISSION_MODE',
+      'CLAUDE_TOOLS',
+      'CLAUDE_ALLOWED_TOOLS',
+      'CLAUDE_MCP_CONFIG',
+      'CLAUDE_MODEL',
+      'CLAUDE_TIMEOUT_MS',
       'GITHUB_WRITEBACK_MODE',
       'MEDIATED_POSTING_COMMAND',
       'MEDIATED_POSTING_ARGS_JSON',
@@ -1041,6 +1090,7 @@ export async function main(): Promise<void> {
           process.cwd(),
           (agentId) => resolveQueueWorkRuntimeWorkspace(queryClient, agentId),
           async (agentId) => (await resolveRuntimeMemoryReadyProject(queryClient, agentId)).project,
+          (agentId) => resolveQueueWorkRuntimeForAgent(queryClient, agentId),
         )
       : undefined,
     shirubeD1AutoReceive: buildOptionalShirubeD1AutoReceiveDispatcher(process.env, process.cwd()),

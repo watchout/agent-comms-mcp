@@ -4,12 +4,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
+  QueueWorkRunnerScheduler,
   SHIRUBE_D1_AUTO_RECEIVE_SOURCE,
   buildOptionalShirubeD1AutoReceiveDispatcher,
   buildQueueWorkAgentEnv,
   describeQueueWorkFailure,
   exactClaimFenceFromTargetedReceive,
   loadQueueWorkResidueExcludedQueueIds,
+  queueWorkRuntimeForPreference,
+  resolveQueueWorkRuntimeForAgent,
   resolveQueueWorkRuntimeWorkspace,
 } from '../bin/state-daemon'
 import { StateDaemon } from '../core/state-daemon'
@@ -470,6 +473,59 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
 }
 
 describe('state_daemon queue work scheduler boundary', () => {
+  test('runtime_engine_preference selects different queue-work engines for two seats', async () => {
+    const preferences = new Map([
+      ['codex-audit', 'codex'],
+      ['devauditor', 'claude-code'],
+    ])
+    const db = {
+      async query<T>(_sql: string, params?: unknown[]) {
+        const preference = preferences.get(String(params?.[0])) ?? null
+        return {
+          rows: [{ runtime_engine_preference: preference }] as T[],
+          rowCount: preference === null ? 0 : 1,
+        }
+      },
+    }
+    const selected: Array<{ agentId: string | undefined; runtime: string | undefined }> = []
+    const scheduler = new QueueWorkRunnerScheduler(
+      {},
+      '/repo',
+      async () => '/agent-workspace',
+      async () => 'agent-comms-mcp',
+      (agentId) => resolveQueueWorkRuntimeForAgent(db, agentId),
+      async (opts) => {
+        selected.push({ agentId: opts.agentId, runtime: opts.runtime })
+        return {
+          ok: true,
+          dry_run: false,
+          plan: {
+            repoRoot: '/repo',
+            runtime_cwd: '/agent-workspace',
+            agent_id: opts.agentId ?? null,
+            queue_id: opts.queueId ?? null,
+            runtime: opts.runtime ?? 'unconfigured',
+            invocation_source: null,
+            expected_claim_source: null,
+            finalize: true,
+            github_writeback_mode: null,
+            adapter_contract: 'queue_work_envelope_v1_stdin_to_queue_work_result_v1_stdout',
+          },
+        }
+      },
+    )
+
+    await scheduler.runDone({ queueId: 41, agentId: 'codex-audit' })
+    await scheduler.runDone({ queueId: 42, agentId: 'devauditor' })
+
+    expect(selected).toEqual([
+      { agentId: 'codex-audit', runtime: 'codex-exec' },
+      { agentId: 'devauditor', runtime: 'claude-code' },
+    ])
+    expect(queueWorkRuntimeForPreference(null)).toBe('runtime-preference-required')
+    expect(queueWorkRuntimeForPreference('other-provider')).toBe('runtime-preference-unsupported')
+  })
+
   test('targeted receive output becomes the exact immutable runner claim fence', () => {
     const fence = exactClaimFenceFromTargetedReceive({
       ok: true,
@@ -1847,6 +1903,64 @@ describe('state_daemon queue work scheduler boundary', () => {
       })
       expect(metrics.countInc('state_daemon_queue_work_actions_total', {
         result: 'runner_error_reclaimed',
+      })).toBe(1)
+    } finally {
+      await daemon.stop()
+    }
+  })
+
+  test('non-retryable runner_error is failed in place without a reclaim attempt', async () => {
+    const db = new RunnerErrorSweepDb({
+      id: 497,
+      agent_id: 'qa',
+      status: 'in_progress',
+      message_id: 'msg-497',
+      payload: JSON.stringify({
+        content: 'missing stable adapter result',
+        runner_error: {
+          code: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+          detail: 'same invocation has no final agent message',
+          retryable: false,
+          invocation_source: 'state-daemon-queue-work-scheduler',
+        },
+      }),
+      claim_expires_at: new Date('2026-05-08T00:05:00.000Z'),
+      claimed_by: 'qa',
+      claimed_at: new Date('2026-05-08T00:00:00.000Z'),
+      created_at: new Date('2026-05-08T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: new Date('2026-05-08T00:00:10.000Z'),
+    })
+    const metrics = new FakeMetrics()
+    const daemon = new StateDaemon({
+      db,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock: new FakeClock('2026-05-08T00:01:00.000Z'),
+      metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: { async runReceived() {} },
+      config: { agentAllowlist: ['qa'] },
+    })
+
+    await daemon.start()
+    try {
+      const result = await daemon.sweepStale()
+
+      expect(result.scanned).toBe(1)
+      expect(result.reclaimed).toBe(0)
+      expect(result.permanentlyFailed).toBe(1)
+      expect(db.row.status).toBe('failed')
+      expect(db.row.failed_reason).toBe('CODEX_OUTPUT_LAST_MESSAGE_MISSING')
+      expect(JSON.parse(db.row.payload).queue_work_runner_error_recovery).toMatchObject({
+        attempts: 0,
+        max_reclaims: 0,
+        last_action: 'failed_non_retryable',
+        reason: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      })
+      expect(metrics.countInc('state_daemon_queue_work_actions_total', {
+        result: 'runner_error_failed_non_retryable',
+        code: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
       })).toBe(1)
     } finally {
       await daemon.stop()

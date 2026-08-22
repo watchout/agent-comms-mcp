@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  QueueWorkAdapterInvocationError,
   QUEUE_WORK_RESULT_VERSION,
   buildQueueWorkEnvelope,
   finalizeDoneQueueWork,
@@ -11,6 +12,7 @@ import {
   type QueueWorkResult,
   type QueueWorkWritebackSender,
 } from '../core/queue-work'
+import { parseCodexJsonlQueueWorkFallback } from '../bin/aun/run-queue-work'
 
 const capabilities = {
   input: 'stdin_prompt',
@@ -94,6 +96,25 @@ class FakeQueueDb implements QueueWorkDb {
         this.row.status = 'in_progress'
         this.row.last_heartbeat_at = params?.[1]
         if (hasPayloadWrite) this.row.payload = params?.[2]
+        return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    if (sql.includes("status = 'failed'") && sql.includes('failed_reason = $4')) {
+      if (
+        this.row
+        && String(this.row.id) === String(params?.[0])
+        && this.row.status === 'in_progress'
+        && this.ownsFence(sql, params, 4, 5, 2)
+      ) {
+        this.row.payload = params?.[1]
+        this.row.status = 'failed'
+        this.row.failed_reason = params?.[3]
+        this.row.done_at = params?.[2]
+        this.row.claimed_by = null
+        this.row.claimed_at = null
+        this.row.claim_expires_at = null
+        this.row.last_heartbeat_at = null
         return { rows: [{ id: this.row.id }] as T[], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
@@ -315,6 +336,45 @@ describe('runReceivedQueueWork', () => {
     })
   })
 
+  test('codex output fallback success advances the row to done with fallback evidence', async () => {
+    const db = new FakeQueueDb(receivedRow())
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'codex-exec',
+      capabilities,
+      async invoke() {
+        return parseCodexJsonlQueueWorkFallback(JSON.stringify({
+          type: 'item.completed',
+          item: {
+            type: 'agent_message',
+            text: JSON.stringify({
+              schema_version: 'queue_work_result_v1',
+              ok: true,
+              summary: 'fallback completed',
+              reply: null,
+              evidence: [],
+              writeback: null,
+              next_action: 'close',
+            }),
+          },
+        }))
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({ ok: true, code: 'DONE' })
+    expect(db.row.status).toBe('done')
+    expect(JSON.parse(db.row.payload).runner_result.evidence).toEqual(expect.arrayContaining([
+      'runtime_adapter_fallback=codex_jsonl_agent_message',
+      'runtime_adapter_primary_failure=CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+    ]))
+  })
+
   test('expectedClaimSource leaves rows claimed by another path untouched (CLAIM_NOT_OWNED)', async () => {
     // Row claimed by a live TUI session: no receive_claim.source in payload.
     const db = new FakeQueueDb(receivedRow())
@@ -445,6 +505,49 @@ describe('runReceivedQueueWork', () => {
     expect(JSON.parse(db.row.payload).runner_error).toMatchObject({
       code: 'ADAPTER_RESULT_NOT_OK',
       detail: 'audit found a blocker',
+    })
+  })
+
+  test('state-invariant typed adapter failure becomes failed immediately without retry or done evidence', async () => {
+    const db = new FakeQueueDb(receivedRow())
+    const adapter: LlmRuntimeAdapter = {
+      runtime_id: 'codex-exec',
+      capabilities,
+      async invoke() {
+        throw new QueueWorkAdapterInvocationError(
+          'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+          'same invocation has no output file or final agent message',
+          false,
+        )
+      },
+    }
+
+    const outcome = await runReceivedQueueWork(db, {
+      queueId: 42,
+      adapter,
+      invocationSource: 'state-daemon-queue-work-scheduler',
+      now: () => new Date('2026-05-21T01:00:00.000Z'),
+    })
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      code: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+    })
+    expect(db.row.status).toBe('failed')
+    expect(db.row.failed_reason).toBe('CODEX_OUTPUT_LAST_MESSAGE_MISSING')
+    expect(db.row.claimed_by).toBeNull()
+    const payload = JSON.parse(db.row.payload)
+    expect(payload.runner_result).toBeUndefined()
+    expect(payload.runner_error).toMatchObject({
+      code: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      retryable: false,
+      runtime_id: 'codex-exec',
+    })
+    expect(payload.queue_work_runner_error_recovery).toMatchObject({
+      attempts: 0,
+      max_reclaims: 0,
+      last_action: 'failed_non_retryable',
+      reason: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
     })
   })
 

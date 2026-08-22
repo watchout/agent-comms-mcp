@@ -984,6 +984,51 @@ export class StateDaemon {
     const payload = parseQueuePayload(row.payload)
     if (!payload.runner_error) return 'skipped'
 
+    const runnerError = typeof payload.runner_error === 'object' && payload.runner_error !== null
+      ? payload.runner_error as Record<string, unknown>
+      : {}
+    if (runnerError.retryable === false) {
+      const failureCode = typeof runnerError.code === 'string' && runnerError.code.trim()
+        ? runnerError.code.trim().slice(0, 200)
+        : 'QUEUE_WORK_RUNNER_NON_RETRYABLE'
+      const now = this.clock.now()
+      const failedPayload = JSON.stringify({
+        ...payload,
+        [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
+          attempts: 0,
+          max_reclaims: 0,
+          last_action: 'failed_non_retryable',
+          last_at: now.toISOString(),
+          source: QUEUE_WORK_SCHEDULER_SOURCE,
+          reason: failureCode,
+        },
+      })
+      const updated = await this.dbQuery(
+        `UPDATE message_queue
+            SET status='failed',
+                failed_reason=$2,
+                done_at=$3,
+                payload=$4,
+                claimed_by=NULL,
+                claimed_at=NULL,
+                claim_expires_at=NULL,
+                last_heartbeat_at=NULL
+          WHERE id=$1
+            AND status='in_progress'
+            AND payload LIKE '%"runner_error"%'`,
+        [row.id, failureCode, now, failedPayload],
+      )
+      if (updated.rowCount !== 1) return 'skipped'
+      this.metrics.inc('state_daemon_queue_work_actions_total', {
+        result: 'runner_error_failed_non_retryable',
+        code: failureCode,
+      })
+      await this.alert.alert(
+        `queue work non-retryable runner_error for ${row.agent_id} queue_id=${row.id}; marked failed code=${failureCode}`,
+      )
+      return 'failed'
+    }
+
     const recovery = payload[QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]
     const previousAttempts = typeof recovery === 'object' && recovery !== null
       ? Number((recovery as { attempts?: unknown }).attempts ?? 0)
