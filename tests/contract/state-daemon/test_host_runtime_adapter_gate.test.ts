@@ -125,7 +125,7 @@ async function seedPendingCodexWork(suffix: string): Promise<{ agent: string; qu
     agent_id: agent,
     runtime: 'codex',
     tmux_session: null,
-    status: 'online',
+    status: 'idle',
     last_seen_at: new Date('2030-06-01T05:00:00.000Z'),
   })
   const queueId = await seedQueueRow(pg, {

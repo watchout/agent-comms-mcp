@@ -124,7 +124,7 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
       a.agent_id,
       a.agent_id,
       a.runtime ?? 'TUI',
-      a.status ?? 'online',
+      a.status ?? 'idle',
       a.last_seen_at ?? new Date(),
       JSON.stringify(metadata),
       a.runtime_engine_preference ?? null,

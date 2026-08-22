@@ -167,7 +167,7 @@ async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' |
     await client.query(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
        VALUES ('dev-001', 'dev-001', 'dev', 'codex', $1, '{}'::jsonb, true)`,
-      [agentState === 'ready' ? 'online' : 'offline'],
+      [agentState === 'ready' ? 'idle' : 'offline'],
     )
   }
   const idResult = await client.query<{ id: string }>(

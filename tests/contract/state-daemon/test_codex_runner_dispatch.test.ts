@@ -947,7 +947,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
   test('legacy TUI pending path is disabled and does not inject wake prompts', async () => {
     const agent = makeAgentId('tui-wake-disabled')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-session`, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-session`, status: 'idle' })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -1095,8 +1095,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('agent allowlist limits stale sweep wake to selected agents', async () => {
     const allowed = makeAgentId('allowed-tui')
     const blocked = makeAgentId('blocked-tui')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
-    await seedAgent(pg, { agent_id: blocked, runtime: 'TUI', tmux_session: `${blocked}-session`, status: 'online' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'idle' })
+    await seedAgent(pg, { agent_id: blocked, runtime: 'TUI', tmux_session: `${blocked}-session`, status: 'idle' })
     const old = new Date('2026-05-18T00:00:00.000Z')
     await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
     await seedQueueRow(pg, { agent_id: blocked, status: 'pending', created_at: old })
@@ -1121,8 +1121,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('agent denylist excludes stale sweep wake while preserving fleet default', async () => {
     const allowed = makeAgentId('denied-sweep-allowed')
     const denied = makeAgentId('denied-sweep-blocked')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
-    await seedAgent(pg, { agent_id: denied, runtime: 'TUI', tmux_session: `${denied}-session`, status: 'online' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'idle' })
+    await seedAgent(pg, { agent_id: denied, runtime: 'TUI', tmux_session: `${denied}-session`, status: 'idle' })
     const old = new Date('2026-05-18T00:00:00.000Z')
     await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
     await seedQueueRow(pg, { agent_id: denied, status: 'pending', created_at: old })

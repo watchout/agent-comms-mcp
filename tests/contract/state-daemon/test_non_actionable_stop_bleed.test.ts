@@ -89,7 +89,7 @@ function payload(messageType: string, extra: Record<string, unknown> = {}): stri
 describe('state_daemon non-actionable poison-row stop-bleed (#696)', () => {
   test('pending report row is terminalized once and never runner-dispatched', async () => {
     const agent = makeAgentId('non-action-report')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'idle' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
@@ -131,7 +131,7 @@ describe('state_daemon non-actionable poison-row stop-bleed (#696)', () => {
 
   test('deterministic chat, notice, and projection rows receive stable terminal reasons', async () => {
     const agent = makeAgentId('non-action-types')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'idle' })
     const rows = [
       ['chat', 'NON_ACTIONABLE_CHAT'],
       ['notice', 'NON_ACTIONABLE_NOTICE'],
@@ -172,7 +172,7 @@ describe('state_daemon non-actionable poison-row stop-bleed (#696)', () => {
 
   test('unknown message type is held open with diagnostics, not terminalized or dispatched', async () => {
     const agent = makeAgentId('unknown-held')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'idle' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
@@ -203,7 +203,7 @@ describe('state_daemon non-actionable poison-row stop-bleed (#696)', () => {
 
   test('actionable pending row still reaches Codex runner', async () => {
     const agent = makeAgentId('actionable-pass')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'idle' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
@@ -227,7 +227,7 @@ describe('state_daemon non-actionable poison-row stop-bleed (#696)', () => {
 
   test('reclaim-then-wake terminalizes an expired non-actionable claim without dispatch', async () => {
     const agent = makeAgentId('expired-report')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'idle' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'received',

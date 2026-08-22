@@ -73,7 +73,7 @@ describe('TUI prompt wake is disabled', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
-      status: 'online',
+      status: 'idle',
     })
 
     const t0 = new Date('2026-05-12T00:00:00.000Z')
@@ -130,7 +130,7 @@ describe('TUI prompt wake is disabled', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
-      status: 'online',
+      status: 'idle',
       last_seen_at: t0,
     })
     await pg.query(`UPDATE agents SET last_wake_attempt_at=$1 WHERE agent_id=$2`, [
@@ -172,7 +172,7 @@ describe('TUI prompt wake is disabled', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
-      status: 'online',
+      status: 'idle',
     })
 
     const t0 = new Date('2026-05-12T00:00:55.000Z')
@@ -220,7 +220,7 @@ describe('TUI prompt wake is disabled', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
-      status: 'online',
+      status: 'idle',
     })
     const rowId = await seedQueueRow(pg, {
       agent_id: agent,
@@ -267,7 +267,7 @@ describe('TUI prompt wake is disabled', () => {
         agent_id: a,
         runtime: 'TUI',
         tmux_session: `${a}-session`,
-        status: 'online',
+        status: 'idle',
       })
     }
 
