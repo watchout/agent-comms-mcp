@@ -1500,8 +1500,8 @@ agent message がない、stream が malformed、又は取得した message が 
 使用し、Codex と同じ queue-work envelope / result / claim fence / finalizer を共有する。
 untrusted queue body は argv に入れず stdin で渡す。final `result` event の
 `structured_output`（又は exact result text）だけを `queue_work_result_v1` として受理する。
-MCP 設定は上記 `strict` contract で解決した値だけを `--mcp-config` に渡す。Codex への暗黙
-provider fallback は行わない。
+MCP 設定は上記 `strict` contract で解決した値だけを `--mcp-config` に渡す。
+Codex への暗黙 provider fallback は行わない。
 
 **Failure classification and retry**
 

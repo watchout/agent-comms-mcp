@@ -232,9 +232,13 @@ export interface QueueWorkRuntimeCommand {
   schemaPath: string
 }
 
-export interface CodexExecQueueWorkCommand extends QueueWorkRuntimeCommand {
+export interface CodexExecQueueWorkCommand {
   runtimeId: 'codex-exec'
+  command: string
+  args: string[]
+  stdin: string
   outputLastMessagePath: string
+  schemaPath: string
 }
 
 function truthyEnv(value: string | undefined): boolean {
@@ -688,8 +692,12 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
   }
 }
 
-export interface ClaudeCodeQueueWorkCommand extends QueueWorkRuntimeCommand {
+export interface ClaudeCodeQueueWorkCommand {
   runtimeId: 'claude-code'
+  command: string
+  args: string[]
+  stdin: string
+  schemaPath: string
   mcpConfigSource: 'generated' | 'inline' | 'file'
 }
 
