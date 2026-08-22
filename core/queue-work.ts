@@ -81,6 +81,33 @@ export interface QueueWorkResult {
   next_action: QueueWorkNextAction
 }
 
+export type QueueWorkAdapterFailureCode =
+  | 'CODEX_OUTPUT_LAST_MESSAGE_MISSING'
+  | 'CLAUDE_FINAL_RESULT_MISSING'
+  | 'RUNTIME_ENGINE_PREFERENCE_REQUIRED'
+  | 'RUNTIME_ENGINE_PREFERENCE_UNSUPPORTED'
+  | 'RUNTIME_NONZERO_EXIT'
+  | 'RUNTIME_TIMEOUT'
+  | 'ADAPTER_RESULT_INVALID'
+  | 'ADAPTER_CONFIGURATION_INVALID'
+
+/**
+ * Stable adapter-boundary failure. Generic exceptions remain retryable
+ * ADAPTER_ERROR for backward compatibility; adapters use this type whenever
+ * they can prove whether another identical invocation could change state.
+ */
+export class QueueWorkAdapterInvocationError extends Error {
+  readonly name = 'QueueWorkAdapterInvocationError'
+
+  constructor(
+    readonly code: QueueWorkAdapterFailureCode,
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message)
+  }
+}
+
 export interface LlmRuntimeAdapter {
   runtime_id: string
   capabilities: LlmRuntimeCapability
@@ -187,6 +214,7 @@ export type QueueWorkRunOutcome =
         | 'TRANSITION_RACE'
         | 'EXECUTION_ABORTED'
         | 'ADAPTER_ERROR'
+        | QueueWorkAdapterFailureCode
         | 'ADAPTER_RESULT_NOT_OK'
         | 'DONE_RACE'
       queue_id?: string
@@ -612,12 +640,14 @@ async function persistRunnerError(
   now: Date,
   code: string,
   detail: string,
+  retryable: boolean,
   invocationSource?: string,
   claimFence?: RunReceivedQueueWorkOptions['claimFence'],
 ): Promise<boolean> {
-  const payload = mergePayload(row, 'runner_error', {
+  const runnerError = {
     code,
     detail,
+    retryable,
     runtime_id: adapter.runtime_id,
     invocation_source: invocationSource ?? null,
     failed_at: now.toISOString(),
@@ -627,18 +657,47 @@ async function persistRunnerError(
         claimed_at: claimFence.claimedAt,
       },
     } : {}),
-  })
+  }
+  const payload = retryable
+    ? mergePayload(row, 'runner_error', runnerError)
+    : JSON.stringify({
+        ...parsePayload(row.payload),
+        runner_error: runnerError,
+        queue_work_runner_error_recovery: {
+          attempts: 0,
+          max_reclaims: 0,
+          last_action: 'failed_non_retryable',
+          last_at: now.toISOString(),
+          source: invocationSource ?? null,
+          reason: code,
+        },
+      })
   const params: unknown[] = [row.id, payload, now.toISOString()]
-  let sql = `UPDATE message_queue
+  let sql = retryable
+    ? `UPDATE message_queue
         SET payload = $2,
             last_heartbeat_at = $3
       WHERE id = $1
         AND status = 'in_progress'`
+    : `UPDATE message_queue
+        SET payload = $2,
+            status = 'failed',
+            failed_reason = $4,
+            done_at = $3,
+            claimed_by = NULL,
+            claimed_at = NULL,
+            claim_expires_at = NULL,
+            last_heartbeat_at = NULL
+      WHERE id = $1
+        AND status = 'in_progress'`
+  if (!retryable) params.push(code)
   if (claimFence) {
     params.push(claimFence.claimedBy, claimFence.claimedAt)
+    const claimedByIndex = retryable ? 4 : 5
+    const claimedAtIndex = retryable ? 5 : 6
     sql += `
-        AND claimed_by = $4
-        AND claimed_at = $5
+        AND claimed_by = $${claimedByIndex}
+        AND claimed_at = $${claimedAtIndex}
         AND claim_expires_at > ${databaseClockSql(db)}`
   }
   sql += '\n        RETURNING id'
@@ -881,13 +940,18 @@ export async function runReceivedQueueWork(
         detail: executionAbortDetail(opts.signal),
       }
     }
+    const typed = err instanceof QueueWorkAdapterInvocationError ? err : null
+    const failureCode = typed?.code ?? 'ADAPTER_ERROR'
+    const detail = (err as Error).message ?? String(err)
+    const retryable = typed?.retryable ?? true
     const persisted = await persistRunnerError(
       db,
       row,
       opts.adapter,
       opts.now?.() ?? new Date(),
-      'ADAPTER_ERROR',
-      (err as Error).message ?? String(err),
+      failureCode,
+      detail,
+      retryable,
       opts.invocationSource,
       claimFence,
     )
@@ -901,9 +965,9 @@ export async function runReceivedQueueWork(
     }
     return {
       ok: false,
-      code: 'ADAPTER_ERROR',
+      code: failureCode,
       queue_id: queueIdOf(row),
-      detail: (err as Error).message ?? String(err),
+      detail,
     }
   }
   await opts.onInvocationSettled?.()
@@ -924,6 +988,7 @@ export async function runReceivedQueueWork(
       opts.now?.() ?? new Date(),
       'ADAPTER_RESULT_INVALID',
       'adapter returned a malformed queue_work_result_v1 object',
+      false,
       opts.invocationSource,
       claimFence,
     )
@@ -937,7 +1002,7 @@ export async function runReceivedQueueWork(
     }
     return {
       ok: false,
-      code: 'ADAPTER_ERROR',
+      code: 'ADAPTER_RESULT_INVALID',
       queue_id: queueIdOf(row),
       detail: 'adapter returned a malformed queue_work_result_v1 object',
     }
@@ -951,6 +1016,7 @@ export async function runReceivedQueueWork(
       opts.now?.() ?? new Date(),
       'ADAPTER_RESULT_NOT_OK',
       result.summary,
+      result.next_action === 'retry',
       opts.invocationSource,
       claimFence,
     )
@@ -1571,3 +1637,5 @@ export async function finalizeDoneQueueWork(
     throw err
   }
 }
+
+export { resultLooksValid as queueWorkResultLooksValid }

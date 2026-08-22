@@ -2,12 +2,16 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
   buildCodexExecQueueWorkCommand,
+  buildClaudeCodeQueueWorkCommand,
   buildRunQueueWorkPlan,
   describeCodexExecFailure,
   frameMediatedGithubWriteback,
+  parseClaudeStreamJsonQueueWorkResult,
+  parseCodexJsonlQueueWorkFallback,
   resolveQueueWorkBunExecutable,
   runQueueWork,
 } from '../bin/aun/run-queue-work'
+import { QueueWorkAdapterInvocationError } from '../core/queue-work'
 import { validateMediatedPostingRequest } from '../scripts/queue-work-github-writeback'
 
 describe('buildRunQueueWorkPlan expected_claim_source', () => {
@@ -220,6 +224,123 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
     expect(command.stdin).toContain('immutable implementation subject is available read-only at /repo')
     expect(command.stdin).toContain('"queue_id":"42"')
     expect(command.stdin).toContain('Do not call next, inbox')
+  })
+
+  test('exit zero with no output-last-message is a dedicated typed failure when same-invocation fallback is absent', () => {
+    let failure: unknown
+    try {
+      parseCodexJsonlQueueWorkFallback([
+        JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 0 } }),
+      ].join('\n'))
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(QueueWorkAdapterInvocationError)
+    expect(failure).toMatchObject({
+      code: 'CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+      retryable: false,
+    })
+    expect((failure as Error).message).not.toContain('ADAPTER_ERROR')
+  })
+
+  test('codex same-invocation JSONL fallback returns the final completed agent result with typed evidence', () => {
+    const result = parseCodexJsonlQueueWorkFallback([
+      JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'agent_message',
+          text: JSON.stringify({
+            schema_version: 'queue_work_result_v1',
+            ok: true,
+            summary: 'completed through fallback',
+            reply: null,
+            evidence: ['fixture=codex-jsonl'],
+            writeback: null,
+            next_action: 'close',
+          }),
+        },
+      }),
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+    ].join('\n'))
+
+    expect(result).toMatchObject({
+      ok: true,
+      summary: 'completed through fallback',
+      next_action: 'close',
+    })
+    expect(result.evidence).toEqual(expect.arrayContaining([
+      'fixture=codex-jsonl',
+      'runtime_adapter_fallback=codex_jsonl_agent_message',
+      'runtime_adapter_primary_failure=CODEX_OUTPUT_LAST_MESSAGE_MISSING',
+    ]))
+  })
+
+  test('claude-code queue-work command keeps the envelope on stdin and requests stream-json schema output', () => {
+    const subjectRoot = new URL('..', import.meta.url).pathname
+    const command = buildClaudeCodeQueueWorkCommand({
+      cwd: '/agent-workspace',
+      subjectRoot,
+      env: { AUN_QUEUE_WORK_CLAUDE_EXECUTABLE: '/opt/homebrew/bin/claude' } as NodeJS.ProcessEnv,
+      envelope: {
+        schema_version: 'queue_work_envelope_v1',
+        queue_id: '43',
+        message_id: 'msg-43',
+        agent_id: 'devauditor',
+        channel: 'audit',
+        thread_id: null,
+        requester: 'arc',
+        content: 'private queue content',
+        reply_contract: { required: false, reply_to: 'msg-43', mention: 'arc' },
+        runtime_contract: {
+          do_not_call_next: true,
+          do_not_call_inbox: true,
+          return_schema: 'queue_work_result_v1',
+        },
+        handoff_contract: {
+          kind: 'plain_queue_work',
+          github_backed: false,
+          required_writebacks: [],
+          posting_mode: 'none',
+          detected_from: [],
+        },
+      },
+    })
+
+    expect(command.command).toBe('/opt/homebrew/bin/claude')
+    expect(command.args).toContain('stream-json')
+    expect(command.args).toContain('--json-schema')
+    expect(command.args).toContain('--strict-mcp-config')
+    expect(command.args.join(' ')).not.toContain('private queue content')
+    expect(command.stdin).toContain('private queue content')
+  })
+
+  test('claude stream-json accepts only the final structured result and records its runtime evidence', () => {
+    const result = parseClaudeStreamJsonQueueWorkResult([
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({
+        type: 'result',
+        is_error: false,
+        structured_output: {
+          schema_version: 'queue_work_result_v1',
+          ok: true,
+          summary: 'claude completed',
+          reply: null,
+          evidence: [],
+          writeback: null,
+          next_action: 'close',
+        },
+      }),
+    ].join('\n'))
+
+    expect(result).toMatchObject({
+      ok: true,
+      summary: 'claude completed',
+      next_action: 'close',
+    })
+    expect(result.evidence).toContain('runtime_adapter_engine=claude-code')
   })
 
   test('codex-exec failure diagnostics include stdout and final-message when stderr is empty', () => {
