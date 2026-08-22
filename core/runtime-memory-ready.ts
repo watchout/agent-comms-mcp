@@ -6,6 +6,7 @@ import {
   type RuntimeMemoryReadyPolicy,
   type SealedBootstrapRuntimeReceipt,
 } from './runtime-current-resolver'
+import { isActiveExecutionSeat } from './active-execution-seats'
 
 export type RuntimeMemoryReadyStatus = 'ready' | 'failed' | 'bypassed'
 
@@ -67,6 +68,7 @@ export interface RuntimeMemoryReadyGateResult {
     | 'ready'
     | 'bypassed'
     | 'agent_missing'
+    | 'agent_inactive'
     | 'missing_current_runtime'
     | 'no_current_runtime_for_profile'
     | 'missing_read_model'
@@ -138,6 +140,8 @@ export class RuntimeMemoryReadyProjectResolutionError extends Error {
 
 interface RuntimeMemoryReadyProjectAgentRow {
   agent_id: string
+  agent_type: string | null
+  status: string | null
   profile_enabled: unknown
   disabled_at: unknown
   home_directory: string | null
@@ -199,14 +203,14 @@ export async function resolveRuntimeMemoryReadyProject(
 ): Promise<RuntimeMemoryReadyProjectResolution> {
   const agents = await queryRows<RuntimeMemoryReadyProjectAgentRow>(
     db,
-    `SELECT agent_id, profile_enabled, disabled_at, home_directory, metadata
+    `SELECT agent_id, agent_type, status, profile_enabled, disabled_at, home_directory, metadata
        FROM agents
       WHERE agent_id = $1
       LIMIT 1`,
     [agentId],
   )
   const agent = agents[0] ?? null
-  if (!agent || !enabledProfile(agent.profile_enabled) || agent.disabled_at != null) {
+  if (!agent || !isActiveExecutionSeat(agent)) {
     throw new RuntimeMemoryReadyProjectResolutionError(
       'AGENT_NOT_ENABLED',
       `memory-ready project requires one enabled agent row for ${agentId}`,
@@ -275,6 +279,10 @@ export async function resolveRuntimeMemoryReadyProject(
 
 interface AgentProfileRow {
   agent_id: string
+  agent_type: string | null
+  status: string | null
+  profile_enabled: unknown
+  disabled_at: unknown
   profile_revision: number | string | null
   profile_source: string | null
   channel_port: number | string | null
@@ -680,7 +688,8 @@ export async function evaluateRuntimeMemoryReadyGate(
   try {
     const agentRows = await queryRows<AgentProfileRow>(
       db,
-      `SELECT agent_id, profile_revision, profile_source, channel_port, home_directory, metadata
+      `SELECT agent_id, agent_type, status, profile_enabled, disabled_at,
+              profile_revision, profile_source, channel_port, home_directory, metadata
          FROM agents
         WHERE agent_id = $1
         LIMIT 1`,
@@ -691,6 +700,14 @@ export async function evaluateRuntimeMemoryReadyGate(
     return fail(base, 'read_error', { error: (err as Error).message ?? String(err) })
   }
   if (!agent) return fail(base, 'agent_missing')
+  if (!isActiveExecutionSeat(agent)) {
+    return fail(base, 'agent_inactive', {
+      status: agent.status,
+      profile_enabled: enabledProfile(agent.profile_enabled),
+      disabled_at: agent.disabled_at ?? null,
+      agent_type: agent.agent_type,
+    })
+  }
 
   const agentMetadata = parseObject(agent.metadata)
   const expectedPort = normalizeNumber(agent.channel_port)

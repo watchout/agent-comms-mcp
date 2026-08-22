@@ -182,7 +182,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -241,7 +241,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         agent_id: agent,
         runtime: 'codex',
         tmux_session: null,
-        status: 'online',
+        status: 'idle',
         last_seen_at: '2026-05-18T00:00:01.000Z',
       })
       await scenario.mutate(agent)
@@ -350,7 +350,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -399,7 +399,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       await seedAgent(pg, {
         agent_id: agent,
         runtime: 'TUI',
-        status: 'online',
+        status: 'idle',
         last_seen_at: '2026-05-18T00:00:01.000Z',
       })
       await scenario.mutate(agent)
@@ -437,7 +437,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     await seedAgent(pg, {
       agent_id: receivedAgent,
       runtime: 'TUI',
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     await deleteMemoryReadyEvidence(receivedAgent)
@@ -480,7 +480,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -537,7 +537,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       runtime: 'codex',
       discord_id: '999010',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -611,7 +611,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       runtime: 'codex',
       discord_id: '999010',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -686,7 +686,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, {
@@ -791,7 +791,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const pending = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
@@ -831,7 +831,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
@@ -864,7 +864,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
@@ -898,7 +898,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:01.000Z',
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
@@ -1066,8 +1066,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('agent allowlist ignores pg_notify rows outside the activation scope', async () => {
     const allowed = makeAgentId('allowed-codex')
     const blocked = makeAgentId('blocked-codex')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
-    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'idle', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'idle', last_seen_at: '2026-05-18T00:00:01.000Z' })
     const blockedId = await seedQueueRow(pg, { agent_id: blocked, status: 'pending' })
 
     const runner = new FakeCodexRunner()
@@ -1147,8 +1147,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
   test('agent denylist ignores pg_notify rows while allowing non-denied fleet rows', async () => {
     const allowed = makeAgentId('denied-sibling-allowed')
     const denied = makeAgentId('denied-sibling-blocked')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
-    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'idle', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'idle', last_seen_at: '2026-05-18T00:00:01.000Z' })
     const deniedId = await seedQueueRow(pg, { agent_id: denied, status: 'pending' })
     const allowedId = await seedQueueRow(pg, { agent_id: allowed, status: 'pending' })
 
@@ -1206,7 +1206,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       runtime: 'TUI',
       runtime_engine_preference: 'codex',
       tmux_session: null,
-      status: 'online',
+      status: 'idle',
       last_seen_at: '2026-05-18T00:00:00.000Z',
     })
 
