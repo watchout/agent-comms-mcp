@@ -209,6 +209,25 @@ export async function runRuntimeMemoryReadyFleetRefresh(
         })
         continue
       }
+      const currentRegistrationMismatch = resolution.profile_mismatch_observations.find(row => row.current) ?? null
+      if (currentRegistrationMismatch) {
+        seats.push({
+          agent_id: agentId,
+          status: 'failed',
+          reason: currentRegistrationMismatch.code,
+          runtime_instance_id: resolution.current_runtime.runtime_instance_id,
+          project: null,
+          evidence_id: null,
+          evidence_log_id: null,
+          reaped_runtime_instances: reaped,
+          details: {
+            repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
+            registration_profile_mismatch: currentRegistrationMismatch,
+            ...reapDetails,
+          },
+        })
+        continue
+      }
       const project = await resolveProject(db, agentId)
       if (dryRun) {
         seats.push({

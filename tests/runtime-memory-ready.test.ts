@@ -371,18 +371,55 @@ describe('runtime memory-ready evidence gate', () => {
       })
 
       expect(gate.ok).toBe(false)
-      if (profileMismatch.label === 'port') {
-        expect(gate.reason).toBe(profileMismatch.reason)
-        expect(gate.details).toMatchObject(profileMismatch.details)
-      } else {
-        expect(gate.reason).toBe('no_current_runtime_for_profile')
+      expect(gate.reason).toBe(profileMismatch.reason)
+      expect(gate.details).toMatchObject(profileMismatch.details)
+      if (profileMismatch.label !== 'port') {
         expect(gate.details).toMatchObject({
-          code: 'NO_CURRENT_RUNTIME_FOR_PROFILE',
-          repair_signal: 'RUNTIME_REREGISTRATION_REQUIRED',
+          profile_mismatch_observations: [expect.objectContaining({
+            code: 'REGISTRATION_PROFILE_MISMATCH',
+            current: true,
+            handling: 'WARN_ONLY_CURRENT_FALLBACK',
+          })],
         })
       }
     })
   }
+
+  test('exact evidence fails closed on a resolver-reported runtime-engine-only profile mismatch', async () => {
+    const agentId = 'profile-runtime-engine-mismatch'
+    await seedRuntime(agentId, 39142)
+    await db.execute(
+      `UPDATE agent_runtime_instances
+          SET runtime_engine='claude-code'
+        WHERE agent_id=$1`,
+      [agentId],
+    )
+    await recordReady(agentId, { port: 39142 })
+
+    const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
+      agent_id: agentId,
+      project: 'agent-comms-mcp',
+      now: new Date('2026-06-01T00:00:03.000Z'),
+    })
+
+    expect(gate.ok).toBe(false)
+    expect(gate.reason).toBe('registration_profile_mismatch')
+    expect(gate.details).toMatchObject({
+      current_resolution_source: 'live_profile_mismatch_fallback',
+      registration_profile_mismatch: {
+        code: 'REGISTRATION_PROFILE_MISMATCH',
+        runtime_instance_id: `runtime-${agentId}`,
+        current: true,
+        handling: 'WARN_ONLY_CURRENT_FALLBACK',
+        mismatches: [{
+          field: 'runtime_engine',
+          expected: 'codex',
+          observed: 'claude-code',
+        }],
+      },
+      repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
+    })
+  })
 
   test('missing, stale, and mismatched evidence fail closed', async () => {
     await seedRuntime()

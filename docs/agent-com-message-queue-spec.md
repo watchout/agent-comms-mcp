@@ -1386,7 +1386,22 @@ profile tuple = {
 }
 ```
 
-profile tuple の各登録値が非空であり、かつ 3 項目すべてが一致した row だけを current にできる。
+**Runtime registration metadata authority**
+
+ordinary `local_process` heartbeat が `agent_runtime_instances` を登録・更新するとき、
+`checkout_path` と `session_name` の authority は起動 process の `PWD` / `TMUX` ではなく、
+対象 `agent_id` の enabled な登録 profile とする。`agents.home_directory` が非空なら
+`checkout_path` はその値を使い、`agents.metadata.tmux_session` が非空なら `session_name` は
+その値を使う。登録値が空の場合に限り、heartbeat input の ambient 値へ field 単位で fallback
+できる。登録値と ambient 値が異なる場合も登録値を優先し、ambient 値は observation としてだけ残す。
+
+heartbeat row の `metadata.registration_metadata_provenance` は schema version と、各 field の
+`source` (`registered` / `ambient` / `missing`)、effective value、registered value、ambient value、
+および mismatch boolean を持たなければならない。これにより PWD/TMUX が無い MCP server でも
+席の登録 profile と一致する row を作れ、どの authority を使ったかを後から query できる。
+profile lookup failure や両方の値の欠落を silent に ambient/default へ偽装してはならない。
+
+profile tuple の各登録値が非空であることは ordinary resolver の完全な判定に必要である。
 resolver の呼出側は `requested_runtime_kind` を必ず指定する。candidate、current selection、
 freshness ranking、stale reap はその kind の行だけを対象にし、異なる kind を同じ ranking に
 参加させてはならない。ordinary runtime kind では上記 profile tuple と A1 の freshness / ranking
@@ -1401,26 +1416,26 @@ fail-closed にする。bootstrap と ordinary の間に cross-kind current rank
 定義してはならない。
 
 resolver はまず `status IN ('running','active')` かつ valid heartbeat (`last_seen_at`) が
-`LIVENESS_TTL` 内の row だけを candidate にする。その中の exact tuple match を選び、複数なら
-`last_seen_at DESC, started_at DESC, runtime_instance_id ASC` で決定的に 1 行を選ぶ。一致が
-なければ freshest profile-mismatch row に fallback せず typed
-`NO_CURRENT_RUNTIME_FOR_PROFILE` で fail-closed にする。これは runtime 再登録を要求する
-repair signal である。profile match でも heartbeat が stale なら current ではない。
+`LIVENESS_TTL` 内の row を live pool にする。live exact tuple match が 1 行以上あれば、その集合だけを
+current ranking に参加させ、複数なら `last_seen_at DESC, started_at DESC,
+runtime_instance_id ASC` で決定的に 1 行を選ぶ。同時に存在する live profile-mismatch row は typed
+`PROFILE_MISMATCH_DEPRIORITIZED` とし、exact row より下位へ置く。この順位付け以外の理由で
+profile-mismatch row を一律除外してはならない。
 
-ここでいう candidate は requested kind の active row 全体ではなく、**live かつ exact profile
-match の row だけ**である。同一 `agent_id` / requested kind でも runtime engine、registered tmux
-session、又は home checkout のいずれかが一致しない row は current candidate から除外する。
-resolver は各除外を typed `PROFILE_MISMATCH_EXCLUDED` とし、不一致 field、observed value、expected
-value、runtime instance identity を readback に残す。foreign row が heartbeat を継続していても
-扱いは warning-only とする。その row を current に昇格せず、不一致だけを理由とする quarantine、
-status mutation、reap、物理削除は行わない。
+live exact tuple match が 0 行で、requested kind の live row が 1 行以上ある場合は、freshness 順の
+先頭を current として維持し、typed `REGISTRATION_PROFILE_MISMATCH` observation を返す。この fallback は
+登録 authority drift を可視化しながら「唯一の生きた自席 instance を候補ゼロにして恒久 block する」
+ことを防ぐためのもので、mismatch を ready と偽装するものではない。heartbeat writer は同じ transaction
+path で登録 profile による metadata correction を先に行い、monitor は correction 前又は古い writer が
+残した mismatch を fleet 全体で数えられなければならない。不一致だけを理由とする quarantine、status
+mutation、reap、物理削除は行わない。profile match でも heartbeat が stale なら current ではない。
 
-current candidate が 0 件の場合も原因を潰してはならない。requested kind の active row 自体が
-0 件なら `NO_RUNTIME_ROWS`、live row が profile mismatch により除外されたなら
-`PROFILE_MISMATCH_EXCLUDED`、profile match row はあるが全て heartbeat stale なら
-`ONLY_STALE_PROFILE_MATCHES` を `NO_CURRENT_RUNTIME_FOR_PROFILE` の typed subreason として返す。
-refresher report、gate detail、daemon log/metric、read-only identity monitor は同じ resolver の
-subreason と exclusion records を使い、独自の profile 判定を再実装してはならない。
+current が 0 件の場合も原因を潰してはならない。requested kind の active row 自体が 0 件なら
+`NO_RUNTIME_ROWS`、active row はあるが全て heartbeat stale なら `ONLY_STALE_RUNTIME_ROWS` を
+`NO_CURRENT_RUNTIME_FOR_PROFILE` の typed subreason として返す。`REGISTRATION_PROFILE_MISMATCH` は
+live current を伴う observation であり candidate absence reason にしてはならない。refresher report、
+gate detail、daemon log/metric、read-only identity monitor は同じ resolver の observation / subreason を
+使い、独自の profile 判定を再実装してはならない。
 
 `LIVENESS_TTL` は `(runtime_kind, source)` group の登録 `heartbeat_interval * 6` とする。
 `source` は instance `metadata.source`、それが空なら `runtime_engine`。group 登録がない場合は
@@ -1435,7 +1450,10 @@ ordinary runtime heartbeat の upsert 後、heartbeat writer は同じ exported 
 `runtime_memory_ready_evidence.runtime_instance_id` が current instance と異なる場合、それを typed
 `SUPERSEDED_EVIDENCE_BINDING` として検出し、同じ single-seat refresher/readback 経路で evidence を
 current instance に再束縛する。再取得後は gate readback が `ready` にならなければ成功として扱わない。
-profile mismatch により除外された heartbeat は evidence を再束縛できず、typed warning のみを残す。
+exact current が存在する間に `PROFILE_MISMATCH_DEPRIORITIZED` となった heartbeat は evidence を
+再束縛できず typed warning のみを残す。`REGISTRATION_PROFILE_MISMATCH` current は silent に捨てず、
+登録 provenance と mismatch を audit/monitor に残す。heartbeat writer が profile authority で row を
+correct した後は、同じ heartbeat event 内で通常の evidence 再束縛へ進む。
 
 rotation refresh は heartbeat event が主契機であり、固定周期 refresher の次回実行待ちにしては
 ならない。daemon 起動時にも 1 回 reconciliation を行い、daemon 配備前に生じた rotation を回収する。
@@ -1443,10 +1461,11 @@ heartbeat event と起動時 reconciliation は冪等で、latest evidence が c
 されている場合は新しい evidence を作らない。refresh failure は typed terminal result/log として残し、
 heartbeat row、旧 evidence、又は queue row を手動修復しない。
 
-read-only identity monitor は少なくとも `PROFILE_MISMATCH_EXCLUDED` と
-`SUPERSEDED_EVIDENCE_BINDING` を席別に列挙・集計できなければならない。後者は latest evidence と
-common resolver が選ぶ current instance の不一致で判定し、stopped row に束縛された evidence も
-同じ typed finding とする。
+read-only identity monitor は少なくとも `REGISTRATION_PROFILE_MISMATCH`、
+`PROFILE_MISMATCH_DEPRIORITIZED`、`SUPERSEDED_EVIDENCE_BINDING` を席別に列挙・集計できなければ
+ならない。registration finding は effective 登録 metadata の provenance も返し、同型の全席を一つの
+query/report で列挙する。最後の finding は latest evidence と common resolver が選ぶ current instance の
+不一致で判定し、stopped row に束縛された evidence も同じ typed finding とする。
 
 **Stale runtime reap**
 

@@ -115,7 +115,15 @@ describe('memory-ready fleet refresher', () => {
       expect.objectContaining({
         agent_id: 'broken',
         status: 'failed',
-        reason: 'NO_CURRENT_RUNTIME_FOR_PROFILE',
+        reason: 'REGISTRATION_PROFILE_MISMATCH',
+        runtime_instance_id: 'runtime-broken',
+        details: expect.objectContaining({
+          repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
+          registration_profile_mismatch: expect.objectContaining({
+            current: true,
+            handling: 'WARN_ONLY_CURRENT_FALLBACK',
+          }),
+        }),
       }),
     ]))
   })

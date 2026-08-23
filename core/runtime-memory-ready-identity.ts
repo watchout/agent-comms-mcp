@@ -4,6 +4,7 @@ import {
   type RuntimeCandidateExclusion,
   type RuntimeCurrentResolution,
   type RuntimeMemoryReadyPolicy,
+  type RuntimeProfileMismatchObservation,
 } from './runtime-current-resolver'
 import {
   resolveRuntimeMemoryReadyProject,
@@ -33,6 +34,7 @@ export type RuntimeMemoryReadyIdentityReconcileResult = {
     | 'NO_EVIDENCE'
     | 'NO_CURRENT_RUNTIME'
     | 'PROFILE_MISMATCH_EXCLUDED'
+    | 'PROFILE_MISMATCH_DEPRIORITIZED'
     | 'HEARTBEAT_NOT_CURRENT'
     | 'REFRESH_FAILED'
   code: string
@@ -42,7 +44,11 @@ export type RuntimeMemoryReadyIdentityReconcileResult = {
 }
 
 export type RuntimeMemoryReadyIdentityFinding = {
-  code: 'PROFILE_MISMATCH_EXCLUDED' | 'SUPERSEDED_EVIDENCE_BINDING'
+  code:
+    | 'PROFILE_MISMATCH_EXCLUDED'
+    | 'REGISTRATION_PROFILE_MISMATCH'
+    | 'PROFILE_MISMATCH_DEPRIORITIZED'
+    | 'SUPERSEDED_EVIDENCE_BINDING'
   agent_id: string
   runtime_instance_id: string
   details: Record<string, unknown>
@@ -55,6 +61,8 @@ export type RuntimeMemoryReadyIdentityMonitorReport = {
   summary: {
     inventory: number
     profile_mismatch_excluded: number
+    registration_profile_mismatch: number
+    profile_mismatch_deprioritized: number
     superseded_evidence_binding: number
   }
   findings: RuntimeMemoryReadyIdentityFinding[]
@@ -143,6 +151,14 @@ function observedExclusion(
   return resolution.candidate_exclusions.find(row => row.runtime_instance_id === runtimeInstanceId) ?? null
 }
 
+function observedRegistrationMismatch(
+  resolution: RuntimeCurrentResolution,
+  runtimeInstanceId: string | null,
+): RuntimeProfileMismatchObservation | null {
+  if (!runtimeInstanceId) return null
+  return resolution.profile_mismatch_observations.find(row => row.runtime_instance_id === runtimeInstanceId) ?? null
+}
+
 export async function reconcileRuntimeMemoryReadyIdentity(
   db: RuntimeMemoryReadyDb,
   input: {
@@ -199,7 +215,9 @@ export async function reconcileRuntimeMemoryReadyIdentity(
       observed_runtime_instance_id: observedRuntimeInstanceId,
       current_runtime_instance_id: resolution.current_runtime?.runtime_instance_id ?? null,
       previous_evidence_runtime_instance_id: null,
-      status: 'PROFILE_MISMATCH_EXCLUDED',
+      status: exclusion.code === 'PROFILE_MISMATCH_DEPRIORITIZED'
+        ? 'PROFILE_MISMATCH_DEPRIORITIZED'
+        : 'PROFILE_MISMATCH_EXCLUDED',
       code: exclusion.code,
       evidence_id: null,
       evidence_log_id: null,
@@ -233,6 +251,30 @@ export async function reconcileRuntimeMemoryReadyIdentity(
     }
   }
 
+  const registrationMismatch = observedRegistrationMismatch(resolution, observedRuntimeInstanceId)
+  let registrationMismatchAuditRecorded = false
+  if (registrationMismatch) {
+    registrationMismatchAuditRecorded = await recordIdentityAudit(db, {
+      agentId: input.agentId,
+      target: registrationMismatch.runtime_instance_id,
+      code: registrationMismatch.code,
+      now,
+      deduplicateForMs: 30 * 60 * 1000,
+      details: {
+        handling: registrationMismatch.handling,
+        mismatches: registrationMismatch.mismatches,
+        registration_metadata_provenance: registrationMismatch.registration_metadata_provenance,
+        requested_runtime_kind: resolution.requested_runtime_kind,
+      },
+    })
+  }
+  const mismatchDetails = registrationMismatch
+    ? {
+        registration_profile_mismatch: registrationMismatch,
+        registration_profile_mismatch_audit_recorded: registrationMismatchAuditRecorded,
+      }
+    : {}
+
   try {
     const project = await resolveProject(db, input.agentId)
     const evidence = await selectLatestEvidence(db, input.agentId, project.project)
@@ -246,7 +288,7 @@ export async function reconcileRuntimeMemoryReadyIdentity(
         code: 'NO_EVIDENCE',
         evidence_id: null,
         evidence_log_id: null,
-        details: { project: project.project, project_resolution_source: project.source },
+        details: { project: project.project, project_resolution_source: project.source, ...mismatchDetails },
       }
     }
     if (evidence.runtime_instance_id === resolution.current_runtime.runtime_instance_id) {
@@ -259,7 +301,7 @@ export async function reconcileRuntimeMemoryReadyIdentity(
         code: 'EVIDENCE_ALREADY_CURRENT',
         evidence_id: evidence.id,
         evidence_log_id: null,
-        details: { project: project.project },
+        details: { project: project.project, ...mismatchDetails },
       }
     }
 
@@ -298,7 +340,7 @@ export async function reconcileRuntimeMemoryReadyIdentity(
       code: 'EVIDENCE_BINDING_REFRESHED',
       evidence_id: refreshed.evidence_id,
       evidence_log_id: refreshed.evidence_log_id,
-      details: { project: project.project, superseded_evidence_id: evidence.id },
+      details: { project: project.project, superseded_evidence_id: evidence.id, ...mismatchDetails },
     }
   } catch (error) {
     const message = (error as Error).message ?? String(error)
@@ -307,7 +349,7 @@ export async function reconcileRuntimeMemoryReadyIdentity(
       target: resolution.current_runtime.runtime_instance_id,
       code: 'EVIDENCE_BINDING_REFRESH_FAILED',
       now,
-      details: { error: message },
+      details: { error: message, ...mismatchDetails },
     })
     return {
       agent_id: input.agentId,
@@ -373,9 +415,24 @@ export async function queryRuntimeMemoryReadyIdentityMonitor(
       now,
       policy,
     })
-    for (const exclusion of resolution.candidate_exclusions.filter(row => row.live)) {
+    for (const mismatch of resolution.profile_mismatch_observations.filter(row => row.live)) {
       findings.push({
-        code: 'PROFILE_MISMATCH_EXCLUDED',
+        code: 'REGISTRATION_PROFILE_MISMATCH',
+        agent_id: agentId,
+        runtime_instance_id: mismatch.runtime_instance_id,
+        details: {
+          current: mismatch.current,
+          mismatches: mismatch.mismatches,
+          handling: mismatch.handling,
+          registration_metadata_provenance: mismatch.registration_metadata_provenance,
+        },
+      })
+    }
+    for (const exclusion of resolution.candidate_exclusions.filter(
+      row => row.live && row.code === 'PROFILE_MISMATCH_DEPRIORITIZED',
+    )) {
+      findings.push({
+        code: 'PROFILE_MISMATCH_DEPRIORITIZED',
         agent_id: agentId,
         runtime_instance_id: exclusion.runtime_instance_id,
         details: { mismatches: exclusion.mismatches, handling: exclusion.handling },
@@ -404,7 +461,9 @@ export async function queryRuntimeMemoryReadyIdentityMonitor(
     read_only: true,
     summary: {
       inventory: seats.length,
-      profile_mismatch_excluded: findings.filter(row => row.code === 'PROFILE_MISMATCH_EXCLUDED').length,
+      profile_mismatch_excluded: 0,
+      registration_profile_mismatch: findings.filter(row => row.code === 'REGISTRATION_PROFILE_MISMATCH').length,
+      profile_mismatch_deprioritized: findings.filter(row => row.code === 'PROFILE_MISMATCH_DEPRIORITIZED').length,
       superseded_evidence_binding: findings.filter(row => row.code === 'SUPERSEDED_EVIDENCE_BINDING').length,
     },
     findings,

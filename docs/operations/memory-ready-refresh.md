@@ -22,8 +22,9 @@ typed repair signal and does not prevent later seats from being evaluated.
 
 ## Runtime identity monitor
 
-Use the read-only monitor to count foreign heartbeat exclusions and evidence
-still bound to a superseded runtime instance. It opens an explicit read-only
+Use the read-only monitor to count registration-profile drift, mismatched live
+instances de-prioritized behind an exact live instance, and evidence still
+bound to a superseded runtime instance. It opens an explicit read-only
 transaction and requires a PostgreSQL URL.
 
 ```sh
@@ -31,8 +32,14 @@ bun scripts/operator/memory-ready-identity-monitor.ts \
   --database-url 'postgresql:///agent_comms?host=/tmp'
 ```
 
-`PROFILE_MISMATCH_EXCLUDED` is warning-only: the row is not a current
-candidate, but the monitor does not quarantine, stop, reap, or delete it.
+`REGISTRATION_PROFILE_MISMATCH` means a live instance exists but its recorded
+session or checkout is inconsistent with the registered seat profile. A sole
+live mismatched instance remains current instead of becoming a silent permanent
+block; the runtime heartbeat must correct its registration from
+`agents.home_directory` / `agents.metadata.tmux_session` and record
+`registration_metadata_provenance`. `PROFILE_MISMATCH_DEPRIORITIZED` means an
+exact live instance exists and the mismatched competitor ranked below it. The
+monitor never quarantines, stops, reaps, or deletes either row.
 `SUPERSEDED_EVIDENCE_BINDING` means the common resolver selected a live exact
 profile runtime while the latest evidence still names another instance.
 Ordinary runtime heartbeats repair the latter through the single-seat

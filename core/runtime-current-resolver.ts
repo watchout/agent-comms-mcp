@@ -74,17 +74,27 @@ export type RuntimeProfileMismatch = {
 }
 
 export type RuntimeCandidateExclusion = {
-  code: 'PROFILE_MISMATCH_EXCLUDED'
+  code: 'PROFILE_MISMATCH_DEPRIORITIZED' | 'SEALED_RECEIPT_MISMATCH_EXCLUDED'
   runtime_instance_id: string
   live: boolean
   mismatches: RuntimeProfileMismatch[]
-  handling: 'WARN_ONLY'
+  handling: 'WARN_ONLY_RANK_BELOW_EXACT' | 'FAIL_CLOSED'
+}
+
+export type RuntimeProfileMismatchObservation = {
+  code: 'REGISTRATION_PROFILE_MISMATCH'
+  runtime_instance_id: string
+  live: boolean
+  current: boolean
+  mismatches: RuntimeProfileMismatch[]
+  registration_metadata_provenance: Record<string, unknown> | null
+  handling: 'WARN_ONLY_CURRENT_FALLBACK' | 'WARN_ONLY_RANK_BELOW_EXACT'
 }
 
 export type RuntimeCandidateAbsenceReason =
   | 'NO_RUNTIME_ROWS'
-  | 'PROFILE_MISMATCH_EXCLUDED'
-  | 'ONLY_STALE_PROFILE_MATCHES'
+  | 'ONLY_STALE_RUNTIME_ROWS'
+  | 'SEALED_RECEIPT_MISMATCH'
 
 export type RuntimeStaleReapCandidate = {
   runtime_instance_id: string
@@ -114,6 +124,7 @@ export type RuntimeCurrentResolution = {
   current_runtime: RuntimeCurrentInstance | null
   current_candidates: RuntimeCurrentInstance[]
   candidate_exclusions: RuntimeCandidateExclusion[]
+  profile_mismatch_observations: RuntimeProfileMismatchObservation[]
   candidate_absence_reason: RuntimeCandidateAbsenceReason | null
   runtime_rows: RuntimeCurrentInstance[]
   reap_candidates: RuntimeStaleReapCandidate[]
@@ -322,6 +333,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
       current_runtime: null,
       current_candidates: [],
       candidate_exclusions: [],
+      profile_mismatch_observations: [],
       candidate_absence_reason: 'NO_RUNTIME_ROWS',
       runtime_rows: [],
       reap_candidates: [],
@@ -353,7 +365,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     [input.agentId, requestedRuntimeKind],
   )
   const nowMs = now.getTime()
-  const candidateExclusions: RuntimeCandidateExclusion[] = []
+  const mismatchesByRuntime = new Map<string, RuntimeProfileMismatch[]>()
   const normalized = runtimeRows.map((row): RuntimeCurrentInstance => {
     const rowMetadata = object(row.metadata)
     const runtimeKind = text(row.runtime_kind) ?? 'unknown'
@@ -426,15 +438,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
       }
     }
     instance.profile_match = mismatches.length === 0
-    if (!instance.profile_match) {
-      candidateExclusions.push({
-        code: 'PROFILE_MISMATCH_EXCLUDED',
-        runtime_instance_id: instance.runtime_instance_id,
-        live: instance.live,
-        mismatches,
-        handling: 'WARN_ONLY',
-      })
-    }
+    if (!instance.profile_match) mismatchesByRuntime.set(instance.runtime_instance_id, mismatches)
     return instance
   })
 
@@ -476,18 +480,60 @@ export async function resolveRuntimeMemoryReadyCurrent(
         profile.session_name ? null : 'session',
         profile.home_directory ? null : 'home',
       ].filter((value): value is string => value !== null)
-  const currentCandidates = normalized.filter(row => row.live && row.profile_match)
+  const liveRows = normalized.filter(row => row.live)
+  const exactLiveRows = liveRows.filter(row => row.profile_match)
+  const currentCandidates = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? exactLiveRows
+    : exactLiveRows.length > 0
+      ? exactLiveRows
+      : liveRows
   const current = currentCandidates[0] ?? null
+  const candidateExclusions: RuntimeCandidateExclusion[] = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? normalized
+        .filter(row => !row.profile_match)
+        .map(row => ({
+          code: 'SEALED_RECEIPT_MISMATCH_EXCLUDED' as const,
+          runtime_instance_id: row.runtime_instance_id,
+          live: row.live,
+          mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
+          handling: 'FAIL_CLOSED' as const,
+        }))
+    : exactLiveRows.length > 0
+      ? liveRows
+          .filter(row => !row.profile_match)
+          .map(row => ({
+            code: 'PROFILE_MISMATCH_DEPRIORITIZED' as const,
+            runtime_instance_id: row.runtime_instance_id,
+            live: true,
+            mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
+            handling: 'WARN_ONLY_RANK_BELOW_EXACT' as const,
+          }))
+      : []
+  const profileMismatchObservations: RuntimeProfileMismatchObservation[] = requestedRuntimeKind === 'bootstrap_bound_provider'
+    ? []
+    : liveRows
+        .filter(row => !row.profile_match)
+        .map(row => {
+          const provenance = object(row.metadata.registration_metadata_provenance)
+          return {
+            code: 'REGISTRATION_PROFILE_MISMATCH' as const,
+            runtime_instance_id: row.runtime_instance_id,
+            live: true,
+            current: current?.runtime_instance_id === row.runtime_instance_id,
+            mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
+            registration_metadata_provenance: Object.keys(provenance).length > 0 ? provenance : null,
+            handling: exactLiveRows.length > 0
+              ? 'WARN_ONLY_RANK_BELOW_EXACT' as const
+              : 'WARN_ONLY_CURRENT_FALLBACK' as const,
+          }
+        })
   const candidateAbsenceReason: RuntimeCandidateAbsenceReason | null = current
     ? null
     : normalized.length === 0
       ? 'NO_RUNTIME_ROWS'
-      : candidateExclusions.some(row => row.live)
-        ? 'PROFILE_MISMATCH_EXCLUDED'
-        : normalized.some(row => row.profile_match)
-          ? 'ONLY_STALE_PROFILE_MATCHES'
-          : 'PROFILE_MISMATCH_EXCLUDED'
-  const liveCandidateExclusions = candidateExclusions.filter(row => row.live)
+      : requestedRuntimeKind === 'bootstrap_bound_provider' && candidateExclusions.some(row => row.live)
+        ? 'SEALED_RECEIPT_MISMATCH'
+        : 'ONLY_STALE_RUNTIME_ROWS'
   const code = requestedRuntimeKind === 'bootstrap_bound_provider'
     ? current
       ? 'RESOLVED' as const
@@ -507,6 +553,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     current_runtime: tupleMissing.length === 0 ? current : null,
     current_candidates: tupleMissing.length === 0 ? currentCandidates : [],
     candidate_exclusions: candidateExclusions,
+    profile_mismatch_observations: profileMismatchObservations,
     candidate_absence_reason: candidateAbsenceReason,
     runtime_rows: normalized,
     reap_candidates: reapCandidates,
@@ -517,11 +564,18 @@ export async function resolveRuntimeMemoryReadyCurrent(
       active_runtime_rows: normalized.length,
       live_runtime_rows: normalized.filter(row => row.live).length,
       live_profile_matches: normalized.filter(row => row.live && row.profile_match).length,
+      live_profile_mismatches: profileMismatchObservations.length,
       current_candidate_count: currentCandidates.length,
+      current_resolution_source: current
+        ? current.profile_match
+          ? 'exact_profile'
+          : 'live_profile_mismatch_fallback'
+        : null,
       candidate_absence_reason: candidateAbsenceReason,
       candidate_exclusions_total: candidateExclusions.length,
-      live_candidate_exclusions: liveCandidateExclusions,
-      foreign_heartbeat_handling: 'WARN_ONLY_NO_QUARANTINE',
+      live_candidate_exclusions: candidateExclusions.filter(row => row.live),
+      profile_mismatch_observations: profileMismatchObservations,
+      profile_mismatch_handling: 'WARN_ONLY_NO_QUARANTINE',
     },
   }
 }

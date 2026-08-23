@@ -81,6 +81,7 @@ export interface RuntimeMemoryReadyGateResult {
     | 'port_mismatch'
     | 'profile_revision_mismatch'
     | 'profile_source_mismatch'
+    | 'registration_profile_mismatch'
     | 'checkout_path_mismatch'
     | 'checkout_commit_mismatch'
     | 'stale_runtime_restore'
@@ -808,6 +809,7 @@ export async function evaluateRuntimeMemoryReadyGate(
     details: {
       policy: currentResolution.policy,
       resolver_code: currentResolution.code,
+      ...currentResolution.details,
     },
   }
   if (!currentRuntime.runtime_instance_id) {
@@ -834,6 +836,15 @@ export async function evaluateRuntimeMemoryReadyGate(
     return fail(withEvidence, 'checkout_path_mismatch', {
       profile_checkout_path: expectedCheckoutPath,
       runtime_checkout_path: currentRuntime.checkout_path,
+    })
+  }
+  const currentRegistrationMismatch = currentResolution.profile_mismatch_observations.find(
+    observation => observation.current && observation.runtime_instance_id === currentRuntime.runtime_instance_id,
+  ) ?? null
+  if (currentRegistrationMismatch) {
+    return fail(withEvidence, 'registration_profile_mismatch', {
+      repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
+      registration_profile_mismatch: currentRegistrationMismatch,
     })
   }
   if (evidence.runtime_instance_id !== currentRuntime.runtime_instance_id) {
