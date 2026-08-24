@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Client } from 'pg'
 import {
+  KODAMA_CANARY_SUSPENSION_AGENT_ID,
+  SEAT_DISPOSITION_CONTROL_SOURCE_SHA256,
   SD_C8_REGISTRY_RETIREMENT_AGENT_IDS,
+  transitionKodamaCanaryDelivery,
   transitionSdC8RegistryCohort,
 } from '../../core/registry-retirement'
 
@@ -21,10 +24,19 @@ function explicitScratchDatabaseUrl(): string {
 async function clean(): Promise<void> {
   await db.query(
     `DELETE FROM audit_log
+      WHERE agent_id = $1
+        AND event_type IN ('registry.identity.delivery_suspended', 'registry.identity.delivery_reinstated')`,
+    [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+  )
+  await db.query(
+    `DELETE FROM audit_log
       WHERE agent_id = ANY($1::text[])
         AND event_type IN ('registry.identity.retired', 'registry.identity.reinstated')`,
     [[...SD_C8_REGISTRY_RETIREMENT_AGENT_IDS]],
   )
+  await db.query(`DELETE FROM message_queue WHERE agent_id = $1`, [KODAMA_CANARY_SUSPENSION_AGENT_ID])
+  await db.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [KODAMA_CANARY_SUSPENSION_AGENT_ID])
+  await db.query(`DELETE FROM agents WHERE agent_id = $1`, [KODAMA_CANARY_SUSPENSION_AGENT_ID])
   await db.query(`DELETE FROM message_queue WHERE agent_id = ANY($1::text[])`, [[...SD_C8_REGISTRY_RETIREMENT_AGENT_IDS]])
   await db.query(`DELETE FROM agents WHERE agent_id = ANY($1::text[])`, [[...SD_C8_REGISTRY_RETIREMENT_AGENT_IDS]])
 }
@@ -53,6 +65,22 @@ beforeAll(async () => {
       ],
     )
   }
+  await db.query(
+    `INSERT INTO agents
+       (agent_id, display_name, agent_type, runtime, status, profile_enabled,
+        disabled_at, status_updated_at, metadata)
+     VALUES ($1, $1, 'dev', 'TUI', 'busy', true, NULL, $2, $3::jsonb)`,
+    [
+      KODAMA_CANARY_SUSPENSION_AGENT_ID,
+      '2026-08-25T00:00:00.000Z',
+      JSON.stringify({ canary: 'n40', nested: { preserved: true } }),
+    ],
+  )
+  await db.query(
+    `INSERT INTO message_queue (agent_id, message_id, payload, status)
+     VALUES ($1, $2, $3::jsonb, 'pending')`,
+    [KODAMA_CANARY_SUSPENSION_AGENT_ID, 'sd-c8-kodama-sentinel', JSON.stringify({ kind: 'sentinel' })],
+  )
 })
 
 afterAll(async () => {
@@ -139,6 +167,117 @@ describe('SD-C8 exact registry retirement transition', () => {
     expect(audit.rows).toEqual([
       { event_type: 'registry.identity.reinstated', count: '12' },
       { event_type: 'registry.identity.retired', count: '12' },
+    ])
+  })
+
+  test('kodama canary suspension is reversible, claim-safe, and queue-neutral', async () => {
+    const dryRun = await transitionKodamaCanaryDelivery(db as any, {
+      action: 'suspend',
+      execute: false,
+      now: new Date('2026-08-25T01:00:00.000Z'),
+    })
+    expect(dryRun).toMatchObject({
+      action: 'suspend',
+      execute: false,
+      transitioned: false,
+      readback: { status: 'busy', profile_enabled: true, disabled_at: null, suspended: false },
+    })
+
+    await db.query(
+      `UPDATE message_queue
+          SET status = 'received'
+        WHERE agent_id = $1 AND message_id = 'sd-c8-kodama-sentinel'`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+    await expect(transitionKodamaCanaryDelivery(db as any, {
+      action: 'suspend',
+      execute: true,
+      now: new Date('2026-08-25T01:01:00.000Z'),
+    })).rejects.toThrow('KODAMA_CANARY_SUSPENSION_ACTIVE_CLAIM')
+    await db.query(
+      `UPDATE message_queue
+          SET status = 'pending'
+        WHERE agent_id = $1 AND message_id = 'sd-c8-kodama-sentinel'`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+
+    const suspended = await transitionKodamaCanaryDelivery(db as any, {
+      action: 'suspend',
+      execute: true,
+      now: new Date('2026-08-25T01:02:00.000Z'),
+    })
+    expect(suspended.control_source_ref.sha256).toBe(SEAT_DISPOSITION_CONTROL_SOURCE_SHA256)
+    expect(suspended).toMatchObject({
+      action: 'suspend',
+      execute: true,
+      transitioned: true,
+      readback: { status: 'offline', profile_enabled: true, disabled_at: null, suspended: true },
+    })
+    const storedSuspension = await db.query<{ status: string; profile_enabled: boolean; disabled_at: Date | null; metadata: any }>(
+      `SELECT status, profile_enabled, disabled_at, metadata FROM agents WHERE agent_id = $1`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+    expect(storedSuspension.rows[0].metadata.registry_canary_delivery_suspension.preimage).toMatchObject({
+      status: 'busy',
+      profile_enabled: true,
+      disabled_at: null,
+      metadata: { canary: 'n40', nested: { preserved: true } },
+      metadata_is_sql_null: false,
+    })
+
+    await expect(transitionKodamaCanaryDelivery(db as any, {
+      action: 'reinstate',
+      execute: true,
+      now: new Date('2026-08-25T01:03:00.000Z'),
+      canaryReceipt: {
+        url: 'https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5402944050',
+        sha256: 'not-a-digest',
+      },
+    })).rejects.toThrow('KODAMA_CANARY_RECEIPT_SHA256_INVALID')
+
+    const reinstated = await transitionKodamaCanaryDelivery(db as any, {
+      action: 'reinstate',
+      execute: true,
+      now: new Date('2026-08-25T01:04:00.000Z'),
+      canaryReceipt: {
+        url: 'https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5402944050',
+        sha256: SEAT_DISPOSITION_CONTROL_SOURCE_SHA256,
+      },
+    })
+    expect(reinstated).toMatchObject({
+      action: 'reinstate',
+      execute: true,
+      transitioned: true,
+      readback: { status: 'busy', profile_enabled: true, disabled_at: null, suspended: false },
+    })
+
+    const restored = await db.query<{ status: string; profile_enabled: boolean; disabled_at: Date | null; metadata: any }>(
+      `SELECT status, profile_enabled, disabled_at, metadata FROM agents WHERE agent_id = $1`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+    expect(restored.rows[0]).toMatchObject({
+      status: 'busy',
+      profile_enabled: true,
+      disabled_at: null,
+      metadata: { canary: 'n40', nested: { preserved: true } },
+    })
+    const queue = await db.query<{ status: string }>(
+      `SELECT status FROM message_queue WHERE agent_id = $1 AND message_id = 'sd-c8-kodama-sentinel'`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+    expect(queue.rows).toEqual([{ status: 'pending' }])
+    const audit = await db.query<{ event_type: string; count: string }>(
+      `SELECT event_type, count(*)::text AS count
+         FROM audit_log
+        WHERE agent_id = $1
+          AND event_type IN ('registry.identity.delivery_suspended', 'registry.identity.delivery_reinstated')
+        GROUP BY event_type
+        ORDER BY event_type`,
+      [KODAMA_CANARY_SUSPENSION_AGENT_ID],
+    )
+    expect(audit.rows).toEqual([
+      { event_type: 'registry.identity.delivery_reinstated', count: '1' },
+      { event_type: 'registry.identity.delivery_suspended', count: '1' },
     ])
   })
 })

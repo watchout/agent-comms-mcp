@@ -136,5 +136,19 @@ describe('active execution seat registry definition', () => {
       '--database-url', 'postgresql:///agent_comms_sd_c8_test',
       '--execute',
     ])).toThrow('exact --confirm-cell')
+
+    expect(() => parseRegistryRetirementArgs([
+      '--action', 'suspend-kodama',
+      '--database-url', 'postgresql:///agent_comms_sd_c8_test',
+      '--execute',
+    ])).toThrow('exact --confirm-ruling')
+
+    expect(() => parseRegistryRetirementArgs([
+      '--action', 'reinstate-kodama',
+      '--database-url', 'postgresql:///agent_comms_sd_c8_test',
+      '--execute',
+      '--confirm-ruling', 'RL-ARC-940-SEAT-DISPOSITION-20260825-001',
+      '--confirm-control-source-sha256', '5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b',
+    ])).toThrow('immutable canary receipt')
   })
 })
