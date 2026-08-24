@@ -1412,6 +1412,32 @@ digest を readback できなければならない。
   であり、`N` 自体を達成状況に応じて変更しない。retirement は誤登録行を母集団から除く
   registry correction であって、ready 判定や N/N の測度を緩和するものではない。
 
+**2026-08-25 seat disposition と canary 一時除外**
+
+- 裁定 `RL-ARC-940-SEAT-DISPOSITION-20260825-001`
+  （`https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5402944050`、
+  raw body SHA-256
+  `5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b`）は、
+  original exact-12 cohort 中の `auditor`、`codex-aun`、`lead-sus` を
+  duplicate/legacy/dormant identity として退役対象に確定する。残りの fixture/human identity
+  を active seat に戻す裁定ではなく、上記 active predicate と exact-12 retirement 契約は維持する。
+- `kodama` は退役 identity ではない。N40 canary receipt が出るまで通常配送からだけ外す
+  exact-one temporary suspension とする。suspension は `status='offline'` とし、
+  `profile_enabled`、`disabled_at`、runtime/evidence/queue row を変更しない。metadata に
+  ruling control-source と `status` / metadata 全体の exact preimage を保存し、同じ transaction
+  で `registry.identity.delivery_suspended` audit event を記録する。
+- kodama suspension の preflight は exact agent id、未 suspension、active queue claim 0 件を
+  fail-closed に検証する。agents row が無い、foreign transition metadata がある、又は
+  `received|in_progress` row がある場合は全件 rollback する。canary TUI/process/runtime row を
+  stop、kill、reap、又は書換えてはならない。
+- reinstatement は immutable canary receipt の URL と raw body SHA-256 を operator input と
+  audit detail に要求する。保存済み exact preimage を復元し、
+  `registry.identity.delivery_reinstated` を記録する。receipt 不在、壊れた preimage、
+  又は ruling と異なる transition は fail-closed にする。preimage を手作業で再構築してはならない。
+- corrected delivery population は temporary suspension 中の kodama と確定退役 identity を除く
+  31 席であり、判定は同じ active execution-seat selector による strict `ready/31` とする。
+  pending 総数や通知複製数を completion 判定へ代用してはならない。
+
 **Current-runtime resolver (single implementation)**
 
 refresher と gate は同じ exported resolver を使用する。profile tuple の schema mapping は
