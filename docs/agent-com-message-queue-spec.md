@@ -1412,31 +1412,24 @@ digest を readback できなければならない。
   であり、`N` 自体を達成状況に応じて変更しない。retirement は誤登録行を母集団から除く
   registry correction であって、ready 判定や N/N の測度を緩和するものではない。
 
-**2026-08-25 seat disposition と canary 一時除外**
+**2026-08-25 active-seat denominator correction**
 
-- 裁定 `RL-ARC-940-SEAT-DISPOSITION-20260825-001`
-  （`https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5402944050`、
+- 訂正 `CR-ARC-940-KODAMA-DENOMINATOR-20260825-001`
+  （`https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5403920292`、
   raw body SHA-256
-  `5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b`）は、
-  original exact-12 cohort 中の `auditor`、`codex-aun`、`lead-sus` を
-  duplicate/legacy/dormant identity として退役対象に確定する。残りの fixture/human identity
-  を active seat に戻す裁定ではなく、上記 active predicate と exact-12 retirement 契約は維持する。
-- `kodama` は退役 identity ではない。N40 canary receipt が出るまで通常配送からだけ外す
-  exact-one temporary suspension とする。suspension は `status='offline'` とし、
-  `profile_enabled`、`disabled_at`、runtime/evidence/queue row を変更しない。metadata に
-  ruling control-source と `status` / metadata 全体の exact preimage を保存し、同じ transaction
-  で `registry.identity.delivery_suspended` audit event を記録する。
-- kodama suspension の preflight は exact agent id、未 suspension、active queue claim 0 件を
-  fail-closed に検証する。agents row が無い、foreign transition metadata がある、又は
-  `received|in_progress` row がある場合は全件 rollback する。canary TUI/process/runtime row を
-  stop、kill、reap、又は書換えてはならない。
-- reinstatement は immutable canary receipt の URL と raw body SHA-256 を operator input と
-  audit detail に要求する。保存済み exact preimage を復元し、
-  `registry.identity.delivery_reinstated` を記録する。receipt 不在、壊れた preimage、
-  又は ruling と異なる transition は fail-closed にする。preimage を手作業で再構築してはならない。
-- corrected delivery population は temporary suspension 中の kodama と確定退役 identity を除く
-  31 席であり、判定は同じ active execution-seat selector による strict `ready/31` とする。
-  pending 総数や通知複製数を completion 判定へ代用してはならない。
+  `ec6d01ab20de943734dbd1058272cfec9b43e24b3e330bd5d1f358ff4982b960`）は、
+  `kodama` を active execution seat に含める。Shirube canary、別 program の実行、一時的な
+  tmux 占有、又は修理の難しさは、AUN の分母から席を除く根拠にならない。
+- active denominator は 32 席であり、strict completion target は `ready/32` とする。
+  `kodama` に current listener/runtime/evidence が無い場合は ready ではなく修理対象である。
+- 分母から除外できるのは、その identity が AUN の実行席ではない場合だけである。test/override
+  identity、human identity、又は duplicate/retired identity の除外は、agent id、typed reason、
+  control-source、復帰条件を機械可読に保存しなければならない。別 program の一時状態から
+  active/inactive を暗黙導出してはならない。
+- 2026-08-25 の確定除外は original SD-C8 exact-12 cohort と一致する。`auditor`、
+  `codex-aun`、`lead-sus` は duplicate/legacy/dormant identity として可逆に退役し、残る
+  nine fixture/human identity も registry correction 対象である。`kodama` 用の temporary
+  suspension transition は存在させない。
 
 **Current-runtime resolver (single implementation)**
 

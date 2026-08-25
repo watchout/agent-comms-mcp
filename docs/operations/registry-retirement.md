@@ -64,41 +64,16 @@ bun scripts/operator/registry-retirement.ts \
 If a record lacks the exact SD-C8 transition metadata, stop. Do not reconstruct
 the preimage by hand and do not update an individual row outside the helper.
 
-## Kodama canary delivery suspension
+## Active denominator correction
 
-The 2026-08-25
-[seat-disposition ruling](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5402944050)
-temporarily removes only `kodama` from ordinary delivery while its N40 canary
-is in flight. This is not retirement: the helper changes only the agent status
-to `offline`, preserves the complete preimage, records an audit event, and
-does not stop or mutate the canary process, runtime rows, evidence, or queue.
+`CR-ARC-940-KODAMA-DENOMINATOR-20260825-001` keeps `kodama` in the AUN active
+population. Do not suspend, retire, or mark it offline because a Shirube canary
+or another program occupies its tmux session. A missing MCP listener, stale
+runtime, or expired memory-ready evidence makes it a repair target, not an
+exclusion.
 
-```bash
-unset DATABASE_URL
-bun scripts/operator/registry-retirement.ts \
-  --action suspend-kodama \
-  --database-url 'postgresql:///agent_comms?host=/tmp'
-
-bun scripts/operator/registry-retirement.ts \
-  --action suspend-kodama \
-  --database-url 'postgresql:///agent_comms?host=/tmp' \
-  --execute \
-  --confirm-ruling RL-ARC-940-SEAT-DISPOSITION-20260825-001 \
-  --confirm-control-source-sha256 5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b
-```
-
-Reinstatement is allowed only after the canary publishes an immutable receipt.
-Pass that receipt URL and its raw body digest; the helper restores the exact
-stored preimage and records both receipt fields in the audit event.
-
-```bash
-unset DATABASE_URL
-bun scripts/operator/registry-retirement.ts \
-  --action reinstate-kodama \
-  --database-url 'postgresql:///agent_comms?host=/tmp' \
-  --execute \
-  --confirm-ruling RL-ARC-940-SEAT-DISPOSITION-20260825-001 \
-  --confirm-control-source-sha256 5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b \
-  --canary-receipt-url https://github.com/OWNER/REPO/issues/NUMBER#issuecomment-ID \
-  --canary-receipt-sha256 64_LOWERCASE_HEX
-```
+The strict population is 32 seats after the exact SD-C8 cohort is retired.
+Every exclusion must identify a non-execution, test/override, duplicate, or
+retired identity and record a typed reason, immutable control-source, and
+reinstatement condition. Temporary workload state is never an exclusion
+authority.
