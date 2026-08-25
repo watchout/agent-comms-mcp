@@ -52,6 +52,7 @@ function authorityFixtureResult<T>(
     return {
       rows: [{
         agent_id: agentId,
+        agent_type: 'dev',
         runtime: 'codex',
         runtime_engine_preference: 'codex',
         status: 'idle',

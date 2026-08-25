@@ -350,7 +350,7 @@ describe('T22 legacy_tui_liveness_disabled', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-sess`,
-      status: 'online',
+      status: 'idle',
       last_seen_at: new Date(T0.getTime() - 180_000), // stale
     })
 
@@ -365,7 +365,7 @@ describe('T22 legacy_tui_liveness_disabled', () => {
       expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })).toBe(1)
       expect(h.alert.alerts).toEqual([])
       const r = await pg.query(`SELECT status FROM agents WHERE agent_id=$1`, [agent])
-      expect((r.rows as Array<{ status: string }>)[0].status).toBe('online')
+      expect((r.rows as Array<{ status: string }>)[0].status).toBe('idle')
     } finally {
       await h.daemon.stop()
     }
@@ -375,7 +375,7 @@ describe('T22 legacy_tui_liveness_disabled', () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t22-alive')
     await seedAgent(pg, {
-      agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-sess`, status: 'online',
+      agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-sess`, status: 'idle',
       last_seen_at: new Date(T0.getTime() - 5000),
     })
 
@@ -414,6 +414,37 @@ describe('T22 legacy_tui_liveness_disabled', () => {
       await h.daemon.stop()
     }
   })
+
+  test('retired execution seat is excluded before liveness alert evaluation', async () => {
+    const T0 = new Date('2026-05-08T00:00:00.000Z')
+    const agent = makeAgentId('t22-retired')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'SIG',
+      status: 'idle',
+      last_seen_at: new Date(T0.getTime() - 180_000),
+    })
+    await pg.query(
+      `UPDATE agents
+          SET status = 'retired',
+              profile_enabled = false,
+              disabled_at = $1,
+              metadata = metadata || '{"retired":true}'::jsonb
+        WHERE agent_id = $2`,
+      [T0, agent],
+    )
+
+    const h = buildHarness(T0)
+    await h.daemon.start()
+    try {
+      const result = await h.daemon.checkBotLiveness()
+      expect(result).toEqual({ checked: 0, restarted: 0, escalated: 0 })
+      expect(h.alert.contains('manual intervention')).toBe(false)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'retired' })).toBe(1)
+    } finally {
+      await h.daemon.stop()
+    }
+  })
 })
 
 // ── T23 ───────────────────────────────────────────────────────────────────────
@@ -422,7 +453,7 @@ describe('T23 legacy_tui_restart_loop_removed', () => {
     const T0 = new Date('2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t23-flap')
     await seedAgent(pg, {
-      agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-sess`, status: 'online',
+      agent_id: agent, runtime: 'TUI', tmux_session: `${agent}-sess`, status: 'idle',
       last_seen_at: new Date(T0.getTime() - 180_000),
     })
 

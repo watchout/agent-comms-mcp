@@ -1,7 +1,7 @@
 /**
  * T1: new_pending_dispatched (#323 fixtures §T1, spec §4.3 row 1).
  *
- *   precondition: agents alpha (TUI, online); message_queue empty.
+ *   precondition: agents alpha (TUI, idle); message_queue empty.
  *   trigger:      INSERT row → pg_notify (simulated via __testHandleEvent).
  *   expected:
  *     - tmux.sendKeys is not called; TUI prompt injection is disabled
@@ -45,7 +45,7 @@ describe('T1 new_pending_dispatched', () => {
       agent_id: agent,
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
-      status: 'online',
+      status: 'idle',
     })
 
     const t0 = new Date('2026-05-08T00:00:00.000Z')

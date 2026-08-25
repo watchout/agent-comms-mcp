@@ -13,10 +13,7 @@ import {
   type RuntimeCurrentResolution,
   type RuntimeMemoryReadyPolicy,
 } from './runtime-current-resolver'
-
-type FleetSeatRow = {
-  agent_id: string
-}
+import { listActiveExecutionSeats } from './active-execution-seats'
 
 export type RuntimeMemoryReadySeatResult = {
   agent_id: string
@@ -68,11 +65,6 @@ export type RuntimeMemoryReadyFleetRefreshOptions = {
     validForSeconds: number
     policy: RuntimeMemoryReadyPolicy
   }) => Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }>
-}
-
-async function queryRows<T>(db: RuntimeMemoryReadyDb, sql: string, params?: any[]): Promise<T[]> {
-  const result = await db.query<T>(sql, params)
-  return Array.isArray(result) ? result : result.rows
 }
 
 async function defaultRefreshSeat(input: {
@@ -130,15 +122,7 @@ export async function runRuntimeMemoryReadyFleetRefresh(
   const resolveCurrent = options.resolveCurrent ?? resolveRuntimeMemoryReadyCurrent
   const refreshSeat = options.refreshSeat ?? defaultRefreshSeat
   const denylist = new Set(options.denylist.map(value => value.trim()).filter(Boolean))
-  const inventory = await queryRows<FleetSeatRow>(
-    db,
-    `SELECT agent_id
-       FROM agents
-      WHERE status IN ('idle', 'busy')
-        AND COALESCE(profile_enabled, true) = true
-        AND disabled_at IS NULL
-      ORDER BY agent_id`,
-  )
+  const inventory = await listActiveExecutionSeats(db)
   const seats: RuntimeMemoryReadySeatResult[] = []
 
   for (const seat of inventory) {

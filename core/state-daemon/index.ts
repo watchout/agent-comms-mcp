@@ -104,6 +104,7 @@ import {
   evaluateAutomaticProcessingEligibility,
   type AutomaticProcessingEligibilityVerdict,
 } from '../communication-authority'
+import { isActiveExecutionSeat } from '../active-execution-seats'
 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
@@ -141,6 +142,7 @@ interface QueueRow {
 
 interface AgentRow {
   agent_id: string
+  agent_type?: string | null
   runtime: string | null
   runtime_engine_preference?: string | null
   status: string | null
@@ -680,7 +682,10 @@ export class StateDaemon {
 
   async checkBotLiveness(): Promise<LivenessResult> {
     if (this.status !== 'running') return { checked: 0, restarted: 0, escalated: 0 }
-    let sql = `SELECT agent_id, runtime, runtime_engine_preference, status, (metadata->>'tmux_session') AS tmux_session, last_seen_at FROM agents`
+    let sql = `SELECT agent_id, agent_type, runtime, runtime_engine_preference, status,
+                      profile_enabled, disabled_at, metadata,
+                      (metadata->>'tmux_session') AS tmux_session, last_seen_at
+                 FROM agents`
     const params: unknown[] = []
     const scopeClause = this.agentScopeClause(params, 'agent_id')
     if (scopeClause) sql += ` WHERE ${scopeClause.replace(/^ AND /, '')}`
@@ -688,7 +693,14 @@ export class StateDaemon {
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
     for (const bot of rows) {
-      if (isInactiveAgentStatus(bot.status)) {
+      if (!isActiveExecutionSeat({
+        agent_id: bot.agent_id,
+        agent_type: bot.agent_type ?? null,
+        status: bot.status,
+        profile_enabled: bot.profile_enabled,
+        disabled_at: bot.disabled_at,
+        metadata: bot.metadata,
+      })) {
         this.metrics.inc('state_daemon_bot_liveness_skipped_total', { status: bot.status ?? 'unknown' })
         continue
       }
