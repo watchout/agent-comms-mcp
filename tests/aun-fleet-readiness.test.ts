@@ -265,6 +265,47 @@ describe('AUN fleet readiness', () => {
     expect(byAgent['missing-runtime'].blockers).toContain('no_runtime_evidence')
   })
 
+  test('does not allow a drift exclusion to hide contradictory runtime evidence', async () => {
+    const db = fakeDb()
+    const originalQuery = db.query
+    db.query = async (sql: string) => {
+      if (sql.includes('FROM agent_runtime_instances')) {
+        return [{
+          runtime_instance_id: 'runtime-ready',
+          agent_id: 'ready-dev',
+          status: 'running',
+          stopped_at: null,
+          checkout_path: `/fleet/checkouts/${APPROVED_COMMIT}`,
+          commit_sha: APPROVED_COMMIT,
+          metadata: {
+            git_checkout_path: '/different/runtime',
+            git_commit_sha: OTHER_COMMIT,
+            git_dirty: false,
+          },
+        }]
+      }
+      return originalQuery(sql)
+    }
+
+    const report = await buildAunFleetReadinessReport(db, {
+      requireSmoke: false,
+      now: new Date('2026-06-08T00:00:00.000Z'),
+      driftExclusions: [{
+        agent_id: 'ready-dev',
+        actor: 'operator',
+        reason: 'must not bypass contradictory identity',
+        expires_at: '2026-06-09T00:00:00.000Z',
+        scope: 'fleet_checkout_drift',
+      }],
+    })
+
+    const ready = report.agents.find((agent) => agent.agent_id === 'ready-dev')
+    expect(ready?.approved_exclusion).toBeNull()
+    expect(ready?.readiness).toBe('activation_candidate')
+    expect(ready?.blockers).toContain('runtime_checkout_evidence_mismatch')
+    expect(report.blockers).toContain('ready-dev:runtime_checkout_evidence_mismatch')
+  })
+
   test('formats a compact operator report', async () => {
     const report = await buildAunFleetReadinessReport(fakeDb(), {
       smokeRunId: 'RUN1',

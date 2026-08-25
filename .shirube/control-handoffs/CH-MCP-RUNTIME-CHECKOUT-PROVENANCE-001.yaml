@@ -1,0 +1,116 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+parent_ssot: https://github.com/watchout/ai-dev-framework/issues/576
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: .shirube/specs/SPEC-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
+premise_confirmation_ref: https://github.com/watchout/ai-dev-framework/issues/576
+spec_review_state: ready_for_implementation
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/pull/921
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: /root/runtime_provenance_impl
+operation_code: INDEPENDENT_AUDIT
+independent_audit_required: true
+next_role: independent_audit
+rps_scope:
+  shirube_owns:
+    - Exact-head scope, validation, and maker-checker evidence for this checkout-provenance Cell.
+    - Report-only Rapid/Lite evaluation of the Draft PR.
+  shirube_does_not_own:
+    - Runtime activation, restart, deployment, live heartbeat readback, or production verification.
+    - Database incident readback, repair, rollback, migration, queue cleanup, provider mutation, or daemon mutation.
+    - Branch protection, rulesets, required-check activation, approval, Ready transition, merge, or release.
+cell:
+  CELL-ID: CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+  cell_type: code_lite
+  risk_class: R2
+  goal: Align runtime heartbeat checkout identity to one immutable evidence object and make contradictory row/metadata provenance a non-bypassable fail-closed blocker.
+  non_scope:
+    - live database or runtime inspection
+    - database repair, rollback, schema migration, or queue cleanup
+    - runtime restart, deploy, activation, or live heartbeat readback
+    - provider, credential, scheduler, state-daemon, or supervisor mutation
+    - branch protection, ruleset, required-check, approval, Ready, merge, or release mutation
+  allowed_paths:
+    - .shirube/specs/SPEC-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
+    - .shirube/cells/CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/impls/IMPL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/control-handoffs/CH-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/evidence/EVIDENCE-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - core/git-checkout-evidence.ts
+    - core/fleet-checkout-drift.ts
+    - core/runtime-inventory.ts
+    - core/aun-fleet-readiness.ts
+    - server.ts
+    - docs/operations/aun-recovery-final-approval-packet.md
+    - tests/git-checkout-evidence.test.ts
+    - tests/fleet-checkout-drift.test.ts
+    - tests/runtime-inventory.test.ts
+    - tests/aun-fleet-readiness.test.ts
+    - tests/spec-enforcement/cli-commands.test.ts
+  forbidden_paths:
+    - .github/workflows/**
+    - adapters/**
+    - bin/**
+    - cli/**
+    - db/**
+    - migrations/**
+    - package.json
+    - package-lock.json
+    - bun.lockb
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - secrets/**
+    - deploy/**
+    - deployment/**
+  stop_conditions:
+    - Any runtime, database, provider, queue, daemon, deploy, protected-setting, approval, Ready, merge, or release effect is required.
+    - Any implementation edit outside allowed_paths is required.
+    - The auditor and implementation actor are not independent.
+    - The current PR head cannot be bound to an authenticated external GitHub Actions artifact.
+acceptance_criteria:
+  - Actual Git HEAD of the selected checkout is authoritative; a validated full-SHA environment fallback is used only outside a Git checkout.
+  - Row and metadata path, commit, and dirty projections derive from one frozen evidence object.
+  - Any contradictory path or commit projection produces runtime_checkout_evidence_mismatch without policy activation.
+  - Dirty allowances and drift exclusions cannot suppress an evidence-integrity mismatch.
+  - Runtime inventory, connector inventory, and fleet readiness preserve the mismatch as a blocker.
+  - Aligned clean, dirty, allowed-dirty, and legacy evidence remain compatible.
+  - Focused tests run with DATABASE_URL and AGENT_COM_DB explicitly unset.
+  - No runtime, persistent database, provider, queue, daemon, protected setting, approval, Ready, merge, or release effect occurs.
+validation:
+  required_commands:
+    - git diff --check origin/main...HEAD
+    - env -u DATABASE_URL -u AGENT_COM_DB bun test tests/git-checkout-evidence.test.ts tests/fleet-checkout-drift.test.ts tests/runtime-inventory.test.ts tests/aun-fleet-readiness.test.ts tests/spec-enforcement/cli-commands.test.ts
+    - env -u DATABASE_URL -u AGENT_COM_DB bun build server.ts --target=bun --outdir=/tmp/agent-comms-runtime-provenance-build
+    - YAML parse with aliases disabled
+    - Cell allowed-path replay
+  required_evidence:
+    - PR_head_SHA
+    - changed_files
+    - diff_scope_report
+    - focused_DB_isolated_test_result
+    - DB_free_server_build_result
+    - YAML_parse_result
+    - structured_audit_comment
+    - authenticated_external_gate_subject_artifact
+next_action:
+  blocking: true
+  actor: independent_auditor
+  active_function: evidence_audit_gate
+  action: Audit the exact implementation head and publish a structured result without editing or activating runtime state.
+  deliverable: Exact-head structured PASS, PASS_WITH_WARN, REQUEST_CHANGES, or ESCALATE evidence for PR 921.
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_smoke_or_NA
+    - next_step
+    - no_unresolved_follow_up_blocker

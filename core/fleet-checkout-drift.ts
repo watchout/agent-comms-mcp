@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 
 export type FleetCheckoutDriftReason =
+  | 'runtime_checkout_evidence_mismatch'
   | 'runtime_commit_missing'
   | 'runtime_commit_mismatch'
   | 'runtime_checkout_path_missing'
@@ -109,6 +110,14 @@ function commitMatches(commit: string, approvedCommit: string): boolean {
   return fullGitShaEquals(commit, approvedCommit)
 }
 
+function checkoutEvidenceMatches(rowPath: string, metadataPath: string): boolean {
+  return resolve(rowPath) === resolve(metadataPath)
+}
+
+function commitEvidenceMatches(rowCommit: string, metadataCommit: string): boolean {
+  return rowCommit.toLowerCase() === metadataCommit.toLowerCase()
+}
+
 export function evaluateFleetCheckoutDrift(
   runtime: FleetCheckoutRuntimeEvidence | null,
   policy: FleetCheckoutDriftPolicy = {},
@@ -116,10 +125,28 @@ export function evaluateFleetCheckoutDrift(
   const approvedCommit = cleanText(policy.approvedCommit)
   const approvedCheckoutRoots = normalizeApprovedCheckoutRoots(policy.approvedCheckoutRoots)
   const runtimeInstanceId = cleanText(runtime?.runtime_instance_id)
-  const checkoutPath = cleanText(runtime?.checkout_path) ?? metadataText(runtime?.metadata, ['git_checkout_path', 'checkout_path'])
-  const commitSha = cleanText(runtime?.commit_sha) ?? metadataText(runtime?.metadata, ['git_commit_sha', 'commit_sha'])
+  const rowCheckoutPath = cleanText(runtime?.checkout_path)
+  const metadataCheckoutPath = metadataText(runtime?.metadata, ['git_checkout_path', 'checkout_path'])
+  const rowCommitSha = cleanText(runtime?.commit_sha)
+  const metadataCommitSha = metadataText(runtime?.metadata, ['git_commit_sha', 'commit_sha'])
+  const checkoutPath = rowCheckoutPath ?? metadataCheckoutPath
+  const commitSha = rowCommitSha ?? metadataCommitSha
   const dirty = dirtyFromMetadata(runtime?.metadata)
   const reasons: FleetCheckoutDriftReason[] = []
+
+  // Row and metadata fields are two projections of the same heartbeat
+  // evidence. A disagreement means the runtime identity is internally
+  // inconsistent, independent of approved-root/commit or dirty policies.
+  if (
+    (rowCheckoutPath !== null
+      && metadataCheckoutPath !== null
+      && !checkoutEvidenceMatches(rowCheckoutPath, metadataCheckoutPath))
+    || (rowCommitSha !== null
+      && metadataCommitSha !== null
+      && !commitEvidenceMatches(rowCommitSha, metadataCommitSha))
+  ) {
+    reasons.push('runtime_checkout_evidence_mismatch')
+  }
 
   if (approvedCommit) {
     if (!commitSha) reasons.push('runtime_commit_missing')

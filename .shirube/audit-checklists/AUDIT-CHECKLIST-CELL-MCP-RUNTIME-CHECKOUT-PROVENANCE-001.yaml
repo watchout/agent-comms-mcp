@@ -1,0 +1,66 @@
+schema_version: shirube-audit-checklist/v1
+audit_checklist_id: AUDIT-CHECKLIST-CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+source:
+  handoff_ref: .shirube/control-handoffs/CH-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+  cell_id: CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+  work_order: https://github.com/watchout/ai-dev-framework/issues/576
+  implementation_actor: /root/runtime_provenance_impl
+  audit_model: comment_backed_structured_audit
+items:
+  - item_id: RCP-AUDIT-001
+    source: REQ-RCP-001,REQ-RCP-002
+    verification_method: semantic
+    required: true
+    prompt: Verify that the selected checkout Git HEAD is authoritative and row/metadata projections derive from one frozen evidence object independently of process cwd.
+    expected_evidence:
+      - core/git-checkout-evidence.ts
+      - server.ts
+      - tests/git-checkout-evidence.test.ts
+  - item_id: RCP-AUDIT-002
+    source: REQ-RCP-003
+    verification_method: semantic
+    required: true
+    prompt: Verify that path or commit disagreement produces runtime_checkout_evidence_mismatch and dirty allowances or drift exclusions cannot bypass it.
+    expected_evidence:
+      - core/fleet-checkout-drift.ts
+      - runtime_checkout_evidence_mismatch
+      - tests/fleet-checkout-drift.test.ts
+  - item_id: RCP-AUDIT-003
+    source: REQ-RCP-004
+    verification_method: semantic
+    required: true
+    prompt: Verify that runtime inventory, connector inventory, and fleet readiness all preserve the mismatch as a readiness blocker.
+    expected_evidence:
+      - core/runtime-inventory.ts
+      - core/aun-fleet-readiness.ts
+      - server.ts
+  - item_id: RCP-AUDIT-004
+    source: REQ-RCP-005
+    verification_method: semantic
+    required: true
+    prompt: Verify that aligned clean, dirty, allowed-dirty, and legacy single-projection evidence retain their expected behavior.
+    expected_evidence:
+      - tests/runtime-inventory.test.ts
+      - tests/aun-fleet-readiness.test.ts
+      - tests/spec-enforcement/cli-commands.test.ts
+  - item_id: RCP-AUDIT-005
+    source: validation
+    verification_method: executable
+    required: true
+    prompt: Verify focused DB-isolated tests, a DB-free server build, YAML parsing, and diff checking passed without runtime or persistent-DB effects.
+    expected_evidence:
+      - "command_result:focused DB-isolated tests"
+      - "command_result:DB-free server build"
+      - "command_result:YAML parse with aliases disabled"
+      - "command_result:git diff --check origin/main...HEAD"
+  - item_id: RCP-AUDIT-006
+    source: allowed_paths
+    verification_method: executable
+    required: true
+    prompt: Verify every changed file is inside the exact control handoff allowed_paths and no forbidden path is touched.
+    expected_evidence:
+      - changed_files
+      - diff_scope_report
+notes:
+  - Owner approval, Ready transition, merge, runtime activation, live readback, and DB incident response remain separate.
+  - A PASS_WITH_WARN audit is acceptable only when the trusted checker reports no blockers; residual warnings stay visible in the Draft PR.

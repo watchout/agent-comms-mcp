@@ -1,0 +1,57 @@
+schema_version: shirube-cell/v1
+cell_id: CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+spec_id: SPEC-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+impl_id: IMPL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001
+control_source: https://github.com/watchout/ai-dev-framework/issues/576
+risk_tier: R2
+goal: >-
+  Align runtime heartbeat checkout identity to one immutable evidence object and
+  make contradictory row/metadata provenance a non-bypassable fail-closed
+  blocker across drift, inventory, connector, and fleet readiness reports.
+primary_responsibility: Runtime checkout evidence integrity only.
+implementation_boundary:
+  allowed_paths:
+    - .shirube/specs/SPEC-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
+    - .shirube/cells/CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/impls/IMPL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.md
+    - .shirube/audit-checklists/AUDIT-CHECKLIST-CELL-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/control-handoffs/CH-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - .shirube/evidence/EVIDENCE-MCP-RUNTIME-CHECKOUT-PROVENANCE-001.yaml
+    - core/git-checkout-evidence.ts
+    - core/fleet-checkout-drift.ts
+    - core/runtime-inventory.ts
+    - core/aun-fleet-readiness.ts
+    - server.ts
+    - docs/operations/aun-recovery-final-approval-packet.md
+    - tests/git-checkout-evidence.test.ts
+    - tests/fleet-checkout-drift.test.ts
+    - tests/runtime-inventory.test.ts
+    - tests/aun-fleet-readiness.test.ts
+    - tests/spec-enforcement/cli-commands.test.ts
+  forbidden:
+    - Database schema migration or live database mutation.
+    - Queue, provider, credential, state-daemon, supervisor, or runtime mutation.
+    - Runtime start, stop, restart, deploy, activation, or live readback.
+    - Branch protection, required-check, approval, merge, or release mutation.
+    - Self-audit or self-approval.
+verification_boundary:
+  - Server-root evidence is independent of process cwd.
+  - Explicit AGENT_COM_CHECKOUT_PATH controls all evidence projections together.
+  - Row/metadata path and commit disagreements fail closed without policy activation.
+  - allowDirtyCheckout and drift exclusions cannot suppress integrity mismatch.
+  - Aligned clean, dirty, and legacy evidence preserve existing behavior.
+  - Runtime inventory, connector inventory, and fleet readiness propagate the blocker.
+  - Focused tests pass with DATABASE_URL and AGENT_COM_DB explicitly unset.
+  - git diff --check and a DB-free server build pass.
+lifecycle_state: implementation_candidate_awaiting_independent_audit
+completes_parent_goal: false
+stop_conditions:
+  - A database, runtime, provider, queue, daemon, or protected setting would change.
+  - Scope expands beyond checkout provenance integrity.
+  - An implementation author attempts to publish an audit PASS.
+next_action:
+  blocking: true
+  actor: independent_auditor
+  active_function: evidence_audit_gate
+  action: Audit the exact implementation head and focused regression evidence without editing files.
+  deliverable: Exact-head PASS, REQUEST_CHANGES, or ESCALATE with file-and-test evidence.

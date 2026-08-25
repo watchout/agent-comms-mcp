@@ -237,10 +237,12 @@ The final approval packet is GO only when all conditions are true:
 - state-daemon readiness is GO or explicitly report-only for unloaded/not-running
   with no restart performed
 - runtime inventory has zero stale, unapproved checkout, commit mismatch,
-  missing checkout evidence, or dirty checkout blockers
+  missing checkout evidence, contradictory row/metadata checkout evidence, or
+  dirty checkout blockers
 - fleet readiness has zero checkout drift blockers for production active agents;
   any bounded drift exclusion is present as auditable `approved_fleet_exclusion`
-  evidence and does not count the agent as ready
+  evidence and does not count the agent as ready. A
+  `runtime_checkout_evidence_mismatch` integrity blocker cannot be excluded
 - queue-processing readiness is GO and has no `QUEUE_WAKE_STUCK` blockers
 - install-plan dry-run is GO, persistent-path safe, and non-mutating
 - kodama token rotation evidence is GO and contains no raw token

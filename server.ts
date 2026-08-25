@@ -23,6 +23,7 @@ import { Client } from 'pg'
 import { createDbAdapter, type DbAdapter as NewDbAdapter, toLegacy } from './core/db'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { execSync } from 'node:child_process'
@@ -172,7 +173,7 @@ import {
   inferRuntimeSessionName,
   parseRuntimePort,
 } from './core/runtime-heartbeat'
-import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './core/git-checkout-evidence'
+import { collectRuntimeCheckoutEvidence, gitCheckoutMetadata } from './core/git-checkout-evidence'
 import {
   heartbeatAgentStatus,
   markAgentOfflineIfNoOtherLiveRuntime,
@@ -223,7 +224,7 @@ interface Config {
 
 function loadConfig(): Config {
   const configPath = process.env.AGENT_COMMS_CONFIG
-    ?? join(dirname(new URL(import.meta.url).pathname), 'config.json')
+    ?? join(dirname(fileURLToPath(import.meta.url)), 'config.json')
 
   let raw: any = {}
   if (existsSync(configPath)) {
@@ -406,18 +407,8 @@ let resolvedDiscordBotToken = DISCORD_BOT_TOKEN
 let resolvedDiscordBotTokenSource = process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : process.env.DISCORD_BOT_TOKEN ? 'DISCORD_BOT_TOKEN' : null
 const REPLY_CHAIN_DEPTH = parseReplyChainDepth(process.env.AGENT_COM_REPLY_CHAIN_DEPTH)
 const LOOP_WINDOW_MS = config.loop_detection.window_seconds * 1000
-const SERVER_ROOT = dirname(new URL(import.meta.url).pathname)
-
-function currentRuntimeCommitSha(): string | null {
-  if (process.env.AGENT_COM_COMMIT_SHA?.trim()) return process.env.AGENT_COM_COMMIT_SHA.trim()
-  try {
-    return execSync(`git -C "${SERVER_ROOT}" rev-parse HEAD`, { encoding: 'utf-8' }).trim()
-  } catch {
-    return null
-  }
-}
-const RUNTIME_COMMIT_SHA = currentRuntimeCommitSha()
-const RUNTIME_CHECKOUT_EVIDENCE = collectGitCheckoutEvidence(process.env.AGENT_COM_CHECKOUT_PATH ?? SERVER_ROOT)
+const SERVER_ROOT = dirname(fileURLToPath(import.meta.url))
+const RUNTIME_CHECKOUT_EVIDENCE = collectRuntimeCheckoutEvidence(SERVER_ROOT)
 
 function tokenFingerprint(token: string): string | null {
   const trimmed = token.trim()
@@ -464,8 +455,8 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     sessionName: runtimeSessionName,
     processId: process.pid,
     port: runtimePort,
-    checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
-    commitSha: RUNTIME_COMMIT_SHA,
+    checkoutPath: RUNTIME_CHECKOUT_EVIDENCE.checkout_path,
+    commitSha: RUNTIME_CHECKOUT_EVIDENCE.commit_sha,
     endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
     connectorProvider: hasDiscordConnectorEvidence ? 'discord' : null,
     connectorUri: hasDiscordConnectorEvidence ? `discord://agents/${AGENT_ID}` : null,
