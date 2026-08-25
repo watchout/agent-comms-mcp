@@ -1,0 +1,587 @@
+{
+  "schema_version": "DesignPack/v2",
+  "pack_id": "DF2-ARC-940-SD-C2B-SCHEMA-FAIRNESS-001",
+  "generation": 1,
+  "status": "DESIGN_AUTHORED",
+  "subject": {
+    "id": "SUBJECT-ARC-940-SD-C2B-SCHEMA-FAIRNESS",
+    "stable_identifier": "agent-comms-mcp:940:sd-c2b:schema-required-fairness",
+    "kind": "runtime_contract_correction",
+    "digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+    "generation": 1,
+    "baseline_refs": [
+      "git:1b2065b279048f30c5fe15c6b814c653dd0cdf7f"
+    ],
+    "source_refs": [
+      "SRC-SD-C2B",
+      "SRC-OWNER",
+      "SRC-MEASUREMENT"
+    ]
+  },
+  "admission": {
+    "mode": "author",
+    "actor_agent_id": "dev-001",
+    "active_function": "implementation_executor",
+    "maker_history": [
+      "dev-001"
+    ],
+    "authority": [
+      "CH-ARC-940-SD-C2B-RUNNER-HARDENING-20260822-001",
+      "OD-SD-940-NORMALIZE-TO-EFFECT-20260821-001"
+    ],
+    "protected_surfaces": [
+      "post-merge state-daemon deployment under OD-SD-940"
+    ],
+    "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+    "validation_version": "1.2.0",
+    "admitted_at": "2026-08-25T02:57:28Z"
+  },
+  "owner_outcome": {
+    "statement": "Drain the 35 actionable pending rows without silent success or unbounded retry.",
+    "success_boundary": "A deterministic host-adapter failure terminalizes only its exact row and the same sweep evaluates later rows; post-merge measurement accounts for the full actionable cohort.",
+    "source_refs": [
+      "SRC-SD-C2B",
+      "SRC-OWNER",
+      "SRC-MEASUREMENT"
+    ]
+  },
+  "sources": [
+    {
+      "id": "SRC-SD-C2B",
+      "kind": "control_handoff",
+      "digest": "sha256:20c7ba195c14a9844b2caee71cb3d2c9448d264bcefdaa0e5a26d23b7eaed277",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    },
+    {
+      "id": "SRC-OWNER",
+      "kind": "owner_decision",
+      "digest": "sha256:1f8d621224c0a457d16a59795d8cd8a2557892dc5dc25ed63d1c6f92222f2051",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    },
+    {
+      "id": "SRC-MEASUREMENT",
+      "kind": "runtime_measurement",
+      "digest": "sha256:ec93b28a3c3db26b9d5821eee3370b1ae1166a981d6b327c702b209cac88ba35",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    }
+  ],
+  "non_goals": [
+    "provider fallback",
+    "silent done or replied outcome",
+    "database schema change",
+    "denylist change",
+    "changes to PR 947 or PR 948"
+  ],
+  "assumptions": [
+    {
+      "statement": "message_queue already supports failed, failed_reason, done_at, and JSON payload evidence",
+      "source_ref": "SRC-SD-C2B"
+    }
+  ],
+  "unknowns": [],
+  "inventions": [
+    {
+      "id": "INV-SD-C2B-FAIRNESS-001",
+      "proposal": "Use one pending-row compare-and-set terminalizer shared by deterministic host-adapter failure branches.",
+      "owner_decision_ref": "SRC-SD-C2B"
+    }
+  ],
+  "domain_model": {
+    "entities": [
+      {
+        "id": "PendingQueueRow",
+        "source_ref": "SRC-MEASUREMENT"
+      },
+      {
+        "id": "HostRuntimeFailure",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "values": [
+      {
+        "id": "SCHEMA_REQUIRED",
+        "source_ref": "SRC-MEASUREMENT"
+      },
+      {
+        "id": "failed_non_retryable",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "invariants": [
+      {
+        "id": "INV-NO-SILENT-SUCCESS",
+        "predicate": "deterministic adapter failure never produces done or replied",
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "INV-ROW-FAIRNESS",
+        "predicate": "one terminal row does not stop evaluation of later fetched rows",
+        "source_ref": "SRC-OWNER"
+      }
+    ],
+    "commands": [
+      {
+        "id": "TERMINALIZE_HOST_FAILURE",
+        "owner": "state-daemon deterministic code",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "ownership": [
+      {
+        "object": "message_queue lifecycle",
+        "owner": "state-daemon deterministic control plane",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ]
+  },
+  "state_and_event_model": {
+    "states": [
+      {
+        "id": "PENDING",
+        "source_ref": "SRC-MEASUREMENT"
+      },
+      {
+        "id": "FAILED_NON_RETRYABLE",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "events": [
+      {
+        "id": "HOST_ADAPTER_DETERMINISTIC_FAILURE",
+        "source_ref": "SRC-MEASUREMENT"
+      }
+    ],
+    "transitions": [
+      {
+        "from": "PENDING",
+        "event": "HOST_ADAPTER_DETERMINISTIC_FAILURE",
+        "to": "FAILED_NON_RETRYABLE",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "invalid_transitions": [
+      {
+        "id": "DETERMINISTIC_FAILURE_TO_DONE_OR_REPLIED",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "idempotency": "compare-and-set on exact queue id and pending status",
+    "concurrency": "a stale CAS miss preserves the newer lifecycle state",
+    "transaction": "single SQL statement terminalizes the row and releases the exact agent wake reservation",
+    "consistency": "row terminal evidence and lifecycle status commit atomically"
+  },
+  "options_and_decisions": {
+    "decisions": [
+      {
+        "id": "DESIGN_ADMISSION",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-SCHEMA-TERMINAL"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "DESIGN_STRUCTURE",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-SCHEMA-TERMINAL", "PK-TYPED-EVIDENCE", "PK-ROW-FAIRNESS", "PK-NO-RETRY"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "DESIGN_TRACE",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-SCHEMA-TERMINAL", "PK-TYPED-EVIDENCE", "PK-ROW-FAIRNESS", "PK-NO-RETRY"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-MEASUREMENT"
+      },
+      {
+        "id": "DESIGN_AUTHORITY",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-SCHEMA-TERMINAL"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-OWNER"
+      },
+      {
+        "id": "DESIGN_HANDOFF",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-ROW-FAIRNESS"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "DESIGN_TERMINAL_ADMISSION",
+        "verdict": "PASS",
+        "reason_codes": [],
+        "predicate_refs": ["PK-NO-RETRY"],
+        "evidence_refs": ["EV-SOURCE-BUNDLE"],
+        "source_ref": "SRC-OWNER"
+      }
+    ]
+  },
+  "architecture_and_adapters": {
+    "canonical_semantic_core": "state-daemon queue lifecycle",
+    "semantic_core_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+    "components": [
+      {
+        "id": "host-runtime-adapter-gate",
+        "boundary": "typed runtime admission without lifecycle authority",
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "pending-row-terminalizer",
+        "boundary": "deterministic compare-and-set lifecycle mutation",
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "stale-row-sweep",
+        "boundary": "ordered batch iteration and row fairness",
+        "source_ref": "SRC-MEASUREMENT"
+      }
+    ],
+    "adapters": [
+      {
+        "id": "codex-or-claude-host-adapter",
+        "semantic_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230"
+      }
+    ]
+  },
+  "trust_data_and_authority": {
+    "inputs": [
+      {
+        "id": "host-adapter-failure-code",
+        "classification": "trusted deterministic enum",
+        "source_ref": "SRC-SD-C2B"
+      },
+      {
+        "id": "queue-payload",
+        "classification": "untrusted context preserved as data",
+        "source_ref": "SRC-SD-C2B"
+      }
+    ],
+    "data_sensitivity": "failure detail excludes configuration values and secrets",
+    "trust_boundaries": [
+      "runtime output cannot choose retryability or lifecycle state"
+    ],
+    "permissions": [
+      "exact pending-row failed transition only"
+    ],
+    "protected_effects": [
+      "post-merge state-daemon deployment requires OD-SD-940 citation"
+    ],
+    "decision_owners": {
+      "runtime deployment": "watchout owner decision OD-SD-940"
+    },
+    "non_model_enforcement": [
+      "closed failure-code classification",
+      "pending status compare-and-set",
+      "exact queue id"
+    ]
+  },
+  "ai_native_conformance": {
+    "model_role": "runtime output is evidence only",
+    "deterministic_boundary": "retryability, lifecycle terminalization, and sweep continuation",
+    "authority": "models cannot mark queue rows done, failed, retried, or merged",
+    "tool_boundary": "host adapter builds argv and parses typed results only",
+    "context_retrieval": "untrusted queue payload remains a reference outside argv policy",
+    "failure_degradation": "fail closed as typed failed without silent fallback",
+    "evaluation": "isolated PostgreSQL positive and negative fixtures",
+    "human_oversight": "independent exact-head audit and owner-bound deployment"
+  },
+  "acceptance_predicates": [
+    {
+      "id": "PK-SCHEMA-TERMINAL",
+      "predicate": "message_queue status equals failed and failed_reason equals SCHEMA_REQUIRED after one adapter admission attempt",
+      "source_ref": "SRC-SD-C2B",
+      "decision_ref": "DESIGN_STRUCTURE",
+      "fixture_ref": "FX-SCHEMA-TERMINAL",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "evidence_producer": "isolated PostgreSQL contract test records exact row readback",
+      "proof_tier": "deterministic_fixture",
+      "pass_rule": "exact row status equals failed and done_at is present",
+      "fail_rule": "row remains pending or status equals done or replied"
+    },
+    {
+      "id": "PK-TYPED-EVIDENCE",
+      "predicate": "runner_error evidence retryable equals false and recovery evidence last_action equals failed_non_retryable",
+      "source_ref": "SRC-SD-C2B",
+      "decision_ref": "DESIGN_STRUCTURE",
+      "fixture_ref": "FX-TYPED-EVIDENCE",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "evidence_producer": "isolated PostgreSQL payload readback",
+      "proof_tier": "deterministic_fixture",
+      "pass_rule": "payload evidence contains exact reason code and retry count equals zero",
+      "fail_rule": "retryable equals true or recovery evidence is absent"
+    },
+    {
+      "id": "PK-ROW-FAIRNESS",
+      "predicate": "second pending row invocation count equals 1 after the same stale-row sweep",
+      "source_ref": "SRC-MEASUREMENT",
+      "decision_ref": "DESIGN_TRACE",
+      "fixture_ref": "FX-ROW-FAIRNESS",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "evidence_producer": "two-row isolated PostgreSQL sweep fixture",
+      "proof_tier": "deterministic_fixture",
+      "pass_rule": "first row status equals failed and second row invocation count equals 1",
+      "fail_rule": "second row invocation count equals 0 after first row terminalization"
+    },
+    {
+      "id": "PK-NO-RETRY",
+      "predicate": "SCHEMA_REQUIRED row host runtime launch count equals 0 across two sweeps",
+      "source_ref": "SRC-SD-C2B",
+      "decision_ref": "DESIGN_TERMINAL_ADMISSION",
+      "fixture_ref": "FX-NO-RETRY",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "evidence_producer": "isolated PostgreSQL repeated-sweep fixture",
+      "proof_tier": "deterministic_fixture",
+      "pass_rule": "terminal row selection count equals 0 on the second sweep",
+      "fail_rule": "second sweep queue selection count is nonzero for the same terminal row"
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "FX-SCHEMA-TERMINAL",
+      "predicate_ref": "PK-SCHEMA-TERMINAL",
+      "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "expected": "PASS",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    },
+    {
+      "id": "FX-TYPED-EVIDENCE",
+      "predicate_ref": "PK-TYPED-EVIDENCE",
+      "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "expected": "PASS",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    },
+    {
+      "id": "FX-ROW-FAIRNESS",
+      "predicate_ref": "PK-ROW-FAIRNESS",
+      "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "expected": "PASS",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    },
+    {
+      "id": "FX-NO-RETRY",
+      "predicate_ref": "PK-NO-RETRY",
+      "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "expected": "PASS",
+      "evidence_ref": "EV-SOURCE-BUNDLE"
+    }
+  ],
+  "traceability": {
+    "predicate_registry_digest": "sha256:fb27e2e0a897fc47d45f3e83d3c82569924b851133cb565bc1abc72c3c1f27ad",
+    "edges": [
+      {
+        "source_ref": "SRC-SD-C2B",
+        "decision_ref": "DESIGN_STRUCTURE",
+        "predicate_ref": "PK-SCHEMA-TERMINAL",
+        "fixture_ref": "FX-SCHEMA-TERMINAL",
+        "evidence_ref": "EV-SOURCE-BUNDLE"
+      },
+      {
+        "source_ref": "SRC-SD-C2B",
+        "decision_ref": "DESIGN_STRUCTURE",
+        "predicate_ref": "PK-TYPED-EVIDENCE",
+        "fixture_ref": "FX-TYPED-EVIDENCE",
+        "evidence_ref": "EV-SOURCE-BUNDLE"
+      },
+      {
+        "source_ref": "SRC-MEASUREMENT",
+        "decision_ref": "DESIGN_TRACE",
+        "predicate_ref": "PK-ROW-FAIRNESS",
+        "fixture_ref": "FX-ROW-FAIRNESS",
+        "evidence_ref": "EV-SOURCE-BUNDLE"
+      },
+      {
+        "source_ref": "SRC-SD-C2B",
+        "decision_ref": "DESIGN_TERMINAL_ADMISSION",
+        "predicate_ref": "PK-NO-RETRY",
+        "fixture_ref": "FX-NO-RETRY",
+        "evidence_ref": "EV-SOURCE-BUNDLE"
+      }
+    ]
+  },
+  "failure_threat_recovery": [
+    {
+      "id": "FR-CAS-RACE",
+      "cause": "queue lifecycle changes after selection",
+      "trigger": "pending-row compare-and-set affects zero rows",
+      "protected_invariant": "newer lifecycle state is never overwritten",
+      "detection": "terminalizer CAS readback equals false",
+      "containment": "record stale skip and continue the sweep",
+      "recovery": "the owner of the newer lifecycle state continues processing",
+      "rollback": "no rollback because the failed CAS writes nothing",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "residual_risk": "a separately broken newer owner remains visible in its own typed state",
+      "owner": "state-daemon"
+    },
+    {
+      "id": "FR-ALERT-FAILURE",
+      "cause": "alert sink rejects after terminal evidence is committed",
+      "trigger": "alert delivery promise rejects",
+      "protected_invariant": "observability cannot abort the stale-row batch",
+      "detection": "alert failure metric increments while later row is evaluated",
+      "containment": "catch alert rejection inside the row action",
+      "recovery": "operator repairs alert transport independently",
+      "rollback": "terminal row remains failed because alert delivery is not lifecycle authority",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "residual_risk": "the alert may be absent but durable row evidence remains queryable",
+      "owner": "state-daemon operator"
+    },
+    {
+      "id": "FR-CLASSIFIER-DRIFT",
+      "cause": "a new host failure code lacks retry classification",
+      "trigger": "closed classifier receives an unknown code",
+      "protected_invariant": "unknown retryability never becomes silent success",
+      "detection": "contract test enumerates the HostRuntimeFailureCode union",
+      "containment": "unknown code remains pending and emits typed classifier gap evidence",
+      "recovery": "update the spec and closed classifier before enabling the new code",
+      "rollback": "restore the prior closed failure-code set",
+      "evidence_ref": "EV-SOURCE-BUNDLE",
+      "residual_risk": "unknown code can remain pending but cannot become done",
+      "owner": "implementation executor"
+    }
+  ],
+  "operations_migration_rollback": {
+    "operation": "merge then deploy governed main under OD-SD-940 and measure exact queue cohort",
+    "migration": "no database schema or data migration",
+    "rollback": "redeploy the prior governed build; terminal evidence remains auditable",
+    "evidence_ref": "EV-SOURCE-BUNDLE"
+  },
+  "delivery_handoff": {
+    "goal": "terminalize deterministic host failures once and preserve stale-row batch fairness",
+    "definition_of_done": [
+      "spec and DesignPack precede implementation",
+      "all four mapped fixtures pass on isolated PostgreSQL",
+      "full suite result is published transparently",
+      "independent exact-head audit reaches P0=0 and P1=0",
+      "authorized merge and governed deployment complete",
+      "post-deploy measurement accounts for the 35 actionable pending rows"
+    ],
+    "plan": [
+      "author spec",
+      "implement typed terminalizer",
+      "run isolated tests",
+      "publish draft PR and exact-head evidence",
+      "obtain independent audit",
+      "merge deploy and measure"
+    ],
+    "checklist": [
+      "no schema change",
+      "no denylist change",
+      "no silent done",
+      "no provider fallback",
+      "no self gate"
+    ],
+    "tests": [
+      "bun test tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+      "bun test tests/contract/state-daemon",
+      "bun test tests"
+    ],
+    "trace_refs": [
+      "PK-SCHEMA-TERMINAL",
+      "PK-TYPED-EVIDENCE",
+      "PK-ROW-FAIRNESS",
+      "PK-NO-RETRY"
+    ],
+    "allowed_paths": [
+      "core/**",
+      "bin/**",
+      "scripts/**",
+      "tests/**",
+      "docs/**",
+      "config/**"
+    ],
+    "allowed_operations": [
+      "spec authoring",
+      "implementation and tests",
+      "draft PR and independent audit routing",
+      "owner-authorized merge deployment and effect measurement"
+    ],
+    "forbidden_paths": [
+      ".github/**",
+      "migrations/**",
+      "secrets/**"
+    ],
+    "forbidden_operations": [
+      "database schema change",
+      "STATE_DAEMON_AGENT_DENYLIST change",
+      "silent success",
+      "self gate"
+    ],
+    "stop_conditions": [
+      "protected surface lacks exact owner decision",
+      "failure cannot be represented by existing queue schema",
+      "provider fallback requires a new design choice"
+    ],
+    "required_evidence": [
+      "spec-first commit",
+      "exact-head test and CI evidence",
+      "independent gate result",
+      "merge deployment and effect evidence"
+    ],
+    "subject_identity": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+    "independent_audit_boundary": "dev-001 cannot issue a gate_result on its own PR",
+    "owner_decision_boundary": "deployment cites OD-SD-940 control source and digest"
+  },
+  "lens_results": [
+    {"lens_id":"L01","verdict":"PASS","findings":[],"predicate_refs":["PK-SCHEMA-TERMINAL"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L02","verdict":"PASS","findings":[],"predicate_refs":["PK-TYPED-EVIDENCE"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L03","verdict":"N/A","findings":[],"predicate_refs":["PK-ROW-FAIRNESS"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null,"na_predicate":"no user interface or accessibility surface exists in this daemon-only change"},
+    {"lens_id":"L04","verdict":"PASS","findings":[],"predicate_refs":["PK-ROW-FAIRNESS"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L05","verdict":"PASS","findings":[],"predicate_refs":["PK-SCHEMA-TERMINAL"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L06","verdict":"PASS","findings":[],"predicate_refs":["PK-TYPED-EVIDENCE"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L07","verdict":"PASS","findings":[],"predicate_refs":["PK-NO-RETRY"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L08","verdict":"PASS","findings":[],"predicate_refs":["PK-TYPED-EVIDENCE"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L09","verdict":"PASS","findings":[],"predicate_refs":["PK-ROW-FAIRNESS"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L10","verdict":"PASS","findings":[],"predicate_refs":["PK-NO-RETRY"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L11","verdict":"PASS","findings":[],"predicate_refs":["PK-SCHEMA-TERMINAL","PK-TYPED-EVIDENCE","PK-ROW-FAIRNESS","PK-NO-RETRY"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null},
+    {"lens_id":"L12","verdict":"PASS","findings":[],"predicate_refs":["PK-ROW-FAIRNESS"],"evidence_refs":["EV-SOURCE-BUNDLE"],"required_resolution":null}
+  ],
+  "gate_results": [
+    {"gate_id":"G1","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G2"},
+    {"gate_id":"G2","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G3"},
+    {"gate_id":"G3","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G4"},
+    {"gate_id":"G4","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G5"},
+    {"gate_id":"G5","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G6"},
+    {"gate_id":"G6","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"G7"},
+    {"gate_id":"G7","verdict":"PASS","reason_codes":[],"evidence_refs":["EV-SOURCE-BUNDLE"],"unresolved_items":[],"next_transition":"RETURN_RESULT"}
+  ],
+  "next_action": {
+    "actor_agent_id": "dev-001",
+    "active_function": "implementation_executor",
+    "action": "implement the exact admitted spec and publish a draft PR for independent audit",
+    "handoff_method": "git commits, GitHub PR, and immutable issue 940 evidence",
+    "input_refs": [
+      "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5380396898",
+      "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5362132366",
+      "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5404385347"
+    ],
+    "scope": "host-runtime deterministic failure disposition and stale-row fairness only",
+    "deliverable": "merged deployed correction with effect measurement",
+    "completion_evidence": "exact-head CI, independent gate, merge receipt, deployment receipt, and 35-row cohort readback",
+    "completion_evidence_destination": "https://github.com/watchout/agent-comms-mcp/issues/940",
+    "blocking": false,
+    "stop_reason": null,
+    "retry_policy": "one CI rerun only for an identified unchanged load-sensitive failure; no runtime retry for deterministic adapter failures",
+    "expiry": "2026-08-26T14:59:59Z",
+    "escalation": "arc via issue 940 typed question only for a protected or divergent design decision",
+    "authorized_exhaustion_disposition": "keep the root active and publish typed stop without bypass"
+  },
+  "pack_digest": "sha256:3ec635fd4f4d73c4b27f1a870a8d81601e079e829fb9dbe8aa63d9b9bc027299",
+  "evidence_registry": [
+    {
+      "id": "EV-SOURCE-BUNDLE",
+      "subject_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "declared_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "readback_digest": "sha256:143d8f5d94bc1c21488367879cdff83bba8d4492b1c6d9a94c35b4a4b0957230",
+      "evidence_ref": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5404385347",
+      "receipt_ref": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5404385347",
+      "status": "VERIFIED",
+      "fixture_scope": "control-source body and runtime-measurement readback"
+    }
+  ]
+}

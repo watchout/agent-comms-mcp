@@ -240,6 +240,53 @@ Implementations must surface stable codes for these failure classes:
 - `TUI_FALLBACK_NOT_ALLOWED`
 - `DEGRADATION_NOT_RECORDED`
 
+### State-daemon failure disposition and row fairness
+
+The host adapter gate runs before a runtime process exists. A failure returned
+by this gate is therefore a deterministic admission/configuration failure, not
+a provider attempt. The state daemon must classify the following prelaunch
+codes as `retryable=false`:
+
+- `RUNTIME_PROFILE_REQUIRED`
+- `RUNTIME_PROFILE_INVALID`
+- `UNSUPPORTED_RUNTIME`
+- `RUNTIME_INVOKER_UNCONFIGURED`
+- `RUNTIME_FLAG_UNSUPPORTED`
+- `SCHEMA_REQUIRED`
+- `SANDBOX_POLICY_VIOLATION`
+
+The same non-retryable disposition applies after launch to parser evidence that
+cannot change without a new invocation: `OUTPUT_SCHEMA_MISMATCH`,
+`STREAM_PARSE_ERROR`, and `FINAL_MESSAGE_MISSING`. `RUNTIME_TIMEOUT` and
+`RUNTIME_NONZERO_EXIT` remain retryable because external runtime/provider state
+may change. This classification is deterministic code; stderr prose must not
+choose retryability.
+
+For a non-retryable host-runtime failure on a still-`pending` row, the daemon
+must perform one compare-and-set terminal transition:
+
+- `status='failed'`
+- `failed_reason=<exact failure code>`
+- `done_at=<failure timestamp>`
+- claim and heartbeat fields cleared
+- `runner_error.retryable=false` with runtime/profile, invocation source,
+  failure timestamp, and exact pending-row fence
+- `queue_work_runner_error_recovery.attempts=0`, `max_reclaims=0`, and
+  `last_action='failed_non_retryable'`
+
+The transition is a typed failure, not `done`, `replied`, or a successful
+fallback. It must not launch a runtime process and must not expose secret
+configuration values in the durable detail. A compare-and-set miss is recorded
+as a stale skip and must not overwrite a newer lifecycle state.
+
+The stale-row sweep owns row fairness. Terminalizing one deterministic failure
+must return control to the same sweep so subsequent rows in the fetched batch
+are evaluated. A terminal row is not eligible for a later stale-pending sweep,
+and the agent-level duplicate-suppression reservation is released so another
+row for that agent is not blocked by the failed row. Alert delivery is
+observability only and must not turn this expected typed result into a thrown
+sweep-wide failure.
+
 ## Tests Required For Implementation
 
 1. Profile validation rejects missing `profile_id`, unsupported runtime,
@@ -268,6 +315,14 @@ Implementations must surface stable codes for these failure classes:
     delivery proof.
 12. Existing CP-40B adapter tests remain compatible: queue/baton context shape,
     exact `queue_id`, and typed runner result are unchanged.
+13. Missing schema/output-last-message configuration terminalizes the exact
+    pending row once as `failed` / `SCHEMA_REQUIRED`, persists
+    `retryable=false`, and launches no runtime process.
+14. A second stale pending row in the same batch is still evaluated after the
+    first row is terminalized for `SCHEMA_REQUIRED`.
+15. A second sweep does not retry or re-alert the terminalized row.
+16. Timeout and non-zero runtime exits remain pending/retryable and are not
+    collapsed into deterministic configuration failure.
 
 ## Implementation Plan
 
