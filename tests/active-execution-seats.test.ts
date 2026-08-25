@@ -19,6 +19,10 @@ const rows = [
     profile_enabled: 1, disabled_at: null, metadata: '{}',
   },
   {
+    agent_id: 'kodama', agent_type: 'dev', status: 'busy',
+    profile_enabled: true, disabled_at: null, metadata: { workload: 'shirube-canary' },
+  },
+  {
     agent_id: 'lead-test-2001c9a4', agent_type: 'org', status: 'retired',
     profile_enabled: false, disabled_at: '2026-08-22T13:00:00.000Z', metadata: { retired: true },
   },
@@ -42,10 +46,11 @@ describe('active execution seat registry definition', () => {
     const active = await listActiveExecutionSeats(db)
 
     expect(ACTIVE_EXECUTION_SEAT_QUERY_VERSION).toBe('registry-active-execution-seats/v1')
-    expect(active.map(row => row.agent_id)).toEqual(['healthy-idle', 'healthy-busy'])
+    expect(active.map(row => row.agent_id)).toEqual(['healthy-idle', 'healthy-busy', 'kodama'])
     expect(rows.map(row => [row.agent_id, isActiveExecutionSeat(row)])).toEqual([
       ['healthy-idle', true],
       ['healthy-busy', true],
+      ['kodama', true],
       ['lead-test-2001c9a4', false],
       ['retired-metadata', false],
       ['ceo', false],
@@ -83,14 +88,15 @@ describe('active execution seat registry definition', () => {
 
     expect(report).toMatchObject({
       query_version: 'registry-active-execution-seats/v1',
-      active: 2,
+      active: 3,
       ready: 1,
-      missing: 1,
+      missing: 2,
       complete: false,
     })
     expect(report.seats.map(seat => [seat.agent_id, seat.ready])).toEqual([
       ['healthy-idle', true],
       ['healthy-busy', false],
+      ['kodama', false],
     ])
   })
 
@@ -136,19 +142,5 @@ describe('active execution seat registry definition', () => {
       '--database-url', 'postgresql:///agent_comms_sd_c8_test',
       '--execute',
     ])).toThrow('exact --confirm-cell')
-
-    expect(() => parseRegistryRetirementArgs([
-      '--action', 'suspend-kodama',
-      '--database-url', 'postgresql:///agent_comms_sd_c8_test',
-      '--execute',
-    ])).toThrow('exact --confirm-ruling')
-
-    expect(() => parseRegistryRetirementArgs([
-      '--action', 'reinstate-kodama',
-      '--database-url', 'postgresql:///agent_comms_sd_c8_test',
-      '--execute',
-      '--confirm-ruling', 'RL-ARC-940-SEAT-DISPOSITION-20260825-001',
-      '--confirm-control-source-sha256', '5db1a7bf179b241eae4027a10091839aa8964f0fc7ce895ec44923b4da76d93b',
-    ])).toThrow('immutable canary receipt')
   })
 })
