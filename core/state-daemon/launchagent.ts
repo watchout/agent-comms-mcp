@@ -502,7 +502,7 @@ export function validateStateDaemonCanaryOverlayEnv(
   } else if (target && !STATE_DAEMON_DB_SSOT_CANARY_TARGETS.includes(target as typeof STATE_DAEMON_DB_SSOT_CANARY_TARGETS[number])) {
     issues.push({
       code: 'state_daemon_canary_overlay_target_outside_cohort',
-      message: `Canary overlay target ${target} is outside the owner-authorized four-agent cohort.`,
+      message: `Canary overlay target ${target} is outside the owner-authorized canary cohort.`,
     })
   }
 
