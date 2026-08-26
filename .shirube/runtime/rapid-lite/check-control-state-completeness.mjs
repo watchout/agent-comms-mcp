@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   isMain,
   isObject,
@@ -37,6 +39,7 @@ const FINDINGS = {
   "CSC-016": ["stale_artifact_reference", "Artifact reference is stale, missing, placeholder, or points outside current evidence.", "artifact_ref"],
   "CSC-017": ["report_failure_ignored", "Report FAILURE or report_failed=true must not be ignored.", "reports"],
   "CSC-018": ["required_additional_review_missing", "Required additional review is missing or incomplete.", "review_plan_report"],
+  "CSC-019": ["delivery_plan_not_admitted", "A valid admitted DeliveryPlan/v1 validator result is required.", "delivery_plan_report"],
 };
 
 const DEFAULT_TAXONOMY = [
@@ -75,6 +78,7 @@ export function buildControlStateCompletenessReport(input) {
     ["lifecycle_report", input.lifecycleReport],
     ["gate_contract_report", input.gateContractReport],
     ["design_rule_report", input.designRuleReport],
+    ["delivery_plan_report", input.deliveryPlanReport],
     ["audit_checklist_report", input.auditChecklistReport],
     ["enforcement_policy_report", input.enforcementPolicyReport],
     ["readiness_report", input.readinessReport],
@@ -83,6 +87,18 @@ export function buildControlStateCompletenessReport(input) {
   if (!isPassingReport(input.executionContextReport)) {
     missingStates.push(missingState("execution_context", input.executionContextReportPath));
     blockers.push(finding("CSC-001", { path: input.executionContextReportPath ?? "execution_context_report" }));
+  }
+
+  const deliveryPlanRequired = normalizeRepo(input.actualRepo) === "watchout/ai-dev-framework" || isObject(input.deliveryPlanReport) || isObject(input.deliveryPlan);
+  if (deliveryPlanRequired && !isDeliveryPlanAdmitted(input.deliveryPlanReport, input.deliveryPlan)) {
+    if (!isObject(input.deliveryPlanReport)) missingStates.push(missingState("delivery_plan_report", input.deliveryPlanReportPath ?? input.deliveryPlanPath));
+    const blockingDecision = deliveryPlanBlockingDecision(input.deliveryPlanReport, input.deliveryPlan);
+    blockers.push(finding("CSC-019", {
+      path: input.deliveryPlanReportPath ?? input.deliveryPlanPath ?? "delivery_plan_report",
+      message: blockingDecision?.reason
+        ? `Delivery plan is not admitted: ${blockingDecision.decision}=${blockingDecision.reason}.`
+        : undefined,
+    }));
   }
 
   if (!isObject(input.repoSpec)) {
@@ -307,6 +323,8 @@ function buildInventory(input) {
     lifecycle_report: inventoryRecord(input.lifecycleReportPath, lifecycle),
     gate_contract_report: inventoryRecord(input.gateContractReportPath, gate),
     design_rule_report: inventoryRecord(input.designRuleReportPath, input.designRuleReport),
+    delivery_plan: inventoryRecord(input.deliveryPlanPath, input.deliveryPlan),
+    delivery_plan_report: inventoryRecord(input.deliveryPlanReportPath ?? input.deliveryPlanPath, input.deliveryPlanReport),
     review_plan_report: inventoryRecord(input.reviewPlanReportPath, input.reviewPlanReport),
     audit_checklist_report: inventoryRecord(input.auditChecklistReportPath, input.auditChecklistReport),
     enforcement_policy_report: inventoryRecord(input.enforcementPolicyReportPath, enforcement),
@@ -959,6 +977,52 @@ function isPassingReport(report) {
   return isObject(report) && report.report_failed !== true && !["BLOCKED", "FAILURE"].includes(report.verdict);
 }
 
+function isDeliveryPlanAdmitted(report, plan) {
+  if (!isObject(report) || report.report_failed === true || report.schema !== "shirube-delivery-plan-validation/v1") return false;
+  const workAdmitted = ["PLAN_ADMISSION", "TEST_ADMISSION", "REPLAN_REQUIRED"]
+    .every((decision) => report?.decisions?.[decision]?.verdict === "PASS");
+  if (!workAdmitted) return false;
+  if (!deliveryPlanTerminalCandidate(report, plan)) return true;
+  return report.verdict === "PASS"
+    && report.would_block === false
+    && report?.decisions?.TERMINAL_ADMISSION?.verdict === "PASS";
+}
+
+function deliveryPlanBlockingDecision(report, plan) {
+  if (!isObject(report)) return null;
+  const decisions = ["PLAN_ADMISSION", "TEST_ADMISSION", "REPLAN_REQUIRED"];
+  if (deliveryPlanTerminalCandidate(report, plan)) decisions.push("TERMINAL_ADMISSION");
+  return decisions
+    .map((decision) => report?.decisions?.[decision])
+    .find((result) => result?.verdict !== "PASS") ?? null;
+}
+
+function deliveryPlanTerminalCandidate(report, plan) {
+  if (!isObject(plan)) return report?.terminal_candidate === true;
+  const terminal = plan.terminal_acceptance;
+  const required = asArray(terminal?.required_predicates);
+  const satisfied = asArray(terminal?.satisfied_predicates);
+  const exactSatisfied = required.length > 0
+    && required.length === satisfied.length
+    && new Set(required).size === required.length
+    && [...new Set(required)].sort().join("\n") === [...new Set(satisfied)].sort().join("\n");
+  const evidenceClasses = ["end_to_end", "negative", "degraded", "rollback_recovery", "unaffected", "exact_readback"];
+  const evidenceComplete = evidenceClasses.every((evidenceClass) => {
+    const record = terminal?.operational_evidence?.[evidenceClass];
+    const predicates = asArray(record?.predicate_ids);
+    return record?.status === "VERIFIED"
+      && record?.plan_generation === plan.generation
+      && predicates.length === required.length
+      && [...new Set(predicates)].sort().join("\n") === [...new Set(required)].sort().join("\n");
+  });
+  return exactSatisfied
+    && asArray(terminal?.uncovered_predicates).length === 0
+    && asArray(plan?.delivery_graph?.nodes).length > 0
+    && asArray(plan?.delivery_graph?.nodes).every((node) => node?.lifecycle_status === "COMPLETE")
+    && plan?.next_action?.blocking === false
+    && evidenceComplete;
+}
+
 function isBlockingReport(report) {
   if (!isObject(report)) return false;
   return report.report_failed === true || report.would_block === true || report.verdict === "BLOCKED" || report.verdict === "FAILURE";
@@ -1007,6 +1071,7 @@ function actionFor(itemId) {
     "CSC-016": "Refresh stale artifact references to existing machine-readable artifacts.",
     "CSC-017": "Treat failed reports as blocking evidence and rerun/fix the failed gate.",
     "CSC-018": "Provide required additional review evidence before owner decision.",
+    "CSC-019": "Provide a DeliveryPlan/v1 whose PLAN_ADMISSION decision is PASS.",
     "CSC-W001": "Review enforcement policy warnings before merge or graduation.",
     "HEAD-CHANGE-001": "Refresh exact-head metadata or complete the required scoped/full re-audit for the current PR head.",
     "OWNER-SEQ-001": "Complete independent exact-head audit before requesting or accepting owner exact-head approval.",
@@ -1025,6 +1090,8 @@ function readInput(options) {
     lifecycleReportPath: stringOption(options["lifecycle-report"]),
     gateContractReportPath: stringOption(options["gate-contract-report"]),
     designRuleReportPath: stringOption(options["design-rule-report"]),
+    deliveryPlanPath: stringOption(options["delivery-plan"]),
+    deliveryPlanReportPath: stringOption(options["delivery-plan-report"]),
     reviewPlanReportPath: stringOption(options["review-plan-report"]),
     enforcementPolicyReportPath: stringOption(options["enforcement-policy-report"]),
     readinessReportPath: stringOption(options["readiness-report"]),
@@ -1048,6 +1115,17 @@ function readInput(options) {
     actualRepo: stringOption(options["actual-repo"]),
     actualPr: stringOption(options["actual-pr"]),
     actualHead: stringOption(options["actual-head"]),
+    actualReleaseId: stringOption(options["actual-release-id"]),
+    actualProcessIdentity: stringOption(options["actual-process-identity"]),
+    actualConfigDigest: stringOption(options["actual-config-digest"]),
+    actualPolicyDigest: stringOption(options["actual-policy-digest"]),
+    actualEnvironment: stringOption(options["actual-environment"]),
+    actualFrameworkVersion: stringOption(options["actual-framework-version"]),
+    actualSkillDigest: stringOption(options["actual-skill-digest"]),
+    actualSchemaDigest: stringOption(options["actual-schema-digest"]),
+    actualValidatorDigest: stringOption(options["actual-validator-digest"]),
+    actualTerminalEvidenceResolutionPath: stringOption(options["actual-terminal-evidence-resolution"]),
+    actualTerminalEvidenceCommentRef: stringOption(options["actual-terminal-evidence-comment-ref"]),
   };
 
   const parseErrors = [];
@@ -1061,6 +1139,42 @@ function readInput(options) {
   input.changedFiles = readChangedFiles(input.changedFilesPath);
   input.additionalReviewReports = readAdditionalReviews(input.additionalReviewPath);
   input.handoff = normalizeControlHandoff(input.handoff);
+  if (!isObject(input.deliveryPlanReport) && isObject(input.deliveryPlan)) {
+    const validator = fileURLToPath(new URL("./validate-delivery-plan.mjs", import.meta.url));
+    if (existsSync(validator)) {
+      const validatorArgs = [validator, "--file", input.deliveryPlanPath];
+      for (const [flag, value] of [
+        ["--actual-repository", input.actualRepo],
+        ["--actual-commit-sha", input.actualHead],
+        ["--actual-release-id", input.actualReleaseId],
+        ["--actual-process-identity", input.actualProcessIdentity],
+        ["--actual-config-digest", input.actualConfigDigest],
+        ["--actual-policy-digest", input.actualPolicyDigest],
+        ["--actual-environment", input.actualEnvironment],
+        ["--actual-framework-version", input.actualFrameworkVersion],
+        ["--actual-skill-digest", input.actualSkillDigest],
+        ["--actual-schema-digest", input.actualSchemaDigest],
+        ["--actual-validator-digest", input.actualValidatorDigest],
+        ["--actual-terminal-evidence-resolution", input.actualTerminalEvidenceResolutionPath],
+        ["--actual-terminal-evidence-comment-ref", input.actualTerminalEvidenceCommentRef],
+        ["--actual-pr", input.actualPr],
+      ]) {
+        if (value) validatorArgs.push(flag, value);
+      }
+      validatorArgs.push("--format", "json");
+      const result = spawnSync(process.execPath, validatorArgs, {
+        encoding: "utf8",
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      try {
+        input.deliveryPlanReport = JSON.parse(result.stdout ?? "");
+      } catch {
+        parseErrors.push({ path: input.deliveryPlanPath, message: "Delivery plan validator did not return JSON." });
+      }
+    } else {
+      parseErrors.push({ path: validator, message: "Delivery plan validator is missing." });
+    }
+  }
 
   if (parseErrors.length > 0) {
     return {
