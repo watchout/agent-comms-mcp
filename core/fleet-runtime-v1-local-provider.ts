@@ -1770,6 +1770,11 @@ const COLD_START_BOOT_EVIDENCE_SPECIFIC_KEYS = Object.freeze([
   'server_path',
 ] as const)
 
+const VERIFY_LIVE_IDENTITY_POSTIMAGE_CLASSIFICATION_KEYS = Object.freeze([
+  ...PHASE_EVIDENCE_SPECIFIC_KEYS.VERIFY_LIVE_IDENTITY,
+  'postimage_classification',
+] as const)
+
 function phaseBoundRecord(
   request: FleetRuntimeRequest,
   phase: FleetRuntimeLocalPhase,
@@ -1951,9 +1956,11 @@ function validatePhaseSemantics(
   const reapplyPrepareKeys = phaseName === 'PREPARE_CLEAN_CHECKOUT' && request.operation === 'REAPPLY'
     ? ['rollback_receipt_raw_body_sha256', 'rollback_receipt_self_sha256', 'rollback_receipt_url'] : []
   const phaseEvidenceKeys = phaseName === 'COLD_START_DISCORD_KODAMA'
-    && Object.hasOwn(phase.evidence, 'boot_environment_keys')
+      && Object.hasOwn(phase.evidence, 'boot_environment_keys')
     ? COLD_START_BOOT_EVIDENCE_SPECIFIC_KEYS
-    : PHASE_EVIDENCE_SPECIFIC_KEYS[phaseName]
+    : phaseName === 'VERIFY_LIVE_IDENTITY' && Object.hasOwn(phase.evidence, 'postimage_classification')
+      ? VERIFY_LIVE_IDENTITY_POSTIMAGE_CLASSIFICATION_KEYS
+      : PHASE_EVIDENCE_SPECIFIC_KEYS[phaseName]
   const evidenceKeys = [...PHASE_BINDING_KEYS, 'intent_sha256', ...phaseEvidenceKeys, ...reapplyPrepareKeys]
   assertExactKeys(phase.evidence, evidenceKeys, `${phaseName} evidence`)
   const evidence = phase.evidence
@@ -2068,6 +2075,9 @@ function validatePhaseSemantics(
       }
     }
   } else if (phaseName === 'VERIFY_LIVE_IDENTITY') {
+    if (Object.hasOwn(evidence, 'postimage_classification')) {
+      validateFleetRuntimeColdStartPostimageClassification(evidence.postimage_classification, phase.intent)
+    }
     assertString(evidence.runtime_instance_id, 'live runtime instance')
     assertPlainRecord(evidence.local_checkout, 'live local checkout')
     assertExactKeys(evidence.local_checkout, ['checkout_path', 'clean', 'detached', 'head', 'remote', 'tree'], 'live local checkout')
@@ -2826,9 +2836,187 @@ interface FleetRuntimeColdStartPostimageEvidence {
   runtime_instance_id: string
 }
 
+export interface FleetRuntimeColdStartPostimageClassification {
+  schema_version: 'fleet-runtime-v1/cold-start-postimage-classification/v1'
+  evaluated_at: string
+  observation_observed_at: string
+  target: {
+    session_name: string
+    port: number
+    checkout_path: string
+    commit_sha: string
+  }
+  listener_pids: number[]
+  latest_runtime_instance: {
+    runtime_instance_id: string
+    status: 'running' | 'stopped'
+    session_name: string | null
+    port: number | null
+    checkout_path: string | null
+    commit_sha: string | null
+    stopped_at: string | null
+    last_seen_at: string
+    git_dirty: boolean | null
+  } | null
+  checks: {
+    listener_present: boolean
+    registration_fresh: boolean
+    registration_exact_target_component: boolean
+    registration_realized: boolean
+  }
+  state: 'ABSENT' | 'PARTIAL' | 'REALIZED'
+}
+
 interface FleetRuntimeColdStartPostimageObservation {
   state: 'ABSENT' | 'PARTIAL' | 'REALIZED'
   evidence: FleetRuntimeColdStartPostimageEvidence | null
+  classification: FleetRuntimeColdStartPostimageClassification
+}
+
+export function classifyFleetRuntimeColdStartPostimage(input: {
+  listener_pids: readonly number[]
+  observation: Readonly<FleetRuntimeQueueObservationV2>
+  expected_checkout: string
+  expected_head: string
+  evaluated_at_ms: number
+}): FleetRuntimeColdStartPostimageClassification {
+  if (!isAbsolute(input.expected_checkout) || resolve(input.expected_checkout) !== input.expected_checkout
+    || !COMMIT.test(input.expected_head) || !Number.isFinite(input.evaluated_at_ms)
+    || input.listener_pids.some(pid => !Number.isSafeInteger(pid) || pid <= 0)
+    || new Set(input.listener_pids).size !== input.listener_pids.length) {
+    return providerFail('READBACK_INVALID', 'cold-start postimage classification input is invalid')
+  }
+  const listenerPids = [...input.listener_pids].sort((left, right) => left - right)
+  if (canonicalFleetRuntimeJson(listenerPids) !== canonicalFleetRuntimeJson(input.listener_pids)) {
+    return providerFail('READBACK_INVALID', 'cold-start listener pid input must be sorted')
+  }
+  const latest = input.observation.runtime_inventory.latest_instance
+  const lastSeenAt = Date.parse(String(latest?.last_seen_at ?? ''))
+  const registrationFresh = Boolean(latest
+    && Number.isFinite(lastSeenAt)
+    && input.evaluated_at_ms - lastSeenAt <= 30_000
+    && lastSeenAt <= input.evaluated_at_ms + 30_000)
+  const registrationExactTargetComponent = Boolean(latest
+    && latest.status === 'running'
+    && latest.stopped_at === null
+    && registrationFresh
+    && latest.session_name === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
+    && latest.port === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port
+    && latest.checkout_path === input.expected_checkout
+    && latest.commit_sha === input.expected_head)
+  const registrationRealized = Boolean(registrationExactTargetComponent && latest?.git_dirty === false)
+  const listenerPresent = listenerPids.length > 0
+  const state = listenerPresent && registrationRealized
+    ? 'REALIZED'
+    : listenerPresent || registrationExactTargetComponent ? 'PARTIAL' : 'ABSENT'
+  return {
+    schema_version: 'fleet-runtime-v1/cold-start-postimage-classification/v1',
+    evaluated_at: new Date(input.evaluated_at_ms).toISOString(),
+    observation_observed_at: input.observation.observed_at,
+    target: {
+      session_name: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session,
+      port: FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port,
+      checkout_path: input.expected_checkout,
+      commit_sha: input.expected_head,
+    },
+    listener_pids: listenerPids,
+    latest_runtime_instance: latest ? {
+      runtime_instance_id: latest.runtime_instance_id,
+      status: latest.status,
+      session_name: latest.session_name,
+      port: latest.port,
+      checkout_path: latest.checkout_path,
+      commit_sha: latest.commit_sha,
+      stopped_at: latest.stopped_at,
+      last_seen_at: latest.last_seen_at,
+      git_dirty: latest.git_dirty,
+    } : null,
+    checks: {
+      listener_present: listenerPresent,
+      registration_fresh: registrationFresh,
+      registration_exact_target_component: registrationExactTargetComponent,
+      registration_realized: registrationRealized,
+    },
+    state,
+  }
+}
+
+function validateFleetRuntimeColdStartPostimageClassification(
+  value: unknown,
+  intent: Record<string, unknown>,
+): asserts value is FleetRuntimeColdStartPostimageClassification {
+  assertPlainRecord(value, 'cold-start postimage classification')
+  assertExactKeys(value, [
+    'checks', 'evaluated_at', 'latest_runtime_instance', 'listener_pids', 'observation_observed_at',
+    'schema_version', 'state', 'target',
+  ], 'cold-start postimage classification')
+  if (value.schema_version !== 'fleet-runtime-v1/cold-start-postimage-classification/v1'
+    || typeof value.evaluated_at !== 'string' || !Number.isFinite(Date.parse(value.evaluated_at))
+    || typeof value.observation_observed_at !== 'string' || !Number.isFinite(Date.parse(value.observation_observed_at))
+    || !['ABSENT', 'PARTIAL', 'REALIZED'].includes(String(value.state))) {
+    return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification identity or timestamps differ')
+  }
+  if (!Array.isArray(value.listener_pids)
+    || value.listener_pids.some(pid => !Number.isSafeInteger(pid) || Number(pid) <= 0)
+    || new Set(value.listener_pids).size !== value.listener_pids.length
+    || canonicalFleetRuntimeJson(value.listener_pids)
+      !== canonicalFleetRuntimeJson([...value.listener_pids].sort((left, right) => Number(left) - Number(right)))) {
+    return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification listener pids differ')
+  }
+  assertPlainRecord(value.target, 'cold-start postimage classification target')
+  assertExactKeys(value.target, ['checkout_path', 'commit_sha', 'port', 'session_name'], 'cold-start postimage classification target')
+  if (value.target.session_name !== intent.session || value.target.port !== intent.port
+    || value.target.checkout_path !== intent.checkout_path || value.target.commit_sha !== intent.expected_head) {
+    return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification target differs from phase intent')
+  }
+  const latest = value.latest_runtime_instance
+  if (latest !== null) {
+    assertPlainRecord(latest, 'cold-start postimage classification latest runtime')
+    assertExactKeys(latest, [
+      'checkout_path', 'commit_sha', 'git_dirty', 'last_seen_at', 'port', 'runtime_instance_id',
+      'session_name', 'status', 'stopped_at',
+    ], 'cold-start postimage classification latest runtime')
+    if (typeof latest.runtime_instance_id !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(latest.runtime_instance_id)
+      || !['running', 'stopped'].includes(String(latest.status))
+      || (latest.session_name !== null && typeof latest.session_name !== 'string')
+      || (latest.port !== null && (!Number.isSafeInteger(latest.port) || Number(latest.port) <= 0))
+      || (latest.checkout_path !== null && (typeof latest.checkout_path !== 'string'
+        || !isAbsolute(latest.checkout_path) || resolve(latest.checkout_path) !== latest.checkout_path))
+      || (latest.commit_sha !== null && (typeof latest.commit_sha !== 'string' || !COMMIT.test(latest.commit_sha)))
+      || (latest.stopped_at !== null && (typeof latest.stopped_at !== 'string'
+        || !Number.isFinite(Date.parse(latest.stopped_at))))
+      || typeof latest.last_seen_at !== 'string' || !Number.isFinite(Date.parse(latest.last_seen_at))
+      || (latest.git_dirty !== null && typeof latest.git_dirty !== 'boolean')) {
+      return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification latest runtime differs')
+    }
+  }
+  assertPlainRecord(value.checks, 'cold-start postimage classification checks')
+  assertExactKeys(value.checks, [
+    'listener_present', 'registration_exact_target_component', 'registration_fresh', 'registration_realized',
+  ], 'cold-start postimage classification checks')
+  if (Object.values(value.checks).some(check => typeof check !== 'boolean')) {
+    return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification checks must be boolean')
+  }
+  const evaluatedAt = Date.parse(value.evaluated_at)
+  const lastSeenAt = Date.parse(String(latest?.last_seen_at ?? ''))
+  const registrationFresh = Boolean(latest && Number.isFinite(lastSeenAt)
+    && evaluatedAt - lastSeenAt <= 30_000 && lastSeenAt <= evaluatedAt + 30_000)
+  const exactTarget = Boolean(latest && latest.status === 'running' && latest.stopped_at === null
+    && registrationFresh && latest.session_name === value.target.session_name && latest.port === value.target.port
+    && latest.checkout_path === value.target.checkout_path && latest.commit_sha === value.target.commit_sha)
+  const registrationRealized = Boolean(exactTarget && latest?.git_dirty === false)
+  const listenerPresent = value.listener_pids.length > 0
+  const state = listenerPresent && registrationRealized
+    ? 'REALIZED'
+    : listenerPresent || exactTarget ? 'PARTIAL' : 'ABSENT'
+  if (value.checks.listener_present !== listenerPresent
+    || value.checks.registration_fresh !== registrationFresh
+    || value.checks.registration_exact_target_component !== exactTarget
+    || value.checks.registration_realized !== registrationRealized
+    || value.state !== state) {
+    return providerFail('STATE_RECORD_INVALID', 'cold-start postimage classification checks or state differ')
+  }
 }
 
 /**
@@ -2838,6 +3026,7 @@ interface FleetRuntimeColdStartPostimageObservation {
  */
 export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSystem {
   private readonly realizedPostimages = new Map<string, FleetRuntimeColdStartPostimageEvidence>()
+  private readonly realizedPostimageClassifications = new Map<string, FleetRuntimeColdStartPostimageClassification>()
 
   constructor(
     private readonly runner: FleetRuntimeArgvRunner = bunFleetRuntimeArgvRunner,
@@ -3035,19 +3224,14 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       this.queueObservation(),
     ])
     const latest = observation.runtime_inventory.latest_instance
-    const lastSeenAt = Date.parse(String(latest?.last_seen_at ?? ''))
-    const registrationRealized = Boolean(latest
-      && latest.status === 'running'
-      && latest.session_name === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_session
-      && latest.port === FLEET_RUNTIME_V1_LOCAL_PROVIDER.target_port
-      && latest.checkout_path === expectedCheckout
-      && latest.commit_sha === expectedHead
-      && latest.stopped_at === null
-      && latest.git_dirty === false
-      && Number.isFinite(lastSeenAt)
-      && this.nowMs() - lastSeenAt <= 30_000
-      && lastSeenAt <= this.nowMs() + 30_000)
-    if (listenerPids.length > 0 && registrationRealized && latest) {
+    const classification = classifyFleetRuntimeColdStartPostimage({
+      listener_pids: listenerPids,
+      observation,
+      expected_checkout: expectedCheckout,
+      expected_head: expectedHead,
+      evaluated_at_ms: this.nowMs(),
+    })
+    if (classification.state === 'REALIZED' && latest) {
       return {
         state: 'REALIZED',
         evidence: {
@@ -3058,11 +3242,13 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           registered_commit_sha: expectedHead,
           runtime_instance_id: latest.runtime_instance_id,
         },
+        classification,
       }
     }
     return {
-      state: listenerPids.length > 0 || latest ? 'PARTIAL' : 'ABSENT',
+      state: classification.state,
       evidence: null,
+      classification,
     }
   }
 
@@ -3074,12 +3260,17 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       || !Number.isSafeInteger(this.bootReadbackIntervalMs) || this.bootReadbackIntervalMs < 0) {
       return providerFail('READBACK_INVALID', 'cold-start boot readback bounds are invalid')
     }
+    let lastClassification: FleetRuntimeColdStartPostimageClassification | null = null
     for (let attempt = 0; attempt < this.bootReadbackAttempts; attempt++) {
       const observed = await this.observeColdStartPostimage(expectedCheckout, expectedHead)
+      lastClassification = observed.classification
       if (observed.state === 'REALIZED' && observed.evidence) return observed.evidence
       if (attempt + 1 < this.bootReadbackAttempts) await this.sleep(this.bootReadbackIntervalMs)
     }
-    return providerFail('READBACK_INVALID', 'cold-start listener and exact runtime registration did not realize within the bounded window')
+    return providerFail(
+      'READBACK_INVALID',
+      `cold-start listener and exact runtime registration did not realize within the bounded window; postimage_classification=${canonicalFleetRuntimeJson(lastClassification)}`,
+    )
   }
 
   private async launchColdStartWrapper(
@@ -3919,6 +4110,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
       if (remoteImage.head_commit !== expectedHead || remoteImage.tree !== expectedTree) {
         return providerFail('READBACK_INVALID', 'live default-branch head/tree differs from the admitted operation image')
       }
+      const postimageClassification = this.realizedPostimageClassifications.get(request.idempotency_key)
       return {
         evidence: {
           inventory,
@@ -3928,6 +4120,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
           queue_unchanged: postObservation.queue.queue_observation_id === preflight.queue_observation.queue.queue_observation_id,
           duplicate_effect_count: 0,
           unauthorized_effect_count: 0,
+          ...(postimageClassification ? { postimage_classification: clone(postimageClassification) } : {}),
         },
         protected_effect_count: 0,
       }
@@ -3951,14 +4144,21 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
     }
     await this.verifyCheckout(expectedCheckout, context.state_directory, expectedHead, expectedTree)
     const observed = await this.observeColdStartPostimage(expectedCheckout, expectedHead)
+    this.realizedPostimageClassifications.set(request.idempotency_key, clone(observed.classification))
     if (observed.state === 'REALIZED' && observed.evidence) {
       this.realizedPostimages.set(request.idempotency_key, clone(observed.evidence))
-      return { outcome: 'ALREADY_REALIZED', evidence: clone(observed.evidence) }
+      return {
+        outcome: 'ALREADY_REALIZED',
+        evidence: { ...clone(observed.evidence), postimage_classification: clone(observed.classification) },
+      }
     }
     if (observed.state === 'PARTIAL') {
       const converged = await this.waitForColdStartPostimage(expectedCheckout, expectedHead)
       this.realizedPostimages.set(request.idempotency_key, clone(converged))
-      return { outcome: 'ALREADY_REALIZED', evidence: clone(converged) }
+      return {
+        outcome: 'ALREADY_REALIZED',
+        evidence: { ...clone(converged), postimage_classification: clone(observed.classification) },
+      }
     }
     const realized = await this.launchColdStartWrapper(context, expectedCheckout, expectedHead)
     this.realizedPostimages.set(request.idempotency_key, clone(realized.postimage))
@@ -3971,6 +4171,7 @@ export class ConcreteFleetRuntimeV1LocalSystem implements FleetRuntimeLocalSyste
         provider_remote: realized.provider.remote,
         provider_tree: realized.provider.tree,
         server_path: realized.provider.server_path,
+        postimage_classification: clone(observed.classification),
       },
     }
   }
