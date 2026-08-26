@@ -662,6 +662,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('botLivenessCheckIntervalMs', num('STATE_DAEMON_BOT_LIVENESS_CHECK_INTERVAL_MS'))
   set('botDeadThresholdMs', num('STATE_DAEMON_BOT_DEAD_THRESHOLD_MS'))
   set('botRestartMaxPerHour', num('STATE_DAEMON_BOT_RESTART_MAX_PER_HOUR'))
+  set('wakeInvocationMaxAttempts', num('STATE_DAEMON_WAKE_INVOCATION_MAX_ATTEMPTS'))
   set('abnormalActivityWindowMs', num('STATE_DAEMON_ABNORMAL_ACTIVITY_WINDOW_MS'))
   set('abnormalActivityThreshold', num('STATE_DAEMON_ABNORMAL_ACTIVITY_THRESHOLD'))
   set('dbErrorAlertThreshold', num('STATE_DAEMON_DB_ERROR_ALERT_THRESHOLD'))

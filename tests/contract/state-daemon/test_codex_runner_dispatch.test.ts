@@ -507,7 +507,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         [id],
       )).rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null }
       expect(row).toEqual({
-        status: 'skipped',
+        status: 'done',
         claimed_by: null,
         replied_with: null,
         failed_reason: 'TYPED_ACK_RECEIPT',

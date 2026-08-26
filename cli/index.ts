@@ -119,6 +119,7 @@ import {
   closeObsoletePendingQueueRows,
   reassignPendingQueueRows,
   reclaimExpiredQueueClaims,
+  requeueFailedQueueRows,
 } from '../core/queue-repair'
 import {
   buildQueueDaemonStatusReport,
@@ -5003,6 +5004,18 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
         process.exit(2)
       }
       const report = await reassignPendingQueueRows(db as any, { fromAgentId, toAgentId, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'requeue-failed') {
+      const agentId = flags.agent ?? flags['agent-id'] ?? null
+      const queueIds = (flags.id ? String(flags.id).split(',') : []).map((v) => v.trim()).filter(Boolean)
+      if (!agentId && queueIds.length === 0) {
+        console.error('Usage: agent-com queue requeue-failed (--agent <agent> | --id <queue_id[,queue_id...]>) [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const report = await requeueFailedQueueRows(db as any, { agentId, queueIds, dryRun })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }

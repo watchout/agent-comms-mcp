@@ -465,6 +465,20 @@ describe('#603 queue-processing readiness', () => {
     ])
   })
 
+  test('typed-failed rows block readiness until repaired', () => {
+    const report = buildQueueProcessingReadinessReport([
+      botStatusRow({
+        agent_id: 'check',
+        pending_count: 0,
+        typed_failed_count: 2,
+      } as any),
+    ], runtimeReadiness(), { now: new Date('2026-06-02T00:03:00.000Z') })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.queue_processing_readiness.blocker_codes).toContain('TYPED_FAILED_AWAITING_REPAIR')
+  })
+
   test('normalizes current bot_status rows without legacy wake-state fields', () => {
     const row = {
       ...botStatusRow({

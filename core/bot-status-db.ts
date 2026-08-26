@@ -41,6 +41,7 @@ export interface BotStatusDbRow {
   pending_count: number
   oldest_pending_at: string | null
   active_claim_count: number
+  typed_failed_count: number
   health_state: BotHealthState
   active_connector_count: number
   runtime_linked_connector_count: number
@@ -58,7 +59,11 @@ const QUERY = `
            COUNT(mq.id) FILTER (
              WHERE mq.status IN ('received', 'in_progress')
                AND mq.claimed_by = mq.agent_id
-           ) AS active_claim_count
+           ) AS active_claim_count,
+           COUNT(mq.id) FILTER (
+             WHERE mq.status = 'failed'
+               AND mq.failed_reason IN ('WAKE_INVOCATION_RETRY_EXHAUSTED', 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')
+           ) AS typed_failed_count
       FROM message_queue mq
      GROUP BY mq.agent_id
   ),
@@ -94,6 +99,7 @@ const QUERY = `
          COALESCE(q.pending_count, 0) AS pending_count,
          q.oldest_pending_at,
          COALESCE(q.active_claim_count, 0) AS active_claim_count,
+         COALESCE(q.typed_failed_count, 0) AS typed_failed_count,
          CASE
            WHEN a.last_seen_at IS NULL THEN 'offline'
            -- Order matters: busy_stuck must be checked before crashed, otherwise
@@ -135,6 +141,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     runtime: string | null
     runtime_engine_preference: string | null
     status: string | null
+    typed_failed_count: string | number
     last_seen_at: Date | null
     heartbeat_ok: boolean
     pending_count: string | number
@@ -158,6 +165,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
       runtime: row.runtime ?? null,
       runtime_engine_preference: row.runtime_engine_preference ?? null,
       status: row.status,
+      typed_failed_count: parseCount(row.typed_failed_count),
       last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,
       heartbeat_ok: Boolean(row.heartbeat_ok),
       pending_count: parseCount(row.pending_count),

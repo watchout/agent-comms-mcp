@@ -988,17 +988,23 @@ export function buildQueueProcessingReadinessReport(
   }
 
   for (const row of rowList) {
-    if ((row.pending_count ?? 0) <= 0) continue
     const blockerCodes: string[] = []
     const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
-    if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
-    // Same canonical predicate as the live daemon (single implementation).
-    // channelMember is true because fleet-level readiness has no channel
-    // subject (amendment A2 §1).
-    const eligibility = evaluateAutomaticProcessingEligibility(
-      automaticProcessingInputsFromAgent(row, true),
-    )
-    for (const reason of eligibility.reasons) blockerCodes.push(reason)
+    // Typed-failed rows block regardless of pending work: a failed row has
+    // usually already left pending, and it must stay visible until repaired.
+    const typedFailedCount = (row as BotStatusDbRow & { typed_failed_count?: number }).typed_failed_count ?? 0
+    if (typedFailedCount > 0) blockerCodes.push('TYPED_FAILED_AWAITING_REPAIR')
+    // Runner/eligibility blockers apply only to delivery targets (pending > 0).
+    if ((row.pending_count ?? 0) > 0) {
+      if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
+      // Same canonical predicate as the live daemon (single implementation).
+      // channelMember is true because fleet-level readiness has no channel
+      // subject (amendment A2 §1).
+      const eligibility = evaluateAutomaticProcessingEligibility(
+        automaticProcessingInputsFromAgent(row, true),
+      )
+      for (const reason of eligibility.reasons) blockerCodes.push(reason)
+    }
     if (blockerCodes.length === 0) continue
 
     agentScopeBlockers.push({
@@ -1012,9 +1018,11 @@ export function buildQueueProcessingReadinessReport(
       const message =
         code === 'STATE_DAEMON_RUNNER_DISABLED'
           ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
-          : code === 'AGENT_TYPE_HUMAN'
-            ? 'agent_type=human seats are excluded from automatic processing (canonical DB-only eligibility)'
-            : `canonical automatic-processing eligibility blocked: ${code}`
+          : code === 'TYPED_FAILED_AWAITING_REPAIR'
+            ? 'typed-failed rows await repair; requeue with agent-com queue requeue-failed after fixing the cause'
+            : code === 'AGENT_TYPE_HUMAN'
+              ? 'agent_type=human seats are excluded from automatic processing (canonical DB-only eligibility)'
+              : `canonical automatic-processing eligibility blocked: ${code}`
       blockers.push(readinessFinding(code, 'blocker', message, {
         agent_id: row.agent_id,
         evidence: {

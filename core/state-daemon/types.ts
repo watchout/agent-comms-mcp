@@ -38,6 +38,7 @@ export interface StateDaemonConfig {
   claimTtlSec: number               // default 60
   activeClaimMaxAgeSec: number      // default 300; daemon must not keep a claim alive forever
   queueWorkRunnerErrorMaxReclaims: number // default 3; fail after this many runner_error reclaims
+  wakeInvocationMaxAttempts: number // default 3; typed-fail a row after this many delivery invocations
   /** Exact canary control ref allowed one audited retry-budget extension. */
   queueWorkRecoveryControlRef: string | null
 
@@ -154,6 +155,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   claimTtlSec: 60,
   activeClaimMaxAgeSec: 300,
   queueWorkRunnerErrorMaxReclaims: 3,
+  wakeInvocationMaxAttempts: 3,
   queueWorkRecoveryControlRef: null,
   wakePoolMinCapacity: 5,
   wakePoolMaxCapacity: 20,
