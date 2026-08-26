@@ -33,6 +33,7 @@ import {
   FleetRuntimeLocalProviderError,
   buildFleetRuntimeV1DryRunReceipt,
   bunFleetRuntimeArgvRunner,
+  classifyFleetRuntimeColdStartPostimage,
   executeLocalFleetRuntimeV1,
   assertExactFleetRuntimeChangedPathSet,
   assertExactFleetRuntimePathSet,
@@ -1352,6 +1353,102 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(canonicalFleetRuntimeObservationJson(readback)).not.toContain(secretSentinel)
   })
 
+  test('postimage classifier treats a stopped stale foreign-session row without a listener as ABSENT', () => {
+    const observedAt = '2026-08-15T08:24:00.000Z'
+    const expectedCheckout = join(temporary('frv1-postimage-absent'), 'checkout')
+    const expectedHead = 'c'.repeat(40)
+    const observation = queueObservation(observedAt)
+    observation.runtime_inventory.latest_instance = {
+      runtime_instance_id: '22222222-2222-4222-8222-222222222222',
+      status: 'stopped',
+      session_name: 'discord-arc',
+      port: 8803,
+      checkout_path: join(temporary('frv1-postimage-foreign'), 'checkout'),
+      commit_sha: '9'.repeat(40),
+      started_at: '2026-08-15T08:00:00.000Z',
+      stopped_at: '2026-08-15T08:01:00.000Z',
+      last_seen_at: '2026-08-15T08:01:00.000Z',
+      git_dirty: false,
+    }
+
+    expect(classifyFleetRuntimeColdStartPostimage({
+      listener_pids: [],
+      observation,
+      expected_checkout: expectedCheckout,
+      expected_head: expectedHead,
+      evaluated_at_ms: Date.parse(observedAt),
+    })).toMatchObject({
+      state: 'ABSENT',
+      checks: {
+        listener_present: false,
+        registration_fresh: false,
+        registration_exact_target_component: false,
+        registration_realized: false,
+      },
+      latest_runtime_instance: {
+        status: 'stopped',
+        session_name: 'discord-arc',
+      },
+    })
+  })
+
+  test('postimage classifier keeps an exact-target running row without a listener PARTIAL', () => {
+    const observedAt = '2026-08-15T08:24:00.000Z'
+    const expectedCheckout = join(temporary('frv1-postimage-exact-row'), 'checkout')
+    const expectedHead = 'c'.repeat(40)
+    const observation = queueObservation(observedAt)
+    observation.runtime_inventory.latest_instance = {
+      runtime_instance_id: '33333333-3333-4333-8333-333333333333',
+      status: 'running',
+      session_name: 'discord-kodama',
+      port: 8803,
+      checkout_path: expectedCheckout,
+      commit_sha: expectedHead,
+      started_at: '2026-08-15T08:23:59.000Z',
+      stopped_at: null,
+      last_seen_at: observedAt,
+      git_dirty: false,
+    }
+
+    expect(classifyFleetRuntimeColdStartPostimage({
+      listener_pids: [],
+      observation,
+      expected_checkout: expectedCheckout,
+      expected_head: expectedHead,
+      evaluated_at_ms: Date.parse(observedAt),
+    })).toMatchObject({
+      state: 'PARTIAL',
+      checks: {
+        listener_present: false,
+        registration_fresh: true,
+        registration_exact_target_component: true,
+        registration_realized: true,
+      },
+    })
+  })
+
+  test('postimage classifier keeps a live target-port listener without a runtime row PARTIAL', () => {
+    const observedAt = '2026-08-15T08:24:00.000Z'
+    const classification = classifyFleetRuntimeColdStartPostimage({
+      listener_pids: [43210],
+      observation: queueObservation(observedAt),
+      expected_checkout: join(temporary('frv1-postimage-listener'), 'checkout'),
+      expected_head: 'c'.repeat(40),
+      evaluated_at_ms: Date.parse(observedAt),
+    })
+
+    expect(classification).toMatchObject({
+      state: 'PARTIAL',
+      listener_pids: [43210],
+      latest_runtime_instance: null,
+      checks: {
+        listener_present: true,
+        registration_exact_target_component: false,
+        registration_realized: false,
+      },
+    })
+  })
+
   test('concrete COLD_START and started-phase reconcile require the same full boot proof without replay', async () => {
     const root = temporary('frv1-cold-start-runtime-image')
     const stateDirectory = join(root, 'state')
@@ -1376,12 +1473,15 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     let registeredStatus: 'running' | 'stopped' = 'running'
     let registeredStoppedAt: string | null = null
     let registeredDirty = false
+    let latestOverride: ReturnType<typeof queueObservation>['runtime_inventory']['latest_instance'] = null
     let allowBootPostimage = true
     let wrapperStartCount = 0
     const calls: Array<{ argv: string[]; cwd?: string; env?: Record<string, string> }> = []
     const postObservation = () => {
       const observed = queueObservation(observedAt)
-      if (wrapperRealized) {
+      if (latestOverride) {
+        observed.runtime_inventory.latest_instance = structuredClone(latestOverride)
+      } else if (wrapperRealized) {
         observed.runtime_inventory.latest_instance = {
           runtime_instance_id: '11111111-1111-4111-8111-111111111111',
           status: registeredStatus,
@@ -1438,6 +1538,7 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
         }
         if (args[0] === 'tmux' && args[1] === 'new-session') {
           wrapperStartCount += 1
+          latestOverride = null
           wrapperRealized = allowBootPostimage
           listenerRealized = allowBootPostimage
           return { exitCode: 0, stdout: '', stderr: '' }
@@ -1580,13 +1681,11 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(wrapperStartCount).toBe(1)
 
     listenerRealized = false
-    registeredCommit = '9'.repeat(40)
     await expectProviderCode(
       () => system.realizePostimage(request, preflightFor(request), context),
       'READBACK_INVALID',
     )
     listenerRealized = true
-    registeredCommit = expectedHead
     expect(wrapperStartCount).toBe(1)
 
     const replay = await system.realizePostimage(request, preflightFor(request), context)
@@ -1594,9 +1693,42 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect(wrapperStartCount).toBe(1)
 
     wrapperRealized = false
+    listenerRealized = true
+    await expectProviderCode(
+      () => system.realizePostimage(request, preflightFor(request), context),
+      'READBACK_INVALID',
+    )
+    expect(wrapperStartCount).toBe(1)
+
     listenerRealized = false
+    latestOverride = {
+      runtime_instance_id: '22222222-2222-4222-8222-222222222222',
+      status: 'stopped',
+      session_name: 'discord-arc',
+      port: 8803,
+      checkout_path: join(root, 'foreign-checkout'),
+      commit_sha: '9'.repeat(40),
+      started_at: '2026-08-15T08:00:00.000Z',
+      stopped_at: '2026-08-15T08:01:00.000Z',
+      last_seen_at: '2026-08-15T08:01:00.000Z',
+      git_dirty: false,
+    }
     const repaired = await system.realizePostimage(request, preflightFor(request), context)
     expect(repaired.outcome).toBe('REALIZED')
+    expect(repaired.evidence.postimage_classification).toMatchObject({
+      state: 'ABSENT',
+      checks: {
+        listener_present: false,
+        registration_fresh: false,
+        registration_exact_target_component: false,
+        registration_realized: false,
+      },
+      latest_runtime_instance: {
+        runtime_instance_id: '22222222-2222-4222-8222-222222222222',
+        status: 'stopped',
+        session_name: 'discord-arc',
+      },
+    })
     expect(wrapperStartCount).toBe(2)
     expect(calls.filter(call => call.argv[0] === 'git' && call.argv[1] === 'clone')).toHaveLength(1)
 

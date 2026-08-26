@@ -1775,14 +1775,30 @@ CLI の明示 `--realize-postimage` は `--execute-protected-effects` と exact 
 | 未 completed | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
 | modern completed / boot-proof evidence あり | `REALIZE_POSTIMAGE_NOT_ADMITTED`; wrapper effect 0 |
 | legacy completed / listener+exact registration とも realized | `ALREADY_REALIZED`; wrapper effect 0、VERIFY だけ継続 |
-| legacy completed / listener+runtime registration row とも absent | durable provider image から wrapper を 1 回起動し bounded readback。成功後 VERIFY だけ継続 |
-| legacy completed / 片方だけ存在、または listener/registration conflict | bounded convergence readback 後も不一致なら typed fail-closed; wrapper effect 0 |
+| legacy completed / listener と exact-target runtime registration component がともに absent | durable provider image から wrapper を 1 回起動し bounded readback。成功後 VERIFY だけ継続 |
+| legacy completed / exact-target component が片方だけ存在、または listener/registration conflict | bounded convergence readback 後も不一致なら typed fail-closed; wrapper effect 0 |
 
 legacy eligibility は completed evidence の exact legacy schema、すなわち `boot_environment_keys`
-以下の boot-proof key 集合が存在しないことから判定する。latest runtime row が 1 件でも存在する
-場合、その row が stale、stopped、dirty、wrong commit/checkout/session/port のいずれであっても
-postimage を `ABSENT` と分類してはならず、conflict/partial として wrapper effect 0 の bounded
-convergence readback に送る。
+以下の boot-proof key 集合が存在しないことから判定する。postimage classifier は target port の
+LISTEN pid 集合と latest runtime row を typed input とし、次の規則を順に適用する。
+
+1. latest row は `status=running`、`stopped_at=null`、fresh `last_seen_at`、および exact
+   `session_name` / `port` / `checkout_path` / `commit_sha` をすべて満たす場合だけ
+   exact-target runtime registration component である。`git_dirty` は target identity ではなく
+   realization 条件なので、dirty な exact-target component は存在するが realized ではない。
+2. listener と clean な exact-target component がともに存在するときだけ `REALIZED` とする。
+3. `REALIZED` でなく、listener または exact-target component の少なくとも一方が存在すれば
+   `PARTIAL` とし、bounded convergence readback 後も揃わなければ wrapper effect 0 で fail-closed
+   とする。target port の listener は row identity にかかわらず collision component として扱う。
+4. listener も exact-target component も存在しない場合だけ `ABSENT` とする。したがって
+   stopped、stale、wrong session/port/checkout/commit の row は、それ単独では `PARTIAL` の根拠に
+   せず、admitted な wrapper launch 経路を妨げない。
+
+各 observation は listener pid、latest row の status/session/port/checkout/commit/stopped/fresh/dirty、
+exact-target component 判定、realized 判定、最終 state を typed classification record に残す。
+`REALIZE_POSTIMAGE` 経路はこの record を後続 `VERIFY_LIVE_IDENTITY` phase evidence の
+`postimage_classification` に保存し、bounded timeout は最後の classification を error に含める。
+これにより成功・失敗のどちらも、journal または typed error から判定根拠を再読できる。
 
 この経路は COLD_START phase を再度 started/completed にせず、COLD_START の effect-specific
 evidence と `protected_effect_count=1` を増減しない。durable resume に伴う既存 execution-owner

@@ -752,14 +752,20 @@ boot evidence の一部欠落を reconciliation success として扱うことを
 execution-owner fencing と、成功後の VERIFY phase completion は通常規則どおりである。
 COLD_START が未 completed、または completed evidence が `boot_environment_keys` を持つ modern
 boot-proof schema なら effect 前に拒否する。legacy eligibility は exact legacy evidence schema
-（boot-proof keys がすべて absent）で判定する。listener と exact runtime 登録が既に
-両方揃っていれば wrapper を起動せず
-no-op とし、両方とも未実現なら上記 durable provider image と explicit MCP env で wrapper を
-1 回だけ起動して同じ bounded boot readback を行う。片方だけ存在する状態、競合 listener、
-または latest runtime row が存在するが不一致・stale な exact-checkout 登録は、listener が absent
-でも `ABSENT` に分類せず、bounded readback 後も収束しなければ fail-closed
-とする。通常 resume の no-replay 規則は維持し、再実現は successor control が明示した
-`REALIZE_POSTIMAGE` mode 以外から到達不能とする。
+（boot-proof keys がすべて absent）で判定する。listener と exact runtime 登録が既に両方揃って
+いれば wrapper を起動せず no-op とする。exact-target runtime registration component は fresh
+`running`、`stopped_at=null`、exact session/port/checkout/commit の row に限る。clean な component
+と listener が揃えば `REALIZED`、どちらか一方だけなら `PARTIAL` として bounded readback 後も
+収束しなければ fail-closed とする。dirty な exact component と target port の競合 listener も
+`PARTIAL` であり、この fail-closed を緩めない。一方、listener が無く、latest row が stopped、
+stale、または wrong session/port/checkout/commit で exact-target component ではない場合は
+`ABSENT` とし、durable provider image と explicit MCP env から wrapper を 1 回起動する経路を維持する。
+
+classifier は listener pid、latest row の status/session/port/checkout/commit/stopped/fresh/dirty、
+exact-target component、realized、最終 state を typed record にし、`REALIZE_POSTIMAGE` の後続
+`VERIFY_LIVE_IDENTITY` journal evidence に保存する。bounded timeout も最後の record を返し、
+判定根拠を後から再読可能にする。通常 resume の no-replay 規則は維持し、再実現は successor
+control が明示した `REALIZE_POSTIMAGE` mode 以外から到達不能とする。
 
 ### 10.4 N1 通信 SLO 計測
 
