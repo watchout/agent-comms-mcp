@@ -19,6 +19,29 @@ export type HostRuntimeFailureCode =
   | 'RUNTIME_NONZERO_EXIT'
   | 'SANDBOX_POLICY_VIOLATION'
 
+const HOST_RUNTIME_FAILURE_RETRYABILITY: Record<HostRuntimeFailureCode, boolean> = {
+  RUNTIME_PROFILE_REQUIRED: false,
+  RUNTIME_PROFILE_INVALID: false,
+  UNSUPPORTED_RUNTIME: false,
+  RUNTIME_INVOKER_UNCONFIGURED: false,
+  RUNTIME_FLAG_UNSUPPORTED: false,
+  SCHEMA_REQUIRED: false,
+  OUTPUT_SCHEMA_MISMATCH: false,
+  STREAM_PARSE_ERROR: false,
+  FINAL_MESSAGE_MISSING: false,
+  RUNTIME_TIMEOUT: true,
+  RUNTIME_NONZERO_EXIT: true,
+  SANDBOX_POLICY_VIOLATION: false,
+}
+
+/**
+ * Retryability is a closed control-plane classification. Runtime prose does
+ * not get to choose whether the same queue row is invoked again.
+ */
+export function isHostRuntimeFailureRetryable(code: HostRuntimeFailureCode): boolean {
+  return HOST_RUNTIME_FAILURE_RETRYABILITY[code]
+}
+
 export interface RuntimeInvocationProfile {
   profile_id: string
   runtime: HostRuntimeKind

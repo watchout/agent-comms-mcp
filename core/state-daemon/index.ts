@@ -65,8 +65,11 @@ import type {
 } from '../all-agent-communication-manifest'
 import {
   buildHostRuntimeFailureResult,
+  isHostRuntimeFailureRetryable,
   selectHostRuntimeAdapter,
+  type HostRuntimeFailureCode,
   type HostRuntimeRunnerInvocation,
+  type HostRuntimeRunnerResult,
   type RuntimeInvocationProfile,
 } from './host-runtime-invocation'
 import { WakePool } from './wake-pool'
@@ -110,6 +113,7 @@ const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 const QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY = 'queue_work_runner_error_recovery'
 const QUEUE_WORK_RUNNER_ERROR_FAILED_REASON = 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED'
+const HOST_RUNTIME_ADAPTER_INVOCATION_SOURCE = 'state-daemon-host-runtime-adapter'
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -1733,6 +1737,91 @@ export class StateDaemon {
     return result.exit_status === 0 && result.schema_valid && !result.failure_code && result.parser_outcome === 'success'
   }
 
+  private async terminalizeNonRetryableHostRuntimeFailure(
+    row: QueueRow,
+    reservedAt: Date,
+    profile: RuntimeInvocationProfile | null | undefined,
+    failure: HostRuntimeRunnerResult & { failure_code: HostRuntimeFailureCode },
+  ): Promise<boolean> {
+    const failureCode = failure.failure_code
+    const failedAt = this.clock.now()
+    const payload = parseQueuePayload(row.payload)
+    const failedPayload = JSON.stringify({
+      ...payload,
+      runner_error: {
+        code: failureCode,
+        detail: `host runtime deterministic failure: ${failureCode}`,
+        retryable: false,
+        runtime_id: profile?.profile_id ?? failure.runtime,
+        invocation_source: HOST_RUNTIME_ADAPTER_INVOCATION_SOURCE,
+        failed_at: failedAt.toISOString(),
+        pending_fence: {
+          queue_id: Number(row.id),
+          status: 'pending',
+        },
+      },
+      [QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY]: {
+        attempts: 0,
+        max_reclaims: 0,
+        last_action: 'failed_non_retryable',
+        last_at: failedAt.toISOString(),
+        source: HOST_RUNTIME_ADAPTER_INVOCATION_SOURCE,
+        reason: failureCode,
+      },
+    })
+    const { rows } = await this.dbQuery<{
+      terminalized: boolean
+      wake_reservation_released: boolean
+    }>(
+      `WITH terminalized AS (
+         UPDATE message_queue
+            SET status='failed',
+                failed_reason=$3,
+                done_at=$4,
+                payload=$5,
+                claimed_by=NULL,
+                claimed_at=NULL,
+                claim_expires_at=NULL,
+                last_heartbeat_at=NULL
+          WHERE id=$1
+            AND agent_id=$2
+            AND status='pending'
+          RETURNING agent_id
+       ), released AS (
+         UPDATE agents
+            SET last_wake_attempt_at=NULL
+          WHERE agent_id=$2
+            AND last_wake_attempt_at=$6
+          RETURNING agent_id
+       )
+       SELECT EXISTS(SELECT 1 FROM terminalized) AS terminalized,
+              EXISTS(SELECT 1 FROM released) AS wake_reservation_released`,
+      [row.id, row.agent_id, failureCode, failedAt, failedPayload, reservedAt],
+    )
+    const terminalized = rows[0]?.terminalized === true
+    if (!terminalized) {
+      this.metrics.inc('state_daemon_wake_actions_total', {
+        result: 'host_runtime_failure_terminal_stale_skipped',
+        code: failureCode,
+      })
+      return false
+    }
+
+    this.metrics.inc('state_daemon_wake_actions_total', {
+      result: 'host_runtime_failure_failed_non_retryable',
+      code: failureCode,
+    })
+    void this.alert.alert(
+      `host runtime non-retryable failure for ${row.agent_id} queue_id=${row.id}; marked failed code=${failureCode}`,
+    ).catch(() => {
+      this.metrics.inc('state_daemon_wake_actions_total', {
+        result: 'host_runtime_failure_alert_error',
+        code: failureCode,
+      })
+    })
+    return true
+  }
+
   private async invokeCodexRunner(
     row: QueueRow,
     agent: AgentRow | null | undefined,
@@ -1811,15 +1900,25 @@ export class StateDaemon {
       timestamp: now.toISOString(),
     })
     if (!hostSelection.ok) {
-      await this.dbQuery(
-        `UPDATE agents SET last_wake_attempt_at=NULL
-          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
-        [row.agent_id, now],
-      )
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_failed' })
-      await this.alert.alert(
-        `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${hostSelection.failure.failure_code}`,
-      )
+      const failureCode = hostSelection.failure.failure_code
+      if (failureCode && !isHostRuntimeFailureRetryable(failureCode)) {
+        await this.terminalizeNonRetryableHostRuntimeFailure(
+          row,
+          now,
+          effectiveProfile,
+          hostSelection.failure as HostRuntimeRunnerResult & { failure_code: HostRuntimeFailureCode },
+        )
+      } else {
+        await this.dbQuery(
+          `UPDATE agents SET last_wake_attempt_at=NULL
+            WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+          [row.agent_id, now],
+        )
+        await this.alert.alert(
+          `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${failureCode ?? 'unknown'}`,
+        )
+      }
       return false
     }
     if (hostSelection.selected === 'host-runtime') {
@@ -1831,14 +1930,12 @@ export class StateDaemon {
           message: 'host runtime invoker is not configured',
           timestamp: now.toISOString(),
         })
-        await this.dbQuery(
-          `UPDATE agents SET last_wake_attempt_at=NULL
-            WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
-          [row.agent_id, now],
-        )
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_invoker_unconfigured' })
-        await this.alert.alert(
-          `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${failure.failure_code}`,
+        await this.terminalizeNonRetryableHostRuntimeFailure(
+          row,
+          now,
+          hostSelection.profile,
+          failure as HostRuntimeRunnerResult & { failure_code: HostRuntimeFailureCode },
         )
         return false
       }
@@ -1848,12 +1945,21 @@ export class StateDaemon {
         command: hostSelection.command,
       })
       if (!this.hostRuntimeResultOk(result)) {
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_error' })
+        if (result.failure_code && !isHostRuntimeFailureRetryable(result.failure_code)) {
+          await this.terminalizeNonRetryableHostRuntimeFailure(
+            row,
+            now,
+            hostSelection.profile,
+            result as HostRuntimeRunnerResult & { failure_code: HostRuntimeFailureCode },
+          )
+          return false
+        }
         await this.dbQuery(
           `UPDATE agents SET last_wake_attempt_at=NULL
             WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
           [row.agent_id, now],
         )
-        this.metrics.inc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_error' })
         await this.alert.alert(
           `host runtime adapter failed for ${row.agent_id} queue_id=${row.id}: ${result.failure_code ?? result.parser_outcome}`,
         )

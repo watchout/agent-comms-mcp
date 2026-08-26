@@ -1577,6 +1577,18 @@ reclaim cap を適用する。model の `ok=false` result は `next_action='retr
 であり、それ以外は `ADAPTER_RESULT_NOT_OK` の typed failed とする。旧 row に
 `runner_error.retryable` が無い場合だけ backward-compatible bounded retry を維持する。
 
+この分類は queue-work scheduler が claim 後に残した `runner_error` だけでなく、state-daemon
+の host-runtime adapter admission にも共通適用する。host adapter が process 起動前に返す
+`SCHEMA_REQUIRED` を含む決定的 configuration failure は、まだ `pending` の exact row に
+`runner_error.retryable=false` と `failed_reason=<exact code>` を記録し、compare-and-set で同じ
+sweep 中に `failed` へ遷移させる。process 起動、provider fallback、`done` / `replied` 化は
+行わない。
+
+1 row の決定的 failure は sweep 全体の停止条件ではない。terminal CAS 後は agent-level
+duplicate-suppression reservation を解放し、同じ fetched batch の次 row を評価する。後続 sweep
+では terminal row を再選択してはならない。alert delivery は観測効果であり、その失敗がこの
+typed terminal path を例外へ戻して batch の残りを止めてはならない。
+
 失敗分類は schema 変更なしで次の canonical query により数えられなければならない。
 
 ```sql
