@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import { detectNoReplyIntent } from './no-reply-policy'
 
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
@@ -552,7 +551,6 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
   const payload = parsePayload(row.payload)
   const messageId = row.message_id ?? payload.message_id ?? null
   const requester = payload.author_id ?? payload.from ?? null
-  const noReply = detectNoReplyIntent({ payload, content: payload.content })
   return {
     schema_version: QUEUE_WORK_ENVELOPE_VERSION,
     queue_id: queueIdOf(row),
@@ -563,7 +561,9 @@ export function buildQueueWorkEnvelope(row: QueueWorkRow): QueueWorkEnvelope {
     requester: requester === null ? null : String(requester),
     content: typeof payload.content === 'string' ? payload.content : row.payload,
     reply_contract: {
-      required: payload.reply_contract?.required === false || noReply.no_reply_required ? false : true,
+      // Only the typed queue contract controls reply behavior. Untrusted
+      // message prose must never become close authority.
+      required: payload.reply_contract?.required !== false,
       reply_to: messageId === null ? null : String(messageId),
       mention: requester === null ? null : String(requester),
     },

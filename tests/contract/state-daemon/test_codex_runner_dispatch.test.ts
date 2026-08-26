@@ -474,8 +474,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('pending report row is not dispatched, terminalized, or runner-error looped', async () => {
-    const agent = makeAgentId('codex-report')
+  test('exact typed ACK envelope terminalizes without consulting ACK prose', async () => {
+    const agent = makeAgentId('typed-ack')
     await seedAgent(pg, {
       agent_id: agent,
       runtime: 'codex',
@@ -487,7 +487,16 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-111111111120',
-      payload: JSON.stringify({ author_id: 'agent-com-dev', message_type: 'report', content: 'implementation status only' }),
+      payload: JSON.stringify({
+        author_id: 'codex-cto',
+        message_type: 'chat',
+        content: 'This free-form text is ignored by the terminal decision.',
+        typed_ack: {
+          schema_version: 'aun-queue-ack/v1',
+          kind: 'receipt',
+          acknowledged_message_id: '11111111-1111-4111-8111-000000000950',
+        },
+      }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
 
@@ -510,9 +519,9 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         terminal: 'true',
       })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', {
-        result: 'non_actionable_terminalized',
-        reason: 'NON_ACTIONABLE_REPORT',
-        message_type: 'report',
+        result: 'typed_ack_terminalized',
+        reason: 'TYPED_ACK_RECEIPT',
+        message_type: 'chat',
       })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_error' })).toBe(0)
       const row = (await pg.query(
@@ -523,7 +532,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         status: 'skipped',
         claimed_by: null,
         replied_with: null,
-        failed_reason: 'NON_ACTIONABLE_REPORT',
+        failed_reason: 'TYPED_ACK_RECEIPT',
       })
     } finally {
       await h.daemon.stop()
@@ -680,7 +689,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('structured no-reply terminal work is completed by state_daemon without invoking runner', async () => {
+  test('free-text no-reply instructions are delivered instead of terminalized', async () => {
     const agent = makeAgentId('codex-complete')
     await seedAgent(pg, {
       agent_id: agent,
@@ -695,7 +704,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       message_id: '11111111-1111-4111-8111-222222222222',
       payload: JSON.stringify({
         author_id: 'codex-cto',
-        content: 'NORM-060 synthetic probe',
+        content: 'ACK: request received. Run CHECK and ADJUST, then record the evidence.\nno_reply_required: true\nNo reply required.',
+        message_type: 'instruction',
         no_reply_required: true,
       }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
@@ -714,28 +724,28 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         claim_expires_at: null,
       })
 
-      expect(runner.invocations).toHaveLength(0)
+      expect(runner.invocations).toHaveLength(1)
+      expect(runner.invocations[0]).toMatchObject({
+        queueId: id,
+        completeNoReply: false,
+        completionReason: null,
+      })
+      expect(runner.invocations[0]?.ackContent).toContain('final close requires explicit --close')
       const row = await pg.query<{ status: string; done_at: Date | null; payload: string }>(
         `SELECT status, done_at, payload FROM message_queue WHERE id=$1`,
         [id],
       )
-      expect(row.rows[0]?.status).toBe('done')
-      expect(row.rows[0]?.done_at).toBeTruthy()
-      expect(JSON.parse(row.rows[0]?.payload ?? '{}').terminal_baton).toMatchObject({
-        no_reply_required: true,
-        reason: 'payload_no_reply_required',
-        set_by: 'state_daemon',
-        source: 'deterministic_no_reply_policy',
-      })
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(1)
+      expect(row.rows[0]?.status).toBe('pending')
+      expect(row.rows[0]?.done_at).toBeNull()
+      expect(JSON.parse(row.rows[0]?.payload ?? '{}').terminal_baton).toBeUndefined()
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_terminal_completed' })).toBe(0)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
   })
 
-  test('TUI no-reply terminal work is completed without prompt injection', async () => {
+  test('typed no-reply preference cannot silently close TUI work without an approved runner', async () => {
     const agent = makeAgentId('tui-no-reply')
     await seedAgent(pg, {
       agent_id: agent,
@@ -752,6 +762,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         author_id: 'state-daemon-smoke',
         content: 'NORM-060 synthetic probe',
         no_reply_required: true,
+        message_type: 'instruction',
       }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
@@ -776,10 +787,9 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         `SELECT status, done_at FROM message_queue WHERE id=$1`,
         [id],
       )
-      expect(row.rows[0]).toMatchObject({ status: 'done' })
-      expect(row.rows[0]?.done_at).toBeTruthy()
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      expect(row.rows[0]).toMatchObject({ status: 'pending' })
+      expect(row.rows[0]?.done_at).toBeNull()
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }

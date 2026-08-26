@@ -89,15 +89,10 @@ import {
 import { loadRuntimeMemoryReadyPolicy } from '../runtime-current-resolver'
 import { MemoryReadyBackoff } from './memory-ready-backoff'
 import {
-  buildTerminalBaton,
-  detectNoReplyIntent,
   parseQueuePayload,
-  type NoReplyDecision,
-  withTerminalBaton,
 } from '../no-reply-policy'
 import {
   classifyQueueSurface,
-  withQueueDispositionStamp,
   type QueueSurfaceClassification,
 } from '../queue-message-classification'
 import {
@@ -110,6 +105,30 @@ const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 const QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY = 'queue_work_runner_error_recovery'
 const QUEUE_WORK_RUNNER_ERROR_FAILED_REASON = 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED'
+const TYPED_QUEUE_ACK_SCHEMA_VERSION = 'aun-queue-ack/v1'
+const TYPED_QUEUE_ACK_REASON = 'TYPED_ACK_RECEIPT'
+
+interface TypedQueueAcknowledgement {
+  schema_version: typeof TYPED_QUEUE_ACK_SCHEMA_VERSION
+  kind: 'receipt'
+  acknowledged_message_id: string
+}
+
+function typedQueueAcknowledgement(payload: unknown): TypedQueueAcknowledgement | null {
+  const parsed = parseQueuePayload(payload)
+  const raw = parsed.typed_ack
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const ack = raw as Record<string, unknown>
+  const keys = Object.keys(ack).sort()
+  if (keys.length !== 3 || keys.join(',') !== 'acknowledged_message_id,kind,schema_version') return null
+  if (ack.schema_version !== TYPED_QUEUE_ACK_SCHEMA_VERSION || ack.kind !== 'receipt') return null
+  if (typeof ack.acknowledged_message_id !== 'string' || !ack.acknowledged_message_id.trim()) return null
+  return {
+    schema_version: TYPED_QUEUE_ACK_SCHEMA_VERSION,
+    kind: 'receipt',
+    acknowledged_message_id: ack.acknowledged_message_id.trim(),
+  }
+}
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -887,25 +906,31 @@ export class StateDaemon {
     const bot = rows[0]
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
     if (bot && row.status === 'pending') {
-      if (await this.completeNoReplyIfRequired(row)) {
-        return true
-      }
       const surface = classifyQueueSurface({
         agentId: row.agent_id,
         payload: row.payload,
         agent: bot,
       })
       if (!surface.actionable) {
-        if (this.shouldAllowExactFencedQueueWorkPending(row, surface)) {
+        const typedAck = surface.deterministic_non_actionable
+          ? typedQueueAcknowledgement(row.payload)
+          : null
+        if (typedAck) {
+          this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
+          return this.completeTypedAcknowledgementIfRequired(row, surface, typedAck)
+        }
+        if (surface.message_type === 'phase_handoff' && this.shouldAllowExactFencedQueueWorkPending(row, surface)) {
           this.metrics.inc('state_daemon_queue_work_actions_total', {
             result: 'pending_routing_bypass',
             message_type: surface.message_type,
           })
+        } else if (surface.message_type !== 'phase_handoff' && surface.routing.routing_decision === 'deliver_only') {
+          this.metrics.inc('state_daemon_wake_actions_total', {
+            result: 'routing_delivery_fallback',
+            message_type: surface.message_type,
+            route_reason: surface.routing.route_reason,
+          })
         } else {
-          if (surface.deterministic_non_actionable) {
-            this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
-            return this.completeNonActionableIfRequired(row, surface)
-          }
           this.recordQueueAction({ kind: 'routing_hold', terminal: false }, row)
           this.metrics.inc('state_daemon_wake_actions_total', {
             result: 'routing_non_actionable_held',
@@ -944,9 +969,6 @@ export class StateDaemon {
       return false
     }
     this.recordMemoryReadyRecovered(action, row)
-    if (action.kind !== 'agent_missing' && row.status !== 'pending' && await this.completeNoReplyIfRequired(row)) {
-      return true
-    }
     if (action.kind !== 'wake_pending' && action.kind !== 'wake_received') {
       return this.runObservedQueueAction(action, row, bot, memoryReady.project)
     }
@@ -1501,14 +1523,6 @@ export class StateDaemon {
     }
   }
 
-  private noReplyDecisionForRow(row: QueueRow): NoReplyDecision {
-    const payload = parseQueuePayload(row.payload)
-    return detectNoReplyIntent({
-      payload,
-      content: payload.content,
-    })
-  }
-
   private isQueueWorkSchedulerClaim(row: QueueRow): boolean {
     const payload = parseQueuePayload(row.payload)
     return payload.receive_claim?.source === QUEUE_WORK_SCHEDULER_SOURCE
@@ -1615,62 +1629,29 @@ export class StateDaemon {
     return rows
   }
 
-  private async completeNoReplyIfRequired(row: QueueRow): Promise<boolean> {
-    if (this.isQueueWorkResidueExcluded(row)) return false
-    if (!this.config.codexRunnerAutoCompleteNoReply) return false
-    // no_reply_required controls the outbound response after substantive work;
-    // it is not authority to skip that work. A configured queue-work scheduler
-    // must execute the row and let the typed result close it without a reply.
-    if (this.queueWorkScheduler) return false
-    if (row.status !== 'pending' && row.status !== 'received' && row.status !== 'in_progress') return false
-    const decision = this.noReplyDecisionForRow(row)
-    if (!decision.no_reply_required) return false
-
-    const now = this.clock.now()
-    const payload = parseQueuePayload(row.payload)
-    const stampedPayload = JSON.stringify(withTerminalBaton(payload, buildTerminalBaton({
-      reason: decision.reason ?? 'state_daemon_auto_no_reply',
-      setBy: 'state_daemon',
-      source: 'deterministic_no_reply_policy',
-      now: () => now,
-    })))
-    const updated = await this.dbQuery(
-      `UPDATE message_queue
-          SET status='done',
-              done_at=$2,
-              payload=$3,
-              claim_expires_at=NULL,
-              claimed_by=NULL,
-              claimed_at=NULL
-        WHERE id=$1
-          AND status IN ('pending', 'received', 'in_progress')`,
-      [row.id, now, stampedPayload],
-    )
-    if (updated.rowCount !== 1) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'no_reply_stale_skipped' })
-      return false
-    }
-    this.metrics.inc('state_daemon_wake_actions_total', { result: 'state_daemon_no_reply_completed' })
-    return true
-  }
-
-  private async completeNonActionableIfRequired(
+  private async completeTypedAcknowledgementIfRequired(
     row: QueueRow,
     surface: QueueSurfaceClassification,
+    acknowledgement: TypedQueueAcknowledgement,
   ): Promise<boolean> {
     const disposition = surface.deterministic_non_actionable
     if (!disposition) return false
 
     const now = this.clock.now()
-    const stampedPayload = JSON.stringify(withQueueDispositionStamp(parseQueuePayload(row.payload), {
-      code: disposition.reason,
-      set_by: 'state_daemon',
-      set_at: now.toISOString(),
-      source: disposition.source,
-      message_type: disposition.message_type,
-      routing_decision: surface.routing.routing_decision,
-      route_reason: surface.routing.route_reason,
-    }))
+    const payload = parseQueuePayload(row.payload)
+    const stampedPayload = JSON.stringify({
+      ...payload,
+      queue_disposition: {
+        code: TYPED_QUEUE_ACK_REASON,
+        set_by: 'state_daemon',
+        set_at: now.toISOString(),
+        source: 'typed_ack_envelope',
+        message_type: disposition.message_type,
+        routing_decision: surface.routing.routing_decision,
+        route_reason: surface.routing.route_reason,
+        acknowledgement,
+      },
+    })
     const updated = await this.dbQuery(
       `UPDATE message_queue
           SET status='skipped',
@@ -1682,25 +1663,22 @@ export class StateDaemon {
               claimed_at=NULL
         WHERE id=$1
           AND status='pending'`,
-      [row.id, disposition.reason, now, stampedPayload],
+      [row.id, TYPED_QUEUE_ACK_REASON, now, stampedPayload],
     )
     if (updated.rowCount !== 1) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_actionable_stale_skipped' })
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'typed_ack_stale_skipped' })
       return false
     }
     this.metrics.inc('state_daemon_wake_actions_total', {
-      result: 'non_actionable_terminalized',
-      reason: disposition.reason,
+      result: 'typed_ack_terminalized',
+      reason: TYPED_QUEUE_ACK_REASON,
       message_type: disposition.message_type,
     })
     return false
   }
 
-  private boundedAckContent(row: QueueRow, noReplyDecision: NoReplyDecision): string {
-    const finalClose = noReplyDecision.no_reply_required
-      ? 'final close will be auto-completed as no-reply.'
-      : 'final close requires explicit --close.'
-    const raw = `ACK: received by ${row.agent_id}; queue_id={queue_id}; message_id={message_id}; ${finalClose}`
+  private boundedAckContent(row: QueueRow): string {
+    const raw = `ACK: received by ${row.agent_id}; queue_id={queue_id}; message_id={message_id}; final close requires explicit --close.`
     return raw.length <= this.config.codexRunnerAckContentMaxChars
       ? raw
       : raw.slice(0, this.config.codexRunnerAckContentMaxChars)
@@ -1773,9 +1751,11 @@ export class StateDaemon {
       return false
     }
 
-    const noReplyDecision = this.noReplyDecisionForRow(row)
-    const completeNoReply = this.config.codexRunnerAutoCompleteNoReply && noReplyDecision.no_reply_required
-    const autoFinalReply = this.config.codexRunnerAutoFinalReply && !completeNoReply
+    // The daemon cannot infer completion authority from untrusted message
+    // prose. Substantive work closes only through a typed runner result or an
+    // explicit lifecycle operation after processing.
+    const completeNoReply = false
+    const autoFinalReply = this.config.codexRunnerAutoFinalReply
     const runnerInput = {
       agentId: row.agent_id,
       queueId: Number(row.id),
@@ -1783,11 +1763,9 @@ export class StateDaemon {
       requester: this.requesterFromPayload(row.payload),
       databaseUrl: this.config.codexRunnerDatabaseUrl,
       memoryReadyProject,
-      ackContent: autoFinalReply ? '' : this.boundedAckContent(row, noReplyDecision),
+      ackContent: autoFinalReply ? '' : this.boundedAckContent(row),
       completeNoReply,
-      completionReason: completeNoReply
-        ? noReplyDecision.reason ?? 'state_daemon_auto_no_reply'
-        : null,
+      completionReason: null,
       autoFinalReply,
       payload: row.payload,
     }
