@@ -10,6 +10,8 @@ import {
   type AllAgentCommunicationManifestTargetV1,
 } from './all-agent-communication-manifest'
 import type { BotStatusDbRow, QueueWakeState } from './bot-status-db'
+import { evaluateAutomaticProcessingEligibility } from './communication-authority'
+import { automaticProcessingInputsFromAgent } from './state-daemon'
 import { defaultConfigPort } from './ports/config-port'
 import { validateStateDaemonCanaryOverlayEnv } from './state-daemon/launchagent'
 
@@ -986,10 +988,17 @@ export function buildQueueProcessingReadinessReport(
   }
 
   for (const row of rowList) {
+    if ((row.pending_count ?? 0) <= 0) continue
     const blockerCodes: string[] = []
     const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
     if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
-    if ((row as { agent_type?: string | null }).agent_type === 'human') blockerCodes.push('AGENT_TYPE_HUMAN')
+    // Same canonical predicate as the live daemon (single implementation).
+    // channelMember is true because fleet-level readiness has no channel
+    // subject (amendment A2 §1).
+    const eligibility = evaluateAutomaticProcessingEligibility(
+      automaticProcessingInputsFromAgent(row, true),
+    )
+    for (const reason of eligibility.reasons) blockerCodes.push(reason)
     if (blockerCodes.length === 0) continue
 
     agentScopeBlockers.push({
@@ -1003,7 +1012,9 @@ export function buildQueueProcessingReadinessReport(
       const message =
         code === 'STATE_DAEMON_RUNNER_DISABLED'
           ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
-          : 'agent_type=human seats are excluded from automatic processing (DB-only eligibility)'
+          : code === 'AGENT_TYPE_HUMAN'
+            ? 'agent_type=human seats are excluded from automatic processing (canonical DB-only eligibility)'
+            : `canonical automatic-processing eligibility blocked: ${code}`
       blockers.push(readinessFinding(code, 'blocker', message, {
         agent_id: row.agent_id,
         evidence: {

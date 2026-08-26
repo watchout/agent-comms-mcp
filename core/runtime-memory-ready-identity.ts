@@ -367,10 +367,8 @@ export async function reconcileRuntimeMemoryReadyIdentity(
 
 export async function reconcileRuntimeMemoryReadyFleetIdentity(
   db: RuntimeMemoryReadyDb,
-  input: { denylist: string[] },
   options: RuntimeMemoryReadyIdentityOptions = {},
 ): Promise<RuntimeMemoryReadyIdentityReconcileResult[]> {
-  const denylist = new Set(input.denylist.map(value => value.trim()).filter(Boolean))
   const seats = await queryRows<FleetSeatRow>(
     db,
     `SELECT agent_id
@@ -378,12 +376,12 @@ export async function reconcileRuntimeMemoryReadyFleetIdentity(
       WHERE status IN ('idle', 'busy')
         AND COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
+        AND COALESCE(agent_type, 'dev') <> 'human'
       ORDER BY agent_id`,
   )
   const results: RuntimeMemoryReadyIdentityReconcileResult[] = []
   for (const seat of seats) {
     const agentId = String(seat.agent_id)
-    if (denylist.has(agentId)) continue
     results.push(await reconcileRuntimeMemoryReadyIdentity(db, { agentId }, options))
   }
   return results

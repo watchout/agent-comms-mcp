@@ -193,6 +193,40 @@ function isProfileEnabled(raw: unknown): boolean {
   return raw === true || raw === 1 || raw === '1'
 }
 
+/**
+ * Single mapping from an agents row to the canonical automatic-processing
+ * eligibility inputs. Both the live daemon and readiness diagnostics must use
+ * this builder so the two can never disagree on what the columns mean.
+ */
+export function automaticProcessingInputsFromAgent(
+  agent: {
+    agent_type?: string | null
+    runtime?: string | null
+    runtime_engine_preference?: string | null
+    status?: string | null
+    profile_enabled?: unknown
+    disabled_at?: Date | string | null
+  } | null,
+  channelMember: boolean,
+): {
+  enrolled: boolean
+  enabled: boolean
+  runtimeReady: boolean
+  channelMember: boolean
+  humanAgent: boolean
+} {
+  return {
+    enrolled: agent !== null,
+    enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
+    runtimeReady: agent !== null
+      && Boolean(effectiveRuntime(agent as AgentRow))
+      && Boolean(agent.status?.trim())
+      && !isInactiveAgentStatus(agent.status ?? null),
+    channelMember,
+    humanAgent: agent?.agent_type === 'human',
+  }
+}
+
 export async function evaluateStateDaemonAutomaticProcessingEligibility(
   db: Pick<DBClient, 'query'>,
   input: { agentId: string; channelId: string | null },
@@ -213,16 +247,7 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
     )
     channelMember = parseChannelMembers(channelRows.rows[0]?.members).includes(input.agentId)
   }
-  return evaluateAutomaticProcessingEligibility({
-    enrolled: agent !== null,
-    enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
-    runtimeReady: agent !== null
-      && Boolean(effectiveRuntime(agent))
-      && Boolean(agent.status?.trim())
-      && !isInactiveAgentStatus(agent.status),
-    channelMember,
-    humanAgent: (agent as { agent_type?: string | null } | null)?.agent_type === 'human',
-  })
+  return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent, channelMember))
 }
 
 export class StateDaemon {

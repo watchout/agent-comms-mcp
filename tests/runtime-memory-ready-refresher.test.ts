@@ -30,6 +30,16 @@ afterEach(async () => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+async function seedSeatHuman(agentId: string, status: 'idle' | 'busy' = 'idle'): Promise<void> {
+  await db.execute(
+    `INSERT INTO agents
+       (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
+        home_directory, profile_enabled, disabled_at)
+     VALUES ($1, $1, 'human', 'codex', $2, 39002, $3, $4, 1, NULL)`,
+    [agentId, status, JSON.stringify({}), `/tmp/${agentId}`],
+  )
+}
+
 async function seedSeat(agentId: string, status: 'idle' | 'busy' = 'idle'): Promise<void> {
   await db.execute(
     `INSERT INTO agents
@@ -51,11 +61,10 @@ describe('memory-ready fleet refresher', () => {
   test('returns N/N terminal results and isolates one seat failure', async () => {
     await seedSeat('alpha', 'idle')
     await seedSeat('bravo', 'busy')
-    await seedSeat('denied', 'idle')
+    await seedSeatHuman('denied', 'idle')
     const visited: string[] = []
 
     const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
-      denylist: ['denied'],
       now,
       policy,
       resolveProject: async (_db, agentId) => ({
@@ -74,17 +83,16 @@ describe('memory-ready fleet refresher', () => {
     expect(visited).toEqual(['alpha', 'bravo'])
     expect(report.ok).toBe(false)
     expect(report.summary).toEqual({
-      inventory: 3,
+      inventory: 2,
       eligible: 2,
       ready: 1,
       failed: 1,
-      skipped: 1,
-      terminal_results: 3,
+      skipped: 0,
+      terminal_results: 2,
     })
     expect(report.seats.map(row => [row.agent_id, row.status, row.reason])).toEqual([
       ['alpha', 'failed', 'SEAT_REFRESH_ERROR'],
       ['bravo', 'ready', 'READY'],
-      ['denied', 'skipped', 'DENYLISTED'],
     ])
     expect(report.provider_effects).toBe(0)
     expect(report.discord_visible_sends).toBe(0)
@@ -96,7 +104,6 @@ describe('memory-ready fleet refresher', () => {
     await db.execute(`UPDATE agent_runtime_instances SET session_name='wrong' WHERE agent_id='broken'`)
 
     const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
-      denylist: [],
       now,
       dryRun: true,
       policy,

@@ -193,6 +193,11 @@ function runtimeReadiness(overrides: Partial<StateDaemonRuntimeReadiness> = {}):
 function botStatusRow(overrides: Partial<BotStatusDbRow> = {}): BotStatusDbRow {
   return {
     agent_id: 'codex-cto',
+    agent_type: 'dev',
+    profile_enabled: true,
+    disabled_at: null,
+    runtime: 'codex',
+    runtime_engine_preference: null,
     status: 'idle',
     last_seen_at: '2026-06-02T00:00:00.000Z',
     heartbeat_ok: true,

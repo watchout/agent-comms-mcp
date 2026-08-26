@@ -199,9 +199,7 @@ describe('m4 — launchd plist source-pin', () => {
     expect(PLIST).toMatch(
       /<key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL<\/key>\s*<string>postgresql:\/\/\/agent_comms\?host=\/tmp<\/string>/,
     )
-    expect(PLIST).toMatch(
-      /<key>STATE_DAEMON_AGENT_DENYLIST<\/key>\s*<string>adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown<\/string>/,
-    )
+    expect(PLIST).not.toMatch(/<key>STATE_DAEMON_AGENT_DENYLIST<\/key>/)
     expect(PLIST).not.toMatch(/<key>STATE_DAEMON_AGENT_ALLOWLIST<\/key>/)
     expect(PLIST).toMatch(/<key>STATE_DAEMON_ALERT_CHANNEL<\/key>\s*<string>1487368919613444156<\/string>/)
   })

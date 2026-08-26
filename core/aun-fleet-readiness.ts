@@ -65,7 +65,6 @@ export type AunFleetAgentReadiness = {
   runtime_instance_count: number
   live_runtime_instance_count: number
   active_queue_count: number
-  denied: boolean
   profile_excluded_reason: ProfileExclusionReason
   active_status: boolean
   runtime_evidence: boolean
@@ -92,7 +91,6 @@ export type AunFleetReadinessReport = {
     final_design_guardrail: string
   }
   options: {
-    denylist_count: number
     smoke_run_id: string | null
     require_smoke: boolean
     operator_agent_id: string
@@ -169,12 +167,12 @@ function increment(map: Map<string, number>, key: string): void {
 
 function actionForBlocker(blocker: string): string {
   switch (blocker) {
-    case 'denied_by_state_daemon':
-      return 'STATE_DAEMON_AGENT_DENYLIST is retired; eligibility is DB-only (agents table + agent_type human guard)'
     case 'disabled_profile_excluded':
       return 'pass --include-disabled only for an explicit reviewed disabled-profile audit'
     case 'test_profile_excluded':
       return 'pass --include-test only for an explicit reviewed test-profile audit'
+    case 'human_profile_excluded':
+      return 'agent_type=human seats are never automatic-processing activation targets (DB-only eligibility)'
     case 'no_channel_membership':
       return 'add explicit channel membership and routing metadata'
     case 'inactive_status':
@@ -428,7 +426,6 @@ export async function buildAunFleetReadinessReport(
     const checkoutDriftReasons = unique(checkoutDriftRuntimes.flatMap((drift) => drift.reasons))
     const checkoutDriftOk = (!driftPolicyActive || liveRuntimeRows.length > 0) && checkoutDriftReasons.length === 0
     const activeQueueCount = activeQueueCountByAgent.get(agentId) ?? 0
-    const denied = false
     const approvedExclusion = validDriftExclusion(agentId, driftExclusions, now)
     const profileExcludedReason = profileExclusionReason(row, {
       includeDisabledProfiles,
@@ -441,12 +438,12 @@ export async function buildAunFleetReadinessReport(
 
     if (approvedExclusion) {
       blockers.push('approved_fleet_exclusion')
-    } else if (denied) {
-      blockers.push('denied_by_state_daemon')
     } else if (profileExcludedReason === 'disabled_profile') {
       blockers.push('disabled_profile_excluded')
     } else if (profileExcludedReason === 'test_profile') {
       blockers.push('test_profile_excluded')
+    } else if (profileExcludedReason === 'human_profile') {
+      blockers.push('human_profile_excluded')
     } else {
       if (channels.length === 0) blockers.push('no_channel_membership')
       if (!activeStatus) blockers.push('inactive_status')
@@ -454,7 +451,7 @@ export async function buildAunFleetReadinessReport(
       if (runtimeEvidence && !checkoutDriftOk) blockers.push(...checkoutDriftReasons)
     }
 
-    if (!approvedExclusion && !denied && !profileExcludedReason && requireSmoke) {
+    if (!approvedExclusion && !profileExcludedReason && requireSmoke) {
       if (agentId === operatorAgentId && smoke === null) {
         if (activeQueueCount > 0) blockers.push('active_queue_not_drained')
       } else if (!smoke) {
@@ -466,7 +463,7 @@ export async function buildAunFleetReadinessReport(
       }
     }
 
-    const readiness: AunFleetReadinessClass = approvedExclusion || denied || profileExcludedReason !== null
+    const readiness: AunFleetReadinessClass = approvedExclusion || profileExcludedReason !== null
       ? 'excluded'
       : blockers.length === 0
         ? 'ready'
@@ -482,7 +479,6 @@ export async function buildAunFleetReadinessReport(
       runtime_instance_count: runtimeInstanceCount,
       live_runtime_instance_count: liveRuntimeInstanceCount,
       active_queue_count: activeQueueCount,
-      denied,
       profile_excluded_reason: profileExcludedReason,
       active_status: activeStatus,
       runtime_evidence: runtimeEvidence,
@@ -512,7 +508,6 @@ export async function buildAunFleetReadinessReport(
       final_design_guardrail: 'read-only readiness report; do not infer readiness from Discord visibility alone',
     },
     options: {
-      denylist_count: 0,
       smoke_run_id: smokeRunId,
       require_smoke: requireSmoke,
       operator_agent_id: operatorAgentId,

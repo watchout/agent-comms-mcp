@@ -28,7 +28,7 @@ blocker-resolution commands, approved restart commands, smoke, and rollback.
   load/kickstart.
 - Confirm `STATE_DAEMON_AGENT_ALLOWLIST` is absent/empty. Production rollout is
   DB-driven; allowlist is only an emergency narrowing override.
-- Confirm `STATE_DAEMON_AGENT_DENYLIST` excludes disabled/test/human identities
+- (retired) STATE_DAEMON_AGENT_DENYLIST: 存在してはならない。残存は readiness が STATE_DAEMON_AGENT_DENYLIST_RETIRED blocker として検出する
   only, and does not include current PR audit recipients: `auditor` for L1 and
   `codex-audit` for L2.
 - Confirm the daemon restart launcher path resolves to

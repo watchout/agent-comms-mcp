@@ -1110,9 +1110,7 @@ export async function main(): Promise<void> {
     config,
   })
 
-  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, {
-    denylist: [],
-  }).catch((error) => [{
+  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any).catch((error) => [{
     agent_id: 'fleet',
     observed_runtime_instance_id: null,
     current_runtime_instance_id: null,
