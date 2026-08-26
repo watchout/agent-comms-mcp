@@ -119,6 +119,7 @@ import {
   closeObsoletePendingQueueRows,
   reassignPendingQueueRows,
   reclaimExpiredQueueClaims,
+  requeueFailedQueueRows,
 } from '../core/queue-repair'
 import {
   buildQueueDaemonStatusReport,
@@ -4809,7 +4810,6 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
       launchAgentsDir: flags['launch-agents-dir'],
       bunPath: flags['bun-path'],
       databaseUrl: flags['database-url'],
-      agentDenylist: flags['agent-denylist'],
       expectedAgentId: flags['expected-agent-id'],
       activeLaunchAgentPlists,
       checkoutDirs,
@@ -5004,6 +5004,18 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
         process.exit(2)
       }
       const report = await reassignPendingQueueRows(db as any, { fromAgentId, toAgentId, dryRun })
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+      return
+    }
+
+    if (subcommand === 'requeue-failed') {
+      const agentId = flags.agent ?? flags['agent-id'] ?? null
+      const queueIds = (flags.id ? String(flags.id).split(',') : []).map((v) => v.trim()).filter(Boolean)
+      if (!agentId && queueIds.length === 0) {
+        console.error('Usage: agent-com queue requeue-failed (--agent <agent> | --id <queue_id[,queue_id...]>) [--execute|--dry-run]')
+        process.exit(2)
+      }
+      const report = await requeueFailedQueueRows(db as any, { agentId, queueIds, dryRun })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }
@@ -5393,14 +5405,13 @@ async function inboundCommand(subcommand: string | undefined, args: string[]) {
 async function fleetCommand(subcommand: string | undefined, args: string[]) {
   const { flags } = parseArgs(args)
   if (subcommand !== 'readiness') {
-    console.error('Usage: agent-com fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]')
+    console.error('Usage: agent-com fleet readiness [--format json|text] [--smoke-run-id <id>] [--operator-agent-id codex-aun] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]')
     process.exit(2)
   }
   const format = flags.format ?? 'json'
   const db = await getDb()
   try {
     const report = await buildAunFleetReadinessReport((db as any).__adapter, {
-      denylist: parseCsvFlag(flags.denylist ?? process.env.STATE_DAEMON_AGENT_DENYLIST ?? undefined) ?? [],
       smokeRunId: flags['smoke-run-id'] ?? null,
       requireSmoke: hasFlag(flags, 'require-smoke') ? flagEnabled(flags['require-smoke']) : undefined,
       operatorAgentId: flags['operator-agent-id'] ?? 'codex-aun',
@@ -5439,7 +5450,6 @@ async function smokeCommand(subcommand: string | undefined, args: string[]) {
         confirmPlanHash: flags.confirm ?? null,
         timeoutMs,
         pollMs,
-        denylist: parseCsvFlag(flags.denylist ?? process.env.STATE_DAEMON_AGENT_DENYLIST ?? undefined) ?? [],
       })
       if (format === 'text') {
         process.stdout.write(formatQueueWakeSmokeText(report))
@@ -6568,7 +6578,7 @@ Message I/O (requires AGENT_ID env var):
                                                        — Cell 20 source-bound identity classification; apply/rollback require exact hashes, immutable owner-decision evidence, and --execute
   inbound smoke [--format json|text] [--window-hours 168]
                                                        — read-only Discord inbound smoke evidence by channel
-  fleet readiness [--format json|text] [--denylist <a,b>] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]
+  fleet readiness [--format json|text] [--smoke-run-id <id>] [--require-smoke] [--include-disabled] [--include-test] [--approved-commit <sha>] [--approved-checkout-root <path[,path]>] [--drift-exclusion-file <json>]
                                                        — read-only all-agent AUN readiness gates and activation blockers
   smoke run [--format json|text] [--provider discord] [--window-hours 168] [--channel <external_id>] [--include-disabled] [--include-test] [--execute --confirm <plan_hash>] [--timeout-ms 30000]
                                                        — NORM-060 full-channel smoke (dry-run/plan default, read-only)

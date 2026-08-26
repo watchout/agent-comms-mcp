@@ -745,7 +745,8 @@ describe('T11d — AUN fleet readiness CLI surface', () => {
 
   test('fleet readiness is DB-evidence based and read-only', () => {
     expect(AUN_FLEET_READINESS_SRC).toMatch(/db_is_source_of_truth/)
-    expect(AUN_FLEET_READINESS_SRC).toMatch(/STATE_DAEMON_AGENT_DENYLIST/)
+    expect(AUN_FLEET_READINESS_SRC).not.toMatch(/STATE_DAEMON_AGENT_DENYLIST/)
+    expect(AUN_FLEET_READINESS_SRC).toMatch(/human_profile_excluded/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/disabled_profile_excluded/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/test_profile_excluded/)
     expect(AUN_FLEET_READINESS_SRC).toMatch(/runtime_checkout_path_unapproved/)

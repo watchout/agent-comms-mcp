@@ -7,7 +7,7 @@ export type ProfileLike = {
   disabled_at?: unknown
 }
 
-export type ProfileExclusionReason = 'disabled_profile' | 'test_profile' | null
+export type ProfileExclusionReason = 'disabled_profile' | 'test_profile' | 'human_profile' | null
 
 export type AuthoritativeProfileClass = 'production' | 'test'
 
@@ -103,5 +103,6 @@ export function profileExclusionReason(
 ): ProfileExclusionReason {
   if (!options.includeDisabledProfiles && isDisabledProfile(row)) return 'disabled_profile'
   if (!options.includeTestProfiles && isTestProfile(row)) return 'test_profile'
+  if ((row as { agent_type?: string | null }).agent_type === 'human') return 'human_profile'
   return null
 }

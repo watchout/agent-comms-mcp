@@ -15,7 +15,7 @@ An agent is AUN communication-ready when all of these are true:
 2. `channels.members` contains at least one channel for the agent.
 3. `agents.metadata->>'tmux_session'` or a runtime record identifies the local
    runtime.
-4. The agent is not in `STATE_DAEMON_AGENT_DENYLIST`.
+- (retired) STATE_DAEMON_AGENT_DENYLIST: 存在してはならない。残存は readiness が STATE_DAEMON_AGENT_DENYLIST_RETIRED blocker として検出する
 5. `agents.status` is active (`idle`, `busy`, or `online`) rather than
    `disabled`, `offline`, or `retired`.
 6. A smoke from `codex-aun` reaches the target, the target replies with the
@@ -76,7 +76,7 @@ dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown
 ```
 
 If any excluded identity becomes real production scope, remove it from the
-denylist in a reviewed PR, update channel membership/runtime metadata, reload
+DB profile in a reviewed PR (profile_enabled / disabled_at / agent_type), update channel membership/runtime metadata, reload
 state_daemon, and smoke it explicitly.
 
 ## Post-Smoke Cleanup Rule
@@ -104,7 +104,7 @@ Scripted report:
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
   bun cli/index.ts fleet readiness \
   --format text \
-  --denylist 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown' \
+
   --smoke-run-id 20260523T160628 \
   --require-smoke
 ```

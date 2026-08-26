@@ -30,12 +30,18 @@ export type BotHealthState =
 
 export interface BotStatusDbRow {
   agent_id: string
+  agent_type: string | null
+  profile_enabled: boolean | null
+  disabled_at: string | null
+  runtime: string | null
+  runtime_engine_preference: string | null
   status: string | null
   last_seen_at: string | null
   heartbeat_ok: boolean
   pending_count: number
   oldest_pending_at: string | null
   active_claim_count: number
+  typed_failed_count: number
   health_state: BotHealthState
   active_connector_count: number
   runtime_linked_connector_count: number
@@ -53,7 +59,11 @@ const QUERY = `
            COUNT(mq.id) FILTER (
              WHERE mq.status IN ('received', 'in_progress')
                AND mq.claimed_by = mq.agent_id
-           ) AS active_claim_count
+           ) AS active_claim_count,
+           COUNT(mq.id) FILTER (
+             WHERE mq.status = 'failed'
+               AND mq.failed_reason IN ('WAKE_INVOCATION_RETRY_EXHAUSTED', 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')
+           ) AS typed_failed_count
       FROM message_queue mq
      GROUP BY mq.agent_id
   ),
@@ -78,12 +88,18 @@ const QUERY = `
      GROUP BY ci.agent_id
   )
   SELECT a.agent_id,
+         a.agent_type,
+         a.profile_enabled,
+         a.disabled_at,
+         a.runtime,
+         a.runtime_engine_preference,
          a.status,
          a.last_seen_at,
          (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,
          COALESCE(q.pending_count, 0) AS pending_count,
          q.oldest_pending_at,
          COALESCE(q.active_claim_count, 0) AS active_claim_count,
+         COALESCE(q.typed_failed_count, 0) AS typed_failed_count,
          CASE
            WHEN a.last_seen_at IS NULL THEN 'offline'
            -- Order matters: busy_stuck must be checked before crashed, otherwise
@@ -119,7 +135,13 @@ function parseCount(value: string | number): number {
 export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, BotStatusDbRow>> {
   const result = await client.query<{
     agent_id: string
+    agent_type: string | null
+    profile_enabled: boolean | null
+    disabled_at: Date | null
+    runtime: string | null
+    runtime_engine_preference: string | null
     status: string | null
+    typed_failed_count: string | number
     last_seen_at: Date | null
     heartbeat_ok: boolean
     pending_count: string | number
@@ -137,7 +159,13 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
   for (const row of result.rows) {
     map.set(row.agent_id, {
       agent_id: row.agent_id,
+      agent_type: row.agent_type ?? null,
+      profile_enabled: row.profile_enabled ?? null,
+      disabled_at: row.disabled_at ? row.disabled_at.toISOString() : null,
+      runtime: row.runtime ?? null,
+      runtime_engine_preference: row.runtime_engine_preference ?? null,
       status: row.status,
+      typed_failed_count: parseCount(row.typed_failed_count),
       last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,
       heartbeat_ok: Boolean(row.heartbeat_ok),
       pending_count: parseCount(row.pending_count),

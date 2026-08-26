@@ -92,8 +92,8 @@ type Queryable = {
 }
 
 const ACTIVE_STATUSES = ['pending', 'received', 'in_progress']
-const EXPECTED_STATUSES = ['pending', 'received', 'in_progress', 'done', 'replied']
-const LEGACY_STATUSES = ['read', 'skipped', 'failed']
+const EXPECTED_STATUSES = ['pending', 'received', 'in_progress', 'done', 'replied', 'failed']
+const LEGACY_STATUSES = ['read', 'skipped']
 const REQUIRED_COLUMNS = ['status', 'replied_at', 'replied_with', 'done_at', 'claimed_by', 'claimed_at', 'claim_expires_at', 'payload']
 const AUDIT_COLUMNS = ['failed_reason']
 
@@ -351,8 +351,8 @@ export async function buildQueueTerminalStatePreflightReport(
       agentId,
       code: 'legacy_status_rows',
       severity: 'blocker',
-      title: 'legacy read/skipped/failed rows still present',
-      where: "status IN ('read', 'skipped', 'failed')",
+      title: 'legacy read/skipped/untyped-failed rows still present',
+      where: "status IN ('read', 'skipped') OR (status = 'failed' AND (failed_reason IS NULL OR failed_reason NOT IN ('WAKE_INVOCATION_RETRY_EXHAUSTED', 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')))",
       action: 'Archive or normalize with audit evidence before narrowing the status CHECK constraint.',
     }),
   ])

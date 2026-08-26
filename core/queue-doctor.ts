@@ -142,6 +142,15 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
      LIMIT 50`,
     agentOnlyParams,
   )
+  const typedFailed = await db.query(
+    `${baseSelect}
+       ${agentOnlyFilter}
+       AND mq.status = 'failed'
+       AND mq.failed_reason IN ('WAKE_INVOCATION_RETRY_EXHAUSTED', 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')
+     ORDER BY mq.created_at ASC
+     LIMIT 50`,
+    agentOnlyParams,
+  )
   const stalePending = await db.query(
     `${baseSelect}
        ${agentFilter}
@@ -245,6 +254,13 @@ export async function buildQueueDoctorReport(db: Queryable, options: QueueDoctor
       'message_queue still contains legacy terminal/active statuses',
       legacyRows.rows,
       'Finish or explicitly archive legacy read/skipped/failed rows before treating queue health as clean.',
+    ),
+    finding(
+      'typed_failed_awaiting_repair',
+      'blocker',
+      'typed-failed rows awaiting repair (bounded delivery attempts exhausted)',
+      typedFailed.rows,
+      'Fix the underlying cause, then reopen with: agent-com queue requeue-failed --id <queue_id> --execute. The fleet is not healthy while typed-failed rows sit unrepaired.',
     ),
     finding(
       'stale_pending',

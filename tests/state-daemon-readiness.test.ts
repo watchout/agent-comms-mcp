@@ -193,6 +193,11 @@ function runtimeReadiness(overrides: Partial<StateDaemonRuntimeReadiness> = {}):
 function botStatusRow(overrides: Partial<BotStatusDbRow> = {}): BotStatusDbRow {
   return {
     agent_id: 'codex-cto',
+    agent_type: 'dev',
+    profile_enabled: true,
+    disabled_at: null,
+    runtime: 'codex',
+    runtime_engine_preference: null,
     status: 'idle',
     last_seen_at: '2026-06-02T00:00:00.000Z',
     heartbeat_ok: true,
@@ -453,10 +458,25 @@ describe('#603 queue-processing readiness', () => {
       blocker_codes: ['STATE_DAEMON_RUNNER_DISABLED'],
     }])
     expect(report.queue_processing_readiness.blocker_codes).toEqual([
+      'STATE_DAEMON_AGENT_DENYLIST_RETIRED',
       'STATE_DAEMON_CANARY_OVERLAY_IDENTITY_INCOMPLETE',
       'STATE_DAEMON_CANARY_OVERLAY_TARGET_OUTSIDE_COHORT',
       'STATE_DAEMON_RUNNER_DISABLED',
     ])
+  })
+
+  test('typed-failed rows block readiness until repaired', () => {
+    const report = buildQueueProcessingReadinessReport([
+      botStatusRow({
+        agent_id: 'check',
+        pending_count: 0,
+        typed_failed_count: 2,
+      } as any),
+    ], runtimeReadiness(), { now: new Date('2026-06-02T00:03:00.000Z') })
+
+    expect(report.ok).toBe(false)
+    expect(report.go_no_go).toBe('NO_GO')
+    expect(report.queue_processing_readiness.blocker_codes).toContain('TYPED_FAILED_AWAITING_REPAIR')
   })
 
   test('normalizes current bot_status rows without legacy wake-state fields', () => {

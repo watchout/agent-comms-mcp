@@ -2,7 +2,7 @@
 
 The production refresher is repository-owned at
 `scripts/operator/memory-ready-refresh.ts`. It covers every enabled
-`idle`/`busy` seat, reports denylisted seats explicitly, and continues after a
+`idle`/`busy` seat,  and continues after a
 per-seat failure. It never invokes a provider or sends a Discord message.
 
 ## Dry-run
@@ -12,7 +12,6 @@ falling back to SQLite.
 
 ```sh
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
-STATE_DAEMON_AGENT_DENYLIST='<current exact value>' \
 bun scripts/operator/memory-ready-refresh.ts --dry-run
 ```
 
@@ -48,8 +47,8 @@ to cover rotations that predate deployment.
 
 ## Render and install the LaunchAgent
 
-First read `STATE_DAEMON_AGENT_DENYLIST` from the installed state-daemon plist.
-Pass that exact value to the renderer; SD-C2a does not authorize denylist
+The retired STATE_DAEMON_AGENT_DENYLIST is no longer read or rendered; seat
+inventory exclusion is DB-only (profile_enabled, disabled_at, agent_type).
 changes. Render from a merged, governed checkout and inspect the digest before
 installing.
 
@@ -57,12 +56,10 @@ installing.
 bun scripts/operator/memory-ready-refresh-launchagent.ts render \
   --repo-root /Users/yuji/Developer/agent-comms-mcp \
   --database-url 'postgresql:///agent_comms?host=/tmp' \
-  --denylist '<current exact state-daemon value>'
 
 bun scripts/operator/memory-ready-refresh-launchagent.ts install \
   --repo-root /Users/yuji/Developer/agent-comms-mcp \
   --database-url 'postgresql:///agent_comms?host=/tmp' \
-  --denylist '<current exact state-daemon value>' \
   --execute
 
 plutil -lint ~/Library/LaunchAgents/com.agent-comms.operator.memory-ready-refresh.plist
@@ -72,7 +69,7 @@ launchctl kickstart -k "gui/$(id -u)/com.agent-comms.operator.memory-ready-refre
 ```
 
 Publish the template path/digest, installed plist digest, exact unchanged
-denylist readback, batch report, and launchctl status. `install --execute`
+batch report and launchctl status. `install --execute`
 preserves an existing plist at the returned `rollback_path` and reports its
 digest. Rollback is to copy that saved plist back and repeat
 `bootout`/`bootstrap`; keep it until effect verification is complete.

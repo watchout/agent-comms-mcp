@@ -50,7 +50,6 @@ export type RuntimeMemoryReadyFleetRefreshReport = {
 }
 
 export type RuntimeMemoryReadyFleetRefreshOptions = {
-  denylist: string[]
   now?: Date
   dryRun?: boolean
   validForSeconds?: number
@@ -129,7 +128,6 @@ export async function runRuntimeMemoryReadyFleetRefresh(
   const resolveProject = options.resolveProject ?? resolveRuntimeMemoryReadyProject
   const resolveCurrent = options.resolveCurrent ?? resolveRuntimeMemoryReadyCurrent
   const refreshSeat = options.refreshSeat ?? defaultRefreshSeat
-  const denylist = new Set(options.denylist.map(value => value.trim()).filter(Boolean))
   const inventory = await queryRows<FleetSeatRow>(
     db,
     `SELECT agent_id
@@ -137,26 +135,13 @@ export async function runRuntimeMemoryReadyFleetRefresh(
       WHERE status IN ('idle', 'busy')
         AND COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
+        AND COALESCE(agent_type, 'dev') <> 'human'
       ORDER BY agent_id`,
   )
   const seats: RuntimeMemoryReadySeatResult[] = []
 
   for (const seat of inventory) {
     const agentId = String(seat.agent_id)
-    if (denylist.has(agentId)) {
-      seats.push({
-        agent_id: agentId,
-        status: 'skipped',
-        reason: 'DENYLISTED',
-        runtime_instance_id: null,
-        project: null,
-        evidence_id: null,
-        evidence_log_id: null,
-        reaped_runtime_instances: [],
-        details: {},
-      })
-      continue
-    }
 
     let resolution: RuntimeCurrentResolution | null = null
     let reaped: RuntimeMemoryReadySeatResult['reaped_runtime_instances'] = []

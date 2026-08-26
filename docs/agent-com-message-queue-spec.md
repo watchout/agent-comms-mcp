@@ -1334,6 +1334,27 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 - state-daemon 不通 / tmux session 不在時は non-fatal (次層にフォールバック)
 - state-daemon の HA / supervisor は ADR-051 で別途扱う
 
+**Typed completion authority**
+
+- state-daemon と queue-work envelope は、未信頼の `content`（例: `No reply required`、`no_reply_required: true`、ACK 作文）を close / skip / reply 不要の根拠にしてはならない。
+- substantive な内容は `message_type` が `instruction` / `request` / `question` 以外（`chat` / `report` / `notice` / `projection` を含む）でも、型名だけで non-action / ACK と断定してはならない。厳格な typed ACK envelope が無い行は runner 配送へ fail-open する。
+- unknown / 未定義 / 判別不能な `message_type` は hold や自動 terminal にせず runner 配送へ fail-open する。ただし disabled agent / self-authored loop など既存の明示的な typed block と、`phase_handoff` の protected hold / exact fence は維持する。
+- reply 不要の指定は typed `reply_contract.required=false` として queue-work envelope に渡す。この指定は substantive work の実行を省略する権限ではなく、実行後の typed result が `next_action=close` を返すための応答契約である。
+- 自動 terminal が許される ACK は、recognized non-action transport type に加えて、queue payload に次の完全な structured envelope を持つ行だけである。欠落・余分な ACK 作文・不正な schema/kind/空の参照 ID は権限にならず配送する。
+
+```json
+{
+  "typed_ack": {
+    "schema_version": "aun-queue-ack/v1",
+    "kind": "receipt",
+    "acknowledged_message_id": "non-empty-message-id"
+  }
+}
+```
+
+- `content` と `message_type` だけでは ACK にならない。`typed_ack` は control-plane producer が構造化して付与する機械入力であり、state-daemon は本文から生成・補完しない。自動 terminal reason は `TYPED_ACK_RECEIPT` とする。
+- substantive work の terminal 遷移は typed runner result または明示 lifecycle 操作だけが行う。state-daemon は入力本文から `complete-no-reply` / completion reason / terminal baton を生成しない。
+
 **Secondary: MCP notification (MCP client 対応時の加速)**
 
 - PollingDriver が pending 検出時に MCP 標準 notification を送信
@@ -1362,9 +1383,9 @@ digest を readback できなければならない。
 **対象席と batch 契約**
 
 - inventory は `agents.status IN ('idle','busy')`、`profile_enabled = true`、
-  `disabled_at IS NULL` の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
-  typed `DENYLISTED` として除外できる。本機能が denylist の値を変更してはならない。
-- denylist 外の inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
+  `disabled_at IS NULL`、`agent_type <> 'human'` の全行である。`STATE_DAEMON_AGENT_DENYLIST`
+  は廃止済み: 除外は DB 列のみで決まり、file/env 名簿は存在しない (Issue #940 修正3)。
+- inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
   session、port、runtime、workspace 又は project が欠ける席も silent に落とさず、typed
   failure reason と repair signal を記録する。
 - 1 席の resolver / bootstrap / readback failure はその席の result だけを失敗にし、残りの
@@ -1587,6 +1608,45 @@ SELECT payload::jsonb #>> '{runner_error,code}' AS failure_code,
  GROUP BY 1
  ORDER BY 1;
 ```
+
+### 13.5.3 Bounded wake invocation and repairable failed (Issue #940)
+
+「無限に再試行しない」と「止まった行を放置しない」を両立させる。回数上限だけでは
+行が pending に滞留したまま忘れられるため、上限到達は **可視の型付き終端 + 復帰路**
+に必ず遷移する。
+
+- state-daemon は row への runner 起動ごとに `payload.wake_invocation_recovery.attempts`
+  を増分する (schema 変更なし、`queue_work_runner_error_recovery` と同型)。
+- attempts が `STATE_DAEMON_WAKE_INVOCATION_MAX_ATTEMPTS` (default 3) に達した row は
+  それ以上起動されず、`status='failed'`、
+  `failed_reason='WAKE_INVOCATION_RETRY_EXHAUSTED'`、`done_at=now()` へ遷移する。
+- 遷移は外部イベントに依存しない: 上限到達 row は「配送経路の次回訪問」(pg_notify
+  event または**周期 sweep**) で必ず typed failed へ送られる。daemon 自身の sweep loop
+  が保証経路である。
+- 遷移時に alert sink へ通知を **丁度 1 回** 送る (復帰コマンド
+  `agent-com queue requeue-failed --id <queue_id> --execute` を含む)。failed row への
+  後続イベントは再通知しない (人待ち中の成果物量産の禁止、authority-and-waiting R2)。
+- `failed` は墓場ではなく修理可能な終端: 原因修理後、
+  `agent-com queue requeue-failed (--agent <id> | --id <queue_id,...>) --execute` が
+  row を pending に戻し、recovery counter を消去して試行予算を回復する。
+- queue doctor は typed failed (`WAKE_INVOCATION_RETRY_EXHAUSTED` /
+  `QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED`) の残存を **blocker**
+  (`typed_failed_awaiting_repair`) として数え、queue-processing readiness も同条件を
+  blocker `TYPED_FAILED_AWAITING_REPAIR` として数えて GO を返さない。修理されるまで
+  fleet は健全とみなされない。
+
+#### 13.5.3.1 Canonical status vocabulary
+
+message_queue の status の canonical 集合は
+`pending → received / in_progress → done | failed` である。`replied` は
+「reply 配送確認済み」を表す done の精密化であり、**既存の fence 付き二段クローズ
+(done → replied、exactly-once close の柱) のみ**が書く。新規 writer を追加して
+よいのは canonical 集合と replied だけで、`read` / `skipped` への**新規書き込み経路の
+追加は禁止**する (state-daemon の typed-ACK close は `done` を書く)。読み手
+(doctor / readiness / 集計) は read / skipped と**型付き理由を持たない旧 failed** を
+legacy として認識し (`legacy_status_mix` warning)、修了扱いの集計では `done` 系に
+読み替える。旧値の一掃は schema/data migration ではなく、書き込み経路の廃止と
+自然減で行う (既存の他 `skipped` writer の廃止は follow-up 台帳)。
 
 ### 13.6 Presence Client
 

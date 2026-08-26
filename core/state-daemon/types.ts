@@ -38,6 +38,7 @@ export interface StateDaemonConfig {
   claimTtlSec: number               // default 60
   activeClaimMaxAgeSec: number      // default 300; daemon must not keep a claim alive forever
   queueWorkRunnerErrorMaxReclaims: number // default 3; fail after this many runner_error reclaims
+  wakeInvocationMaxAttempts: number // default 3; typed-fail a row after this many delivery invocations
   /** Exact canary control ref allowed one audited retry-budget extension. */
   queueWorkRecoveryControlRef: string | null
 
@@ -94,7 +95,6 @@ export interface StateDaemonConfig {
    * Normal fleet exclusion gate. Keep disabled/test/human identities here when
    * they should never be woken by state_daemon even if a queue row is inserted.
    */
-  agentDenylist: string[] | null
 
   /**
    * Ordinary all-agent communication manifest admission. This remains false
@@ -155,6 +155,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   claimTtlSec: 60,
   activeClaimMaxAgeSec: 300,
   queueWorkRunnerErrorMaxReclaims: 3,
+  wakeInvocationMaxAttempts: 3,
   queueWorkRecoveryControlRef: null,
   wakePoolMinCapacity: 5,
   wakePoolMaxCapacity: 20,
@@ -185,7 +186,6 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   memoryReadyGateEnabled: true,
   memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
-  agentDenylist: null,
   allAgentCommunicationManifestEnforcementEnabled: false,
   queueWorkFenceQueueIds: null,
   queueWorkFenceMessageIds: null,

@@ -662,6 +662,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('botLivenessCheckIntervalMs', num('STATE_DAEMON_BOT_LIVENESS_CHECK_INTERVAL_MS'))
   set('botDeadThresholdMs', num('STATE_DAEMON_BOT_DEAD_THRESHOLD_MS'))
   set('botRestartMaxPerHour', num('STATE_DAEMON_BOT_RESTART_MAX_PER_HOUR'))
+  set('wakeInvocationMaxAttempts', num('STATE_DAEMON_WAKE_INVOCATION_MAX_ATTEMPTS'))
   set('abnormalActivityWindowMs', num('STATE_DAEMON_ABNORMAL_ACTIVITY_WINDOW_MS'))
   set('abnormalActivityThreshold', num('STATE_DAEMON_ABNORMAL_ACTIVITY_THRESHOLD'))
   set('dbErrorAlertThreshold', num('STATE_DAEMON_DB_ERROR_ALERT_THRESHOLD'))
@@ -672,7 +673,6 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
-  set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
   set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
   set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))
@@ -1111,9 +1111,7 @@ export async function main(): Promise<void> {
     config,
   })
 
-  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, {
-    denylist: config.agentDenylist ?? [],
-  }).catch((error) => [{
+  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any).catch((error) => [{
     agent_id: 'fleet',
     observed_runtime_instance_id: null,
     current_runtime_instance_id: null,

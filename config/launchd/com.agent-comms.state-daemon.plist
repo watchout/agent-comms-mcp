@@ -21,7 +21,7 @@
       because launchd children do not reliably inherit a login user env.
     - StandardErrorPath is the canonical alert sink (see CompositeAlertSink
       in bin/state-daemon.ts).
-    - STATE_DAEMON_AGENT_DENYLIST excludes disabled/test/human identities from
+    - eligibility is DB-only (agents table + agent_type human guard) — no name list; excluded identities come from
       automatic wake. Normal bot rollout is DB-driven: add an enabled agent
       with channel membership and tmux/runtime metadata, and the daemon can
       wake it without a plist edit. STATE_DAEMON_AGENT_ALLOWLIST is valid only
@@ -89,8 +89,6 @@
     <string>1</string>
     <key>STATE_DAEMON_CODEX_RUNNER_DATABASE_URL</key>
     <string>postgresql:///agent_comms?host=/tmp</string>
-    <key>STATE_DAEMON_AGENT_DENYLIST</key>
-    <string>adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown</string>
     <key>STATE_DAEMON_ALERT_CHANNEL</key>
     <string>1487368919613444156</string>
     <key>PGUSER</key>

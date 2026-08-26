@@ -1,13 +1,11 @@
 #!/usr/bin/env bun
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { toLegacy } from '../../core/db/adapter'
-import { DEFAULT_STATE_DAEMON_DENYLIST } from '../../core/state-daemon/launchagent'
 import { runRuntimeMemoryReadyFleetRefresh } from '../../core/runtime-memory-ready-refresher'
 import { loadRuntimeMemoryReadyPolicy } from '../../core/runtime-current-resolver'
 
 type CliOptions = {
   databaseUrl: string
-  denylist: string[]
   dryRun: boolean
   validForSeconds: number
   policyPath: string | undefined
@@ -18,7 +16,7 @@ function usage(): string {
 
 Usage:
   bun scripts/operator/memory-ready-refresh.ts [--dry-run]
-    [--database-url <postgres-url>] [--denylist <csv>]
+    [--database-url <postgres-url>]
     [--valid-for-seconds <n>] [--policy <path>]
 
 DATABASE_URL must be explicit through the flag or environment. The refresher
@@ -32,7 +30,6 @@ export function parseMemoryReadyRefreshArgs(
   env: NodeJS.ProcessEnv = process.env,
 ): CliOptions {
   let databaseUrl = env.DATABASE_URL?.trim() ?? ''
-  let denylistRaw = env.STATE_DAEMON_AGENT_DENYLIST?.trim() || DEFAULT_STATE_DAEMON_DENYLIST
   let dryRun = false
   let validForSeconds = 86_400
   let policyPath = env.RUNTIME_MEMORY_READY_POLICY_FILE?.trim() || undefined
@@ -45,7 +42,6 @@ export function parseMemoryReadyRefreshArgs(
     }
     if (arg === '--dry-run') dryRun = true
     else if (arg === '--database-url') databaseUrl = next()
-    else if (arg === '--denylist') denylistRaw = next()
     else if (arg === '--policy') policyPath = next()
     else if (arg === '--valid-for-seconds') {
       validForSeconds = Number.parseInt(next(), 10)
@@ -60,7 +56,6 @@ export function parseMemoryReadyRefreshArgs(
   if (!databaseUrl) throw new Error('DATABASE_URL_REQUIRED')
   return {
     databaseUrl,
-    denylist: denylistRaw.split(',').map(value => value.trim()).filter(Boolean),
     dryRun,
     validForSeconds,
     policyPath,
@@ -73,7 +68,6 @@ export async function main(argv = process.argv.slice(2), env: NodeJS.ProcessEnv 
     const db = new PgAdapter(options.databaseUrl)
     try {
       const report = await runRuntimeMemoryReadyFleetRefresh(toLegacy(db), {
-        denylist: options.denylist,
         dryRun: options.dryRun,
         validForSeconds: options.validForSeconds,
         policy: loadRuntimeMemoryReadyPolicy(options.policyPath),
