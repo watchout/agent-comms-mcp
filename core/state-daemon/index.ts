@@ -93,7 +93,6 @@ import {
 } from '../no-reply-policy'
 import {
   classifyQueueSurface,
-  withQueueDispositionStamp,
   type QueueSurfaceClassification,
 } from '../queue-message-classification'
 import {
@@ -106,6 +105,30 @@ const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 const QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY = 'queue_work_runner_error_recovery'
 const QUEUE_WORK_RUNNER_ERROR_FAILED_REASON = 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED'
+const TYPED_QUEUE_ACK_SCHEMA_VERSION = 'aun-queue-ack/v1'
+const TYPED_QUEUE_ACK_REASON = 'TYPED_ACK_RECEIPT'
+
+interface TypedQueueAcknowledgement {
+  schema_version: typeof TYPED_QUEUE_ACK_SCHEMA_VERSION
+  kind: 'receipt'
+  acknowledged_message_id: string
+}
+
+function typedQueueAcknowledgement(payload: unknown): TypedQueueAcknowledgement | null {
+  const parsed = parseQueuePayload(payload)
+  const raw = parsed.typed_ack
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const ack = raw as Record<string, unknown>
+  const keys = Object.keys(ack).sort()
+  if (keys.length !== 3 || keys.join(',') !== 'acknowledged_message_id,kind,schema_version') return null
+  if (ack.schema_version !== TYPED_QUEUE_ACK_SCHEMA_VERSION || ack.kind !== 'receipt') return null
+  if (typeof ack.acknowledged_message_id !== 'string' || !ack.acknowledged_message_id.trim()) return null
+  return {
+    schema_version: TYPED_QUEUE_ACK_SCHEMA_VERSION,
+    kind: 'receipt',
+    acknowledged_message_id: ack.acknowledged_message_id.trim(),
+  }
+}
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
@@ -889,16 +912,25 @@ export class StateDaemon {
         agent: bot,
       })
       if (!surface.actionable) {
-        if (this.shouldAllowExactFencedQueueWorkPending(row, surface)) {
+        const typedAck = surface.deterministic_non_actionable
+          ? typedQueueAcknowledgement(row.payload)
+          : null
+        if (typedAck) {
+          this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
+          return this.completeTypedAcknowledgementIfRequired(row, surface, typedAck)
+        }
+        if (surface.message_type === 'phase_handoff' && this.shouldAllowExactFencedQueueWorkPending(row, surface)) {
           this.metrics.inc('state_daemon_queue_work_actions_total', {
             result: 'pending_routing_bypass',
             message_type: surface.message_type,
           })
+        } else if (surface.message_type !== 'phase_handoff' && surface.routing.routing_decision === 'deliver_only') {
+          this.metrics.inc('state_daemon_wake_actions_total', {
+            result: 'routing_delivery_fallback',
+            message_type: surface.message_type,
+            route_reason: surface.routing.route_reason,
+          })
         } else {
-          if (surface.deterministic_non_actionable) {
-            this.recordQueueAction({ kind: 'terminal_non_actionable', terminal: true }, row)
-            return this.completeNonActionableIfRequired(row, surface)
-          }
           this.recordQueueAction({ kind: 'routing_hold', terminal: false }, row)
           this.metrics.inc('state_daemon_wake_actions_total', {
             result: 'routing_non_actionable_held',
@@ -1597,23 +1629,29 @@ export class StateDaemon {
     return rows
   }
 
-  private async completeNonActionableIfRequired(
+  private async completeTypedAcknowledgementIfRequired(
     row: QueueRow,
     surface: QueueSurfaceClassification,
+    acknowledgement: TypedQueueAcknowledgement,
   ): Promise<boolean> {
     const disposition = surface.deterministic_non_actionable
     if (!disposition) return false
 
     const now = this.clock.now()
-    const stampedPayload = JSON.stringify(withQueueDispositionStamp(parseQueuePayload(row.payload), {
-      code: disposition.reason,
-      set_by: 'state_daemon',
-      set_at: now.toISOString(),
-      source: disposition.source,
-      message_type: disposition.message_type,
-      routing_decision: surface.routing.routing_decision,
-      route_reason: surface.routing.route_reason,
-    }))
+    const payload = parseQueuePayload(row.payload)
+    const stampedPayload = JSON.stringify({
+      ...payload,
+      queue_disposition: {
+        code: TYPED_QUEUE_ACK_REASON,
+        set_by: 'state_daemon',
+        set_at: now.toISOString(),
+        source: 'typed_ack_envelope',
+        message_type: disposition.message_type,
+        routing_decision: surface.routing.routing_decision,
+        route_reason: surface.routing.route_reason,
+        acknowledgement,
+      },
+    })
     const updated = await this.dbQuery(
       `UPDATE message_queue
           SET status='skipped',
@@ -1625,15 +1663,15 @@ export class StateDaemon {
               claimed_at=NULL
         WHERE id=$1
           AND status='pending'`,
-      [row.id, disposition.reason, now, stampedPayload],
+      [row.id, TYPED_QUEUE_ACK_REASON, now, stampedPayload],
     )
     if (updated.rowCount !== 1) {
-      this.metrics.inc('state_daemon_wake_actions_total', { result: 'non_actionable_stale_skipped' })
+      this.metrics.inc('state_daemon_wake_actions_total', { result: 'typed_ack_stale_skipped' })
       return false
     }
     this.metrics.inc('state_daemon_wake_actions_total', {
-      result: 'non_actionable_terminalized',
-      reason: disposition.reason,
+      result: 'typed_ack_terminalized',
+      reason: TYPED_QUEUE_ACK_REASON,
       message_type: disposition.message_type,
     })
     return false

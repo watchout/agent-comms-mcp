@@ -474,7 +474,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('typed non-action chat carrying ACK prose is terminalized without prose close authority', async () => {
+  test('exact typed ACK envelope terminalizes without consulting ACK prose', async () => {
     const agent = makeAgentId('typed-ack')
     await seedAgent(pg, {
       agent_id: agent,
@@ -490,7 +490,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       payload: JSON.stringify({
         author_id: 'codex-cto',
         message_type: 'chat',
-        content: 'ACK: audit PASS received and recorded. No reply required.',
+        content: 'This free-form text is ignored by the terminal decision.',
+        typed_ack: {
+          schema_version: 'aun-queue-ack/v1',
+          kind: 'receipt',
+          acknowledged_message_id: '11111111-1111-4111-8111-000000000950',
+        },
       }),
       created_at: new Date('2026-05-18T00:00:00.000Z'),
     })
@@ -514,8 +519,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         terminal: 'true',
       })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', {
-        result: 'non_actionable_terminalized',
-        reason: 'NON_ACTIONABLE_CHAT',
+        result: 'typed_ack_terminalized',
+        reason: 'TYPED_ACK_RECEIPT',
         message_type: 'chat',
       })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_error' })).toBe(0)
@@ -527,7 +532,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         status: 'skipped',
         claimed_by: null,
         replied_with: null,
-        failed_reason: 'NON_ACTIONABLE_CHAT',
+        failed_reason: 'TYPED_ACK_RECEIPT',
       })
     } finally {
       await h.daemon.stop()

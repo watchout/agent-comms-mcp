@@ -1337,9 +1337,22 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 **Typed completion authority**
 
 - state-daemon と queue-work envelope は、未信頼の `content`（例: `No reply required`、`no_reply_required: true`、ACK 作文）を close / skip / reply 不要の根拠にしてはならない。
-- substantive な `instruction` / `request` / `question` は、本文が ACK / no-reply に見えても completion authority とせず、通常の typed routing へ渡す。実行前に `done` へ移してはならず、typed message routing の保護 hold / fence は変更しない。
+- substantive な内容は `message_type` が `instruction` / `request` / `question` 以外（`chat` / `report` / `notice` / `projection` を含む）でも、型名だけで non-action / ACK と断定してはならない。厳格な typed ACK envelope が無い行は runner 配送へ fail-open する。
+- unknown / 未定義 / 判別不能な `message_type` は hold や自動 terminal にせず runner 配送へ fail-open する。ただし disabled agent / self-authored loop など既存の明示的な typed block と、`phase_handoff` の protected hold / exact fence は維持する。
 - reply 不要の指定は typed `reply_contract.required=false` として queue-work envelope に渡す。この指定は substantive work の実行を省略する権限ではなく、実行後の typed result が `next_action=close` を返すための応答契約である。
-- 自動 terminal が許されるのは、typed `message_type` と routing decision により `chat` / `report` / `notice` / `projection` の non-action と確定した行だけである。ACK 作文そのものは判定に影響せず、substantive type の本文だけが ACK に見えても配送対象に残す。
+- 自動 terminal が許される ACK は、recognized non-action transport type に加えて、queue payload に次の完全な structured envelope を持つ行だけである。欠落・余分な ACK 作文・不正な schema/kind/空の参照 ID は権限にならず配送する。
+
+```json
+{
+  "typed_ack": {
+    "schema_version": "aun-queue-ack/v1",
+    "kind": "receipt",
+    "acknowledged_message_id": "non-empty-message-id"
+  }
+}
+```
+
+- `content` と `message_type` だけでは ACK にならない。`typed_ack` は control-plane producer が構造化して付与する機械入力であり、state-daemon は本文から生成・補完しない。自動 terminal reason は `TYPED_ACK_RECEIPT` とする。
 - substantive work の terminal 遷移は typed runner result または明示 lifecycle 操作だけが行う。state-daemon は入力本文から `complete-no-reply` / completion reason / terminal baton を生成しない。
 
 **Secondary: MCP notification (MCP client 対応時の加速)**
