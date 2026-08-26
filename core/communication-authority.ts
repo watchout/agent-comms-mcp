@@ -44,7 +44,7 @@ export type AutomaticProcessingBlockReason =
   | 'AGENT_NOT_ENABLED'
   | 'RUNTIME_NOT_READY'
   | 'AGENT_NOT_CHANNEL_MEMBER'
-  | 'AGENT_DENYLISTED'
+  | 'AGENT_TYPE_HUMAN'
 
 export type AutomaticProcessingEligibilityVerdict = {
   ok: boolean
@@ -59,14 +59,14 @@ export function evaluateAutomaticProcessingEligibility(input: {
   enabled: boolean
   runtimeReady: boolean
   channelMember: boolean
-  denylisted: boolean
+  humanAgent: boolean
 }): AutomaticProcessingEligibilityVerdict {
   const reasons: AutomaticProcessingBlockReason[] = []
   if (!input.enrolled) reasons.push('AGENT_NOT_ENROLLED')
   if (!input.enabled) reasons.push('AGENT_NOT_ENABLED')
   if (!input.runtimeReady) reasons.push('RUNTIME_NOT_READY')
   if (!input.channelMember) reasons.push('AGENT_NOT_CHANNEL_MEMBER')
-  if (input.denylisted) reasons.push('AGENT_DENYLISTED')
+  if (input.humanAgent) reasons.push('AGENT_TYPE_HUMAN')
   return {
     ok: reasons.length === 0,
     authority: 'db.agent_runtime_and_channels.members',

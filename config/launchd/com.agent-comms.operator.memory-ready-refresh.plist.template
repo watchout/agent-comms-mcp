@@ -24,8 +24,6 @@
   <dict>
     <key>DATABASE_URL</key>
     <string>__DATABASE_URL__</string>
-    <key>STATE_DAEMON_AGENT_DENYLIST</key>
-    <string>__STATE_DAEMON_AGENT_DENYLIST__</string>
     <key>RUNTIME_MEMORY_READY_POLICY_FILE</key>
     <string>__REPO_ROOT__/config/runtime-memory-ready-policy.json</string>
     <key>PATH</key>

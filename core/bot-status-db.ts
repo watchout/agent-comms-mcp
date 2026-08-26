@@ -30,6 +30,11 @@ export type BotHealthState =
 
 export interface BotStatusDbRow {
   agent_id: string
+  agent_type: string | null
+  profile_enabled: boolean | null
+  disabled_at: string | null
+  runtime: string | null
+  runtime_engine_preference: string | null
   status: string | null
   last_seen_at: string | null
   heartbeat_ok: boolean
@@ -83,6 +88,11 @@ const QUERY = `
      GROUP BY ci.agent_id
   )
   SELECT a.agent_id,
+         a.agent_type,
+         a.profile_enabled,
+         a.disabled_at,
+         a.runtime,
+         a.runtime_engine_preference,
          a.status,
          a.last_seen_at,
          (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,
@@ -125,6 +135,11 @@ function parseCount(value: string | number): number {
 export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, BotStatusDbRow>> {
   const result = await client.query<{
     agent_id: string
+    agent_type: string | null
+    profile_enabled: boolean | null
+    disabled_at: Date | null
+    runtime: string | null
+    runtime_engine_preference: string | null
     status: string | null
     typed_failed_count: string | number
     last_seen_at: Date | null
@@ -144,6 +159,11 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
   for (const row of result.rows) {
     map.set(row.agent_id, {
       agent_id: row.agent_id,
+      agent_type: row.agent_type ?? null,
+      profile_enabled: row.profile_enabled ?? null,
+      disabled_at: row.disabled_at ? row.disabled_at.toISOString() : null,
+      runtime: row.runtime ?? null,
+      runtime_engine_preference: row.runtime_engine_preference ?? null,
       status: row.status,
       typed_failed_count: parseCount(row.typed_failed_count),
       last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,

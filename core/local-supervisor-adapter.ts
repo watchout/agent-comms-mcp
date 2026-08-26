@@ -69,7 +69,6 @@ export interface LocalLaunchdInstallDryRunOptions {
   launchAgentsDir?: string
   bunPath?: string
   databaseUrl?: string
-  agentDenylist?: string
   extraEnv?: Record<string, string>
   probe?: PathProbe
   expectedAgentId?: string

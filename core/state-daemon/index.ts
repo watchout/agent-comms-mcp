@@ -195,12 +195,46 @@ function isProfileEnabled(raw: unknown): boolean {
   return raw === true || raw === 1 || raw === '1'
 }
 
+/**
+ * Single mapping from an agents row to the canonical automatic-processing
+ * eligibility inputs. Both the live daemon and readiness diagnostics must use
+ * this builder so the two can never disagree on what the columns mean.
+ */
+export function automaticProcessingInputsFromAgent(
+  agent: {
+    agent_type?: string | null
+    runtime?: string | null
+    runtime_engine_preference?: string | null
+    status?: string | null
+    profile_enabled?: unknown
+    disabled_at?: Date | string | null
+  } | null,
+  channelMember: boolean,
+): {
+  enrolled: boolean
+  enabled: boolean
+  runtimeReady: boolean
+  channelMember: boolean
+  humanAgent: boolean
+} {
+  return {
+    enrolled: agent !== null,
+    enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
+    runtimeReady: agent !== null
+      && Boolean(effectiveRuntime(agent as AgentRow))
+      && Boolean(agent.status?.trim())
+      && !isInactiveAgentStatus(agent.status ?? null),
+    channelMember,
+    humanAgent: agent?.agent_type === 'human',
+  }
+}
+
 export async function evaluateStateDaemonAutomaticProcessingEligibility(
   db: Pick<DBClient, 'query'>,
-  input: { agentId: string; channelId: string | null; denylisted: boolean },
+  input: { agentId: string; channelId: string | null },
 ): Promise<AutomaticProcessingEligibilityVerdict> {
-  const agentRows = await db.query<AgentRow>(
-    `SELECT agent_id, runtime, runtime_engine_preference, status,
+  const agentRows = await db.query<AgentRow & { agent_type?: string | null }>(
+    `SELECT agent_id, agent_type, runtime, runtime_engine_preference, status,
             profile_enabled, disabled_at
        FROM agents
       WHERE agent_id=$1`,
@@ -215,16 +249,7 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
     )
     channelMember = parseChannelMembers(channelRows.rows[0]?.members).includes(input.agentId)
   }
-  return evaluateAutomaticProcessingEligibility({
-    enrolled: agent !== null,
-    enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
-    runtimeReady: agent !== null
-      && Boolean(effectiveRuntime(agent))
-      && Boolean(agent.status?.trim())
-      && !isInactiveAgentStatus(agent.status),
-    channelMember,
-    denylisted: input.denylisted,
-  })
+  return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent, channelMember))
 }
 
 export class StateDaemon {
@@ -814,7 +839,6 @@ export class StateDaemon {
     return evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
       agentId: row.agent_id,
       channelId: row.channel_id ?? null,
-      denylisted: this.config.agentDenylist?.includes(row.agent_id) ?? false,
     })
   }
 
@@ -1979,7 +2003,6 @@ export class StateDaemon {
 
   private isAgentInScope(agentId: string): boolean {
     if (this.config.agentIdPrefix && !agentId.startsWith(this.config.agentIdPrefix)) return false
-    if (this.config.agentDenylist && this.config.agentDenylist.includes(agentId)) return false
     if (this.config.agentAllowlist && !this.config.agentAllowlist.includes(agentId)) return false
     return true
   }
@@ -1989,10 +2012,6 @@ export class StateDaemon {
     if (this.config.agentIdPrefix) {
       params.push(this.config.agentIdPrefix + '%')
       sql += ` AND ${column} LIKE $${params.length}`
-    }
-    if (this.config.agentDenylist) {
-      params.push(this.config.agentDenylist)
-      sql += ` AND NOT (${column} = ANY($${params.length}::text[]))`
     }
     if (this.config.agentAllowlist) {
       params.push(this.config.agentAllowlist)

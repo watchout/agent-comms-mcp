@@ -57,7 +57,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
       enabled: true,
       runtimeReady: true,
       channelMember: true,
-      denylisted: false,
+      humanAgent: false,
     })).toEqual({
       ok: true,
       authority: 'db.agent_runtime_and_channels.members',
@@ -71,14 +71,14 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     ['AGENT_NOT_ENABLED', { enabled: false }],
     ['RUNTIME_NOT_READY', { runtimeReady: false }],
     ['AGENT_NOT_CHANNEL_MEMBER', { channelMember: false }],
-    ['AGENT_DENYLISTED', { denylisted: true }],
+    ['AGENT_TYPE_HUMAN', { humanAgent: true }],
   ] as const)('F04 blocks %s without requiring a host allowlist', (reason, patch) => {
     const verdict = evaluateAutomaticProcessingEligibility({
       enrolled: true,
       enabled: true,
       runtimeReady: true,
       channelMember: true,
-      denylisted: false,
+      humanAgent: false,
       ...patch,
     })
     expect(verdict.ok).toBe(false)
@@ -111,7 +111,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      denylisted: false,
+      humanAgent: false,
     })
 
     expect(verdict).toMatchObject({ ok: true, host_allowlist_required: false, reasons: [] })
@@ -128,7 +128,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      denylisted: false,
+      humanAgent: false,
     })
 
     expect(verdict.ok).toBe(false)
@@ -144,7 +144,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      denylisted: false,
+      humanAgent: false,
     })
 
     expect(verdict.ok).toBe(false)
@@ -160,7 +160,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      denylisted: false,
+      humanAgent: false,
     })
 
     expect(verdict.ok).toBe(false)

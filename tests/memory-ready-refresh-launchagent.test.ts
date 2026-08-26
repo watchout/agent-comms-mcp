@@ -10,17 +10,16 @@ afterEach(() => {
 })
 
 describe('memory-ready refresh LaunchAgent template', () => {
-  test('renders repo-owned paths and preserves the exact supplied denylist', () => {
+  test('renders repo-owned paths without any retired denylist key', () => {
     const rendered = renderMemoryReadyRefreshLaunchAgent({
       repoRoot: '/tmp/agent-comms-mcp',
       bunPath: '/tmp/bin/bun',
       databaseUrl: 'postgresql:///scratch?host=/tmp',
-      denylist: 'ceo,dev-001',
       logRoot: '/tmp/logs',
     })
     expect(rendered.content).toContain('/tmp/agent-comms-mcp/scripts/operator/memory-ready-refresh.ts')
     expect(rendered.content).toContain('/tmp/agent-comms-mcp/config/runtime-memory-ready-policy.json')
-    expect(rendered.content).toContain('<string>ceo,dev-001</string>')
+    expect(rendered.content).not.toContain('STATE_DAEMON_AGENT_DENYLIST')
     expect(rendered.content).toContain('<string>postgresql:///scratch?host=/tmp</string>')
     expect(rendered.content).not.toMatch(/__[A-Z0-9_]+__/)
     expect(rendered.sha256).toMatch(/^[0-9a-f]{64}$/)
@@ -38,7 +37,6 @@ describe('memory-ready refresh LaunchAgent template', () => {
       'install',
       '--repo-root', '/tmp/agent-comms-mcp',
       '--database-url', 'postgresql:///scratch?host=/tmp',
-      '--denylist', 'ceo,dev-001',
       '--log-root', join(temp, 'logs'),
       '--output', output,
       '--execute',

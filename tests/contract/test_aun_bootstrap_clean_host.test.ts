@@ -906,7 +906,7 @@ describe('aun bootstrap clean-host journal', () => {
           checkoutPath: repoRoot, entryPath: join(repoRoot, 'core', 'state-daemon', 'index.ts'),
           logsDir: join(home, 'logs'), buildOutfile: join(home, 'state-daemon'), plistPath,
           tempPlistPath: `${plistPath}.tmp`, bunPath: process.execPath,
-          databaseUrl: databaseUrl || 'postgresql:///agent_comms?host=/tmp', agentDenylist: '', extraEnv: {},
+          databaseUrl: databaseUrl || 'postgresql:///agent_comms?host=/tmp', extraEnv: {},
         }
         writeFileSync(plistPath, renderStateDaemonLaunchAgentPlist(plan, {
           AGENT_ID: 'state_daemon', SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
@@ -1088,7 +1088,7 @@ describe('aun bootstrap clean-host journal', () => {
       checkoutPath: repoRoot, entryPath: join(repoRoot, 'core', 'state-daemon', 'index.ts'),
       logsDir: join(home, 'logs'), buildOutfile: join(home, 'state-daemon'), plistPath,
       tempPlistPath: `${plistPath}.tmp`, bunPath: process.execPath,
-      databaseUrl: 'postgresql:///disposable?host=/tmp', agentDenylist: '', extraEnv: {},
+      databaseUrl: 'postgresql:///disposable?host=/tmp', extraEnv: {},
     }
     const original = renderStateDaemonLaunchAgentPlist(plan, {
       SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
@@ -1287,7 +1287,7 @@ describe('aun bootstrap clean-host journal', () => {
       commit: 'a'.repeat(40), restoreRoot: join(home, 'restore'), checkoutPath: repoRoot,
       entryPath: join(repoRoot, 'core', 'state-daemon', 'index.ts'), logsDir: join(home, 'logs'),
       buildOutfile: join(home, 'daemon'), plistPath, tempPlistPath: `${plistPath}.tmp`, bunPath: process.execPath,
-      databaseUrl: 'postgresql:///disposable?host=/tmp', agentDenylist: '', extraEnv: {},
+      databaseUrl: 'postgresql:///disposable?host=/tmp', extraEnv: {},
     }
     const daemonPlist = renderStateDaemonLaunchAgentPlist(daemonPlan, {
       AGENT_ID: 'state_daemon', SHIRUBE_D1_ENABLED: '0', SHIRUBE_D1_KILL_SWITCH: '1',
