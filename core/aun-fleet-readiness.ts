@@ -15,7 +15,6 @@ import {
 export type AunFleetReadinessClass = 'ready' | 'activation_candidate' | 'excluded'
 
 export type AunFleetReadinessOptions = {
-  denylist?: string[] | null
   smokeRunId?: string | null
   requireSmoke?: boolean
   operatorAgentId?: string
@@ -171,7 +170,7 @@ function increment(map: Map<string, number>, key: string): void {
 function actionForBlocker(blocker: string): string {
   switch (blocker) {
     case 'denied_by_state_daemon':
-      return 'remove from STATE_DAEMON_AGENT_DENYLIST in a reviewed PR before activation'
+      return 'STATE_DAEMON_AGENT_DENYLIST is retired; eligibility is DB-only (agents table + agent_type human guard)'
     case 'disabled_profile_excluded':
       return 'pass --include-disabled only for an explicit reviewed disabled-profile audit'
     case 'test_profile_excluded':
@@ -240,7 +239,6 @@ export async function buildAunFleetReadinessReport(
   db: DbAdapter,
   options: AunFleetReadinessOptions = {},
 ): Promise<AunFleetReadinessReport> {
-  const denylist = new Set((options.denylist ?? []).map((item) => item.trim()).filter(Boolean))
   const smokeRunId = normalizeString(options.smokeRunId)
   const requireSmoke = options.requireSmoke ?? smokeRunId !== null
   const operatorAgentId = options.operatorAgentId ?? 'codex-aun'
@@ -430,7 +428,7 @@ export async function buildAunFleetReadinessReport(
     const checkoutDriftReasons = unique(checkoutDriftRuntimes.flatMap((drift) => drift.reasons))
     const checkoutDriftOk = (!driftPolicyActive || liveRuntimeRows.length > 0) && checkoutDriftReasons.length === 0
     const activeQueueCount = activeQueueCountByAgent.get(agentId) ?? 0
-    const denied = denylist.has(agentId)
+    const denied = false
     const approvedExclusion = validDriftExclusion(agentId, driftExclusions, now)
     const profileExcludedReason = profileExclusionReason(row, {
       includeDisabledProfiles,
@@ -514,7 +512,7 @@ export async function buildAunFleetReadinessReport(
       final_design_guardrail: 'read-only readiness report; do not infer readiness from Discord visibility alone',
     },
     options: {
-      denylist_count: denylist.size,
+      denylist_count: 0,
       smoke_run_id: smokeRunId,
       require_smoke: requireSmoke,
       operator_agent_id: operatorAgentId,

@@ -672,7 +672,6 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
-  set('agentDenylist', csv('STATE_DAEMON_AGENT_DENYLIST'))
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
   set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
   set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))
@@ -1112,7 +1111,7 @@ export async function main(): Promise<void> {
   })
 
   const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, {
-    denylist: config.agentDenylist ?? [],
+    denylist: [],
   }).catch((error) => [{
     agent_id: 'fleet',
     observed_runtime_instance_id: null,

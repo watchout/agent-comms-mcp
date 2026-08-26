@@ -85,30 +85,8 @@ function scopedDaemon(
   return { daemon: d, metrics, alert, tmux }
 }
 
-function denylistDaemon(
-  clock: FakeClock,
-  codexRunner: FakeCodexRunner,
-  agentDenylist: string[],
-  tmux = new FakeTmux(),
-) {
-  const metrics = new FakeMetrics()
-  const alert = new FakeAlertSink()
-  const d = new StateDaemon({
-    db: new PgDBClient(pg),
-    pgListen: new FakePgListen(),
-    tmux,
-    codexRunner,
-    clock,
-    metrics,
-    alert,
-    config: {
-      agentIdPrefix: 'sd-test-',
-      agentDenylist,
-      codexRunnerEnabled: true,
-      codexRunnerDatabaseUrl: 'postgresql:///agent_comms?host=/tmp',
-    },
-  })
-  return { daemon: d, metrics, alert, tmux }
+async function markHuman(agentId: string): Promise<void> {
+  await pg.query(`UPDATE agents SET agent_type='human' WHERE agent_id=$1`, [agentId])
 }
 
 function disabledDaemon(clock: FakeClock, codexRunner: FakeCodexRunner) {
@@ -1128,7 +1106,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('agent denylist excludes stale sweep wake while preserving fleet default', async () => {
+  test('human seats are excluded from stale sweep wake while preserving fleet default', async () => {
     const allowed = makeAgentId('denied-sweep-allowed')
     const denied = makeAgentId('denied-sweep-blocked')
     await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
@@ -1136,10 +1114,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     const old = new Date('2026-05-18T00:00:00.000Z')
     await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
     await seedQueueRow(pg, { agent_id: denied, status: 'pending', created_at: old })
+    await markHuman(denied)
 
     const runner = new FakeCodexRunner()
     const clock = new FakeClock('2026-05-18T00:00:30.000Z')
-    const h = denylistDaemon(clock, runner, [denied])
+    const h = daemon(clock, runner)
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
@@ -1154,17 +1133,18 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     }
   })
 
-  test('agent denylist ignores pg_notify rows while allowing non-denied fleet rows', async () => {
+  test('human seats are ignored on pg_notify while non-human fleet rows proceed', async () => {
     const allowed = makeAgentId('denied-sibling-allowed')
     const denied = makeAgentId('denied-sibling-blocked')
     await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
     await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
     const deniedId = await seedQueueRow(pg, { agent_id: denied, status: 'pending' })
     const allowedId = await seedQueueRow(pg, { agent_id: allowed, status: 'pending' })
+    await markHuman(denied)
 
     const runner = new FakeCodexRunner()
     const clock = new FakeClock('2026-05-18T00:00:01.000Z')
-    const h = denylistDaemon(clock, runner, [denied])
+    const h = daemon(clock, runner)
     await h.daemon.start()
     try {
       await h.daemon.__testHandleEvent({
@@ -1183,7 +1163,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       })
 
       expect(runner.invocations.map((x) => x.agentId)).toEqual([allowed])
-      expect(h.metrics.countInc('state_daemon_scope_skipped_total', { path: 'notify' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { agent_id: denied, reason: 'AGENT_TYPE_HUMAN' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
     } finally {
       await h.daemon.stop()

@@ -94,7 +94,6 @@ export interface StateDaemonConfig {
    * Normal fleet exclusion gate. Keep disabled/test/human identities here when
    * they should never be woken by state_daemon even if a queue row is inserted.
    */
-  agentDenylist: string[] | null
 
   /**
    * Ordinary all-agent communication manifest admission. This remains false
@@ -185,7 +184,6 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   memoryReadyGateEnabled: true,
   memoryReadyProject: 'agent-comms-mcp',
   agentAllowlist: null,
-  agentDenylist: null,
   allAgentCommunicationManifestEnforcementEnabled: false,
   queueWorkFenceQueueIds: null,
   queueWorkFenceMessageIds: null,

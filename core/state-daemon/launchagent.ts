@@ -23,7 +23,6 @@ export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist
 export const DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID = 'state_daemon'
 export const DEFAULT_STATE_DAEMON_BUN_PATH = '/Users/yuji/.bun/bin/bun'
 export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
-export const DEFAULT_STATE_DAEMON_DENYLIST = 'adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
 export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor'] as const
 export const STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID = 'codex-aun'
 export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:3dda8cd2b471e907245b28b4a1c4f6e656d2d76c6eff9f5c5a44db698f2372bc'
@@ -58,7 +57,6 @@ export type StateDaemonRestorePlan = {
   tempPlistPath: string
   bunPath: string
   databaseUrl: string
-  agentDenylist: string
   extraEnv: Record<string, string>
 }
 
@@ -343,7 +341,6 @@ export function buildStateDaemonRestorePlan(options: {
   launchAgentsDir?: string
   bunPath?: string
   databaseUrl?: string
-  agentDenylist?: string
   extraEnv?: Record<string, string>
   pid?: number
 }): StateDaemonRestorePlan {
@@ -369,7 +366,6 @@ export function buildStateDaemonRestorePlan(options: {
     tempPlistPath: join(launchAgentsDir, `.${STATE_DAEMON_PLIST_NAME}.${pid}.tmp`),
     bunPath: options.bunPath ?? DEFAULT_STATE_DAEMON_BUN_PATH,
     databaseUrl: options.databaseUrl ?? DEFAULT_STATE_DAEMON_DATABASE_URL,
-    agentDenylist: options.agentDenylist ?? DEFAULT_STATE_DAEMON_DENYLIST,
     extraEnv: options.extraEnv ?? {},
   }
 }
@@ -381,7 +377,6 @@ export function renderStateDaemonLaunchAgentPlist(plan: StateDaemonRestorePlan, 
     DATABASE_URL: plan.databaseUrl,
     STATE_DAEMON_CODEX_RUNNER_ENABLED: '1',
     STATE_DAEMON_CODEX_RUNNER_DATABASE_URL: plan.databaseUrl,
-    STATE_DAEMON_AGENT_DENYLIST: plan.agentDenylist,
     STATE_DAEMON_ALERT_CHANNEL: '1487368919613444156',
     STATE_DAEMON_RESTORE_MANAGED: '1',
     STATE_DAEMON_RESTORE_COMMIT: plan.commit,

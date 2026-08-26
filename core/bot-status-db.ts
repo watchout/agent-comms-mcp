@@ -30,6 +30,7 @@ export type BotHealthState =
 
 export interface BotStatusDbRow {
   agent_id: string
+  agent_type: string | null
   status: string | null
   last_seen_at: string | null
   heartbeat_ok: boolean
@@ -78,6 +79,7 @@ const QUERY = `
      GROUP BY ci.agent_id
   )
   SELECT a.agent_id,
+         a.agent_type,
          a.status,
          a.last_seen_at,
          (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,

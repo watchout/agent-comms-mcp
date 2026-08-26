@@ -1383,9 +1383,9 @@ digest を readback できなければならない。
 **対象席と batch 契約**
 
 - inventory は `agents.status IN ('idle','busy')`、`profile_enabled = true`、
-  `disabled_at IS NULL` の全行である。既存の `STATE_DAEMON_AGENT_DENYLIST` に含まれる席だけを
-  typed `DENYLISTED` として除外できる。本機能が denylist の値を変更してはならない。
-- denylist 外の inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
+  `disabled_at IS NULL`、`agent_type <> 'human'` の全行である。`STATE_DAEMON_AGENT_DENYLIST`
+  は廃止済み: 除外は DB 列のみで決まり、file/env 名簿は存在しない (Issue #940 修正3)。
+- inventory `N` 行には必ず `N` 個の terminal per-seat result を返す。
   session、port、runtime、workspace 又は project が欠ける席も silent に落とさず、typed
   failure reason と repair signal を記録する。
 - 1 席の resolver / bootstrap / readback failure はその席の result だけを失敗にし、残りの

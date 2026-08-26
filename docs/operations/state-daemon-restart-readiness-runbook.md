@@ -26,7 +26,6 @@ EnvironmentVariables.STATE_DAEMON_WAKE_DUPLICATE_SUPPRESS_SEC: 30
 EnvironmentVariables.STATE_DAEMON_CODEX_RUNNER_ENABLED: 1
 EnvironmentVariables.STATE_DAEMON_CODEX_RUNNER_DATABASE_URL: postgresql:///agent_comms?host=/tmp
 EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST: <unset>
-EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST: adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown
 KeepAlive: true
 ThrottleInterval: 10
 ProcessType: Background

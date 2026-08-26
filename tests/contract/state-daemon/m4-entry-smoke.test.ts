@@ -85,7 +85,6 @@ describe('m4 — bin/state-daemon.ts source-pin', () => {
       'STATE_DAEMON_BOT_RESTART_MAX_PER_HOUR',
       'STATE_DAEMON_DB_ERROR_ALERT_THRESHOLD',
       'STATE_DAEMON_AGENT_ALLOWLIST',
-      'STATE_DAEMON_AGENT_DENYLIST',
     ]
     for (const k of expected) expect(SRC).toContain(k)
   })

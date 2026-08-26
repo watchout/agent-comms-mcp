@@ -112,7 +112,7 @@ export interface QueueWakeSmokeReport {
     target_tmux_session: string | null
     active_claim_count: number
     pending_count: number
-    denylist_hit: boolean
+    human_agent_hit: boolean
     blockers: string[]
   }
   smoke: {
@@ -213,7 +213,6 @@ export interface QueueWakeSmokeOptions {
   pollMs?: number
   nowMs?: () => number
   sleepMs?: (ms: number) => Promise<void>
-  denylist?: string[]
 }
 
 interface SmokeAgentRow {
@@ -603,7 +602,7 @@ function emptySmokeSafety(agentId: string): QueueWakeSmokeReport['safety'] {
     target_tmux_session: null,
     active_claim_count: 0,
     pending_count: 0,
-    denylist_hit: false,
+    human_agent_hit: false,
     blockers: [`agent ${agentId} not found`],
   }
 }
@@ -646,9 +645,9 @@ function buildSmokeReportBase(opts: Required<Pick<QueueWakeSmokeOptions, 'mode' 
   }
 }
 
-async function loadSmokeSafety(db: DbAdapter, agentId: string, denylist: string[]): Promise<QueueWakeSmokeReport['safety']> {
+async function loadSmokeSafety(db: DbAdapter, agentId: string): Promise<QueueWakeSmokeReport['safety']> {
   const agents = await db.query<SmokeAgentRow>(
-    `SELECT agent_id, runtime, status, metadata, last_wake_attempt_at
+    `SELECT agent_id, agent_type, runtime, status, metadata, last_wake_attempt_at
        FROM agents
       WHERE agent_id = $1`,
     [agentId],
@@ -674,8 +673,8 @@ async function loadSmokeSafety(db: DbAdapter, agentId: string, denylist: string[
   const blockers: string[] = []
   const runtime = agent.runtime ?? null
   const status = agent.status ?? null
-  const denylistHit = denylist.includes(agentId)
-  if (denylistHit) blockers.push('target agent is in STATE_DAEMON_AGENT_DENYLIST')
+  const humanHit = (agent as { agent_type?: string | null }).agent_type === 'human'
+  if (humanHit) blockers.push('target agent is agent_type=human; human seats are excluded from automatic processing')
   if (isInactiveStatus(status)) blockers.push(`target agent status is ${status}`)
   if (runtime !== defaultConfigPort.getDefaultRuntime()) blockers.push(`target runtime is ${runtime ?? 'null'}, expected ${defaultConfigPort.getDefaultRuntime()}`)
   if (!tmuxSession) blockers.push('target agent is missing metadata.tmux_session')
@@ -688,7 +687,7 @@ async function loadSmokeSafety(db: DbAdapter, agentId: string, denylist: string[
     target_tmux_session: tmuxSession,
     active_claim_count: activeClaimCount,
     pending_count: pendingCount,
-    denylist_hit: denylistHit,
+    human_agent_hit: humanHit,
     blockers,
   }
 }
@@ -745,10 +744,9 @@ export async function buildQueueWakeSmokeReport(db: DbAdapter, options: QueueWak
   const timeoutMs = options.timeoutMs ?? DEFAULT_SMOKE_TIMEOUT_MS
   const pollMs = options.pollMs ?? DEFAULT_SMOKE_POLL_MS
   const agentId = options.agentId ?? defaultSmokeAgentId()
-  const denylist = options.denylist ?? parseCsv(process.env.STATE_DAEMON_AGENT_DENYLIST)
   const baseOptions = { mode, timeoutMs, pollMs, agentId, nowMs }
 
-  const safety = await loadSmokeSafety(db, agentId, denylist)
+  const safety = await loadSmokeSafety(db, agentId)
   const report = buildSmokeReportBase(baseOptions, safety)
   if (safety.blockers.length > 0) {
     report.ok = false
@@ -948,13 +946,21 @@ export function buildQueueProcessingReadinessReport(
       evidence: agent,
     }))
   }
-  const denylist = parseCsv(runtime.environment.agent_denylist)
+  const retiredDenylistEnv = (runtime.environment.agent_denylist ?? '').trim()
   const codexRunnerEnabled = envEnabled(runtime.environment.codex_runner_enabled)
   const queueWorkSchedulerEnabled = envEnabled(runtime.environment.queue_work_scheduler_enabled)
   const runnerEnabled = codexRunnerEnabled || queueWorkSchedulerEnabled
   const agentScopeBlockers: QueueProcessingReadinessReport['queue_processing_readiness']['agent_scope_blockers'] = []
   const addQueueBlockerCode = (code: string) => {
     if (!queueBlockerCodes.includes(code)) queueBlockerCodes.push(code)
+  }
+
+  if (retiredDenylistEnv) {
+    addQueueBlockerCode('STATE_DAEMON_AGENT_DENYLIST_RETIRED')
+    blockers.push(readinessFinding('STATE_DAEMON_AGENT_DENYLIST_RETIRED', 'blocker',
+      'STATE_DAEMON_AGENT_DENYLIST is retired: eligibility is DB-only (agents table + agent_type human guard); remove the key from the LaunchAgent environment', {
+      evidence: { agent_denylist: retiredDenylistEnv },
+    }))
   }
 
   const overlayValidation = validateStateDaemonCanaryOverlayEnv({
@@ -983,7 +989,7 @@ export function buildQueueProcessingReadinessReport(
     const blockerCodes: string[] = []
     const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
     if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
-    if (denylist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_DENYLISTED')
+    if ((row as { agent_type?: string | null }).agent_type === 'human') blockerCodes.push('AGENT_TYPE_HUMAN')
     if (blockerCodes.length === 0) continue
 
     agentScopeBlockers.push({
@@ -997,7 +1003,7 @@ export function buildQueueProcessingReadinessReport(
       const message =
         code === 'STATE_DAEMON_RUNNER_DISABLED'
           ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
-          : 'state-daemon agent denylist excludes the target agent'
+          : 'agent_type=human seats are excluded from automatic processing (DB-only eligibility)'
       blockers.push(readinessFinding(code, 'blocker', message, {
         agent_id: row.agent_id,
         evidence: {
@@ -1006,7 +1012,6 @@ export function buildQueueProcessingReadinessReport(
           codex_runner_enabled: runtime.environment.codex_runner_enabled,
           queue_work_scheduler_enabled: runtime.environment.queue_work_scheduler_enabled,
           agent_allowlist: runtime.environment.agent_allowlist,
-          agent_denylist: runtime.environment.agent_denylist,
         },
       }))
     }

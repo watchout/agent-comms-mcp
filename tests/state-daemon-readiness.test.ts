@@ -453,6 +453,7 @@ describe('#603 queue-processing readiness', () => {
       blocker_codes: ['STATE_DAEMON_RUNNER_DISABLED'],
     }])
     expect(report.queue_processing_readiness.blocker_codes).toEqual([
+      'STATE_DAEMON_AGENT_DENYLIST_RETIRED',
       'STATE_DAEMON_CANARY_OVERLAY_IDENTITY_INCOMPLETE',
       'STATE_DAEMON_CANARY_OVERLAY_TARGET_OUTSIDE_COHORT',
       'STATE_DAEMON_RUNNER_DISABLED',

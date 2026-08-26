@@ -195,10 +195,10 @@ function isProfileEnabled(raw: unknown): boolean {
 
 export async function evaluateStateDaemonAutomaticProcessingEligibility(
   db: Pick<DBClient, 'query'>,
-  input: { agentId: string; channelId: string | null; denylisted: boolean },
+  input: { agentId: string; channelId: string | null },
 ): Promise<AutomaticProcessingEligibilityVerdict> {
-  const agentRows = await db.query<AgentRow>(
-    `SELECT agent_id, runtime, runtime_engine_preference, status,
+  const agentRows = await db.query<AgentRow & { agent_type?: string | null }>(
+    `SELECT agent_id, agent_type, runtime, runtime_engine_preference, status,
             profile_enabled, disabled_at
        FROM agents
       WHERE agent_id=$1`,
@@ -221,7 +221,7 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
       && Boolean(agent.status?.trim())
       && !isInactiveAgentStatus(agent.status),
     channelMember,
-    denylisted: input.denylisted,
+    humanAgent: (agent as { agent_type?: string | null } | null)?.agent_type === 'human',
   })
 }
 
@@ -812,7 +812,6 @@ export class StateDaemon {
     return evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
       agentId: row.agent_id,
       channelId: row.channel_id ?? null,
-      denylisted: this.config.agentDenylist?.includes(row.agent_id) ?? false,
     })
   }
 
@@ -1913,7 +1912,6 @@ export class StateDaemon {
 
   private isAgentInScope(agentId: string): boolean {
     if (this.config.agentIdPrefix && !agentId.startsWith(this.config.agentIdPrefix)) return false
-    if (this.config.agentDenylist && this.config.agentDenylist.includes(agentId)) return false
     if (this.config.agentAllowlist && !this.config.agentAllowlist.includes(agentId)) return false
     return true
   }
@@ -1923,10 +1921,6 @@ export class StateDaemon {
     if (this.config.agentIdPrefix) {
       params.push(this.config.agentIdPrefix + '%')
       sql += ` AND ${column} LIKE $${params.length}`
-    }
-    if (this.config.agentDenylist) {
-      params.push(this.config.agentDenylist)
-      sql += ` AND NOT (${column} = ANY($${params.length}::text[]))`
     }
     if (this.config.agentAllowlist) {
       params.push(this.config.agentAllowlist)
