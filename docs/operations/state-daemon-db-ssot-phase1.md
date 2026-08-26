@@ -32,7 +32,12 @@ The only Phase 1 targets, in order, are:
 3. `adf-lead`
 4. `devauditor`
 
-`codex-aun` is retired. An expired overlay, multiple targets, a wrong subject, a retired target, or any target outside the four-agent cohort is a preflight blocker. Legacy queue-work activation plans that provide only `--agent-allowlist` are therefore not executable until a typed overlay is supplied.
+The overlay cohort additionally admits `qa` for the fix-1 headless queue-work
+canary (OD-SD-940-FIX1-QA-CANARY-20260826-001, issue #940 comment 5423583944);
+`qa` is not a Phase 1 DB-SSOT rollout target and the ordered list above is
+unchanged.
+
+`codex-aun` is retired. An expired overlay, multiple targets, a wrong subject, a retired target, or any target outside the owner-authorized canary cohort is a preflight blocker. Legacy queue-work activation plans that provide only `--agent-allowlist` are therefore not executable until a typed overlay is supplied.
 
 ## Activation boundary
 
