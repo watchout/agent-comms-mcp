@@ -105,6 +105,8 @@ const INACTIVE_AGENT_STATUSES = new Set(['disabled', 'offline', 'retired'])
 const QUEUE_WORK_SCHEDULER_SOURCE = 'state-daemon-queue-work-scheduler'
 const QUEUE_WORK_RUNNER_ERROR_RECOVERY_KEY = 'queue_work_runner_error_recovery'
 const QUEUE_WORK_RUNNER_ERROR_FAILED_REASON = 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED'
+const WAKE_INVOCATION_RECOVERY_KEY = 'wake_invocation_recovery'
+const WAKE_INVOCATION_FAILED_REASON = 'WAKE_INVOCATION_RETRY_EXHAUSTED'
 const TYPED_QUEUE_ACK_SCHEMA_VERSION = 'aun-queue-ack/v1'
 const TYPED_QUEUE_ACK_REASON = 'TYPED_ACK_RECEIPT'
 
@@ -1750,6 +1752,70 @@ export class StateDaemon {
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_stale_skipped' })
       return false
     }
+
+    // Bounded delivery attempts: a row that keeps cycling pending -> invoked
+    // -> reclaimed must reach a typed terminal state instead of looping
+    // forever (issue #940: 721 re-invocations of 3 rows). Attempts persist in
+    // the payload like queue_work_runner_error_recovery; no schema change.
+    const wakePayload = parseQueuePayload(row.payload)
+    const wakeRecovery = wakePayload[WAKE_INVOCATION_RECOVERY_KEY]
+    const priorWakeAttempts = typeof wakeRecovery === 'object' && wakeRecovery !== null
+      ? Math.max(0, Math.floor(Number((wakeRecovery as { attempts?: unknown }).attempts ?? 0)) || 0)
+      : 0
+    const maxWakeAttempts = Math.max(1, this.config.wakeInvocationMaxAttempts)
+    if (priorWakeAttempts >= maxWakeAttempts) {
+      const failedPayload = JSON.stringify({
+        ...wakePayload,
+        [WAKE_INVOCATION_RECOVERY_KEY]: {
+          attempts: priorWakeAttempts,
+          max_attempts: maxWakeAttempts,
+          last_action: 'failed',
+          last_at: now.toISOString(),
+          source: 'state-daemon-wake',
+          reason: WAKE_INVOCATION_FAILED_REASON,
+        },
+      })
+      const failedUpdate = await this.dbQuery(
+        `UPDATE message_queue
+            SET status='failed',
+                failed_reason=$2,
+                done_at=$3,
+                payload=$4,
+                claimed_by=NULL,
+                claimed_at=NULL,
+                claim_expires_at=NULL,
+                last_heartbeat_at=NULL
+          WHERE id=$1
+            AND status='pending'`,
+        [row.id, WAKE_INVOCATION_FAILED_REASON, now, failedPayload],
+      )
+      await this.dbQuery(
+        `UPDATE agents SET last_wake_attempt_at=NULL
+          WHERE agent_id=$1 AND last_wake_attempt_at=$2`,
+        [row.agent_id, now],
+      )
+      if (failedUpdate.rowCount === 1) {
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'invocation_exhausted_failed' })
+        await this.alert.alert(
+          `wake invocation exhausted for ${row.agent_id} queue_id=${row.id}; marked failed after ${priorWakeAttempts} attempts; requeue with: bun bin/aun.ts requeue-failed --id ${row.id} --execute`,
+        )
+      }
+      return false
+    }
+    const nextWakePayload = JSON.stringify({
+      ...wakePayload,
+      [WAKE_INVOCATION_RECOVERY_KEY]: {
+        attempts: priorWakeAttempts + 1,
+        max_attempts: maxWakeAttempts,
+        last_action: 'invoke',
+        last_at: now.toISOString(),
+        source: 'state-daemon-wake',
+      },
+    })
+    await this.dbQuery(
+      `UPDATE message_queue SET payload=$2 WHERE id=$1 AND status='pending'`,
+      [row.id, nextWakePayload],
+    )
 
     // The daemon cannot infer completion authority from untrusted message
     // prose. Substantive work closes only through a typed runner result or an
