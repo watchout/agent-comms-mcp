@@ -76,7 +76,7 @@ dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown
 ```
 
 If any excluded identity becomes real production scope, remove it from the
-denylist in a reviewed PR, update channel membership/runtime metadata, reload
+DB profile in a reviewed PR (profile_enabled / disabled_at / agent_type), update channel membership/runtime metadata, reload
 state_daemon, and smoke it explicitly.
 
 ## Post-Smoke Cleanup Rule

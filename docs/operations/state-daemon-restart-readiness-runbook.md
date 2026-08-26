@@ -38,7 +38,7 @@ another persistent package/artifact path. Do not use the dirty/behind developer
 checkout at `/Users/yuji/Developer/agent-comms-mcp`, and do not point launchd at
 an unowned `/tmp` or `/private/tmp` worktree. That commit must include the
 `scripts/restart-bot.sh` adapter fix, the Codex restart prompt-skip fix, and the
-DB-driven denylist state_daemon profile.
+DB-only eligibility state_daemon profile (Issue #940 fix 3: no name list).
 
 ### DB URL
 
@@ -70,12 +70,14 @@ approved restart window.
 The normal production scope is DB-driven: an enabled agent with channel
 membership and runtime/tmux metadata is in daemon scope by default. The launchd
 profile must leave `STATE_DAEMON_AGENT_ALLOWLIST` unset; that key is only an
-emergency narrowing override. `STATE_DAEMON_AGENT_DENYLIST` excludes
-disabled/test/human identities that must not be woken even if a queue row is
-inserted.
+emergency narrowing override. `STATE_DAEMON_AGENT_DENYLIST` is retired: it must
+be ABSENT from the profile. Exclusion is DB-only — disabled/test identities are
+excluded by `profile_enabled`/`disabled_at`/status, and human seats by
+`agents.agent_type='human'`. A leftover denylist key is itself a NO_GO
+(readiness blocker `STATE_DAEMON_AGENT_DENYLIST_RETIRED`).
 
 The PR audit path still uses `auditor` for L1 and `codex-audit` for L2. Those
-recipients must be enabled DB agents and must not appear in the denylist.
+recipients must be enabled DB agents.
 Runtime and tmux routing are DB-owned (`agents.runtime` plus
 `agents.metadata->>'tmux_session'`) and must be verified in preflight rather
 than hard-coded into launchd scope.
@@ -86,7 +88,8 @@ Preflight command:
 CURRENT_AGENT_ALLOWLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_ALLOWLIST raw ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
 CURRENT_AGENT_DENYLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST raw ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
 printf 'installed STATE_DAEMON_AGENT_ALLOWLIST=%s\n' "$CURRENT_AGENT_ALLOWLIST"
-printf 'installed STATE_DAEMON_AGENT_DENYLIST=%s\n' "$CURRENT_AGENT_DENYLIST"
+printf 'installed STATE_DAEMON_AGENT_DENYLIST=%s (must be empty: retired)\n' "$CURRENT_AGENT_DENYLIST"
+test -z "$CURRENT_AGENT_DENYLIST"
 
 psql 'postgresql:///agent_comms?host=/tmp' -P pager=off -c "
 SELECT agent_id, status, runtime, (metadata->>'tmux_session') AS tmux_session,
@@ -108,7 +111,7 @@ SELECT id, agent_id, message_id, status, created_at, last_wake_attempt_at,
 The daemon must run from a clean checkout at the CTO-approved post-fix merge
 commit. The approved commit must include the repo-owned
 `scripts/restart-bot.sh` adapter, the Codex restart prompt-skip fix, and the
-DB-driven denylist state_daemon profile. #431 commit
+DB-only eligibility state_daemon profile. #431 commit
 `0b6efae21c49e85619394194a466f7120f79d964` is not sufficient for restart
 because it still references the missing `scripts/start-runbot.sh` path.
 
@@ -179,7 +182,7 @@ CTO_APPROVED_STATE_DAEMON_COMMIT='<fill-with-CTO-approved-main-merge-commit>'
 APPROVED_RESTORE_ROOT="$HOME/.agent-comms/state-daemon/checkouts"
 APPROVED_REPO="${APPROVED_RESTORE_ROOT}/${CTO_APPROVED_STATE_DAEMON_COMMIT}"
 DATABASE_URL='postgresql:///agent_comms?host=/tmp'
-APPROVED_AGENT_DENYLIST='adf-dev,arc-test,auditor-test,ceo,codex-test,cto,cto-test,cto-test2,dev-001,hotfix-test,iyasaka-arc,test,test-probe,unknown'
+# STATE_DAEMON_AGENT_DENYLIST is retired: the approved profile has NO denylist key.
 
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$CTO_APPROVED_STATE_DAEMON_COMMIT"
@@ -221,9 +224,10 @@ CURRENT_AGENT_ALLOWLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGE
 CURRENT_AGENT_DENYLIST="$(plutil -extract EnvironmentVariables.STATE_DAEMON_AGENT_DENYLIST raw \
   ~/Library/LaunchAgents/com.agent-comms.state-daemon.plist 2>/dev/null || true)"
 printf 'installed STATE_DAEMON_AGENT_ALLOWLIST=%s\n' "$CURRENT_AGENT_ALLOWLIST"
-printf 'installed STATE_DAEMON_AGENT_DENYLIST=%s\n' "$CURRENT_AGENT_DENYLIST"
+printf 'installed STATE_DAEMON_AGENT_DENYLIST=%s (must be empty: retired)\n' "$CURRENT_AGENT_DENYLIST"
 printf 'approved  STATE_DAEMON_AGENT_ALLOWLIST=<unset>\n'
-printf 'approved  STATE_DAEMON_AGENT_DENYLIST=%s\n' "$APPROVED_AGENT_DENYLIST"
+printf 'approved  STATE_DAEMON_AGENT_DENYLIST=<absent: retired>\n'
+test -z "$CURRENT_AGENT_DENYLIST"
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
 BEGIN READ ONLY;
@@ -260,9 +264,10 @@ Pass criteria:
 - installed plist values match the desired values above, or every mismatch is
   recorded as pending CTO-approved restart-window mutation
 - `STATE_DAEMON_AGENT_ALLOWLIST` is absent/empty in the production profile
-- L1 `auditor` and L2 `codex-audit` are enabled DB agents and absent from
-  `STATE_DAEMON_AGENT_DENYLIST`, unless the PR audit routing policy was
-  explicitly changed in the same reviewed release
+- L1 `auditor` and L2 `codex-audit` are enabled DB agents
+- the retired `STATE_DAEMON_AGENT_DENYLIST` key is absent from the installed
+  profile (presence = NO_GO via readiness blocker
+  `STATE_DAEMON_AGENT_DENYLIST_RETIRED`)
 - pending audit rows are accounted for; no row is stranded only because its
   `agent_id` is denied or marked inactive
 - focused tests and build pass

@@ -12,7 +12,6 @@ falling back to SQLite.
 
 ```sh
 DATABASE_URL='postgresql:///agent_comms?host=/tmp' \
-STATE_DAEMON_AGENT_DENYLIST='<current exact value>' \
 bun scripts/operator/memory-ready-refresh.ts --dry-run
 ```
 
@@ -61,7 +60,6 @@ bun scripts/operator/memory-ready-refresh-launchagent.ts render \
 bun scripts/operator/memory-ready-refresh-launchagent.ts install \
   --repo-root /Users/yuji/Developer/agent-comms-mcp \
   --database-url 'postgresql:///agent_comms?host=/tmp' \
-  --denylist '<current exact state-daemon value>' \
   --execute
 
 plutil -lint ~/Library/LaunchAgents/com.agent-comms.operator.memory-ready-refresh.plist
