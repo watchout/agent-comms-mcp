@@ -982,6 +982,8 @@ export function buildQueueProcessingReadinessReport(
   for (const row of rowList) {
     const blockerCodes: string[] = []
     const activeClaimCount = (row as BotStatusDbRow & { active_claim_count?: number }).active_claim_count ?? 0
+    const typedFailedCount = (row as BotStatusDbRow & { typed_failed_count?: number }).typed_failed_count ?? 0
+    if (typedFailedCount > 0) blockerCodes.push('TYPED_FAILED_AWAITING_REPAIR')
     if (!runnerEnabled) blockerCodes.push('STATE_DAEMON_RUNNER_DISABLED')
     if (denylist.includes(row.agent_id)) blockerCodes.push('STATE_DAEMON_AGENT_DENYLISTED')
     if (blockerCodes.length === 0) continue
@@ -997,7 +999,9 @@ export function buildQueueProcessingReadinessReport(
       const message =
         code === 'STATE_DAEMON_RUNNER_DISABLED'
           ? 'state-daemon has no autonomous queue runner enabled for target queue processing'
-          : 'state-daemon agent denylist excludes the target agent'
+          : code === 'TYPED_FAILED_AWAITING_REPAIR'
+            ? 'typed-failed rows await repair; requeue with agent-com queue requeue-failed after fixing the cause'
+            : 'state-daemon agent denylist excludes the target agent'
       blockers.push(readinessFinding(code, 'blocker', message, {
         agent_id: row.agent_id,
         evidence: {

@@ -1656,7 +1656,7 @@ export class StateDaemon {
     })
     const updated = await this.dbQuery(
       `UPDATE message_queue
-          SET status='skipped',
+          SET status='done',
               failed_reason=$2,
               done_at=$3,
               payload=$4,
@@ -1797,7 +1797,7 @@ export class StateDaemon {
       if (failedUpdate.rowCount === 1) {
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'invocation_exhausted_failed' })
         await this.alert.alert(
-          `wake invocation exhausted for ${row.agent_id} queue_id=${row.id}; marked failed after ${priorWakeAttempts} attempts; requeue with: bun bin/aun.ts requeue-failed --id ${row.id} --execute`,
+          `wake invocation exhausted for ${row.agent_id} queue_id=${row.id}; marked failed after ${priorWakeAttempts} attempts; requeue with: agent-com queue requeue-failed --id ${row.id} --execute`,
         )
       }
       return false

@@ -97,9 +97,11 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
       }
       expect(runner.invocations).toHaveLength(3)
 
-      // 4th delivery cycle: attempts are exhausted; the row must not be
-      // re-invoked and must not stay parked in pending.
-      await h.daemon.__testHandleEvent(pendingEvent(id, agent))
+      // No external event arrives. The daemon's own periodic sweep must move
+      // the exhausted row to typed failed — nothing may stay parked in
+      // pending waiting for a 4th delivery event that never comes.
+      clock.advance(60_000)
+      await h.daemon.sweepStale()
       expect(runner.invocations).toHaveLength(3)
 
       const row = await pg.query(

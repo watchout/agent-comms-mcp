@@ -44,7 +44,7 @@ function countFor(sql: string): number {
   if (sql.includes("status = 'pending' AND")) return 1
   if (sql.includes("status IN ('received', 'in_progress')")) return 0
   if (sql.includes("status = 'done'")) return 1
-  if (sql.includes("status IN ('read', 'skipped', 'failed')")) return 7
+  if (sql.includes("status IN ('read', 'skipped')")) return 7
   return 0
 }
 
@@ -78,7 +78,7 @@ describe('queue terminal-state preflight', () => {
         if (sql.includes("status = 'done'")) {
           return { rows: [sample({ id: 3, status: 'done' })] }
         }
-        if (sql.includes("status IN ('read', 'skipped', 'failed')")) {
+        if (sql.includes("status IN ('read', 'skipped')")) {
           return { rows: [sample({ id: 4, status: 'skipped' })] }
         }
         return { rows: [] }
@@ -93,7 +93,7 @@ describe('queue terminal-state preflight', () => {
       no_queue_mutation: true,
       no_schema_migration: true,
     })
-    expect(report.schema.status_check.legacy_statuses_allowed).toEqual(['read', 'skipped', 'failed'])
+    expect(report.schema.status_check.legacy_statuses_allowed).toEqual(['read', 'skipped'])
     expect(report.schema.status_check.contract_ready).toBe(false)
     expect(report.preflight.ok).toBe(false)
     expect(report.preflight.blocker_codes).toContain('terminal_status_contract_not_enforced')
@@ -114,7 +114,7 @@ describe('queue terminal-state preflight', () => {
           return {
             rows: [{
               constraint_name: 'message_queue_status_check',
-              definition: "CHECK ((status = ANY (ARRAY['pending','received','in_progress','done','replied'])))",
+              definition: "CHECK ((status = ANY (ARRAY['pending','received','in_progress','done','replied','failed'])))",
             }],
           }
         }

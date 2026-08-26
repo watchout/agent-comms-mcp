@@ -160,7 +160,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
       expect(result.scanned).toBe(1)
       expect(result.rewoken).toBe(0)
       expect(h.runner.invocations).toHaveLength(0)
-      expect(row.status).toBe('skipped')
+      expect(row.status).toBe('done')
       expect(row.failed_reason).toBe('TYPED_ACK_RECEIPT')
       expect(row.done_at).toBeTruthy()
       expect(JSON.parse(row.payload).queue_disposition).toMatchObject({

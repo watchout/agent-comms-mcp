@@ -1620,24 +1620,33 @@ SELECT payload::jsonb #>> '{runner_error,code}' AS failure_code,
 - attempts が `STATE_DAEMON_WAKE_INVOCATION_MAX_ATTEMPTS` (default 3) に達した row は
   それ以上起動されず、`status='failed'`、
   `failed_reason='WAKE_INVOCATION_RETRY_EXHAUSTED'`、`done_at=now()` へ遷移する。
-- 遷移時に alert sink へ通知を **丁度 1 回** 送る。failed row への後続イベントは
-  再通知しない (人待ち中の成果物量産の禁止、authority-and-waiting R2)。
+- 遷移は外部イベントに依存しない: 上限到達 row は「配送経路の次回訪問」(pg_notify
+  event または**周期 sweep**) で必ず typed failed へ送られる。daemon 自身の sweep loop
+  が保証経路である。
+- 遷移時に alert sink へ通知を **丁度 1 回** 送る (復帰コマンド
+  `agent-com queue requeue-failed --id <queue_id> --execute` を含む)。failed row への
+  後続イベントは再通知しない (人待ち中の成果物量産の禁止、authority-and-waiting R2)。
 - `failed` は墓場ではなく修理可能な終端: 原因修理後、
   `agent-com queue requeue-failed (--agent <id> | --id <queue_id,...>) --execute` が
   row を pending に戻し、recovery counter を消去して試行予算を回復する。
 - queue doctor は typed failed (`WAKE_INVOCATION_RETRY_EXHAUSTED` /
   `QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED`) の残存を **blocker**
-  (`typed_failed_awaiting_repair`) として数える。修理されるまで fleet は健全と
-  みなされない。
+  (`typed_failed_awaiting_repair`) として数え、queue-processing readiness も同条件を
+  blocker `TYPED_FAILED_AWAITING_REPAIR` として数えて GO を返さない。修理されるまで
+  fleet は健全とみなされない。
 
 #### 13.5.3.1 Canonical status vocabulary
 
 message_queue の status の canonical 集合は
-`pending → received / in_progress → done | failed` である。
-`read` / `replied` / `skipped` は旧世代の値であり、**新規の書き込み経路を追加しては
-ならない**。読み手 (doctor / readiness / 集計) は旧値を legacy として認識し
-(`legacy_status_mix` warning)、修了扱いの集計では `done` 系に読み替える。
-旧値の一掃は schema/data migration ではなく、書き込み経路の廃止と自然減で行う。
+`pending → received / in_progress → done | failed` である。`replied` は
+「reply 配送確認済み」を表す done の精密化であり、**既存の fence 付き二段クローズ
+(done → replied、exactly-once close の柱) のみ**が書く。新規 writer を追加して
+よいのは canonical 集合と replied だけで、`read` / `skipped` への**新規書き込み経路の
+追加は禁止**する (state-daemon の typed-ACK close は `done` を書く)。読み手
+(doctor / readiness / 集計) は read / skipped と**型付き理由を持たない旧 failed** を
+legacy として認識し (`legacy_status_mix` warning)、修了扱いの集計では `done` 系に
+読み替える。旧値の一掃は schema/data migration ではなく、書き込み経路の廃止と
+自然減で行う (既存の他 `skipped` writer の廃止は follow-up 台帳)。
 
 ### 13.6 Presence Client
 
