@@ -23,7 +23,7 @@ export const STATE_DAEMON_PLIST_NAME = `${STATE_DAEMON_LAUNCH_AGENT_LABEL}.plist
 export const DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID = 'state_daemon'
 export const DEFAULT_STATE_DAEMON_BUN_PATH = '/Users/yuji/.bun/bin/bun'
 export const DEFAULT_STATE_DAEMON_DATABASE_URL = 'postgresql:///agent_comms?host=/tmp'
-export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor'] as const
+export const STATE_DAEMON_DB_SSOT_CANARY_TARGETS = ['aun', 'codex-audit', 'adf-lead', 'devauditor', 'qa'] as const
 export const STATE_DAEMON_DB_SSOT_RETIRED_AGENT_ID = 'codex-aun'
 export const STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST = 'sha256:3dda8cd2b471e907245b28b4a1c4f6e656d2d76c6eff9f5c5a44db698f2372bc'
 
