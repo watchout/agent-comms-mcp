@@ -126,6 +126,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
   const result = await client.query<{
     agent_id: string
     status: string | null
+    typed_failed_count: string | number
     last_seen_at: Date | null
     heartbeat_ok: boolean
     pending_count: string | number
@@ -144,6 +145,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     map.set(row.agent_id, {
       agent_id: row.agent_id,
       status: row.status,
+      typed_failed_count: parseCount(row.typed_failed_count),
       last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,
       heartbeat_ok: Boolean(row.heartbeat_ok),
       pending_count: parseCount(row.pending_count),

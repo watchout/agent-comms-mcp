@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Client } from 'pg'
 import { StateDaemon } from '../../../core/state-daemon'
 import { buildQueueDoctorReport } from '../../../core/queue-doctor'
+import { fetchBotStatusFromDb } from '../../../core/bot-status-db'
 import { requeueFailedQueueRows } from '../../../core/queue-repair'
 import type { StateDaemonConfig } from '../../../core/state-daemon/types'
 import {
@@ -151,6 +152,29 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     expect(blocker).toBeDefined()
     expect(blocker?.severity).toBe('blocker')
     expect(blocker?.count).toBeGreaterThanOrEqual(1)
+  })
+
+  test('fetchBotStatusFromDb carries typed_failed_count from the DB to the readiness row', async () => {
+    const agent = makeAgentId('wake-botstatus')
+    await seedAgent(pg, {
+      agent_id: agent,
+      runtime: 'codex',
+      tmux_session: null,
+      status: 'online',
+      last_seen_at: '2026-05-18T00:00:01.000Z',
+    })
+    const id = await seedPendingRow(agent)
+    await pg.query(
+      `UPDATE message_queue
+          SET status='failed', failed_reason='WAKE_INVOCATION_RETRY_EXHAUSTED', done_at=now()
+        WHERE id=$1`,
+      [id],
+    )
+
+    const statusMap = await fetchBotStatusFromDb(pg)
+    const row = statusMap.get(agent)
+    expect(row).toBeDefined()
+    expect(row?.typed_failed_count).toBe(1)
   })
 
   test('requeue-failed reopens the row with a fresh attempt budget', async () => {
