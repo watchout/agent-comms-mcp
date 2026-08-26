@@ -10,7 +10,7 @@ export type QueueRepairSample = {
 export type QueueRepairResult = {
   ok: true
   dry_run: boolean
-  action: 'reassign' | 'close_obsolete' | 'reclaim_expired' | 'close_duplicates' | 'close_outbound_obsolete'
+  action: 'reassign' | 'close_obsolete' | 'reclaim_expired' | 'close_duplicates' | 'close_outbound_obsolete' | 'requeue_failed'
   affected_count: number
   sample_count: number
   sample_queue_ids: Array<string | number>
@@ -581,4 +581,79 @@ export async function closeObsoleteOutboundRows(
 
 export const _internal = {
   parseDurationToSeconds,
+}
+
+/**
+ * Reopen typed-failed rows for another bounded delivery cycle.
+ *
+ * failed is a repairable terminal state, not a graveyard: after the operator
+ * fixes the underlying cause, requeue returns the row to pending and resets
+ * the wake/runner recovery counters so the row gets a fresh attempt budget.
+ * Scoped by agent and/or explicit queue ids; dry-run by default.
+ */
+export async function requeueFailedQueueRows(
+  db: Queryable,
+  input: { agentId?: string | null; queueIds?: Array<string | number>; dryRun?: boolean },
+): Promise<QueueRepairResult> {
+  const dryRun = input.dryRun ?? true
+  const agentId = input.agentId?.trim() || null
+  const queueIds = (input.queueIds ?? []).map((v) => String(v).trim()).filter(Boolean)
+  if (!agentId && queueIds.length === 0) {
+    throw new Error('QUEUE_REPAIR_REQUEUE_SCOPE_REQUIRED')
+  }
+
+  const params: unknown[] = []
+  const clauses = ["status = 'failed'"]
+  if (agentId) {
+    params.push(agentId)
+    clauses.push(`agent_id = $${params.length}`)
+  }
+  if (queueIds.length > 0) {
+    params.push(queueIds)
+    clauses.push(`id::text = ANY($${params.length}::text[])`)
+  }
+  const whereSql = clauses.join(' AND ')
+
+  const selectSql = `
+    SELECT id, agent_id, status, message_id, created_at,
+           count(*) OVER ()::int AS total_count,
+           left(payload, 180) AS content
+      FROM message_queue
+     WHERE ${whereSql}
+     ORDER BY created_at ASC
+     LIMIT 50`
+
+  if (dryRun) {
+    const preview = await db.query(selectSql, params)
+    return result('requeue_failed', true, preview.rows)
+  }
+
+  await db.query('BEGIN')
+  try {
+    const requeued = await db.query(
+      `UPDATE message_queue
+          SET status = 'pending',
+              failed_reason = NULL,
+              done_at = NULL,
+              claimed_by = NULL,
+              claimed_at = NULL,
+              claim_expires_at = NULL,
+              last_heartbeat_at = NULL,
+              payload = CASE
+                WHEN payload IS NOT NULL AND left(ltrim(payload), 1) = '{'
+                  THEN (payload::jsonb - 'wake_invocation_recovery' - 'queue_work_runner_error_recovery')::text
+                ELSE payload
+              END
+        WHERE ${whereSql}
+        RETURNING id, agent_id, 'pending' AS status, message_id, created_at,
+                  left(payload, 180) AS content`,
+      params,
+    )
+    await db.query('COMMIT')
+    const rows = requeued.rows.map((r: any) => ({ ...r, total_count: requeued.rows.length }))
+    return result('requeue_failed', false, rows)
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {})
+    throw err
+  }
 }
