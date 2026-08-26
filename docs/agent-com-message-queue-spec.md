@@ -1334,6 +1334,14 @@ OSS利用者の大半は1-10 bot構成のため、デフォルト3秒で十分�
 - state-daemon 不通 / tmux session 不在時は non-fatal (次層にフォールバック)
 - state-daemon の HA / supervisor は ADR-051 で別途扱う
 
+**Typed completion authority**
+
+- state-daemon と queue-work envelope は、未信頼の `content`（例: `No reply required`、`no_reply_required: true`、ACK 作文）を close / skip / reply 不要の根拠にしてはならない。
+- substantive な `instruction` / `request` / `question` は、本文が ACK / no-reply に見えても completion authority とせず、通常の typed routing へ渡す。実行前に `done` へ移してはならず、typed message routing の保護 hold / fence は変更しない。
+- reply 不要の指定は typed `reply_contract.required=false` として queue-work envelope に渡す。この指定は substantive work の実行を省略する権限ではなく、実行後の typed result が `next_action=close` を返すための応答契約である。
+- 自動 terminal が許されるのは、typed `message_type` と routing decision により `chat` / `report` / `notice` / `projection` の non-action と確定した行だけである。ACK 作文そのものは判定に影響せず、substantive type の本文だけが ACK に見えても配送対象に残す。
+- substantive work の terminal 遷移は typed runner result または明示 lifecycle 操作だけが行う。state-daemon は入力本文から `complete-no-reply` / completion reason / terminal baton を生成しない。
+
 **Secondary: MCP notification (MCP client 対応時の加速)**
 
 - PollingDriver が pending 検出時に MCP 標準 notification を送信

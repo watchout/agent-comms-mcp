@@ -258,7 +258,7 @@ describe('queue work envelope', () => {
     ]))
   })
 
-  test('keeps reference-heavy no-reply control work plain while preserving its execution', () => {
+  test('does not derive the reply contract from legacy no-reply fields or prose', () => {
     const envelope = buildQueueWorkEnvelope(receivedRow({
       payload: JSON.stringify({
         author_id: 'pdca-ops',
@@ -270,6 +270,7 @@ describe('queue work envelope', () => {
           'Run the local check-in after CHECK and ADJUST exist.',
           'no_reply_required: true',
         ].join('\n'),
+        no_reply_required: true,
       }),
     }))
 
@@ -278,6 +279,19 @@ describe('queue work envelope', () => {
       github_backed: false,
       required_writebacks: [],
     })
+    expect(envelope.reply_contract.required).toBe(true)
+  })
+
+  test('honors an explicit typed reply contract without inspecting prose', () => {
+    const envelope = buildQueueWorkEnvelope(receivedRow({
+      payload: JSON.stringify({
+        author_id: 'pdca-ops',
+        message_type: 'instruction',
+        content: 'Run the local check-in after CHECK and ADJUST exist.',
+        reply_contract: { required: false },
+      }),
+    }))
+
     expect(envelope.reply_contract.required).toBe(false)
   })
 
