@@ -139,7 +139,7 @@ describe('m4 — direct-entry DB-SSOT canary overlay fail-closed matrix', () => 
     })
   })
 
-  test('complete four-agent-cohort overlay is allowed', () => {
+  test('complete canary-cohort overlay is allowed', () => {
     const result = validateStateDaemonDirectEntryEnv(VALID_CANARY_OVERLAY, now)
     expect(result.active).toBe(true)
     expect(result.target).toBe('aun')

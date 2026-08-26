@@ -175,7 +175,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     )
 
     expect(result).toMatchObject({ active: true, target: 'aun', issues: [] })
-    expect(STATE_DAEMON_DB_SSOT_CANARY_TARGETS).toEqual(['aun', 'codex-audit', 'adf-lead', 'devauditor'])
+    expect(STATE_DAEMON_DB_SSOT_CANARY_TARGETS).toEqual(['aun', 'codex-audit', 'adf-lead', 'devauditor', 'qa'])
   })
 
   test('Issue #917 typed canary overlay blocks missing, duplicate, expired, retired, wrong-subject, and outside-cohort records', () => {
@@ -186,7 +186,7 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
       ['expired', { ...valid, STATE_DAEMON_CANARY_OVERLAY_EXPIRES_AT: '2026-08-06T00:00:00.000Z' }, 'state_daemon_canary_overlay_expired'],
       ['retired', canaryOverlayEnv('codex-aun'), 'state_daemon_canary_overlay_retired_target'],
       ['wrong-subject', { ...valid, STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST: `sha256:${'b'.repeat(64)}` }, 'state_daemon_canary_overlay_subject_digest_mismatch'],
-      ['outside-cohort', canaryOverlayEnv('qa'), 'state_daemon_canary_overlay_target_outside_cohort'],
+      ['outside-cohort', canaryOverlayEnv('zumen'), 'state_daemon_canary_overlay_target_outside_cohort'],
       ['same-control-and-owner-ref', { ...valid, STATE_DAEMON_CANARY_OVERLAY_OWNER_DECISION_REF: valid.STATE_DAEMON_CANARY_OVERLAY_CONTROL_REF }, 'state_daemon_canary_overlay_refs_not_distinct'],
     ]
 
