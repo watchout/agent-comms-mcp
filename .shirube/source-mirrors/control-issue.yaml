@@ -18,5 +18,6 @@ source_authority:
 extracted_fields:
   target_repo: watchout/agent-comms-mcp
   product: AgentCommsMcp
-  owner_confirmation: pending
+  owner_confirmation: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+  owner_confirmation_raw_body_sha256: 4384a62af0cc035cfff30d01c8f09aff658d4e90152bbc5b7b915830bb03dc8a
   control_source_status: snapshot
