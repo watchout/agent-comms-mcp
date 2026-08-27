@@ -2,7 +2,7 @@ schema_version: shirube-repo-spec/v1
 repo: "watchout/agent-comms-mcp"
 repo_id: "watchout/agent-comms-mcp"
 owner: "watchout"
-canonical_core: "watchout/agent-comms-mcp@<PINNED_TARGET_HEAD>"
+canonical_core: "watchout/agent-comms-mcp@56a1940fa4cbc32d74927595dcb20a1d8cceb0fe"
 purpose: >
   Adopt Shirube Rapid/Lite as a report-only control-plane overlay for AgentCommsMcp
   while keeping product runtime, API, DB, package, deploy, required checks, branch

@@ -5,7 +5,7 @@ primary:
   repo: watchout/agent-comms-mcp
   product: AgentCommsMcp
   work_order: watchout/agent-comms-mcp#802
-  pr: watchout/agent-comms-mcp#<PR_NUMBER_PENDING>
+  pr: watchout/agent-comms-mcp#813
 active_role: dev
 roles:
   lead:
