@@ -24,11 +24,12 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
+import type { SelfLivenessStore } from '../core/state-daemon/types'
 import { PgAdapter } from '../core/db/pg-adapter'
 import {
   AunConfigurationReconciler,
@@ -594,6 +595,31 @@ export function loadQueueWorkResidueExcludedQueueIds(env: NodeJS.ProcessEnv = pr
   return values.size > 0 ? Array.from(values).sort((a, b) => a - b) : undefined
 }
 
+export function defaultSelfLivenessStatePath(): string {
+  return join(homedir(), '.agent-comms', 'state-daemon', 'self-liveness-state.json')
+}
+
+/** Durable D3 exit ledger — survives process generations so restart
+ * boundedness (min interval / max-per-window latch) actually binds. */
+export function createFileSelfLivenessStore(path: string): SelfLivenessStore {
+  const read = (): number[] => {
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8'))
+      return Array.isArray(parsed?.exits) ? parsed.exits.filter((x: unknown) => Number.isFinite(x)) : []
+    } catch {
+      return []
+    }
+  }
+  return {
+    readExits: read,
+    appendExit: (ts: number) => {
+      const exits = [...read(), ts].slice(-50)
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, JSON.stringify({ exits }), 'utf8')
+    },
+  }
+}
+
 export function resolveGithubTokenFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   readTokenFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
@@ -1109,6 +1135,9 @@ export async function main(): Promise<void> {
       })
       : undefined,
     configurationReconciler,
+    selfLivenessStore: createFileSelfLivenessStore(
+      process.env.STATE_DAEMON_SELF_LIVENESS_STATE_PATH?.trim() || defaultSelfLivenessStatePath(),
+    ),
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),

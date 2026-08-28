@@ -142,8 +142,14 @@ export interface StateDaemonConfig {
   selfLivenessCheckIntervalMs: number
   selfLivenessWedgeSec: number
   selfLivenessMaxStrikes: number
-  /** Kill switch: suppress the exit (still alerts + metrics). */
+  /** Kill switch: suppress the exit (still alerts + metrics, latched per episode). */
   selfLivenessExitDisabled: boolean
+  /** D3: minimum seconds between self-exits (durable via the exit ledger). */
+  selfLivenessMinExitIntervalSec: number
+  /** D3: window for counting self-exits before the fail-visible latch. */
+  selfLivenessExitWindowSec: number
+  /** D3: self-exits within the window that halt auto-restart (fail-visible). */
+  selfLivenessMaxExitsPerWindow: number
 
   /**
    * Test-only scope guard. When set, every queue / agents query the daemon
@@ -215,6 +221,32 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   selfLivenessWedgeSec: 600,
   selfLivenessMaxStrikes: 3,
   selfLivenessExitDisabled: false,
+  selfLivenessMinExitIntervalSec: 900,
+  selfLivenessExitWindowSec: 3_600,
+  selfLivenessMaxExitsPerWindow: 3,
+}
+
+/** Published D2 queue-family metrics: their emission IS queue progress. */
+export const QUEUE_PROGRESS_METRIC_FAMILY: ReadonlySet<string> = new Set([
+  'state_daemon_queue_work_actions_total',
+  'state_daemon_memory_ready_backoff_total',
+  'state_daemon_state_actions_total',
+])
+
+export type SelfLivenessDecision = 'ok' | 'strike' | 'exit' | 'exit_suppressed' | 'exit_latched' | 'exit_deferred'
+
+/** Durable self-exit ledger (D3 boundedness across process generations). */
+export interface SelfLivenessStore {
+  readExits(): number[]
+  appendExit(ts: number): void
+}
+
+export function createInMemorySelfLivenessStore(): SelfLivenessStore {
+  const exits: number[] = []
+  return {
+    readExits: () => [...exits],
+    appendExit: (ts) => { exits.push(ts) },
+  }
 }
 
 /**
@@ -470,4 +502,6 @@ export interface StateDaemonDeps {
   config?: Partial<StateDaemonConfig>
   /** Crash-only exit hook; tests inject a spy. Defaults to process.exit. */
   exit?: (code: number) => void
+  /** D3 exit ledger; production injects a file-backed store, tests in-memory. */
+  selfLivenessStore?: SelfLivenessStore
 }

@@ -38,6 +38,10 @@ import {
   loadAllAgentCommunicationManifestOverridesFromEnv,
   loadGcOverridesFromEnv,
   DBConnectionError,
+  QUEUE_PROGRESS_METRIC_FAMILY,
+  createInMemorySelfLivenessStore,
+  type SelfLivenessDecision,
+  type SelfLivenessStore,
   type AlertSink,
   type Clock,
   type CodexRunnerInvoker,
@@ -281,6 +285,9 @@ export class StateDaemon {
   // observable progress (sweep completion or a queue-work evaluation).
   private lastQueueProgressAt = 0
   private selfLivenessStrikes = 0
+  private selfLivenessEpisodeAlerted = false
+  private selfLivenessSuppressionAlerted = false
+  private readonly selfLivenessStore: SelfLivenessStore
   private readonly exit: (code: number) => void
   private readonly inflightWakes = new Set<Promise<boolean>>()
   private readonly inflightQueueWork = new Map<string, Promise<void>>()
@@ -300,9 +307,25 @@ export class StateDaemon {
     this.githubWorkPuller = deps.githubWorkPuller ?? null
     this.configurationReconciler = deps.configurationReconciler ?? null
     this.clock = deps.clock
-    this.metrics = deps.metrics
+    // Self-liveness D2 equivalence: queue progress is defined as an emission
+    // of one of the published queue-family metrics (issue #940 liveness
+    // definition D2). Binding the marker to the metric sink makes the signal
+    // provably identical to the published definition instead of an
+    // approximation sprinkled over call sites.
+    const rawMetrics = deps.metrics
+    this.metrics = {
+      inc: (name, labels, by) => {
+        if (QUEUE_PROGRESS_METRIC_FAMILY.has(name)) {
+          this.lastQueueProgressAt = this.clock.now().getTime()
+        }
+        rawMetrics.inc(name, labels, by as never)
+      },
+      observe: (name, value, labels) => rawMetrics.observe(name, value, labels),
+      gaugeSet: (name, value, labels) => rawMetrics.gaugeSet(name, value, labels),
+    }
     this.alert = deps.alert
     this.exit = deps.exit ?? ((code: number) => process.exit(code))
+    this.selfLivenessStore = deps.selfLivenessStore ?? createInMemorySelfLivenessStore()
     this.lastQueueProgressAt = deps.clock.now().getTime()
     // cycle 2 Fix (auditor verdict `ab541187`): the GC env overrides have
     // to land in `this.config` to actually take effect at runtime.
@@ -624,67 +647,112 @@ export class StateDaemon {
     if (result.durationMs > this.config.budgetWarnMs) {
       result.budgetWarn = true
     }
-    this.lastQueueProgressAt = this.clock.now().getTime()
     return result
   }
 
-  // ── Self-liveness (crash-only, issue #940 liveness definition D2/D3) ──────
+  // ── Self-liveness (crash-only, issue #940 liveness definition D2/D3/D4) ───
 
   /**
-   * One liveness evaluation. Pure decision over injected pending count so
-   * tests can drive it deterministically with FakeClock.
+   * One liveness evaluation over an injected eligible-pending count.
+   * Decision only; the exit path (drain + exit) runs in the async caller.
    */
-  private evaluateSelfLiveness(pendingCount: number): 'ok' | 'strike' | 'exit' | 'exit_suppressed' {
-    const idleMs = this.clock.now().getTime() - this.lastQueueProgressAt
-    if (pendingCount === 0 || idleMs <= this.config.selfLivenessWedgeSec * 1000) {
+  private evaluateSelfLiveness(eligiblePendingCount: number): SelfLivenessDecision {
+    const nowMs = this.clock.now().getTime()
+    const idleMs = nowMs - this.lastQueueProgressAt
+    if (eligiblePendingCount === 0 || idleMs <= this.config.selfLivenessWedgeSec * 1000) {
       if (this.selfLivenessStrikes > 0) {
         this.metrics.inc('state_daemon_self_liveness_total', { result: 'recovered' })
       }
       this.selfLivenessStrikes = 0
+      this.selfLivenessEpisodeAlerted = false
+      this.selfLivenessSuppressionAlerted = false
       return 'ok'
     }
     this.selfLivenessStrikes += 1
-    this.metrics.inc('state_daemon_self_liveness_total', { result: 'strike' })
-    if (this.selfLivenessStrikes === 1) {
+    if (this.selfLivenessStrikes <= this.config.selfLivenessMaxStrikes) {
+      this.metrics.inc('state_daemon_self_liveness_total', { result: 'strike' })
+    }
+    if (!this.selfLivenessEpisodeAlerted) {
+      this.selfLivenessEpisodeAlerted = true
       void this.alert.alert(
-        `state-daemon self-liveness: ${pendingCount} eligible pending row(s) with no queue progress for ` +
-        `${Math.round(idleMs / 1000)}s (strike 1/${this.config.selfLivenessMaxStrikes})`,
+        `state-daemon self-liveness: ${eligiblePendingCount} eligible pending row(s) with no queue-family ` +
+        `metric emission for ${Math.round(idleMs / 1000)}s (strike 1/${this.config.selfLivenessMaxStrikes})`,
       )
     }
     if (this.selfLivenessStrikes < this.config.selfLivenessMaxStrikes) return 'strike'
+
+    // D3 boundedness — durable across process generations via the exit ledger.
     if (this.config.selfLivenessExitDisabled) {
-      this.metrics.inc('state_daemon_self_liveness_total', { result: 'exit_suppressed' })
-      void this.alert.alert(
+      return this.suppressExit('exit_suppressed',
         'state-daemon self-liveness: exit suppressed by STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED; ' +
-        'daemon is wedged and needs manual restart',
-      )
-      return 'exit_suppressed'
+        'daemon is wedged and needs manual restart')
     }
+    const windowMs = this.config.selfLivenessExitWindowSec * 1000
+    const exits = this.selfLivenessStore.readExits().filter((ts) => nowMs - ts < windowMs)
+    if (exits.length >= this.config.selfLivenessMaxExitsPerWindow) {
+      return this.suppressExit('exit_latched',
+        `state-daemon self-liveness: ${exits.length} self-exits within ${this.config.selfLivenessExitWindowSec}s — ` +
+        'auto-restart halted (fail-visible); manual investigation required')
+    }
+    const lastExit = exits.length ? Math.max(...exits) : 0
+    if (lastExit && nowMs - lastExit < this.config.selfLivenessMinExitIntervalSec * 1000) {
+      return this.suppressExit('exit_deferred',
+        `state-daemon self-liveness: exit deferred — last self-exit ${Math.round((nowMs - lastExit) / 1000)}s ago ` +
+        `is inside the ${this.config.selfLivenessMinExitIntervalSec}s minimum interval`)
+    }
+    this.selfLivenessStore.appendExit(nowMs)
     this.metrics.inc('state_daemon_self_liveness_total', { result: 'exit' })
     void this.alert.alert(
       `state-daemon self-liveness: exiting after ${this.selfLivenessStrikes} consecutive stalled checks ` +
       '(crash-only; launchd KeepAlive restarts the daemon)',
     )
-    this.exit(1)
     return 'exit'
+  }
+
+  /** Latched suppression: alert + metric once per continuous wedge episode. */
+  private suppressExit(kind: 'exit_suppressed' | 'exit_latched' | 'exit_deferred', message: string): SelfLivenessDecision {
+    if (!this.selfLivenessSuppressionAlerted) {
+      this.selfLivenessSuppressionAlerted = true
+      this.metrics.inc('state_daemon_self_liveness_total', { result: kind })
+      void this.alert.alert(message)
+    }
+    return kind
+  }
+
+  /** Bounded drain (claim handoff hygiene) then hard exit. Cap keeps crash-only semantics. */
+  private async drainThenExit(): Promise<void> {
+    await Promise.race([
+      this.stop().catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+    ])
+    this.exit(1)
   }
 
   private async selfLivenessCheck(): Promise<void> {
     if (this.status !== 'running') return
-    let pendingCount: number
+    let eligibleExists = 0
     try {
-      pendingCount = (await this.fetchPendingStale()).length
+      const rows = await this.fetchPendingStale()
+      for (const row of rows) {
+        // F4: raw pending is not "work the daemon owes progress on" — only
+        // rows passing the shared automatic-processing eligibility count.
+        const verdict = await this.checkAutomaticProcessingEligibility(row)
+        if (verdict.ok) { eligibleExists = 1; break }
+      }
     } catch (e) {
       // D4: a DB outage is not the daemon's fault — never strike on it.
       this.recordDbError(e)
       return
     }
-    this.evaluateSelfLiveness(pendingCount)
+    const decision = this.evaluateSelfLiveness(eligibleExists)
+    if (decision === 'exit') await this.drainThenExit()
   }
 
-  /** Test hook: drive one liveness evaluation with an injected pending count. */
-  __testSelfLivenessTick(pendingCount: number): 'ok' | 'strike' | 'exit' | 'exit_suppressed' {
-    return this.evaluateSelfLiveness(pendingCount)
+  /** Test hook: one full liveness evaluation incl. exit drain, with injected count. */
+  async __testSelfLivenessTick(eligiblePendingCount: number): Promise<SelfLivenessDecision> {
+    const decision = this.evaluateSelfLiveness(eligiblePendingCount)
+    if (decision === 'exit') await this.drainThenExit()
+    return decision
   }
 
   /** Test hook: simulate queue progress (what sweep completion records). */
@@ -1450,7 +1518,6 @@ export class StateDaemon {
     row: QueueRow,
     run: () => Promise<void>,
   ): void {
-    this.lastQueueProgressAt = this.clock.now().getTime()
     if (this.isQueueWorkResidueExcluded(row)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: phase })
       return

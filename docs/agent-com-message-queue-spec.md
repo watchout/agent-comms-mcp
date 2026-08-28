@@ -1650,16 +1650,34 @@ legacy として認識し (`legacy_status_mix` warning)、修了扱いの集計�
 
 ### 13.5.4 Self-liveness (crash-only, Issue #940)
 
-state-daemon は決定論スクリプトであり、合法な故障モードは「動いている」か「死んでいる」の二値のみとする。「プロセスは生きているが queue 処理だけ止まっている」半死状態は設計上违法であり、daemon 自身が検知して自死する:
+state-daemon は決定論スクリプトであり、合法な故障モードは「動いている」か「死んでいる」の二値のみとする。「プロセスは生きているが queue 処理だけ止まっている」半死状態は設計上違法であり、daemon 自身が検知して自死する。
 
-- **progress marker**: sweep 完了と queue-work 評価のたびに `lastQueueProgressAt` を更新
-- **check**: `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごとに、fence 内適格 pending が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)を超えて停止していれば strike を数える。pending 0 なら strike は常に 0(暇は wedge ではない)
-- **crash-only exit**: 連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で alert 1 回 + `process.exit(1)`。launchd `KeepAlive` が新プロセスを起動する。外部 watchdog を恒久機構としない
-- **D4(依存断の識別)**: liveness check 自身の DB エラーは strike に数えない(DB 停止は daemon の罪ではない)
-- **kill switch**: `STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED=1` で exit のみ抑止(alert/metric は維持)。canary/調査用
-- metrics: `state_daemon_self_liveness_total{result=strike|recovered|exit|exit_suppressed}`
+**D2 — 仕事の生存(queue progress signal)**
 
-初出 incident: 2026-08-27 18:05 JST、queue-work scheduler のみが無痕跡で沈黙し他コンポーネントは生存、外形から検知不能だった(#940)。
+- progress の定義は「**queue 系 metric family の emission**」と厳密に等価: `state_daemon_queue_work_actions_total` / `state_daemon_memory_ready_backoff_total` / `state_daemon_state_actions_total`。実装は metric sink を wrap して emission 時刻を記録する(sweep 完了や関数入口は progress ではない)
+- check は `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごと。**eligible pending**(shared automatic-processing eligibility を通過した fence 内 pending)が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)超停止 → strike。連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で exit 判定へ
+- **strike しない条件**: eligible pending 0(暇・正当な非対象は wedge でない)/ check 自身の DB エラー(D4: 依存断は daemon の罪ではない)。gate による正当な保留は backoff metric を emit するため progress として扱われる
+
+**D3 — 回復の有界性(durable exit ledger)**
+
+- 自死は永続 ledger(`STATE_DAEMON_SELF_LIVENESS_STATE_PATH`、default `~/.agent-comms/state-daemon/self-liveness-state.json`)に記録され、プロセス世代を跨いで拘束する
+- 直前の自死から `STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC`(default 900s)未満 → exit を defer(hot-loop 禁止)
+- `STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC`(default 3600s)内に `STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW`(default 3)回 → **fail-visible latch**: 以後自死を停止し owner alert 1 回。回復には手動対応が要る
+- exit 時は 5 秒上限の graceful drain(`stop()` race)後に `process.exit(1)`。launchd `KeepAlive` が新プロセスを起動する
+
+**alert / metric 意味論(spam 禁止)**
+
+- wedge episode ごとに: strike 開始時 alert 1 回 + exit(または suppress/latch/defer)時 alert 1 回 = 最大 2 回。suppress/latch/defer 状態の継続 tick は無音(metric も episode につき 1 回)
+- kill switch `STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED=1` は exit のみ抑止(episode につき alert/metric 各 1 回)
+- metrics: `state_daemon_self_liveness_total{result=strike|recovered|exit|exit_suppressed|exit_latched|exit_deferred}`
+
+**crash 安全性(in-flight work)**
+
+- 自死時に生きている runner child は親を失い得る。DB row は claim TTL(default 60s)満了後に §4.3 row 3 の経路で pending へ回収され、再 dispatch される
+- 旧 incarnation の child が claim 満了後に terminal を書くことは targeted-receive の exact claim fence が拒否する(§13.5.1.2、regression: `tests/state-daemon-queue-work-scheduler.test.ts` の incarnation fence)
+- DB 外の外部 effect(GitHub comment 等)は mediated writeback の冪等性契約に依存する。crash window での二重 effect を疑う場合は queue row の runner_result evidence を照合する
+
+初出 incident: 2026-08-27 18:05 JST、queue-work scheduler のみが無痕跡で沈黙し他コンポーネントは生存、外形から検知不能だった(#940)。regression: `tests/state-daemon-self-liveness.test.ts` の「D2 binding」test が本署名(非 queue metric は流れ続け queue family のみ沈黙)を固定する。
 
 ### 13.6 Presence Client
 
