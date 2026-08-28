@@ -24,11 +24,12 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
+import type { SelfLivenessStore } from '../core/state-daemon/types'
 import { PgAdapter } from '../core/db/pg-adapter'
 import {
   AunConfigurationReconciler,
@@ -71,6 +72,7 @@ import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import { reconcileRuntimeMemoryReadyFleetIdentity } from '../core/runtime-memory-ready-identity'
+import { DEFAULT_CONFIG } from '../core/state-daemon/types'
 import type {
   AlertSink,
   DBClient,
@@ -594,6 +596,118 @@ export function loadQueueWorkResidueExcludedQueueIds(env: NodeJS.ProcessEnv = pr
   return values.size > 0 ? Array.from(values).sort((a, b) => a - b) : undefined
 }
 
+export function defaultSelfLivenessStatePath(): string {
+  return join(homedir(), '.agent-comms', 'state-daemon', 'self-liveness-state.json')
+}
+
+/** Durable D3 exit ledger — survives process generations so restart
+ * boundedness (min interval / max-per-window latch) actually binds. */
+export function createFileSelfLivenessStore(path: string): SelfLivenessStore {
+  const read = (): { exits: number[]; error: string | null } => {
+    if (!existsSync(path)) return { exits: [], error: null } // missing file = empty history (first boot)
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8'))
+      if (!Array.isArray(parsed?.exits)) return { exits: [], error: 'ledger_shape_invalid' }
+      const exits: number[] = []
+      for (const entry of parsed.exits) {
+        // Strict per-entry validation: a parseable-but-invalid entry is
+        // corruption evidence, not noise to filter. Dropping it silently
+        // would fail the D3 restart bound open and destroy the evidence.
+        if (typeof entry !== 'number' || !Number.isFinite(entry) || !Number.isInteger(entry) || entry <= 0) {
+          return { exits: [], error: 'ledger_entry_invalid' }
+        }
+        exits.push(entry)
+      }
+      return { exits, error: null }
+    } catch (e) {
+      // Corruption / IO error must NOT collapse to empty history: D3
+      // boundedness would silently fail open. Caller refuses to exit.
+      return { exits: [], error: `ledger_read_failed:${(e as Error).message?.slice(0, 80) ?? 'unknown'}` }
+    }
+  }
+  return {
+    read,
+    appendExit: (ts: number) => {
+      try {
+        const current = read()
+        if (current.error) return false
+        const exits = [...current.exits, ts].slice(-50)
+        mkdirSync(dirname(path), { recursive: true })
+        const tmp = `${path}.${process.pid}.tmp`
+        writeFileSync(tmp, JSON.stringify({ exits }), 'utf8')
+        renameSync(tmp, path) // atomic on same filesystem — no torn ledger
+        return true
+      } catch {
+        return false
+      }
+    },
+  }
+}
+
+/** Strict env loader for the self-liveness numeric knobs. Distinguishes
+ * unset (use default) from malformed (startup error): an operator typo must
+ * never silently degrade D3 boundedness to defaults. */
+export function loadSelfLivenessEnvOverrides(env: NodeJS.ProcessEnv = process.env): {
+  overrides: Partial<StateDaemonConfig>
+  errors: string[]
+} {
+  const overrides: Partial<StateDaemonConfig> = {}
+  const errors: string[] = []
+  const strict = (name: string, key: keyof StateDaemonConfig) => {
+    const raw = env[name]
+    if (raw === undefined) return
+    const trimmed = raw.trim()
+    const value = Number(trimmed)
+    if (
+      trimmed === ''
+      || !Number.isFinite(value)
+      || !Number.isInteger(value)
+      || value <= 0
+      || String(value) !== trimmed
+    ) {
+      errors.push(`${name} must be a positive integer (got ${JSON.stringify(raw)})`)
+      return
+    }
+    ;(overrides as Record<string, unknown>)[key as string] = value
+  }
+  strict('STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS', 'selfLivenessCheckIntervalMs')
+  strict('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC', 'selfLivenessWedgeSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES', 'selfLivenessMaxStrikes')
+  strict('STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', 'selfLivenessMinExitIntervalSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', 'selfLivenessExitWindowSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', 'selfLivenessMaxExitsPerWindow')
+  return { overrides, errors }
+}
+
+/** Fail-closed validation for the published self-liveness knobs. */
+export function validateSelfLivenessConfig(cfg: {
+  selfLivenessCheckIntervalMs: number
+  selfLivenessWedgeSec: number
+  selfLivenessMaxStrikes: number
+  selfLivenessMinExitIntervalSec: number
+  selfLivenessExitWindowSec: number
+  selfLivenessMaxExitsPerWindow: number
+}): string[] {
+  const errors: string[] = []
+  const positive: Array<[string, number]> = [
+    ['STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS', cfg.selfLivenessCheckIntervalMs],
+    ['STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC', cfg.selfLivenessWedgeSec],
+    ['STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES', cfg.selfLivenessMaxStrikes],
+    ['STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', cfg.selfLivenessMinExitIntervalSec],
+    ['STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', cfg.selfLivenessExitWindowSec],
+    ['STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', cfg.selfLivenessMaxExitsPerWindow],
+  ]
+  for (const [name, value] of positive) {
+    if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+      errors.push(`${name} must be a positive integer (got ${value})`)
+    }
+  }
+  if (cfg.selfLivenessExitWindowSec < cfg.selfLivenessMinExitIntervalSec) {
+    errors.push('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC must be >= STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC')
+  }
+  return errors
+}
+
 export function resolveGithubTokenFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   readTokenFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
@@ -649,6 +763,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('batchLimit', num('STATE_DAEMON_BATCH_LIMIT'))
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
+  set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
+  // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
+  // fail-closed on malformed values) — merged and validated in main()
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
   if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
@@ -1056,6 +1173,16 @@ export async function main(): Promise<void> {
   await queryClient.connect()
   const db = new PgClientAdapter(queryClient)
   const config = loadConfig()
+  {
+    const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
+    Object.assign(config, overrides)
+    const merged = { ...DEFAULT_CONFIG, ...config }
+    const invariantErrors = validateSelfLivenessConfig(merged)
+    const selfLivenessErrors = [...errors, ...invariantErrors]
+    if (selfLivenessErrors.length > 0) {
+      throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
+    }
+  }
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(
@@ -1105,6 +1232,9 @@ export async function main(): Promise<void> {
       })
       : undefined,
     configurationReconciler,
+    selfLivenessStore: createFileSelfLivenessStore(
+      process.env.STATE_DAEMON_SELF_LIVENESS_STATE_PATH?.trim() || defaultSelfLivenessStatePath(),
+    ),
     clock: { now: () => new Date() },
     metrics: new StdoutMetrics(),
     alert: new CompositeAlertSink(process.env.STATE_DAEMON_ALERT_CHANNEL ?? null),

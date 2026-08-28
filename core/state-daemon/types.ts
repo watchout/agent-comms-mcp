@@ -131,6 +131,27 @@ export interface StateDaemonConfig {
   githubWorkPullerOwnerAllowlist: string[] | null
 
   /**
+   * Self-liveness (crash-only, issue #940 liveness definition D2/D3).
+   * The daemon measures its own queue-work progress; when eligible pending
+   * rows exist but no sweep/evaluation progress was recorded for
+   * `selfLivenessWedgeSec`, it counts a strike. After
+   * `selfLivenessMaxStrikes` consecutive strikes it exits(1) so launchd
+   * KeepAlive restarts a fresh process. Failure mode collapses to
+   * "running or dead" — a wedged-but-alive daemon is not a legal state.
+   */
+  selfLivenessCheckIntervalMs: number
+  selfLivenessWedgeSec: number
+  selfLivenessMaxStrikes: number
+  /** Kill switch: suppress the exit (still alerts + metrics, latched per episode). */
+  selfLivenessExitDisabled: boolean
+  /** D3: minimum seconds between self-exits (durable via the exit ledger). */
+  selfLivenessMinExitIntervalSec: number
+  /** D3: window for counting self-exits before the fail-visible latch. */
+  selfLivenessExitWindowSec: number
+  /** D3: self-exits within the window that halt auto-restart (fail-visible). */
+  selfLivenessMaxExitsPerWindow: number
+
+  /**
    * Test-only scope guard. When set, every queue / agents query the daemon
    * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
    * this `null` so the daemon scans the full fleet — the field exists only so
@@ -196,6 +217,41 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   githubWorkPullerRepos: null,
   githubWorkPullerLabels: null,
   githubWorkPullerOwnerAllowlist: null,
+  selfLivenessCheckIntervalMs: 60_000,
+  selfLivenessWedgeSec: 600,
+  selfLivenessMaxStrikes: 3,
+  selfLivenessExitDisabled: false,
+  selfLivenessMinExitIntervalSec: 900,
+  selfLivenessExitWindowSec: 3_600,
+  selfLivenessMaxExitsPerWindow: 3,
+}
+
+/** Published D2 queue-family metrics: their emission IS queue progress. */
+export const QUEUE_PROGRESS_METRIC_FAMILY: ReadonlySet<string> = new Set([
+  'state_daemon_queue_work_actions_total',
+  'state_daemon_memory_ready_backoff_total',
+  'state_daemon_state_actions_total',
+])
+
+export type SelfLivenessDecision =
+  | 'ok' | 'strike' | 'exit'
+  | 'exit_suppressed' | 'exit_latched' | 'exit_deferred' | 'exit_ledger_error'
+
+/** Durable self-exit ledger (D3 boundedness across process generations).
+ * `read()` distinguishes an empty/missing ledger from a corrupt or
+ * unreadable one: boundedness must fail closed on the latter. */
+export interface SelfLivenessStore {
+  read(): { exits: number[]; error: string | null }
+  /** Returns false when the exit could not be durably recorded. */
+  appendExit(ts: number): boolean
+}
+
+export function createInMemorySelfLivenessStore(): SelfLivenessStore {
+  const exits: number[] = []
+  return {
+    read: () => ({ exits: [...exits], error: null }),
+    appendExit: (ts) => { exits.push(ts); return true },
+  }
 }
 
 /**
@@ -449,4 +505,8 @@ export interface StateDaemonDeps {
   metrics: Metrics
   alert: AlertSink
   config?: Partial<StateDaemonConfig>
+  /** Crash-only exit hook; tests inject a spy. Defaults to process.exit. */
+  exit?: (code: number) => void
+  /** D3 exit ledger; production injects a file-backed store, tests in-memory. */
+  selfLivenessStore?: SelfLivenessStore
 }
