@@ -24,7 +24,7 @@
  */
 import { Client } from 'pg'
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -72,6 +72,7 @@ import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import { reconcileRuntimeMemoryReadyFleetIdentity } from '../core/runtime-memory-ready-identity'
+import { DEFAULT_CONFIG } from '../core/state-daemon/types'
 import type {
   AlertSink,
   DBClient,
@@ -602,22 +603,64 @@ export function defaultSelfLivenessStatePath(): string {
 /** Durable D3 exit ledger — survives process generations so restart
  * boundedness (min interval / max-per-window latch) actually binds. */
 export function createFileSelfLivenessStore(path: string): SelfLivenessStore {
-  const read = (): number[] => {
+  const read = (): { exits: number[]; error: string | null } => {
+    if (!existsSync(path)) return { exits: [], error: null } // missing file = empty history (first boot)
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
-      return Array.isArray(parsed?.exits) ? parsed.exits.filter((x: unknown) => Number.isFinite(x)) : []
-    } catch {
-      return []
+      if (!Array.isArray(parsed?.exits)) return { exits: [], error: 'ledger_shape_invalid' }
+      return { exits: parsed.exits.filter((x: unknown) => Number.isFinite(x)), error: null }
+    } catch (e) {
+      // Corruption / IO error must NOT collapse to empty history: D3
+      // boundedness would silently fail open. Caller refuses to exit.
+      return { exits: [], error: `ledger_read_failed:${(e as Error).message?.slice(0, 80) ?? 'unknown'}` }
     }
   }
   return {
-    readExits: read,
+    read,
     appendExit: (ts: number) => {
-      const exits = [...read(), ts].slice(-50)
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, JSON.stringify({ exits }), 'utf8')
+      try {
+        const current = read()
+        if (current.error) return false
+        const exits = [...current.exits, ts].slice(-50)
+        mkdirSync(dirname(path), { recursive: true })
+        const tmp = `${path}.${process.pid}.tmp`
+        writeFileSync(tmp, JSON.stringify({ exits }), 'utf8')
+        renameSync(tmp, path) // atomic on same filesystem — no torn ledger
+        return true
+      } catch {
+        return false
+      }
     },
   }
+}
+
+/** Fail-closed validation for the published self-liveness knobs. */
+export function validateSelfLivenessConfig(cfg: {
+  selfLivenessCheckIntervalMs: number
+  selfLivenessWedgeSec: number
+  selfLivenessMaxStrikes: number
+  selfLivenessMinExitIntervalSec: number
+  selfLivenessExitWindowSec: number
+  selfLivenessMaxExitsPerWindow: number
+}): string[] {
+  const errors: string[] = []
+  const positive: Array<[string, number]> = [
+    ['STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS', cfg.selfLivenessCheckIntervalMs],
+    ['STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC', cfg.selfLivenessWedgeSec],
+    ['STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES', cfg.selfLivenessMaxStrikes],
+    ['STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', cfg.selfLivenessMinExitIntervalSec],
+    ['STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', cfg.selfLivenessExitWindowSec],
+    ['STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', cfg.selfLivenessMaxExitsPerWindow],
+  ]
+  for (const [name, value] of positive) {
+    if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+      errors.push(`${name} must be a positive integer (got ${value})`)
+    }
+  }
+  if (cfg.selfLivenessExitWindowSec < cfg.selfLivenessMinExitIntervalSec) {
+    errors.push('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC must be >= STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC')
+  }
+  return errors
 }
 
 export function resolveGithubTokenFromEnv(
@@ -679,6 +722,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('selfLivenessWedgeSec', num('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC'))
   set('selfLivenessMaxStrikes', num('STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
+  set('selfLivenessMinExitIntervalSec', num('STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC'))
+  set('selfLivenessExitWindowSec', num('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC'))
+  set('selfLivenessMaxExitsPerWindow', num('STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW'))
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
   if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
@@ -1086,6 +1132,13 @@ export async function main(): Promise<void> {
   await queryClient.connect()
   const db = new PgClientAdapter(queryClient)
   const config = loadConfig()
+  {
+    const merged = { ...DEFAULT_CONFIG, ...config }
+    const selfLivenessErrors = validateSelfLivenessConfig(merged)
+    if (selfLivenessErrors.length > 0) {
+      throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
+    }
+  }
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(

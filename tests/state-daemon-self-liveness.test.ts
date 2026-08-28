@@ -10,7 +10,11 @@
  * within 1h latch fail-visible (no more auto-exits, one owner alert).
  */
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { StateDaemon } from '../core/state-daemon'
+import { createFileSelfLivenessStore, validateSelfLivenessConfig } from '../bin/state-daemon'
 import type { SelfLivenessStore } from '../core/state-daemon/types'
 import { FakeAlertSink, FakeClock, FakeMetrics, FakePgListen, FakeTmux } from './contract/state-daemon/fakes'
 
@@ -88,7 +92,7 @@ describe('state-daemon self-liveness (crash-only)', () => {
   test('D3 min interval: a recent prior self-exit defers the next exit (no hot loop)', async () => {
     const priorExit = new Date('2026-08-28T00:00:00.000Z').getTime() - 100_000 // 100s ago
     const { daemon, clock, alerts, exits } = buildDaemon({
-      store: { readExits: () => [priorExit], appendExit: () => {} },
+      store: { read: () => ({ exits: [priorExit], error: null }), appendExit: () => true },
     })
     clock.advance(601_000)
     await daemon.__testSelfLivenessTick(2)
@@ -101,7 +105,7 @@ describe('state-daemon self-liveness (crash-only)', () => {
   test('D3 latch: three exits inside the window halt auto-restart fail-visibly, alert once', async () => {
     const base = new Date('2026-08-28T00:00:00.000Z').getTime()
     const { daemon, clock, metrics, alerts, exits } = buildDaemon({
-      store: { readExits: () => [base - 2_900_000, base - 2_000_000, base - 1_000_000], appendExit: () => {} },
+      store: { read: () => ({ exits: [base - 2_900_000, base - 2_000_000, base - 1_000_000], error: null }), appendExit: () => true },
     })
     clock.advance(601_000)
     await daemon.__testSelfLivenessTick(2)
@@ -160,5 +164,153 @@ describe('state-daemon self-liveness (crash-only)', () => {
     await daemon.__testSelfLivenessTick(2)
     expect(await daemon.__testSelfLivenessTick(2)).toBe('exit_deferred')
     expect(exits).toEqual([1])
+  })
+
+  test('F2: defer that later matures into exit keeps the 2-alert episode budget', async () => {
+    const base = new Date('2026-08-28T00:00:00.000Z').getTime()
+    const appended: number[] = []
+    // prior exit 800s before the first tick: inside min interval (900s) at
+    // first exit attempt, outside it after +201s more.
+    const { daemon, clock, alerts, exits } = buildDaemon({
+      store: { read: () => ({ exits: [base + 601_000 - 800_000, ...appended], error: null }), appendExit: (ts) => { appended.push(ts); return true } },
+    })
+    clock.advance(601_000)
+    await daemon.__testSelfLivenessTick(2) // strike (alert 1)
+    await daemon.__testSelfLivenessTick(2) // strike
+    expect(await daemon.__testSelfLivenessTick(2)).toBe('exit_deferred') // terminal alert (alert 2)
+    expect(alerts.alerts.length).toBe(2)
+    clock.advance(201_000) // now beyond the 900s min interval, same episode
+    expect(await daemon.__testSelfLivenessTick(2)).toBe('exit')
+    expect(exits).toEqual([1])
+    expect(alerts.alerts.length).toBe(2) // no third alert: budget respected
+  })
+
+  test('F2: unreadable ledger refuses to exit (fail-closed boundedness), alert once', async () => {
+    const { daemon, clock, metrics, alerts, exits } = buildDaemon({
+      store: { read: () => ({ exits: [], error: 'ledger_read_failed:EIO' }), appendExit: () => true },
+    })
+    clock.advance(601_000)
+    await daemon.__testSelfLivenessTick(2)
+    await daemon.__testSelfLivenessTick(2)
+    expect(await daemon.__testSelfLivenessTick(2)).toBe('exit_ledger_error')
+    expect(await daemon.__testSelfLivenessTick(2)).toBe('exit_ledger_error')
+    expect(exits).toEqual([])
+    expect(metrics.countInc('state_daemon_self_liveness_total', { result: 'exit_ledger_error' })).toBe(1)
+    expect(alerts.alerts.filter((a) => a.includes('ledger unreadable')).length).toBe(1)
+  })
+
+  test('F2: ledger write failure refuses to exit (boundedness must be recorded first)', async () => {
+    const { daemon, clock, exits } = buildDaemon({
+      store: { read: () => ({ exits: [], error: null }), appendExit: () => false },
+    })
+    clock.advance(601_000)
+    await daemon.__testSelfLivenessTick(2)
+    await daemon.__testSelfLivenessTick(2)
+    expect(await daemon.__testSelfLivenessTick(2)).toBe('exit_ledger_error')
+    expect(exits).toEqual([])
+  })
+
+  test('F4: eligible existence scans the whole fenced population, not the first batch', async () => {
+    // 101 distinct pending pairs; only the last agent is eligible. The old
+    // batch-limited probe (LIMIT 100) reported false; the population scan
+    // must report true.
+    const pairs = Array.from({ length: 101 }, (_, i) => ({
+      agent_id: i === 100 ? 'eligible-seat' : `held-seat-${i}`,
+      channel_id: 'ch-1',
+    }))
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql.includes('SELECT DISTINCT mq.agent_id')) return { rows: pairs, rowCount: pairs.length }
+        if (sql.includes('FROM agents')) {
+          const id = String(params?.[0])
+          const eligible = id === 'eligible-seat'
+          return {
+            rows: [{
+              agent_id: id,
+              agent_type: 'dev',
+              runtime: 'codex',
+              runtime_engine_preference: 'codex',
+              status: eligible ? 'idle' : 'offline',
+              profile_enabled: true,
+              disabled_at: null,
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM channels')) {
+          return { rows: [{ members: ['eligible-seat', ...pairs.map((p) => p.agent_id)] }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    const clock = new FakeClock('2026-08-28T00:00:00.000Z')
+    const daemon = new StateDaemon({
+      db: db as any,
+      pgListen: new FakePgListen(),
+      tmux: new FakeTmux(),
+      clock,
+      metrics: new FakeMetrics(),
+      alert: new FakeAlertSink(),
+      exit: () => {},
+    })
+    expect(await daemon.__testLivenessEligiblePendingExists()).toBe(true)
+  })
+})
+
+describe('file self-liveness store (D3 ledger)', () => {
+  test('missing file is empty history (no error); append is durable and atomic-renamed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'liveness-'))
+    const path = join(dir, 'ledger.json')
+    const store = createFileSelfLivenessStore(path)
+    expect(store.read()).toEqual({ exits: [], error: null })
+    expect(store.appendExit(1_000)).toBe(true)
+    expect(store.appendExit(2_000)).toBe(true)
+    expect(store.read()).toEqual({ exits: [1_000, 2_000], error: null })
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ exits: [1_000, 2_000] })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('corrupt ledger reads as an error (fail-closed), and append refuses to overwrite it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'liveness-'))
+    const path = join(dir, 'ledger.json')
+    writeFileSync(path, '{not json', 'utf8')
+    const store = createFileSelfLivenessStore(path)
+    const r = store.read()
+    expect(r.exits).toEqual([])
+    expect(r.error).toContain('ledger_read_failed')
+    expect(store.appendExit(1_000)).toBe(false)
+    expect(readFileSync(path, 'utf8')).toBe('{not json') // history evidence preserved
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('wrong-shaped ledger is an error, not empty history', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'liveness-'))
+    const path = join(dir, 'ledger.json')
+    writeFileSync(path, JSON.stringify({ something: 1 }), 'utf8')
+    const store = createFileSelfLivenessStore(path)
+    expect(store.read().error).toBe('ledger_shape_invalid')
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('self-liveness knob validation (fail-closed startup)', () => {
+  const base = {
+    selfLivenessCheckIntervalMs: 60_000,
+    selfLivenessWedgeSec: 600,
+    selfLivenessMaxStrikes: 3,
+    selfLivenessMinExitIntervalSec: 900,
+    selfLivenessExitWindowSec: 3_600,
+    selfLivenessMaxExitsPerWindow: 3,
+  }
+  test('defaults validate clean', () => {
+    expect(validateSelfLivenessConfig(base)).toEqual([])
+  })
+  test('non-positive and non-integer knobs are rejected with the env name', () => {
+    expect(validateSelfLivenessConfig({ ...base, selfLivenessWedgeSec: 0 }).join()).toContain('WEDGE_SEC')
+    expect(validateSelfLivenessConfig({ ...base, selfLivenessMaxStrikes: -1 }).join()).toContain('MAX_STRIKES')
+    expect(validateSelfLivenessConfig({ ...base, selfLivenessMinExitIntervalSec: 1.5 }).join()).toContain('MIN_EXIT_INTERVAL')
+  })
+  test('window smaller than min exit interval is rejected (invariant)', () => {
+    expect(validateSelfLivenessConfig({ ...base, selfLivenessExitWindowSec: 100 }).join()).toContain('EXIT_WINDOW_SEC must be >=')
   })
 })

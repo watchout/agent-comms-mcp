@@ -233,19 +233,24 @@ export const QUEUE_PROGRESS_METRIC_FAMILY: ReadonlySet<string> = new Set([
   'state_daemon_state_actions_total',
 ])
 
-export type SelfLivenessDecision = 'ok' | 'strike' | 'exit' | 'exit_suppressed' | 'exit_latched' | 'exit_deferred'
+export type SelfLivenessDecision =
+  | 'ok' | 'strike' | 'exit'
+  | 'exit_suppressed' | 'exit_latched' | 'exit_deferred' | 'exit_ledger_error'
 
-/** Durable self-exit ledger (D3 boundedness across process generations). */
+/** Durable self-exit ledger (D3 boundedness across process generations).
+ * `read()` distinguishes an empty/missing ledger from a corrupt or
+ * unreadable one: boundedness must fail closed on the latter. */
 export interface SelfLivenessStore {
-  readExits(): number[]
-  appendExit(ts: number): void
+  read(): { exits: number[]; error: string | null }
+  /** Returns false when the exit could not be durably recorded. */
+  appendExit(ts: number): boolean
 }
 
 export function createInMemorySelfLivenessStore(): SelfLivenessStore {
   const exits: number[] = []
   return {
-    readExits: () => [...exits],
-    appendExit: (ts) => { exits.push(ts) },
+    read: () => ({ exits: [...exits], error: null }),
+    appendExit: (ts) => { exits.push(ts); return true },
   }
 }
 

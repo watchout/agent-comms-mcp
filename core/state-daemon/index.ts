@@ -687,8 +687,16 @@ export class StateDaemon {
         'state-daemon self-liveness: exit suppressed by STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED; ' +
         'daemon is wedged and needs manual restart')
     }
+    const ledger = this.selfLivenessStore.read()
+    if (ledger.error) {
+      // Fail-closed boundedness: with an unreadable ledger the restart cap
+      // cannot be verified, so refuse to exit and surface the wedge instead.
+      return this.suppressExit('exit_ledger_error',
+        `state-daemon self-liveness: exit refused — exit ledger unreadable (${ledger.error}); ` +
+        'boundedness cannot be verified (fail-closed); daemon is wedged and needs manual repair')
+    }
     const windowMs = this.config.selfLivenessExitWindowSec * 1000
-    const exits = this.selfLivenessStore.readExits().filter((ts) => nowMs - ts < windowMs)
+    const exits = ledger.exits.filter((ts) => nowMs - ts < windowMs)
     if (exits.length >= this.config.selfLivenessMaxExitsPerWindow) {
       return this.suppressExit('exit_latched',
         `state-daemon self-liveness: ${exits.length} self-exits within ${this.config.selfLivenessExitWindowSec}s — ` +
@@ -700,17 +708,27 @@ export class StateDaemon {
         `state-daemon self-liveness: exit deferred — last self-exit ${Math.round((nowMs - lastExit) / 1000)}s ago ` +
         `is inside the ${this.config.selfLivenessMinExitIntervalSec}s minimum interval`)
     }
-    this.selfLivenessStore.appendExit(nowMs)
+    if (!this.selfLivenessStore.appendExit(nowMs)) {
+      return this.suppressExit('exit_ledger_error',
+        'state-daemon self-liveness: exit refused — exit ledger write failed; ' +
+        'boundedness cannot be recorded (fail-closed); daemon is wedged and needs manual repair')
+    }
     this.metrics.inc('state_daemon_self_liveness_total', { result: 'exit' })
-    void this.alert.alert(
-      `state-daemon self-liveness: exiting after ${this.selfLivenessStrikes} consecutive stalled checks ` +
-      '(crash-only; launchd KeepAlive restarts the daemon)',
-    )
+    // Episode alert budget (spec 13.5.4): at most one terminal alert per
+    // wedge episode. A defer that later matures into an exit must not add a
+    // third alert on top of strike-start + defer.
+    if (!this.selfLivenessSuppressionAlerted) {
+      this.selfLivenessSuppressionAlerted = true
+      void this.alert.alert(
+        `state-daemon self-liveness: exiting after ${this.selfLivenessStrikes} consecutive stalled checks ` +
+        '(crash-only; launchd KeepAlive restarts the daemon)',
+      )
+    }
     return 'exit'
   }
 
   /** Latched suppression: alert + metric once per continuous wedge episode. */
-  private suppressExit(kind: 'exit_suppressed' | 'exit_latched' | 'exit_deferred', message: string): SelfLivenessDecision {
+  private suppressExit(kind: 'exit_suppressed' | 'exit_latched' | 'exit_deferred' | 'exit_ledger_error', message: string): SelfLivenessDecision {
     if (!this.selfLivenessSuppressionAlerted) {
       this.selfLivenessSuppressionAlerted = true
       this.metrics.inc('state_daemon_self_liveness_total', { result: kind })
@@ -728,24 +746,51 @@ export class StateDaemon {
     this.exit(1)
   }
 
+  /**
+   * F4: eligible-pending existence over the WHOLE fenced pending population.
+   * fetchPendingStale is batch-limited (ORDER BY created_at LIMIT n), so an
+   * old held head could hide eligible work behind it. Distinct
+   * (agent_id, channel_id) pairs keep the scan tiny while the verdict still
+   * comes from the shared automatic-processing predicate (E5: one function).
+   */
+  private async livenessEligiblePendingExists(): Promise<boolean> {
+    const params: unknown[] = [this.clock.now(), this.config.pendingStaleAfter]
+    let sql = `SELECT DISTINCT mq.agent_id, am.channel_id
+         FROM message_queue mq
+         LEFT JOIN agent_messages am ON am.id::text = mq.message_id
+        WHERE mq.status='pending'
+          AND mq.created_at < $1::timestamptz - ($2)::interval`
+    sql += this.agentScopeClause(params, 'mq.agent_id')
+    sql += this.queueWorkFenceClause(params, 'mq')
+    sql += this.queueWorkResidueExclusionClause(params, 'mq')
+    const { rows } = await this.dbQuery<{ agent_id: string; channel_id: string | null }>(sql, params)
+    for (const pair of rows) {
+      const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
+        agentId: pair.agent_id,
+        channelId: pair.channel_id ?? null,
+      })
+      if (verdict.ok) return true
+    }
+    return false
+  }
+
   private async selfLivenessCheck(): Promise<void> {
     if (this.status !== 'running') return
-    let eligibleExists = 0
+    let eligibleExists: boolean
     try {
-      const rows = await this.fetchPendingStale()
-      for (const row of rows) {
-        // F4: raw pending is not "work the daemon owes progress on" — only
-        // rows passing the shared automatic-processing eligibility count.
-        const verdict = await this.checkAutomaticProcessingEligibility(row)
-        if (verdict.ok) { eligibleExists = 1; break }
-      }
+      eligibleExists = await this.livenessEligiblePendingExists()
     } catch (e) {
       // D4: a DB outage is not the daemon's fault — never strike on it.
       this.recordDbError(e)
       return
     }
-    const decision = this.evaluateSelfLiveness(eligibleExists)
+    const decision = this.evaluateSelfLiveness(eligibleExists ? 1 : 0)
     if (decision === 'exit') await this.drainThenExit()
+  }
+
+  /** Test hook: run the population-wide eligible-pending existence probe. */
+  async __testLivenessEligiblePendingExists(): Promise<boolean> {
+    return this.livenessEligiblePendingExists()
   }
 
   /** Test hook: one full liveness evaluation incl. exit drain, with injected count. */
