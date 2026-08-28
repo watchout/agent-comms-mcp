@@ -14,7 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StateDaemon } from '../core/state-daemon'
-import { createFileSelfLivenessStore, validateSelfLivenessConfig } from '../bin/state-daemon'
+import { createFileSelfLivenessStore, loadSelfLivenessEnvOverrides, validateSelfLivenessConfig } from '../bin/state-daemon'
 import type { SelfLivenessStore } from '../core/state-daemon/types'
 import { FakeAlertSink, FakeClock, FakeMetrics, FakePgListen, FakeTmux } from './contract/state-daemon/fakes'
 
@@ -291,6 +291,29 @@ describe('file self-liveness store (D3 ledger)', () => {
     expect(store.read().error).toBe('ledger_shape_invalid')
     rmSync(dir, { recursive: true, force: true })
   })
+  test('parseable-invalid ledger entries are corruption (fail-closed), original file preserved', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'liveness-'))
+    const path = join(dir, 'ledger.json')
+    const original = JSON.stringify({ exits: ['corrupt-entry'] })
+    writeFileSync(path, original, 'utf8')
+    const store = createFileSelfLivenessStore(path)
+    const r = store.read()
+    expect(r.exits).toEqual([])
+    expect(r.error).toBe('ledger_entry_invalid')
+    expect(store.appendExit(1_000)).toBe(false)
+    expect(readFileSync(path, 'utf8')).toBe(original) // corruption evidence preserved
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('non-integer / non-positive / non-finite ledger entries are all corruption', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'liveness-'))
+    for (const bad of [[1.5], [0], [-10], [null], ['1000'], [1e308 * 10]]) {
+      const path = join(dir, `ledger-${JSON.stringify(bad).replace(/[^a-z0-9.-]/gi, '_')}.json`)
+      writeFileSync(path, JSON.stringify({ exits: bad }), 'utf8')
+      expect(createFileSelfLivenessStore(path).read().error).toBe('ledger_entry_invalid')
+    }
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 describe('self-liveness knob validation (fail-closed startup)', () => {
@@ -312,5 +335,32 @@ describe('self-liveness knob validation (fail-closed startup)', () => {
   })
   test('window smaller than min exit interval is rejected (invariant)', () => {
     expect(validateSelfLivenessConfig({ ...base, selfLivenessExitWindowSec: 100 }).join()).toContain('EXIT_WINDOW_SEC must be >=')
+  })
+
+})
+
+describe('self-liveness env loader (strict, fail-closed)', () => {
+  test('unset knobs produce no overrides and no errors', () => {
+    expect(loadSelfLivenessEnvOverrides({} as any)).toEqual({ overrides: {}, errors: [] })
+  })
+
+  test('valid values read back as effective overrides', () => {
+    const { overrides, errors } = loadSelfLivenessEnvOverrides({
+      STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC: '300',
+      STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC: '1200',
+    } as any)
+    expect(errors).toEqual([])
+    expect(overrides).toEqual({ selfLivenessWedgeSec: 300, selfLivenessMinExitIntervalSec: 1200 })
+  })
+
+  test('malformed values are startup errors, never silent defaults', () => {
+    for (const bad of ['abc', 'NaN', 'Infinity', '0', '-1', '1.5', '', ' ', '1e3', '0900']) {
+      const { overrides, errors } = loadSelfLivenessEnvOverrides({
+        STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC: bad,
+      } as any)
+      expect(overrides).toEqual({})
+      expect(errors.length).toBe(1)
+      expect(errors[0]).toContain('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC')
+    }
   })
 })

@@ -608,7 +608,17 @@ export function createFileSelfLivenessStore(path: string): SelfLivenessStore {
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
       if (!Array.isArray(parsed?.exits)) return { exits: [], error: 'ledger_shape_invalid' }
-      return { exits: parsed.exits.filter((x: unknown) => Number.isFinite(x)), error: null }
+      const exits: number[] = []
+      for (const entry of parsed.exits) {
+        // Strict per-entry validation: a parseable-but-invalid entry is
+        // corruption evidence, not noise to filter. Dropping it silently
+        // would fail the D3 restart bound open and destroy the evidence.
+        if (typeof entry !== 'number' || !Number.isFinite(entry) || !Number.isInteger(entry) || entry <= 0) {
+          return { exits: [], error: 'ledger_entry_invalid' }
+        }
+        exits.push(entry)
+      }
+      return { exits, error: null }
     } catch (e) {
       // Corruption / IO error must NOT collapse to empty history: D3
       // boundedness would silently fail open. Caller refuses to exit.
@@ -632,6 +642,41 @@ export function createFileSelfLivenessStore(path: string): SelfLivenessStore {
       }
     },
   }
+}
+
+/** Strict env loader for the self-liveness numeric knobs. Distinguishes
+ * unset (use default) from malformed (startup error): an operator typo must
+ * never silently degrade D3 boundedness to defaults. */
+export function loadSelfLivenessEnvOverrides(env: NodeJS.ProcessEnv = process.env): {
+  overrides: Partial<StateDaemonConfig>
+  errors: string[]
+} {
+  const overrides: Partial<StateDaemonConfig> = {}
+  const errors: string[] = []
+  const strict = (name: string, key: keyof StateDaemonConfig) => {
+    const raw = env[name]
+    if (raw === undefined) return
+    const trimmed = raw.trim()
+    const value = Number(trimmed)
+    if (
+      trimmed === ''
+      || !Number.isFinite(value)
+      || !Number.isInteger(value)
+      || value <= 0
+      || String(value) !== trimmed
+    ) {
+      errors.push(`${name} must be a positive integer (got ${JSON.stringify(raw)})`)
+      return
+    }
+    ;(overrides as Record<string, unknown>)[key as string] = value
+  }
+  strict('STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS', 'selfLivenessCheckIntervalMs')
+  strict('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC', 'selfLivenessWedgeSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES', 'selfLivenessMaxStrikes')
+  strict('STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', 'selfLivenessMinExitIntervalSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', 'selfLivenessExitWindowSec')
+  strict('STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', 'selfLivenessMaxExitsPerWindow')
+  return { overrides, errors }
 }
 
 /** Fail-closed validation for the published self-liveness knobs. */
@@ -718,13 +763,9 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('batchLimit', num('STATE_DAEMON_BATCH_LIMIT'))
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
-  set('selfLivenessCheckIntervalMs', num('STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS'))
-  set('selfLivenessWedgeSec', num('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC'))
-  set('selfLivenessMaxStrikes', num('STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
-  set('selfLivenessMinExitIntervalSec', num('STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC'))
-  set('selfLivenessExitWindowSec', num('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC'))
-  set('selfLivenessMaxExitsPerWindow', num('STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW'))
+  // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
+  // fail-closed on malformed values) — merged and validated in main()
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
   if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
@@ -1133,8 +1174,11 @@ export async function main(): Promise<void> {
   const db = new PgClientAdapter(queryClient)
   const config = loadConfig()
   {
+    const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
+    Object.assign(config, overrides)
     const merged = { ...DEFAULT_CONFIG, ...config }
-    const selfLivenessErrors = validateSelfLivenessConfig(merged)
+    const invariantErrors = validateSelfLivenessConfig(merged)
+    const selfLivenessErrors = [...errors, ...invariantErrors]
     if (selfLivenessErrors.length > 0) {
       throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
     }
