@@ -1681,6 +1681,14 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 
 初出 incident: 2026-08-27 18:05 JST、queue-work scheduler のみが無痕跡で沈黙し他コンポーネントは生存、外形から検知不能だった(#940)。regression: `tests/state-daemon-self-liveness.test.ts` の「D2 binding」test が本署名(非 queue metric は流れ続け queue family のみ沈黙)を固定する。
 
+### 13.5.5 Bounded concurrent runners (E7, Issue #940 definition v2)
+
+queue-work scheduler は同時に走らせる runner child を `STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS`(default 3)に制限する。
+
+- 上限超過の行は **pending のまま**残り、次 sweep で再評価される(deferral は `state_daemon_queue_work_actions_total{result=*_runner_concurrency_deferred}` で可視)。試行回数を消費しない
+- per-agent の直列性(同一席 1 runner)は上限の内側で従来どおり適用
+- 根拠 incident: 2026-08-27 fleet 初日、無制限並列で LLM CLI 13 個が並走し、資源競合により 10 席超が `CODEX_OUTPUT_LAST_MESSAGE_MISSING` で typed failed(#940)。日次一斉配信(毎日 2 回 × 全席)が恒常的にこの burst を作るため、上限は R1(日次サイクル完走)の前提条件
+
 ### 13.6 Presence Client
 
 Presence Client は将来拡張、現行は opt-in。

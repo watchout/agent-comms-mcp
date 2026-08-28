@@ -1573,6 +1573,13 @@ export class StateDaemon {
     }
     const key = row.agent_id
     const queueId = String(row.id)
+    if (!this.inflightQueueWork.has(key) && this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners) {
+      // E7 backpressure: bound concurrent runner children. The row stays
+      // pending and the next sweep retries; deferral is metric-visible and
+      // never consumes a retry attempt.
+      this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_concurrency_deferred` })
+      return
+    }
     if (this.inflightQueueWork.has(key)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', {
         result: this.inflightQueueWorkIds.has(queueId)

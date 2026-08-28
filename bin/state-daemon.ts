@@ -764,6 +764,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
+  set('queueWorkMaxConcurrentRunners', num('STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS'))
   // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
   // fail-closed on malformed values) — merged and validated in main()
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
