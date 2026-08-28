@@ -1,0 +1,55 @@
+{
+  "provider": {
+    "default": "claude"
+  },
+  "docs_layers": {
+    "enabled": true
+  },
+  "roles": {
+    "bindings": {
+      "architecture_owner": {
+        "type": "external",
+        "id": "todo-architecture-owner",
+        "placeholder": true
+      },
+      "implementation_lead": {
+        "type": "external",
+        "id": "todo-implementation-lead",
+        "placeholder": true
+      },
+      "reviewer": {
+        "type": "external",
+        "id": "todo-reviewer",
+        "placeholder": true
+      },
+      "auditor": {
+        "type": "external",
+        "id": "todo-auditor",
+        "placeholder": true
+      },
+      "release_owner": {
+        "type": "github_user",
+        "id": "watchout"
+      },
+      "human_approver": {
+        "type": "github_user",
+        "id": "watchout"
+      },
+      "worker_pool": {
+        "type": "local_agent",
+        "id": "dev-001"
+      },
+      "l3_governance_owner": {
+        "type": "github_user",
+        "id": "watchout"
+      }
+    }
+  },
+  "workflow": {
+    "publishPolicy": "approval_required",
+    "outputs": [
+      "local_files",
+      "github"
+    ]
+  }
+}
