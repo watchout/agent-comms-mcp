@@ -131,6 +131,21 @@ export interface StateDaemonConfig {
   githubWorkPullerOwnerAllowlist: string[] | null
 
   /**
+   * Self-liveness (crash-only, issue #940 liveness definition D2/D3).
+   * The daemon measures its own queue-work progress; when eligible pending
+   * rows exist but no sweep/evaluation progress was recorded for
+   * `selfLivenessWedgeSec`, it counts a strike. After
+   * `selfLivenessMaxStrikes` consecutive strikes it exits(1) so launchd
+   * KeepAlive restarts a fresh process. Failure mode collapses to
+   * "running or dead" — a wedged-but-alive daemon is not a legal state.
+   */
+  selfLivenessCheckIntervalMs: number
+  selfLivenessWedgeSec: number
+  selfLivenessMaxStrikes: number
+  /** Kill switch: suppress the exit (still alerts + metrics). */
+  selfLivenessExitDisabled: boolean
+
+  /**
    * Test-only scope guard. When set, every queue / agents query the daemon
    * issues is filtered to `agent_id LIKE prefix||'%'`. Production MUST leave
    * this `null` so the daemon scans the full fleet — the field exists only so
@@ -196,6 +211,10 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   githubWorkPullerRepos: null,
   githubWorkPullerLabels: null,
   githubWorkPullerOwnerAllowlist: null,
+  selfLivenessCheckIntervalMs: 60_000,
+  selfLivenessWedgeSec: 600,
+  selfLivenessMaxStrikes: 3,
+  selfLivenessExitDisabled: false,
 }
 
 /**
@@ -449,4 +468,6 @@ export interface StateDaemonDeps {
   metrics: Metrics
   alert: AlertSink
   config?: Partial<StateDaemonConfig>
+  /** Crash-only exit hook; tests inject a spy. Defaults to process.exit. */
+  exit?: (code: number) => void
 }

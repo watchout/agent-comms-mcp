@@ -1648,6 +1648,19 @@ legacy として認識し (`legacy_status_mix` warning)、修了扱いの集計�
 読み替える。旧値の一掃は schema/data migration ではなく、書き込み経路の廃止と
 自然減で行う (既存の他 `skipped` writer の廃止は follow-up 台帳)。
 
+### 13.5.4 Self-liveness (crash-only, Issue #940)
+
+state-daemon は決定論スクリプトであり、合法な故障モードは「動いている」か「死んでいる」の二値のみとする。「プロセスは生きているが queue 処理だけ止まっている」半死状態は設計上违法であり、daemon 自身が検知して自死する:
+
+- **progress marker**: sweep 完了と queue-work 評価のたびに `lastQueueProgressAt` を更新
+- **check**: `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごとに、fence 内適格 pending が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)を超えて停止していれば strike を数える。pending 0 なら strike は常に 0(暇は wedge ではない)
+- **crash-only exit**: 連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で alert 1 回 + `process.exit(1)`。launchd `KeepAlive` が新プロセスを起動する。外部 watchdog を恒久機構としない
+- **D4(依存断の識別)**: liveness check 自身の DB エラーは strike に数えない(DB 停止は daemon の罪ではない)
+- **kill switch**: `STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED=1` で exit のみ抑止(alert/metric は維持)。canary/調査用
+- metrics: `state_daemon_self_liveness_total{result=strike|recovered|exit|exit_suppressed}`
+
+初出 incident: 2026-08-27 18:05 JST、queue-work scheduler のみが無痕跡で沈黙し他コンポーネントは生存、外形から検知不能だった(#940)。
+
 ### 13.6 Presence Client
 
 Presence Client は将来拡張、現行は opt-in。

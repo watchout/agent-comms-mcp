@@ -649,6 +649,10 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('batchLimit', num('STATE_DAEMON_BATCH_LIMIT'))
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
+  set('selfLivenessCheckIntervalMs', num('STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS'))
+  set('selfLivenessWedgeSec', num('STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC'))
+  set('selfLivenessMaxStrikes', num('STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES'))
+  set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
   set('activeClaimMaxAgeSec', num('STATE_DAEMON_ACTIVE_CLAIM_MAX_AGE_SEC'))
   if (str('STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM') === '1') {
