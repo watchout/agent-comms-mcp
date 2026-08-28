@@ -6,6 +6,16 @@ GitHub is the durable SSOT for Company Dev OS task state. Role comments carry
 the evidence, but PR label/state changes must be made through
 `scripts/pr-conveyor.ts` so stale exact-head evidence cannot advance a PR.
 
+The canonical route is:
+
+```text
+implementation -> audit -> QA -> check -> CTO when high-risk
+```
+
+CTO review is not the default next step after every check. Use the explicit
+`check-pass-cto` transition only when the PR is high-risk or the governing
+issue/route requires merge-authority review.
+
 ## Contract
 
 The controller is dry-run by default.
@@ -36,9 +46,12 @@ exact head comparison, the evidence URL, and the planned `gh pr edit` command.
 | Transition | Use |
 | --- | --- |
 | `impl-to-l2` | Implementation handoff requests L2 audit. |
-| `l2-pass` | L2 audit passed at the exact head. |
+| `audit-pass` | Audit passed at the exact head; QA is next. |
+| `l2-pass` | Compatibility alias for `audit-pass`. |
+| `qa-pass` | QA passed at the exact head; check is next. |
 | `needs-rework` | Audit, QA, check, or CTO requires implementation rework. |
-| `check-pass` | Check passed; merge authority review may proceed. |
+| `check-pass` | Check passed; release owner may prepare merge. |
+| `check-pass-cto` | Check passed; high-risk CTO review is next. |
 | `cto-go` | Exact-head merge authority GO. |
 | `blocked` | Protected or external blocker stops the conveyor. |
 
@@ -53,7 +66,7 @@ bun scripts/pr-conveyor.ts --pr <pr> --head <exact-head> --transition impl-to-l2
 Audit:
 
 ```bash
-bun scripts/pr-conveyor.ts --pr <pr> --head <exact-head> --transition l2-pass --evidence-url <audit-url> --execute
+bun scripts/pr-conveyor.ts --pr <pr> --head <exact-head> --transition audit-pass --evidence-url <audit-url> --execute
 ```
 
 Failure or rework:
@@ -66,6 +79,12 @@ Check:
 
 ```bash
 bun scripts/pr-conveyor.ts --pr <pr> --head <exact-head> --transition check-pass --evidence-url <check-url> --execute
+```
+
+High-risk check to CTO:
+
+```bash
+bun scripts/pr-conveyor.ts --pr <pr> --head <exact-head> --transition check-pass-cto --evidence-url <check-url> --execute
 ```
 
 CTO:

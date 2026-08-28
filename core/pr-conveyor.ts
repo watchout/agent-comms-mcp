@@ -1,8 +1,11 @@
 export type PrConveyorTransition =
   | 'impl-to-l2'
+  | 'audit-pass'
   | 'l2-pass'
+  | 'qa-pass'
   | 'needs-rework'
   | 'check-pass'
+  | 'check-pass-cto'
   | 'cto-go'
   | 'blocked'
 
@@ -55,6 +58,9 @@ const STATE_LABELS = [
   'state:impl-l1',
   'state:impl-l2',
   'state:impl-l3',
+  'state:qa',
+  'state:check',
+  'state:cto',
   'state:ceo-approval',
   'state:merge-ready',
   'state:blocked',
@@ -66,6 +72,9 @@ const NEEDS_LABELS = [
   'needs:l1-audit',
   'needs:l2-audit',
   'needs:l3-review',
+  'needs:qa',
+  'needs:check',
+  'needs:cto',
   'needs:ceo-approval',
   'needs:implementation',
   'needs:rework',
@@ -75,6 +84,11 @@ const AUDIT_PENDING_LABELS = [
   'audit:l1-pending',
   'audit:l2-pending',
   'audit:l3-pending',
+]
+
+const AUDIT_REQUIRED_LABELS = [
+  'audit:l2-required',
+  'audit:l3-required',
 ]
 
 const AUDIT_PASS_LABELS = [
@@ -108,9 +122,31 @@ function resetConveyorLabels(): string[] {
     ...STATE_LABELS,
     ...NEEDS_LABELS,
     ...AUDIT_PENDING_LABELS,
+    ...AUDIT_REQUIRED_LABELS,
     ...REVIEW_BLOCK_LABELS,
     ...READINESS_LABELS,
   ])
+}
+
+const AUDIT_PASS_TO_QA: TransitionSpec = {
+  add: ['audit:l2-passed', 'needs:qa', 'state:qa'],
+  remove: unique([
+    ...AUDIT_PENDING_LABELS,
+    ...AUDIT_REQUIRED_LABELS,
+    'audit:changes-requested',
+    'changes-requested',
+    'audit-pending',
+    'evidence-ready',
+    'needs:l1-audit',
+    'needs:l2-audit',
+    'needs:l3-review',
+    'needs:rework',
+    'state:impl-l1',
+    'state:impl-l2',
+    'state:impl-l3',
+    'state:rework',
+    'rework-implementing',
+  ]),
 }
 
 export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpec> = {
@@ -118,16 +154,26 @@ export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpe
     add: ['audit:l2-pending', 'needs:l2-audit', 'state:impl-l2', 'audit-pending'],
     remove: resetConveyorLabels(),
   },
-  'l2-pass': {
-    add: ['audit:l2-passed', 'evidence-ready'],
+  'audit-pass': AUDIT_PASS_TO_QA,
+  'l2-pass': AUDIT_PASS_TO_QA,
+  'qa-pass': {
+    add: ['needs:check', 'state:check'],
     remove: unique([
       ...AUDIT_PENDING_LABELS,
+      ...AUDIT_REQUIRED_LABELS,
       'audit:changes-requested',
       'changes-requested',
       'audit-pending',
+      'evidence-ready',
+      'needs:l1-audit',
       'needs:l2-audit',
+      'needs:l3-review',
+      'needs:qa',
       'needs:rework',
+      'state:impl-l1',
       'state:impl-l2',
+      'state:impl-l3',
+      'state:qa',
       'state:rework',
       'rework-implementing',
     ]),
@@ -143,32 +189,68 @@ export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpe
       'needs:l1-audit',
       'needs:l2-audit',
       'needs:l3-review',
+      'needs:qa',
+      'needs:check',
+      'needs:cto',
       'state:impl-l1',
       'state:impl-l2',
       'state:impl-l3',
+      'state:qa',
+      'state:check',
+      'state:cto',
       'state:merge-ready',
     ]),
   },
   'check-pass': {
-    add: ['merge-ready', 'state:merge-ready', 'needs:l3-review'],
+    add: ['merge-ready', 'state:merge-ready'],
     remove: unique([
       'evidence-ready',
       'audit-pending',
       'needs:l1-audit',
       'needs:l2-audit',
+      'needs:l3-review',
+      'needs:qa',
+      'needs:check',
+      'needs:cto',
       'state:impl-l1',
       'state:impl-l2',
       'state:impl-l3',
+      'state:qa',
+      'state:check',
+      'state:cto',
+      'audit:changes-requested',
+      'changes-requested',
+    ]),
+  },
+  'check-pass-cto': {
+    add: ['needs:cto', 'state:cto'],
+    remove: unique([
+      'evidence-ready',
+      'audit-pending',
+      'merge-ready',
+      'needs:l1-audit',
+      'needs:l2-audit',
+      'needs:l3-review',
+      'needs:qa',
+      'needs:check',
+      'state:impl-l1',
+      'state:impl-l2',
+      'state:impl-l3',
+      'state:qa',
+      'state:check',
+      'state:merge-ready',
       'audit:changes-requested',
       'changes-requested',
     ]),
   },
   'cto-go': {
-    add: ['audit:l3-passed', 'merge-ready', 'state:merge-ready'],
+    add: ['merge-ready', 'state:merge-ready'],
     remove: unique([
       'audit:l3-pending',
       'needs:l3-review',
+      'needs:cto',
       'state:impl-l3',
+      'state:cto',
       'state:ceo-approval',
       'needs:ceo-approval',
       'audit:changes-requested',
@@ -187,6 +269,9 @@ export const PR_CONVEYOR_TRANSITIONS: Record<PrConveyorTransition, TransitionSpe
       'state:impl-l1',
       'state:impl-l2',
       'state:impl-l3',
+      'state:qa',
+      'state:check',
+      'state:cto',
       'state:merge-ready',
     ]),
   },

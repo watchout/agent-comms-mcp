@@ -32,14 +32,15 @@ describe('PR conveyor exact-head label controller', () => {
     expect(plan.gh_command).toEqual([])
   })
 
-  test('l2-pass removes stale L2 pending state and plans the exact-head evidence labels', () => {
+  test('audit-pass removes stale audit state and routes to QA', () => {
     const plan = buildPrConveyorPlan({
       prNumber: 750,
       expectedHead: HEAD,
       currentHead: HEAD,
-      transition: 'l2-pass',
+      transition: 'audit-pass',
       currentLabels: [
         'audit:l2-pending',
+        'audit:l3-required',
         'needs:l2-audit',
         'state:impl-l2',
         'changes-requested',
@@ -50,9 +51,10 @@ describe('PR conveyor exact-head label controller', () => {
     })
 
     expect(plan.ok).toBe(true)
-    expect(plan.add_labels).toEqual(['audit:l2-passed', 'evidence-ready'])
+    expect(plan.add_labels).toEqual(['audit:l2-passed', 'needs:qa', 'state:qa'])
     expect(plan.remove_labels).toEqual([
       'audit:l2-pending',
+      'audit:l3-required',
       'changes-requested',
       'needs:l2-audit',
       'state:impl-l2',
@@ -63,9 +65,88 @@ describe('PR conveyor exact-head label controller', () => {
       'edit',
       '750',
       '--add-label',
-      'audit:l2-passed,evidence-ready',
+      'audit:l2-passed,needs:qa,state:qa',
       '--remove-label',
-      'audit:l2-pending,changes-requested,needs:l2-audit,state:impl-l2',
+      'audit:l2-pending,audit:l3-required,changes-requested,needs:l2-audit,state:impl-l2',
+    ])
+  })
+
+  test('l2-pass remains a compatibility alias for audit-pass', () => {
+    const plan = buildPrConveyorPlan({
+      prNumber: 750,
+      expectedHead: HEAD,
+      currentHead: HEAD,
+      transition: 'l2-pass',
+      currentLabels: ['audit:l2-pending', 'needs:l2-audit', 'state:impl-l2'],
+      availableLabels: AVAILABLE_LABELS,
+    })
+
+    expect(plan.ok).toBe(true)
+    expect(plan.add_labels).toEqual(['audit:l2-passed', 'needs:qa', 'state:qa'])
+    expect(plan.remove_labels).toEqual([
+      'audit:l2-pending',
+      'needs:l2-audit',
+      'state:impl-l2',
+    ])
+  })
+
+  test('qa-pass moves exact-head QA evidence to check', () => {
+    const plan = buildPrConveyorPlan({
+      prNumber: 750,
+      expectedHead: HEAD,
+      currentHead: HEAD,
+      transition: 'qa-pass',
+      currentLabels: [
+        'audit:l2-passed',
+        'needs:qa',
+        'state:qa',
+        'audit:l1-pending',
+        'needs:l1-audit',
+      ],
+      availableLabels: AVAILABLE_LABELS,
+    })
+
+    expect(plan.ok).toBe(true)
+    expect(plan.add_labels).toEqual(['needs:check', 'state:check'])
+    expect(plan.remove_labels).toEqual([
+      'audit:l1-pending',
+      'needs:l1-audit',
+      'needs:qa',
+      'state:qa',
+    ])
+  })
+
+  test('check-pass defaults to merge-ready without requesting L3 review', () => {
+    const plan = buildPrConveyorPlan({
+      prNumber: 750,
+      expectedHead: HEAD,
+      currentHead: HEAD,
+      transition: 'check-pass',
+      currentLabels: ['needs:check', 'state:check', 'audit:l2-passed'],
+      availableLabels: AVAILABLE_LABELS,
+    })
+
+    expect(plan.ok).toBe(true)
+    expect(plan.add_labels).toEqual(['merge-ready', 'state:merge-ready'])
+    expect(plan.remove_labels).toEqual(['needs:check', 'state:check'])
+  })
+
+  test('check-pass-cto explicitly routes high-risk checks to CTO', () => {
+    const plan = buildPrConveyorPlan({
+      prNumber: 750,
+      expectedHead: HEAD,
+      currentHead: HEAD,
+      transition: 'check-pass-cto',
+      currentLabels: ['needs:check', 'state:check', 'evidence-ready'],
+      availableLabels: AVAILABLE_LABELS,
+    })
+
+    expect(plan.ok).toBe(true)
+    expect(plan.add_labels).toEqual(['needs:cto', 'state:cto'])
+    expect(plan.remove_labels).toEqual([
+      'evidence-ready',
+      'needs:check',
+      'state:check',
     ])
   })
 

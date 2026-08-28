@@ -84,7 +84,8 @@ check_pattern '\.(plist|service|socket)$'        "launchd/systemd service file"
 
 # ── Governance / gate scripts ────────────────────────────────────────────
 check_pattern '\.github/workflows/'              "GitHub Actions workflow"
-check_pattern 'scripts/(detect-breaking|classify-pr|post-merge-smoke)' "Gate/governance script"
+check_pattern 'core/pr-conveyor\.ts$'            "PR conveyor governance"
+check_pattern 'scripts/(detect-breaking|classify-pr|post-merge-smoke|pr-conveyor)' "Gate/governance script"
 
 # ── Result ────────────────────────────────────────────────────────────────
 if [ ${#REASONS[@]} -eq 0 ]; then

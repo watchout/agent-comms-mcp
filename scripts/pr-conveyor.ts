@@ -30,9 +30,12 @@ Usage:
 
 Transitions:
   impl-to-l2     Implementation handoff requests L2 audit
-  l2-pass        L2 audit passed at exact head
+  audit-pass     Audit passed at exact head; QA is next
+  l2-pass        Compatibility alias for audit-pass
+  qa-pass        QA passed at exact head; check is next
   needs-rework   Review failed and implementation rework is required
-  check-pass     Check completed; merge authority review may proceed
+  check-pass     Check completed; release owner may prepare merge
+  check-pass-cto Check completed; high-risk CTO review is next
   cto-go         Exact-head merge authority GO
   blocked        Protected/blocking condition
 
