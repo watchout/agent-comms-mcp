@@ -1743,6 +1743,18 @@ export class StateDaemon {
     memoryReadyProject: string,
   ): Promise<boolean> {
     if (!this.config.codexRunnerEnabled) {
+      // Fallback: when codex-runner is disabled, send wake prompt via tmux send-keys.
+      // Codex TUI sessions respond to visible-text prompts the same way Claude Code does.
+      const agentRow = await this.dbQuery<{ tmux_session: string | null }>(
+        `SELECT metadata->>'tmux_session' AS tmux_session FROM agents WHERE agent_id=$1`,
+        [row.agent_id],
+      )
+      const session = agentRow.rows[0]?.tmux_session ?? null
+      if (session) {
+        await this.tmux.sendPrompt(session, 'check inbox')
+        this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled_tmux_fallback' })
+        return true
+      }
       this.metrics.inc('state_daemon_wake_actions_total', { result: 'codex_runner_disabled' })
       return false
     }

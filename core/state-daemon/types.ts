@@ -315,6 +315,9 @@ export interface TmuxClient {
   sessionExists(session: string): Promise<boolean>
   /** Legacy adapter hook retained for compatibility; StateDaemon no longer restarts TUI/tmux bots. */
   restartSession(agentId: string): Promise<void>
+  /** Send a prompt string + Enter to the named tmux session via send-keys.
+   *  Used as codex-runner fallback when codexRunnerEnabled=false. */
+  sendPrompt(session: string, prompt: string): Promise<void>
 }
 
 export interface Clock {
