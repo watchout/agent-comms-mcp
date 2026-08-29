@@ -324,6 +324,7 @@ describe('self-liveness knob validation (fail-closed startup)', () => {
     selfLivenessMinExitIntervalSec: 900,
     selfLivenessExitWindowSec: 3_600,
     selfLivenessMaxExitsPerWindow: 3,
+    queueWorkMaxConcurrentRunners: 3,
   }
   test('defaults validate clean', () => {
     expect(validateSelfLivenessConfig(base)).toEqual([])

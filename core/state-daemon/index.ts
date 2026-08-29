@@ -256,6 +256,10 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
   return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent, channelMember))
 }
 
+export type QueueWorkScheduleResult =
+  | 'invoked' | 'deferred_concurrency' | 'deferred_busy' | 'dedup'
+  | 'residue_excluded' | 'fence_skipped'
+
 export class StateDaemon {
   private readonly db: DBClient
   private readonly pgListen: PgListenClient
@@ -284,6 +288,10 @@ export class StateDaemon {
   // Self-liveness (crash-only, #940 D2/D3): last time the queue path made
   // observable progress (sweep completion or a queue-work evaluation).
   private lastQueueProgressAt = 0
+  // F1: last slot acquire/release across generic + D1. All slots occupied
+  // with no activity past the wedge window is a hang even while deferral or
+  // sweep-planning metrics keep flowing.
+  private lastSlotActivityAt = 0
   private selfLivenessStrikes = 0
   private selfLivenessEpisodeAlerted = false
   private selfLivenessSuppressionAlerted = false
@@ -327,6 +335,7 @@ export class StateDaemon {
     this.exit = deps.exit ?? ((code: number) => process.exit(code))
     this.selfLivenessStore = deps.selfLivenessStore ?? createInMemorySelfLivenessStore()
     this.lastQueueProgressAt = deps.clock.now().getTime()
+    this.lastSlotActivityAt = deps.clock.now().getTime()
     // cycle 2 Fix (auditor verdict `ab541187`): the GC env overrides have
     // to land in `this.config` to actually take effect at runtime.
     // Merge order, lowest → highest precedence:
@@ -656,10 +665,10 @@ export class StateDaemon {
    * One liveness evaluation over an injected eligible-pending count.
    * Decision only; the exit path (drain + exit) runs in the async caller.
    */
-  private evaluateSelfLiveness(eligiblePendingCount: number): SelfLivenessDecision {
+  private evaluateSelfLiveness(eligiblePendingCount: number, slotsWedged = false): SelfLivenessDecision {
     const nowMs = this.clock.now().getTime()
     const idleMs = nowMs - this.lastQueueProgressAt
-    if (eligiblePendingCount === 0 || idleMs <= this.config.selfLivenessWedgeSec * 1000) {
+    if (eligiblePendingCount === 0 || (idleMs <= this.config.selfLivenessWedgeSec * 1000 && !slotsWedged)) {
       if (this.selfLivenessStrikes > 0) {
         this.metrics.inc('state_daemon_self_liveness_total', { result: 'recovered' })
       }
@@ -784,8 +793,16 @@ export class StateDaemon {
       this.recordDbError(e)
       return
     }
-    const decision = this.evaluateSelfLiveness(eligibleExists ? 1 : 0)
+    const decision = this.evaluateSelfLiveness(eligibleExists ? 1 : 0, this.queueWorkSlotsWedged())
     if (decision === 'exit') await this.drainThenExit()
+  }
+
+  /** F1: all runner slots occupied with no acquire/release for the wedge
+   * window. Deferral and sweep-planning metrics keep flowing in that state,
+   * so the hang must strike independently of the queue-progress marker. */
+  private queueWorkSlotsWedged(): boolean {
+    return this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners
+      && (this.clock.now().getTime() - this.lastSlotActivityAt) > this.config.selfLivenessWedgeSec * 1000
   }
 
   /** Test hook: run the population-wide eligible-pending existence probe. */
@@ -794,8 +811,8 @@ export class StateDaemon {
   }
 
   /** Test hook: one full liveness evaluation incl. exit drain, with injected count. */
-  async __testSelfLivenessTick(eligiblePendingCount: number): Promise<SelfLivenessDecision> {
-    const decision = this.evaluateSelfLiveness(eligiblePendingCount)
+  async __testSelfLivenessTick(eligiblePendingCount: number, slotsWedged = false): Promise<SelfLivenessDecision> {
+    const decision = this.evaluateSelfLiveness(eligiblePendingCount, slotsWedged || this.queueWorkSlotsWedged())
     if (decision === 'exit') await this.drainThenExit()
     return decision
   }
@@ -974,11 +991,10 @@ export class StateDaemon {
     const d1Handled = await this.tryShirubeD1AutoReceive(row)
     if (d1Handled !== null) return d1Handled
     if (row.status === 'done' && this.queueWorkScheduler?.runDone) {
-      this.scheduleQueueWorkRunner('done', row, () => this.queueWorkScheduler!.runDone!({
+      return this.scheduleQueueWorkRunner('done', row, () => this.queueWorkScheduler!.runDone!({
         queueId: row.id,
         agentId: row.agent_id,
-      }))
-      return true
+      })) === 'invoked'
     }
     const manifestAdmission = await this.checkAllAgentCommunicationManifestAdmission(row)
     if (manifestAdmission.outcome !== 'admit') {
@@ -1511,11 +1527,11 @@ export class StateDaemon {
     switch (action.kind) {
       case 'invoke_codex_runner':
         if (this.queueWorkScheduler?.runPending) {
-          this.scheduleQueueWorkRunner('pending', row, () => this.queueWorkScheduler!.runPending!({
+          // F4: acted/rewoken accounting must reflect real invocations only.
+          return this.scheduleQueueWorkRunner('pending', row, () => this.queueWorkScheduler!.runPending!({
             queueId: row.id,
             agentId: row.agent_id,
-          }))
-          return true
+          })) === 'invoked'
         }
         return this.invokeCodexRunner(row, agent, memoryReadyProject)
       case 'agent_missing':
@@ -1536,11 +1552,10 @@ export class StateDaemon {
         return false
       case 'observe_received':
         if (this.queueWorkScheduler) {
-          this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
+          return this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
             queueId: row.id,
             agentId: row.agent_id,
-          }))
-          return true
+          })) === 'invoked'
         }
         this.metrics.inc('state_daemon_wake_actions_total', { result: 'observed' })
         return false
@@ -1562,34 +1577,37 @@ export class StateDaemon {
     phase: 'pending' | 'received' | 'done',
     row: QueueRow,
     run: () => Promise<void>,
-  ): void {
+  ): QueueWorkScheduleResult {
     if (this.isQueueWorkResidueExcluded(row)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: phase })
-      return
+      return 'residue_excluded'
     }
     if (this.queueWorkFenceConfigured() && !this.isQueueWorkFenceInScope(row)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_fence_skipped', path: phase })
-      return
+      return 'fence_skipped'
     }
-    const key = row.agent_id
+    // F3: generic and Shirube D1 share one global slot pool; keys are
+    // namespaced so an agent_id can never collide with a D1 queue_id.
+    const key = `agent:${row.agent_id}`
     const queueId = String(row.id)
-    if (!this.inflightQueueWork.has(key) && this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners) {
-      // E7 backpressure: bound concurrent runner children. The row stays
-      // pending and the next sweep retries; deferral is metric-visible and
-      // never consumes a retry attempt.
-      this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_concurrency_deferred` })
-      return
-    }
     if (this.inflightQueueWork.has(key)) {
+      const dedup = this.inflightQueueWorkIds.has(queueId)
       this.metrics.inc('state_daemon_queue_work_actions_total', {
-        result: this.inflightQueueWorkIds.has(queueId)
-          ? `${phase}_runner_dedup_skipped`
-          : `${phase}_runner_agent_busy_deferred`,
+        result: dedup ? `${phase}_runner_dedup_skipped` : `${phase}_runner_agent_busy_deferred`,
       })
-      return
+      return dedup ? 'dedup' : 'deferred_busy'
+    }
+    if (this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners) {
+      // E7 backpressure: the row stays pending and the next sweep retries.
+      // F1: this metric is deliberately OUTSIDE the D2 queue-progress family —
+      // deferral must never count as progress, or all-slots-hung becomes an
+      // undetectable half-death again.
+      this.metrics.inc('state_daemon_queue_work_backpressure_total', { result: `${phase}_runner_concurrency_deferred` })
+      return 'deferred_concurrency'
     }
     this.metrics.inc('state_daemon_queue_work_actions_total', { result: `${phase}_runner_invoked` })
     this.inflightQueueWorkIds.add(queueId)
+    this.lastSlotActivityAt = this.clock.now().getTime()
     const promise = Promise.resolve()
       .then(run)
       .catch((err) => {
@@ -1600,8 +1618,10 @@ export class StateDaemon {
       .finally(() => {
         this.inflightQueueWorkIds.delete(queueId)
         this.inflightQueueWork.delete(key)
+        this.lastSlotActivityAt = this.clock.now().getTime()
       })
     this.inflightQueueWork.set(key, promise)
+    return 'invoked'
   }
 
   private shirubeD1Input(row: QueueRow): ShirubeD1AutoReceiveInput {
@@ -1657,11 +1677,10 @@ export class StateDaemon {
       if (row.status === 'received'
         && this.queueWorkScheduler
         && !this.config.allAgentCommunicationManifestEnforcementEnabled) {
-        this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
+        return this.scheduleQueueWorkRunner('received', row, () => this.queueWorkScheduler!.runReceived({
           queueId: row.id,
           agentId: row.agent_id,
-        }))
-        return true
+        })) === 'invoked'
       }
       return null
     }
@@ -1679,10 +1698,17 @@ export class StateDaemon {
       return false
     }
 
-    const key = String(row.id)
+    const key = `d1:${row.id}`
     if (this.inflightQueueWork.has(key)) {
       this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', { result: 'duplicate_notify' })
       return true
+    }
+    if (this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners) {
+      // F3: D1 dispatch obeys the same global runner bound as generic
+      // queue-work. The row stays in place and is re-swept; the deferral
+      // metric is outside the D2 progress family (F1).
+      this.metrics.inc('state_daemon_queue_work_backpressure_total', { result: 'd1_runner_concurrency_deferred' })
+      return false
     }
     const input = this.shirubeD1Input(row)
     this.metrics.inc('state_daemon_shirube_d1_auto_receive_total', {
@@ -1702,8 +1728,10 @@ export class StateDaemon {
       })
       .finally(() => {
         this.inflightQueueWork.delete(key)
+        this.lastSlotActivityAt = this.clock.now().getTime()
       })
     this.inflightQueueWork.set(key, promise)
+    this.lastSlotActivityAt = this.clock.now().getTime()
     return true
   }
 

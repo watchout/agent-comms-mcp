@@ -1657,6 +1657,7 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 - progress の定義は「**queue 系 metric family の emission**」と厳密に等価: `state_daemon_queue_work_actions_total` / `state_daemon_memory_ready_backoff_total` / `state_daemon_state_actions_total`。実装は metric sink を wrap して emission 時刻を記録する(sweep 完了や関数入口は progress ではない)
 - check は `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごと。**eligible pending**(shared automatic-processing eligibility を通過した fence 内 pending)が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)超停止 → strike。連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で exit 判定へ
 - **strike しない条件**: eligible pending 0(暇・正当な非対象は wedge でない)/ check 自身の DB エラー(D4: 依存断は daemon の罪ではない)。gate による正当な保留は backoff metric を emit するため progress として扱われる
+- **slot-wedge signal(E7 連動)**: 全 runner slot が占有されたまま acquire/release が wedge 時間発生しない場合、queue-progress marker の鮮度に関係なく strike する(sweep 計画 metric や deferral が流れ続けても all-slots-hung を隠せない)。deferral metric(`state_daemon_queue_work_backpressure_total`)は progress family の**外**
 
 **D3 — 回復の有界性(durable exit ledger)**
 
@@ -1683,11 +1684,14 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 
 ### 13.5.5 Bounded concurrent runners (E7, Issue #940 definition v2)
 
-queue-work scheduler は同時に走らせる runner child を `STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS`(default 3)に制限する。
+queue-work runner child の同時実行数を `STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS` で制限する。
 
-- 上限超過の行は **pending のまま**残り、次 sweep で再評価される(deferral は `state_daemon_queue_work_actions_total{result=*_runner_concurrency_deferred}` で可視)。試行回数を消費しない
-- per-agent の直列性(同一席 1 runner)は上限の内側で従来どおり適用
-- 根拠 incident: 2026-08-27 fleet 初日、無制限並列で LLM CLI 13 個が並走し、資源競合により 10 席超が `CODEX_OUTPUT_LAST_MESSAGE_MISSING` で typed failed(#940)。日次一斉配信(毎日 2 回 × 全席)が恒常的にこの burst を作るため、上限は R1(日次サイクル完走)の前提条件
+- **初期値 3 は owner 明示選択**(OD-SD-940-E7-BOUND3-ROLLOUT-20260830-001)。rollout: 配備後最初の日次配信 2 サイクルで実測最大同時数 / typed 終端率 / 排出所要時間 / output-missing / operator 介入数を publish し、R1 述語未達なら**値の変更**で見直す。rollback は bound 値変更のみ(env 除去 = 無制限回帰は禁止)
+- 上限超過の行は **pending のまま**残り次 sweep で再評価。deferral は `state_daemon_queue_work_backpressure_total{result=*_runner_concurrency_deferred}` に emit する — この metric は **§13.5.4 D2 progress family の外**(deferral は progress ではない。all-slots-hung の隠蔽防止)。試行回数・claim・行 bytes を一切消費しない
+- **Shirube D1 dispatch も同じ global slot pool に従う**(deferral は `d1_runner_concurrency_deferred`)。slot key は namespace 分離(`agent:<id>` / `d1:<queue_id>`)で衝突しない。per-agent 直列性は上限の内側で従来どおり
+- caller 会計: schedule 結果が `invoked` の時のみ acted=true / sweep `rewoken` に計上(deferral を「実行した」と数えない)
+- knob は strict env loader 経由(unset=default 3 / malformed・0・負値・少数 = **起動失敗**)
+- 根拠 incident: 2026-08-27 fleet 初日、無制限並列で LLM CLI 13 個が並走し 10 席超が `CODEX_OUTPUT_LAST_MESSAGE_MISSING`(#940)。日次一斉配信(毎日 2 回 × 全席)が同 burst を恒常再現するため、上限は R1(日次サイクル完走)の前提条件
 
 ### 13.6 Presence Client
 
