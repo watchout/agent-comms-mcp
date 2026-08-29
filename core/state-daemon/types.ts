@@ -150,6 +150,13 @@ export interface StateDaemonConfig {
   selfLivenessExitWindowSec: number
   /** D3: self-exits within the window that halt auto-restart (fail-visible). */
   selfLivenessMaxExitsPerWindow: number
+  /** F1: the largest legitimate runner child lifetime. The slot-wedge
+   * signal only fires after this budget PLUS the wedge grace has elapsed
+   * with zero slot activity — a full pool of healthy long-running children
+   * must never be mistaken for a hang. Wired from the same envs the runner
+   * consumes (STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS and per-engine overrides),
+   * taking the maximum so the threshold cannot undercut any engine. */
+  queueWorkRunnerTimeoutMs: number
   /** E7: max concurrent queue-work runner children (burst backpressure).
    * Rows over the bound stay pending and are re-swept — visible deferral,
    * never a failure. 8/27 fleet wave: 13 concurrent CLI children caused
@@ -230,6 +237,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   selfLivenessExitWindowSec: 3_600,
   selfLivenessMaxExitsPerWindow: 3,
   queueWorkMaxConcurrentRunners: 3,
+  queueWorkRunnerTimeoutMs: 600_000,
 }
 
 /** Published D2 queue-family metrics: their emission IS queue progress. */

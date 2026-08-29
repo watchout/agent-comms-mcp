@@ -665,10 +665,10 @@ export class StateDaemon {
    * One liveness evaluation over an injected eligible-pending count.
    * Decision only; the exit path (drain + exit) runs in the async caller.
    */
-  private evaluateSelfLiveness(eligiblePendingCount: number, slotsWedged = false): SelfLivenessDecision {
+  private evaluateSelfLiveness(eligiblePendingCount: number, slotWedgeAgeMs: number | null = null): SelfLivenessDecision {
     const nowMs = this.clock.now().getTime()
     const idleMs = nowMs - this.lastQueueProgressAt
-    if (eligiblePendingCount === 0 || (idleMs <= this.config.selfLivenessWedgeSec * 1000 && !slotsWedged)) {
+    if (eligiblePendingCount === 0 || (idleMs <= this.config.selfLivenessWedgeSec * 1000 && slotWedgeAgeMs === null)) {
       if (this.selfLivenessStrikes > 0) {
         this.metrics.inc('state_daemon_self_liveness_total', { result: 'recovered' })
       }
@@ -683,9 +683,14 @@ export class StateDaemon {
     }
     if (!this.selfLivenessEpisodeAlerted) {
       this.selfLivenessEpisodeAlerted = true
+      const cause = slotWedgeAgeMs !== null && idleMs <= this.config.selfLivenessWedgeSec * 1000
+        ? `all ${this.config.queueWorkMaxConcurrentRunners} runner slot(s) occupied with no acquire/release for ` +
+          `${Math.round(slotWedgeAgeMs / 1000)}s, exceeding the runner timeout budget ` +
+          `${Math.round(this.config.queueWorkRunnerTimeoutMs / 1000)}s plus ${this.config.selfLivenessWedgeSec}s grace`
+        : `no queue-family metric emission for ${Math.round(idleMs / 1000)}s`
       void this.alert.alert(
-        `state-daemon self-liveness: ${eligiblePendingCount} eligible pending row(s) with no queue-family ` +
-        `metric emission for ${Math.round(idleMs / 1000)}s (strike 1/${this.config.selfLivenessMaxStrikes})`,
+        `state-daemon self-liveness: ${eligiblePendingCount} eligible pending row(s); ${cause} ` +
+        `(strike 1/${this.config.selfLivenessMaxStrikes})`,
       )
     }
     if (this.selfLivenessStrikes < this.config.selfLivenessMaxStrikes) return 'strike'
@@ -793,16 +798,21 @@ export class StateDaemon {
       this.recordDbError(e)
       return
     }
-    const decision = this.evaluateSelfLiveness(eligibleExists ? 1 : 0, this.queueWorkSlotsWedged())
+    const decision = this.evaluateSelfLiveness(eligibleExists ? 1 : 0, this.queueWorkSlotWedgeAgeMs())
     if (decision === 'exit') await this.drainThenExit()
   }
 
-  /** F1: all runner slots occupied with no acquire/release for the wedge
-   * window. Deferral and sweep-planning metrics keep flowing in that state,
+  /** F1: all runner slots occupied with no acquire/release past the largest
+   * legitimate runner lifetime (child timeout) plus the wedge grace. A slot
+   * that outlives its own child timeout proves the timeout mechanism itself
+   * is wedged; a healthy long-running child (within budget) never trips
+   * this. Deferral and sweep-planning metrics keep flowing in that state,
    * so the hang must strike independently of the queue-progress marker. */
-  private queueWorkSlotsWedged(): boolean {
-    return this.inflightQueueWork.size >= this.config.queueWorkMaxConcurrentRunners
-      && (this.clock.now().getTime() - this.lastSlotActivityAt) > this.config.selfLivenessWedgeSec * 1000
+  private queueWorkSlotWedgeAgeMs(): number | null {
+    if (this.inflightQueueWork.size < this.config.queueWorkMaxConcurrentRunners) return null
+    const ageMs = this.clock.now().getTime() - this.lastSlotActivityAt
+    const thresholdMs = this.config.queueWorkRunnerTimeoutMs + this.config.selfLivenessWedgeSec * 1000
+    return ageMs > thresholdMs ? ageMs : null
   }
 
   /** Test hook: run the population-wide eligible-pending existence probe. */
@@ -811,8 +821,8 @@ export class StateDaemon {
   }
 
   /** Test hook: one full liveness evaluation incl. exit drain, with injected count. */
-  async __testSelfLivenessTick(eligiblePendingCount: number, slotsWedged = false): Promise<SelfLivenessDecision> {
-    const decision = this.evaluateSelfLiveness(eligiblePendingCount, slotsWedged || this.queueWorkSlotsWedged())
+  async __testSelfLivenessTick(eligiblePendingCount: number): Promise<SelfLivenessDecision> {
+    const decision = this.evaluateSelfLiveness(eligiblePendingCount, this.queueWorkSlotWedgeAgeMs())
     if (decision === 'exit') await this.drainThenExit()
     return decision
   }

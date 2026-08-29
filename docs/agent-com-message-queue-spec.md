@@ -1657,7 +1657,7 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 - progress の定義は「**queue 系 metric family の emission**」と厳密に等価: `state_daemon_queue_work_actions_total` / `state_daemon_memory_ready_backoff_total` / `state_daemon_state_actions_total`。実装は metric sink を wrap して emission 時刻を記録する(sweep 完了や関数入口は progress ではない)
 - check は `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごと。**eligible pending**(shared automatic-processing eligibility を通過した fence 内 pending)が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)超停止 → strike。連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で exit 判定へ
 - **strike しない条件**: eligible pending 0(暇・正当な非対象は wedge でない)/ check 自身の DB エラー(D4: 依存断は daemon の罪ではない)。gate による正当な保留は backoff metric を emit するため progress として扱われる
-- **slot-wedge signal(E7 連動)**: 全 runner slot が占有されたまま acquire/release が wedge 時間発生しない場合、queue-progress marker の鮮度に関係なく strike する(sweep 計画 metric や deferral が流れ続けても all-slots-hung を隠せない)。deferral metric(`state_daemon_queue_work_backpressure_total`)は progress family の**外**
+- **slot-wedge signal(E7 連動)**: 全 runner slot が占有されたまま acquire/release が「**最大の正当な runner 寿命(`queueWorkRunnerTimeoutMs` = STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS / CODEX / CLAUDE の最大値、default 600s)+ wedge 猶予**」を超えて発生しない場合、queue-progress marker の鮮度に関係なく strike する。child 予算内の正当な長時間実行は決して trip しない(slot が自分の child timeout を超えて生きている = timeout 機構自体の故障の証明)。strike alert は実原因(slot 占有時間と予算)を明記する。deferral metric(`state_daemon_queue_work_backpressure_total`)は progress family の**外**
 
 **D3 — 回復の有界性(durable exit ledger)**
 

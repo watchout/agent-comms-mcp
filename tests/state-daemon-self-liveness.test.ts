@@ -354,6 +354,21 @@ describe('self-liveness env loader (strict, fail-closed)', () => {
     expect(overrides).toEqual({ selfLivenessWedgeSec: 300, selfLivenessMinExitIntervalSec: 1200 })
   })
 
+  test('concurrency bound knob: valid override, unset default, malformed matrix (F2, PR #958)', () => {
+    const ok = loadSelfLivenessEnvOverrides({ STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS: '5' } as any)
+    expect(ok.errors).toEqual([])
+    expect(ok.overrides).toEqual({ queueWorkMaxConcurrentRunners: 5 })
+    expect(loadSelfLivenessEnvOverrides({} as any).overrides).toEqual({}) // unset => default 3 via DEFAULT_CONFIG
+    for (const bad of ['0', '-1', '1.5', 'abc', 'NaN', 'Infinity', '', '1e2']) {
+      const { overrides, errors } = loadSelfLivenessEnvOverrides({
+        STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS: bad,
+      } as any)
+      expect(overrides).toEqual({})
+      expect(errors.length).toBe(1)
+      expect(errors[0]).toContain('STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS')
+    }
+  })
+
   test('malformed values are startup errors, never silent defaults', () => {
     for (const bad of ['abc', 'NaN', 'Infinity', '0', '-1', '1.5', '', ' ', '1e3', '0900']) {
       const { overrides, errors } = loadSelfLivenessEnvOverrides({

@@ -96,17 +96,32 @@ describe('queue-work concurrency bound (E7)', () => {
       alert: new FakeAlertSink(),
       exit: (code: number) => { exits.push(code) },
       queueWorkScheduler: scheduler as any,
-      config: { queueWorkMaxConcurrentRunners: 1, selfLivenessWedgeSec: 600, selfLivenessMaxStrikes: 3 },
+      config: {
+        queueWorkMaxConcurrentRunners: 1,
+        selfLivenessWedgeSec: 600,
+        selfLivenessMaxStrikes: 3,
+        queueWorkRunnerTimeoutMs: 600_000, // legitimate child budget 10min
+      },
     })
     const schedule = (r: any) => (daemon as any).scheduleQueueWorkRunner('pending', r, () => scheduler.runPending())
     const emitFamily = () => (daemon as any).metrics.inc('state_daemon_state_actions_total', {})
+    const alerts = (daemon as any).alert as FakeAlertSink
     expect(schedule(row(1, 'seat-hung'))).toBe('invoked') // occupies the only slot, hangs forever
-    clock.advance(601_000)
+    // healthy-long phase: inside timeout+grace (1200s) nothing strikes even
+    // though the pool is full and eligible work waits
+    clock.advance(1_100_000)
+    emitFamily()
+    expect(schedule(row(2, 'seat-b'))).toBe('deferred_concurrency')
+    expect(await daemon.__testSelfLivenessTick(1)).toBe('ok')
+    // genuinely wedged phase: slot outlives its own child timeout + grace.
     // The auditor's exact scenario: sweep planning keeps emitting progress-
     // family metrics and deferrals keep flowing, yet no slot ever releases.
+    clock.advance(200_000) // total 1300s > 600s timeout + 600s grace
     emitFamily() // refreshes lastQueueProgressAt — idle path alone would say ok
-    expect(schedule(row(2, 'seat-b'))).toBe('deferred_concurrency')
+    schedule(row(2, 'seat-b'))
     expect(await daemon.__testSelfLivenessTick(1)).toBe('strike') // slot-wedge signal
+    expect(alerts.alerts[0]).toContain('runner slot(s) occupied') // honest cause, not idle-time text
+    expect(alerts.alerts[0]).toContain('exceeding the runner timeout budget')
     clock.advance(61_000)
     emitFamily()
     schedule(row(2, 'seat-b'))
@@ -115,6 +130,34 @@ describe('queue-work concurrency bound (E7)', () => {
     emitFamily()
     expect(await daemon.__testSelfLivenessTick(1)).toBe('exit')
     expect(exits).toEqual([1])
+  })
+
+  test('F1: three healthy long-running runners within the child budget never false-strike', async () => {
+    const clock = new FakeClock('2026-08-28T00:00:00.000Z')
+    const exits: number[] = []
+    const scheduler = { runPending: () => new Promise<void>(() => {}) }
+    const daemon = new StateDaemon({
+      db: { query: async () => ({ rows: [], rowCount: 0 }) } as any,
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock,
+      metrics: new FakeMetrics(), alert: new FakeAlertSink(),
+      exit: (code: number) => { exits.push(code) },
+      queueWorkScheduler: scheduler as any,
+      config: {
+        queueWorkMaxConcurrentRunners: 3,
+        selfLivenessWedgeSec: 600,
+        queueWorkRunnerTimeoutMs: 2_400_000, // 40min interim budget (#940 v2)
+      },
+    })
+    const schedule = (r: any) => (daemon as any).scheduleQueueWorkRunner('pending', r, () => scheduler.runPending())
+    schedule(row(1, 'seat-a')); schedule(row(2, 'seat-b')); schedule(row(3, 'seat-c'))
+    // 39 minutes in: full pool, eligible pending, all children still within
+    // their 40min budget — the auditor's healthy-long probe
+    for (let i = 0; i < 39; i++) {
+      clock.advance(60_000)
+      ;(daemon as any).metrics.inc('state_daemon_state_actions_total', {})
+      expect(await daemon.__testSelfLivenessTick(1)).toBe('ok')
+    }
+    expect(exits).toEqual([])
   })
 
   test('F1: deferral metric is outside the D2 progress family', async () => {
@@ -230,5 +273,134 @@ describe('queue-work concurrency bound (E7)', () => {
     expect(sched('done', row(3, 'seat-c'))).toBe('deferred_concurrency')
     expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'received_runner_concurrency_deferred' })).toBe(1)
     expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'done_runner_concurrency_deferred' })).toBe(1)
+  })
+
+  test('F5: production sweepStale — repeated deferral leaves the DB row untouched, rewoken=0; release invokes exactly once', async () => {
+    const clock = new FakeClock('2026-08-28T00:00:00.000Z')
+    const metrics = new FakeMetrics()
+    const mutations: string[] = []
+    const invoked: Array<{ queueId: unknown; agentId: string }> = []
+    const pendingRow = {
+      id: 4242,
+      agent_id: 'seat-b',
+      message_id: 'msg-4242',
+      payload: JSON.stringify({ message_type: 'task', content: 'real work' }),
+      status: 'pending',
+      claim_expires_at: null,
+      created_at: new Date('2026-08-28T00:00:00.000Z'),
+      last_wake_attempt_at: null,
+      last_heartbeat_at: null,
+      message_type: 'task',
+      channel_id: 'ch-1',
+    }
+    const pendingRowFrozen = JSON.stringify(pendingRow)
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (/^\s*(UPDATE|INSERT|DELETE)/i.test(sql)) { mutations.push(sql.slice(0, 80)); return { rows: [], rowCount: 0 } }
+        if (sql.includes("mq.status='pending'") && sql.includes('created_at <')) {
+          return { rows: [JSON.parse(pendingRowFrozen)], rowCount: 1 }
+        }
+        if (sql.includes('profile_revision') && sql.includes('FROM agents')) {
+          return {
+            rows: [{
+              agent_id: 'seat-b', runtime: 'codex', profile_revision: null, profile_source: null,
+              channel_port: null, home_directory: '/repo', metadata: { tmux_session: 'seat-b-session' },
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM agents') && (sql.includes('agent_id=$1') || sql.includes('agent_id = $1'))) {
+          return {
+            rows: [{
+              agent_id: String(params?.[0]),
+              agent_type: 'dev',
+              runtime: 'codex',
+              runtime_engine_preference: 'codex',
+              status: 'idle',
+              profile_enabled: true,
+              disabled_at: null,
+              metadata: { memory_project: 'agent-comms-mcp' },
+              tmux_session: null,
+              last_seen_at: new Date('2026-08-28T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM agent_runtime_instances')) {
+          return {
+            rows: [{
+              runtime_instance_id: 'rt-f5', agent_id: 'seat-b', runtime_engine: 'codex',
+              runtime_kind: 'local_process', session_name: 'seat-b-session', port: null,
+              checkout_path: '/repo', commit_sha: null,
+              started_at: '2026-08-27T00:00:00.000Z', last_seen_at: '2030-01-01T00:00:00.000Z',
+              status: 'running', metadata: {},
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM runtime_memory_ready_evidence')) {
+          return {
+            rows: [{
+              id: 1, agent_id: 'seat-b', project: 'agent-comms-mcp', runtime_instance_id: 'rt-f5',
+              profile_revision: null, profile_source: null, session_name: 'seat-b-session', port: null,
+              expected_agent_id: 'seat-b', checkout_path: '/repo', checkout_commit_sha: null,
+              recovery_command: 'mcp__wasurezu__recover_context', result_status: 'ready',
+              failure_reason: null, completed_at: '2026-08-27T23:55:00.000Z',
+              evidence_path: null, evidence_log_id: null,
+              valid_until: '2030-01-01T00:00:00.000Z', source: 'wasurezu_boot_recovery', metadata: {},
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('FROM channels')) {
+          return { rows: [{ members: ['seat-a', 'seat-b', 'arc'] }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+    const resolvers: Array<() => void> = []
+    const scheduler = {
+      runPending: (input: { queueId: unknown; agentId: string }) => {
+        invoked.push(input)
+        return new Promise<void>((r) => { resolvers.push(r) })
+      },
+    }
+    const daemon = new StateDaemon({
+      db: db as any,
+      pgListen: new FakePgListen(), tmux: new FakeTmux(), clock, metrics,
+      alert: new FakeAlertSink(),
+      queueWorkScheduler: scheduler as any,
+      config: {
+        queueWorkMaxConcurrentRunners: 1,
+        pendingStaleAfter: '10 seconds',
+      },
+    })
+    await daemon.start()
+    try {
+      // saturate the single slot with a hung runner for another seat
+      expect((daemon as any).scheduleQueueWorkRunner('pending', row(1, 'seat-a'), () => new Promise<void>(() => {}))).toBe('invoked')
+      // three production sweeps: the pending row is fetched each time and deferred each time
+      for (let i = 0; i < 3; i++) {
+        clock.advance(30_000)
+        const result = await daemon.sweepStale()
+        expect(result.rewoken).toBe(0) // F4 accounting at the production seam
+      }
+      expect(invoked).toEqual([]) // runner never started for the deferred row
+      expect(mutations).toEqual([]) // zero DB writes: no attempt, claim, or payload consumed
+      expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'pending_runner_concurrency_deferred' })).toBe(3)
+      // release the slot; the next sweep invokes exactly once
+      ;(daemon as any).inflightQueueWork.clear()
+      ;(daemon as any).inflightQueueWorkIds.clear()
+      clock.advance(30_000)
+      const after = await daemon.sweepStale()
+      expect(after.rewoken).toBe(1)
+      expect(invoked).toEqual([{ queueId: 4242, agentId: 'seat-b' }])
+    } finally {
+      // resolve the outstanding runner: stop()'s drain deadline uses the
+      // injected clock, which FakeClock never advances
+      resolvers.forEach((r) => r())
+      await new Promise((r) => setTimeout(r, 0))
+      await daemon.stop()
+    }
   })
 })

@@ -767,6 +767,16 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
+  {
+    // F1: the slot-wedge threshold must cover the LARGEST engine timeout so a
+    // healthy long-running child can never be mistaken for a hang.
+    const timeouts = [
+      process.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS,
+      process.env.STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS,
+      process.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS,
+    ].map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0)
+    if (timeouts.length > 0) (cfg as any).queueWorkRunnerTimeoutMs = Math.max(...timeouts)
+  }
   // STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS loads via the strict
   // loader (fail-closed on malformed values) — merged and validated in main()
   // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
@@ -1173,10 +1183,9 @@ export async function main(): Promise<void> {
   // Fail before DB connection, daemon construction, LISTEN, or any runtime
   // effect when a host allowlist lacks the complete Issue #917 overlay.
   assertStateDaemonDirectEntryEnv(process.env)
-  const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
-  const queryClient = new Client({ connectionString: connStr })
-  await queryClient.connect()
-  const db = new PgClientAdapter(queryClient)
+  // F2 (PR #958 L2): strict knob load + validation runs BEFORE any DB client
+  // construction or connect — an invalid knob must fail the process with the
+  // config error, never with an unrelated connection error first.
   const config = loadConfig()
   {
     const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
@@ -1188,6 +1197,10 @@ export async function main(): Promise<void> {
       throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
     }
   }
+  const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
+  const queryClient = new Client({ connectionString: connStr })
+  await queryClient.connect()
+  const db = new PgClientAdapter(queryClient)
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(
