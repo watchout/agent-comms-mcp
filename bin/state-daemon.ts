@@ -1169,30 +1169,36 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   }
 }
 
+/**
+ * F2 (PR #958 L2): strict knob load + validation runs BEFORE any DB client
+ * construction or connect — an invalid knob must fail the process with the
+ * config error, never with an unrelated connection error first.
+ * F1 (L2 cycle-3): the slot-wedge budget comes from the SAME resolver the
+ * runner children consume (core/queue-work-timeout.ts), so daemon belief and
+ * child reality cannot diverge; malformed timeout envs fail startup here.
+ */
+export function loadValidatedStartupConfig(env: NodeJS.ProcessEnv = process.env): Partial<StateDaemonConfig> {
+  const config = loadConfig()
+  const { overrides, errors } = loadSelfLivenessEnvOverrides(env)
+  Object.assign(config, overrides)
+  const timeouts = resolveQueueWorkTimeouts(env)
+  config.queueWorkRunnerTimeoutMs = timeouts.maxLegitimateRunnerTimeoutMs
+  const merged = { ...DEFAULT_CONFIG, ...config }
+  const invariantErrors = validateSelfLivenessConfig(merged)
+  const selfLivenessErrors = [...errors, ...timeouts.errors, ...invariantErrors]
+  if (selfLivenessErrors.length > 0) {
+    throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
+  }
+  return config
+}
+
 export async function main(): Promise<void> {
   assertStateDaemonDirectEntryArgv(process.argv.slice(2))
   // Fail before DB connection, daemon construction, LISTEN, or any runtime
   // effect when a host allowlist lacks the complete Issue #917 overlay.
   assertStateDaemonDirectEntryEnv(process.env)
-  // F2 (PR #958 L2): strict knob load + validation runs BEFORE any DB client
-  // construction or connect — an invalid knob must fail the process with the
-  // config error, never with an unrelated connection error first.
-  const config = loadConfig()
-  {
-    const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
-    Object.assign(config, overrides)
-    // F1 (L2 cycle-3): the slot-wedge budget comes from the SAME resolver the
-    // runner children consume, so daemon belief and child reality cannot
-    // diverge. Malformed timeout envs fail startup here, before DB connect.
-    const timeouts = resolveQueueWorkTimeouts(process.env)
-    config.queueWorkRunnerTimeoutMs = timeouts.maxLegitimateRunnerTimeoutMs
-    const merged = { ...DEFAULT_CONFIG, ...config }
-    const invariantErrors = validateSelfLivenessConfig(merged)
-    const selfLivenessErrors = [...errors, ...timeouts.errors, ...invariantErrors]
-    if (selfLivenessErrors.length > 0) {
-      throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
-    }
-  }
+  // Strict config + timeout validation (F2/F1) precedes the DB client open.
+  const config = loadValidatedStartupConfig(process.env)
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()
