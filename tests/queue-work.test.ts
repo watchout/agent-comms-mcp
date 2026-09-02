@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { resolveEngineTimeoutMs, resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import {
   QueueWorkAdapterInvocationError,
   QUEUE_WORK_RESULT_VERSION,
@@ -1532,5 +1533,65 @@ describe('finalizeDoneQueueWork', () => {
     ])
     expect(db.row.status).toBe('done')
     expect(db.row.replied_with).toBeUndefined()
+  })
+})
+
+
+describe('queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1)', () => {
+  test('AUN per-engine override reaches both the child and the slot budget with the same value', () => {
+    const env = { AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000' } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(2_400_000) // child
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(2_400_000) // daemon
+    // the audit's cycle-3 probe scenario: daemon can no longer believe 600s
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs)
+      .toBe(resolveEngineTimeoutMs(env, 'codex'))
+  })
+
+  test('STATE per-engine/generic overrides match between child and slot budget', () => {
+    const env = {
+      STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS: '1800000',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '900000',
+    } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env, 'claude')).toBe(1_800_000)
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(900_000) // generic fallback
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(1_800_000)
+  })
+
+  test('conflicting overrides: slot budget never undercuts the largest legitimate child budget', () => {
+    const env = {
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000',
+      STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS: '3000000',
+      AUN_QUEUE_WORK_TIMEOUT_MS: '600000',
+    } as NodeJS.ProcessEnv
+    const r = resolveQueueWorkTimeouts(env)
+    expect(r.maxLegitimateRunnerTimeoutMs).toBe(3_000_000)
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'codex'))
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'claude'))
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'generic'))
+  })
+
+  test('canonical precedence: engine-specific beats generic; AUN beats STATE within each tier', () => {
+    const env = {
+      STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS: '1200000',
+      AUN_QUEUE_WORK_TIMEOUT_MS: '900000',
+    } as NodeJS.ProcessEnv
+    // engine-specific STATE beats generic AUN (the old Claude path inverted this)
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(1_200_000)
+    const env2 = {
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000',
+      STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS: '1200000',
+    } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env2, 'codex')).toBe(2_400_000)
+  })
+
+  test('malformed or non-positive timeouts are typed errors for both sides, never silent defaults', () => {
+    for (const bad of ['abc', '0', '-1', '1.5', '', 'NaN', 'Infinity', '1e3']) {
+      const env = { AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: bad } as NodeJS.ProcessEnv
+      const r = resolveQueueWorkTimeouts(env)
+      expect(r.errors.length).toBe(1) // daemon startup joins these into fail-closed validation
+      expect(r.errors[0]).toContain('AUN_QUEUE_WORK_CODEX_TIMEOUT_MS')
+      expect(() => resolveEngineTimeoutMs(env, 'codex')).toThrow('QUEUE_WORK_TIMEOUT_CONFIG_INVALID')
+    }
+    expect(resolveQueueWorkTimeouts({} as NodeJS.ProcessEnv).maxLegitimateRunnerTimeoutMs).toBe(600_000) // unset => documented default
   })
 })

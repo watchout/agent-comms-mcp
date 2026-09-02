@@ -7,6 +7,7 @@
  * stay pending, are re-swept later, and never consume a retry attempt.
  */
 import { describe, expect, test } from 'bun:test'
+import { resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import { StateDaemon } from '../core/state-daemon'
 import { FakeAlertSink, FakeClock, FakeMetrics, FakePgListen, FakeTmux } from './contract/state-daemon/fakes'
 
@@ -145,7 +146,11 @@ describe('queue-work concurrency bound (E7)', () => {
       config: {
         queueWorkMaxConcurrentRunners: 3,
         selfLivenessWedgeSec: 600,
-        queueWorkRunnerTimeoutMs: 2_400_000, // 40min interim budget (#940 v2)
+        // production wiring: the SAME operator env the runner children read
+        // (AUN override, 40min interim budget #940 v2) drives the slot budget
+        queueWorkRunnerTimeoutMs: resolveQueueWorkTimeouts(
+          { AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000' } as NodeJS.ProcessEnv,
+        ).maxLegitimateRunnerTimeoutMs,
       },
     })
     const schedule = (r: any) => (daemon as any).scheduleQueueWorkRunner('pending', r, () => scheduler.runPending())
@@ -158,6 +163,15 @@ describe('queue-work concurrency bound (E7)', () => {
       expect(await daemon.__testSelfLivenessTick(1)).toBe('ok')
     }
     expect(exits).toEqual([])
+    // genuine wedge: the pool outlives the SAME resolver value (40min) plus
+    // grace — now it must strike through to exit even with family metrics
+    clock.advance(12 * 60_000) // total 51min > 40min budget + 10min grace
+    for (const expected of ['strike', 'strike', 'exit'] as const) {
+      ;(daemon as any).metrics.inc('state_daemon_state_actions_total', {})
+      expect(await daemon.__testSelfLivenessTick(1)).toBe(expected)
+      clock.advance(61_000)
+    }
+    expect(exits).toEqual([1])
   })
 
   test('F1: deferral metric is outside the D2 progress family', async () => {

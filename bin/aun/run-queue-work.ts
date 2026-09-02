@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createDbAdapter } from '../../core/db'
+import { resolveEngineTimeoutMs } from '../../core/queue-work-timeout'
 import {
   QUEUE_WORK_RESULT_VERSION,
   finalizeDoneQueueWork,
@@ -664,7 +665,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         cwd: this.cwd,
         env: this.env,
         input: plan.stdin,
-        timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+        timeout: resolveEngineTimeoutMs(this.env, 'codex'),
         maxBuffer: 1024 * 1024 * 20,
       })
       if (child.status !== 0) {
@@ -814,14 +815,7 @@ export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
       cwd: this.cwd,
       env: this.env,
       input: plan.stdin,
-      timeout: Number.parseInt(
-        this.env.AUN_QUEUE_WORK_CLAUDE_TIMEOUT_MS
-          ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS
-          ?? this.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS
-          ?? this.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS
-          ?? '600000',
-        10,
-      ),
+      timeout: resolveEngineTimeoutMs(this.env, 'claude'),
       maxBuffer: 1024 * 1024 * 20,
     })
     if (child.status !== 0) {

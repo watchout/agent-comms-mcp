@@ -73,6 +73,7 @@ import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import { reconcileRuntimeMemoryReadyFleetIdentity } from '../core/runtime-memory-ready-identity'
 import { DEFAULT_CONFIG } from '../core/state-daemon/types'
+import { resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import type {
   AlertSink,
   DBClient,
@@ -767,16 +768,6 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
-  {
-    // F1: the slot-wedge threshold must cover the LARGEST engine timeout so a
-    // healthy long-running child can never be mistaken for a hang.
-    const timeouts = [
-      process.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS,
-      process.env.STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS,
-      process.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS,
-    ].map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0)
-    if (timeouts.length > 0) (cfg as any).queueWorkRunnerTimeoutMs = Math.max(...timeouts)
-  }
   // STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS loads via the strict
   // loader (fail-closed on malformed values) — merged and validated in main()
   // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
@@ -1190,9 +1181,14 @@ export async function main(): Promise<void> {
   {
     const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
     Object.assign(config, overrides)
+    // F1 (L2 cycle-3): the slot-wedge budget comes from the SAME resolver the
+    // runner children consume, so daemon belief and child reality cannot
+    // diverge. Malformed timeout envs fail startup here, before DB connect.
+    const timeouts = resolveQueueWorkTimeouts(process.env)
+    config.queueWorkRunnerTimeoutMs = timeouts.maxLegitimateRunnerTimeoutMs
     const merged = { ...DEFAULT_CONFIG, ...config }
     const invariantErrors = validateSelfLivenessConfig(merged)
-    const selfLivenessErrors = [...errors, ...invariantErrors]
+    const selfLivenessErrors = [...errors, ...timeouts.errors, ...invariantErrors]
     if (selfLivenessErrors.length > 0) {
       throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
     }
