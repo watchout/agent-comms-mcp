@@ -303,6 +303,38 @@ describe('#602 recovery read-only gate pack', () => {
     }
   })
 
+  test('large read-only report stdout is preserved instead of becoming command error', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'aun-readonly-gate-pack-'))
+    try {
+      const outputFile = join(tmp, 'fleet-readiness.json')
+      const report = runReport({
+        report: 'fleet-readiness',
+        outputFile,
+        command: 'bun',
+        args: [
+          '-e',
+          [
+            'const blockers = Array.from({ length: 70000 }, (_, i) => ({ code: `RUNTIME_DRIFT_${i}` }));',
+            'console.log(JSON.stringify({ ok: false, go_no_go: "NO_GO", mutation_performed: false, restart_performed: false, blockers }));',
+          ].join(' '),
+        ],
+      }, process.cwd()) as Record<string, unknown>
+      const stored = JSON.parse(readFileSync(outputFile, 'utf8'))
+
+      expect(report).toMatchObject({
+        ok: false,
+        go_no_go: 'NO_GO',
+        mutation_performed: false,
+        restart_performed: false,
+      })
+      expect(report.command_error).toBeUndefined()
+      expect((report.blockers as unknown[]).length).toBe(70000)
+      expect(stored).toMatchObject(report)
+    } finally {
+      rmSync(tmp, { recursive: true, force: true })
+    }
+  })
+
   test('diagnostic NO-GO JSON with exit 1 is preserved as report evidence', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'aun-readonly-gate-pack-'))
     try {
