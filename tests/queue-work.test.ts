@@ -14,9 +14,13 @@ import {
   type QueueWorkWritebackSender,
 } from '../core/queue-work'
 import {
+  CommandJsonRuntimeAdapter,
   classifyQueueWorkRuntimeExecFailure,
   parseCodexJsonlQueueWorkFallback,
 } from '../bin/aun/run-queue-work'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const capabilities = {
   input: 'stdin_prompt',
@@ -1593,5 +1597,81 @@ describe('queue-work timeout resolver — daemon slot budget and child budgets s
       expect(() => resolveEngineTimeoutMs(env, 'codex')).toThrow('QUEUE_WORK_TIMEOUT_CONFIG_INVALID')
     }
     expect(resolveQueueWorkTimeouts({} as NodeJS.ProcessEnv).maxLegitimateRunnerTimeoutMs).toBe(600_000) // unset => documented default
+  })
+})
+
+
+describe('command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1)', () => {
+  const envelope = {
+    schema_version: 'queue_work_envelope_v1',
+    queue_id: '958',
+    message_id: null,
+    agent_id: 'qa',
+    channel: null,
+    thread_id: null,
+    requester: null,
+    content: 'cycle-4 seam probe',
+    reply_contract: { required: false, reply_to: null, mention: null },
+    runtime_contract: { do_not_call_next: true, do_not_call_inbox: true, return_schema: QUEUE_WORK_RESULT_VERSION },
+    handoff_contract: {
+      kind: 'plain_queue_work',
+      github_backed: false,
+      required_writebacks: [],
+      posting_mode: 'none',
+      detected_from: [],
+    },
+  } as unknown as QueueWorkEnvelope
+
+  test('STATE generic timeout reaches the command-json child and equals the daemon slot budget', () => {
+    // cycle-4 probe: STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS=2400000 must not leave the custom child at 600000
+    const env = { STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000' } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(2_400_000)
+    expect(adapter.execution_timeout_ms).toBe(resolveEngineTimeoutMs(env, 'generic'))
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(adapter.execution_timeout_ms)
+  })
+
+  test('AUN generic beats STATE generic; engine-specific overrides never leak into the custom child but still raise the slot budget', () => {
+    const env = {
+      AUN_QUEUE_WORK_TIMEOUT_MS: '900000',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000',
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '3000000',
+    } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(900_000)
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(3_000_000)
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(adapter.execution_timeout_ms)
+  })
+
+  test('unset generic timeout resolves to the documented default 600000 for the custom child', () => {
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), {} as NodeJS.ProcessEnv)
+    expect(adapter.execution_timeout_ms).toBe(600_000)
+  })
+
+  test('malformed STATE or AUN generic timeout is a typed QUEUE_WORK_TIMEOUT_CONFIG_INVALID failure before any child spawns', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-cmdjson-seam-'))
+    try {
+      const marker = join(dir, 'spawned')
+      for (const env of [
+        { STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: 'abc' },
+        { AUN_QUEUE_WORK_TIMEOUT_MS: '0' },
+        { AUN_QUEUE_WORK_TIMEOUT_MS: '1.5', STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000' },
+      ] as NodeJS.ProcessEnv[]) {
+        expect(() => new CommandJsonRuntimeAdapter('/bin/sh', ['-c', `touch ${marker}; cat >/dev/null; echo {}`], process.cwd(), env))
+          .toThrow('QUEUE_WORK_TIMEOUT_CONFIG_INVALID')
+      }
+      expect(existsSync(marker)).toBe(false) // no child ever ran against an unvalidated budget
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the resolved generic budget is the value actually enforced on the spawned child', async () => {
+    const env = { AUN_QUEUE_WORK_TIMEOUT_MS: '200' } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; sleep 5; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(200)
+    const startedAt = Date.now()
+    await expect(adapter.invoke(envelope)).rejects.toThrow('runtime command failed')
+    expect(Date.now() - startedAt).toBeLessThan(4_000) // killed by the resolver budget, not by the 5s sleep
   })
 })
