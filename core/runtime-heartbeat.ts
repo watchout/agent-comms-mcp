@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { readlinkSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, resolve } from 'node:path'
 import {
@@ -33,6 +34,46 @@ export type RuntimeHeartbeatInput = {
   connectorTransport?: string | null
   metadata?: Record<string, unknown>
   connectorMetadata?: Record<string, unknown>
+}
+
+export const RUNTIME_PROVIDER_OBSERVATION_SCHEMA = 'runtime-provider-observation/v1' as const
+
+export type RuntimeProviderEngine = 'claude-code' | 'codex'
+export type RuntimeSurface = 'tui_session' | 'headless_runner' | 'service_daemon'
+export type RuntimeProviderObservationProvenance = 'observed' | 'missing'
+
+export type RuntimeProviderObservation = {
+  schema_version: typeof RUNTIME_PROVIDER_OBSERVATION_SCHEMA
+  agent_id: string
+  runtime_instance_id: string
+  provider_engine: RuntimeProviderEngine | null
+  runtime_surface: RuntimeSurface
+  host_process_id: number | null
+  host_process_image: string | null
+  observed_session: string | null
+  observed_workspace: string | null
+  observed_at: string
+  provenance: RuntimeProviderObservationProvenance
+  evidence_digest: string
+}
+
+export type RuntimeProviderObservationInput = {
+  agentId: string
+  runtimeInstanceId: string
+  hostProcessId: number | null
+  hostProcessImage: string | null
+  observedSession: string | null
+  observedWorkspace: string | null
+  observedAt: Date | string
+  runtimeSurface?: RuntimeSurface
+}
+
+export type RuntimeProviderObservationDeps = {
+  parentProcessId?: number
+  readProcessImage?: (processId: number) => string | null
+  readProcessWorkspace?: (processId: number) => string | null
+  resolveProcessSession?: (processId: number) => string | null
+  now?: Date
 }
 
 export const RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA = 'runtime-registration-metadata-provenance/v1' as const
@@ -69,10 +110,15 @@ export type RuntimeHeartbeatResult = {
   endpoint_lease_heartbeat_at: string | Date | null
   memory_ready_identity: RuntimeMemoryReadyIdentityReconcileResult | null
   registration_metadata_provenance: RuntimeRegistrationMetadataProvenance
+  provider_observation: RuntimeProviderObservation
 }
 
 export type RuntimeHeartbeatOptions = {
   reconcileMemoryReadyIdentity?: typeof reconcileRuntimeMemoryReadyIdentity
+  observeProvider?: (input: {
+    agentId: string
+    runtimeInstanceId: string
+  }) => RuntimeProviderObservation
 }
 
 type AgentWorkspaceProfile = {
@@ -96,6 +142,167 @@ type EndpointLeaseHeartbeatResult = {
 
 const RUNTIME_ENDPOINT_LEASE_PURPOSE = 'worker'
 const DEFAULT_RUNTIME_ENDPOINT_LEASE_TTL_MS = 10 * 60 * 1000
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+}
+
+function runtimeProviderObservationDigestMaterial(
+  observation: Omit<RuntimeProviderObservation, 'evidence_digest'>,
+): Record<string, unknown> {
+  return {
+    agent_id: observation.agent_id,
+    host_process_id: observation.host_process_id,
+    host_process_image: observation.host_process_image,
+    observed_at: observation.observed_at,
+    observed_session: observation.observed_session,
+    observed_workspace: observation.observed_workspace,
+    provenance: observation.provenance,
+    provider_engine: observation.provider_engine,
+    runtime_instance_id: observation.runtime_instance_id,
+    runtime_surface: observation.runtime_surface,
+    schema_version: observation.schema_version,
+  }
+}
+
+export function runtimeProviderObservationDigest(
+  observation: Omit<RuntimeProviderObservation, 'evidence_digest'>,
+): string {
+  return createHash('sha256')
+    .update(canonicalJson(runtimeProviderObservationDigestMaterial(observation)), 'utf8')
+    .digest('hex')
+}
+
+export function providerEngineFromProcessImage(image: string | null | undefined): RuntimeProviderEngine | null {
+  const normalized = image?.trim().replace(/\\/g, '/')
+  if (!normalized) return null
+  const executable = basename(normalized).toLowerCase().replace(/\.exe$/, '')
+  if (executable === 'claude' || executable === 'claude-code') return 'claude-code'
+  if (executable === 'codex' || executable === 'codex-cli') return 'codex'
+  return null
+}
+
+function inferRuntimeSurface(image: string | null, session: string | null): RuntimeSurface {
+  if (session) return 'tui_session'
+  const executable = image ? basename(image).toLowerCase().replace(/\.exe$/, '') : ''
+  return executable === 'launchd' || executable === 'systemd'
+    ? 'service_daemon'
+    : 'headless_runner'
+}
+
+export function buildRuntimeProviderObservation(
+  input: RuntimeProviderObservationInput,
+): RuntimeProviderObservation {
+  const hostProcessImage = normalizedText(input.hostProcessImage)
+  const observedSession = normalizedText(input.observedSession)
+  const observedWorkspace = normalizeCheckoutPath(input.observedWorkspace)
+  const providerEngine = providerEngineFromProcessImage(hostProcessImage)
+  const hostProcessId = Number.isSafeInteger(input.hostProcessId) && Number(input.hostProcessId) > 0
+    ? Number(input.hostProcessId)
+    : null
+  const parsedObservedAt = input.observedAt instanceof Date
+    ? input.observedAt
+    : new Date(input.observedAt)
+  if (!Number.isFinite(parsedObservedAt.getTime())) {
+    throw new Error('RUNTIME_PROVIDER_OBSERVATION_INVALID: observedAt')
+  }
+  const unsigned: Omit<RuntimeProviderObservation, 'evidence_digest'> = {
+    schema_version: RUNTIME_PROVIDER_OBSERVATION_SCHEMA,
+    agent_id: input.agentId,
+    runtime_instance_id: input.runtimeInstanceId,
+    provider_engine: providerEngine,
+    runtime_surface: input.runtimeSurface ?? inferRuntimeSurface(hostProcessImage, observedSession),
+    host_process_id: hostProcessId,
+    host_process_image: hostProcessImage,
+    observed_session: observedSession,
+    observed_workspace: observedWorkspace,
+    observed_at: parsedObservedAt.toISOString(),
+    provenance: providerEngine === null ? 'missing' : 'observed',
+  }
+  return {
+    ...unsigned,
+    evidence_digest: runtimeProviderObservationDigest(unsigned),
+  }
+}
+
+export function readRuntimeHostProcessImage(processId: number): string | null {
+  try {
+    const output = execFileSync('ps', ['-p', String(processId), '-o', 'comm='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    }).trim()
+    return output || null
+  } catch {
+    return null
+  }
+}
+
+export function readRuntimeHostWorkspace(processId: number): string | null {
+  try {
+    return normalizeCheckoutPath(readlinkSync(`/proc/${processId}/cwd`))
+  } catch {
+    // macOS has no /proc filesystem. lsof's -Fn output prefixes the path with n.
+  }
+  try {
+    const output = execFileSync('lsof', ['-a', '-p', String(processId), '-d', 'cwd', '-Fn'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    })
+    const path = output.split(/\r?\n/).find(line => line.startsWith('n'))?.slice(1) ?? null
+    return normalizeCheckoutPath(path)
+  } catch {
+    return null
+  }
+}
+
+export function readRuntimeHostSession(processId: number): string | null {
+  try {
+    const tty = execFileSync('ps', ['-p', String(processId), '-o', 'tty='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    }).trim()
+    if (!tty || /^\?+$/.test(tty)) return null
+    const ttyPath = tty.startsWith('/dev/') ? tty : `/dev/${tty}`
+    const panes = execFileSync('tmux', ['list-panes', '-a', '-F', '#{session_name}\t#{pane_tty}'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    })
+    for (const line of panes.split(/\r?\n/)) {
+      const [session, paneTty] = line.split('\t')
+      if (session?.trim() && paneTty?.trim() === ttyPath) return session.trim()
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function observeRuntimeProvider(
+  input: { agentId: string; runtimeInstanceId: string },
+  deps: RuntimeProviderObservationDeps = {},
+): RuntimeProviderObservation {
+  const parentProcessId = Number.isSafeInteger(deps.parentProcessId) && Number(deps.parentProcessId) > 0
+    ? Number(deps.parentProcessId)
+    : process.ppid
+  const readProcessImage = deps.readProcessImage ?? readRuntimeHostProcessImage
+  const readProcessWorkspace = deps.readProcessWorkspace ?? readRuntimeHostWorkspace
+  const resolveProcessSession = deps.resolveProcessSession ?? readRuntimeHostSession
+  return buildRuntimeProviderObservation({
+    ...input,
+    hostProcessId: parentProcessId,
+    hostProcessImage: readProcessImage(parentProcessId),
+    observedSession: resolveProcessSession(parentProcessId),
+    observedWorkspace: readProcessWorkspace(parentProcessId),
+    observedAt: deps.now ?? new Date(),
+  })
+}
 
 function sha256Prefix(value: string, length = 16): string {
   return createHash('sha256').update(value).digest('hex').slice(0, length)
@@ -533,6 +740,11 @@ export async function heartbeatRuntimeInstance(
   input: RuntimeHeartbeatInput,
   options: RuntimeHeartbeatOptions = {},
 ): Promise<RuntimeHeartbeatResult> {
+  const observeProvider = options.observeProvider ?? observeRuntimeProvider
+  const providerObservation = observeProvider({
+    agentId: input.agentId,
+    runtimeInstanceId: input.runtimeInstanceId,
+  })
   const profile = await selectAgentWorkspaceProfile(db, input.agentId)
   const registration = resolveRuntimeRegistrationMetadata(input, profile)
   const effectiveInput: RuntimeHeartbeatInput = {
@@ -542,6 +754,7 @@ export async function heartbeatRuntimeInstance(
     metadata: {
       ...(input.metadata ?? {}),
       registration_metadata_provenance: registration.provenance,
+      provider_observation: providerObservation,
     },
   }
   const workspaceId = await ensureWorkspaceBinding(db, effectiveInput, profile, input.checkoutPath)
@@ -618,5 +831,6 @@ export async function heartbeatRuntimeInstance(
     endpoint_lease_heartbeat_at: endpointLease?.heartbeatAt ?? null,
     memory_ready_identity: memoryReadyIdentity,
     registration_metadata_provenance: registration.provenance,
+    provider_observation: providerObservation,
   }
 }
