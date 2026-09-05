@@ -1713,6 +1713,26 @@ image、root-goal readback、および preflight zero-write / zero-effect counte
 省略しない。fresh queue readback が nonzero、stale、または不正なら protected effect 前に
 停止する。
 
+### Owner-write lock generation fence
+
+reservation、owner heartbeat、operation journal、completion の mutation は invocation ごとの
+generation-bound `owner-write.lock` で直列化する。stale dead lock の reclaim は次の境界を守る。
+
+1. contender は canonical `owner.json` の owner、heartbeat、`lock_token` を検証してから、同じ
+   generation を `owner-write.lock.retired.<lock_token>` へ atomic rename する。
+2. この retirement に成功した 1 contender だけが successor generation を publish し、critical
+   action に進む。retirement loser は successor の directory や record を削除・移動・上書きしない。
+3. 検証済み generation が read / retirement の競合境界で消失または置換された場合は normal
+   contention であり、typed `IN_FLIGHT` を返す。filesystem の raw `ENOENT` は provider 境界を
+   越えない。
+4. lock directory / record が残存したまま欠落、malformed、unsafe、または同一 token の retired
+   generation と不一致である場合は contention とみなさず、`STATE_RECORD_INVALID` で fail-closed
+   とする。
+
+contract fixture は 2 つの real child process を同じ stale generation の直後で barrier release し、
+exactly one critical entrant / simulated effect、exactly one typed `IN_FLIGHT` loser、zero raw
+`ENOENT`、successor generation の不変性を完全な child stdout / stderr / exit readback で証明する。
+
 ### Merge-derived postimage basis
 
 provider は durable reservation を load した後、live preflight より先に operation journal を
@@ -2253,6 +2273,7 @@ next_message結果 / send結果にtopicを含めることで、LLMがチャン�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-09-05 | §13.7 に generation-bound owner-write lock fence を追加。stale retirement の exactly-one winner、typed `IN_FLIGHT` loser、zero raw `ENOENT`、successor preservation、malformed / unsafe state の `STATE_RECORD_INVALID` を固定。 |
 | 2026-08-21 | §13.7 に COLD_START の explicit MCP env、state-root pinned provider checkout/server path、listener+exact runtime 登録の completed boot proof、legacy completed phase だけに限定した bounded `REALIZE_POSTIMAGE` state machine を追加。 |
 | 2026-08-21 | §13.7 に started `VERIFY_LIVE_IDENTITY` の exact preflight 参照と no-replay reconcile fixture を追加。completed COLD_START を effect 前に skip し、live identity のみを再開して canonical receipt に到達する境界を固定。 |
 | 2026-08-20 | §17.4 N1 probe の exact canonical `channel_id=pdca-daily` 束縛、channel row/member の transactional validation、typed binding failure、隔離 fixture の production `NOT NULL` parity と3 regression を追加。 |

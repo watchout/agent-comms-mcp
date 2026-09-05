@@ -694,6 +694,14 @@ load してから live preflight を選ぶ。
   receipt を返す。live preflight と protected subeffect は再実行しない。
 - same key / different request digest、壊れた durable state、fresh readback 不成立は、
   reservation・journal・sealed request を変更せず fail-closed とする。
+- invocation owner、reservation、journal の mutation は generation-bound
+  `owner-write.lock` で直列化する。検証済みの stale dead generation は token 固有の
+  `owner-write.lock.retired.<lock_token>` へ atomic に退役させてから successor を publish し、
+  退役と critical action に進める contender は 1 件だけとする。同じ検証済み generation が
+  退役境界で消失または置換された loser は normal contention として typed `IN_FLIGHT` で停止し、
+  raw filesystem `ENOENT` を外へ漏らさない。loser は successor generation を削除・移動・上書き
+  してはならず、malformed / unsafe な lock record は contention に正規化せず
+  `STATE_RECORD_INVALID` で fail-closed とする。
 
 resume は残存 phase の reconciliation であり、受領済み protected subeffect を再実行する
 権限ではない。`resume_admission_binding` は sealed request、reservation、operation journal
@@ -1306,6 +1314,7 @@ TUIの確認プロンプト（option 1選択）はtmux send-keys Enterで自動�
 
 | 日付 | 内容 |
 |------|------|
+| 2026-09-05 | §10.3 の owner-write lock に generation 固有の atomic stale retirement を固定。通常の race loser は `IN_FLIGHT`、raw `ENOENT` は外へ漏らさず、successor を保持し、malformed / unsafe state は `STATE_RECORD_INVALID` のまま fail-closed とする。 |
 | 2026-08-21 | §10.3 に COLD_START の explicit MCP env、state-root 配下 pinned provider checkout/server path、listener+exact runtime 登録による completed boot proof、legacy completed phase 専用 `REALIZE_POSTIMAGE` の bounded/no-journal-mutation 契約を追加。 |
 | 2026-08-21 | §10.3 に started `VERIFY_LIVE_IDENTITY` の preflight 参照と no-replay reconciliation を明記。completed COLD_START を skip し、同一の検証済み preflight で live identity のみ再開して canonical receipt に到達する契約を固定。 |
 | 2026-08-20 | §10.4 N1 probe の canonical internal `channel_id=pdca-daily` 束縛、channel row/member 検証、`N1_PROBE_CHANNEL_BINDING_NOT_READY` fail-closed、隔離 fixture の production `NOT NULL` parity を固定。 |

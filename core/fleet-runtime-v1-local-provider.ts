@@ -219,6 +219,22 @@ function providerFail(code: FleetRuntimeLocalProviderErrorCode, message: string)
   throw new FleetRuntimeLocalProviderError(code, message)
 }
 
+function filesystemErrorCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object' || !('code' in error)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+function pathExistsNoFollow(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    if (filesystemErrorCode(error) === 'ENOENT') return false
+    throw error
+  }
+}
+
 function clone<T>(value: T): T {
   return structuredClone(value)
 }
@@ -1176,6 +1192,13 @@ interface InvocationWriteLockRecord {
   execution_owner: FleetRuntimeExecutionOwner
 }
 
+interface InvocationWriteLockGenerationIdentity {
+  device: number
+  inode: number
+  is_directory: boolean
+  is_symbolic_link: boolean
+}
+
 export interface FleetRuntimePersistenceOptions {
   approvedRoot?: string
   ownerId?: string
@@ -1184,6 +1207,7 @@ export interface FleetRuntimePersistenceOptions {
   nowMs?: () => number
   staleAfterMs?: number
   ownerAlive?: (owner: FleetRuntimeExecutionOwner) => boolean
+  testOnlyBeforeOwnerWriteLockRecordRead?: (lockDirectory: string, label: string) => void
 }
 
 /** Durable adapter persistence. It performs no filesystem mutation until reserve_once. */
@@ -1193,11 +1217,13 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
   private readonly nowMs: () => number
   private readonly ownerAlive: (owner: FleetRuntimeExecutionOwner) => boolean
   private readonly staleAfterMs: number
+  private readonly testOnlyBeforeOwnerWriteLockRecordRead?: (lockDirectory: string, label: string) => void
 
   constructor(stateDirectory: string, options: FleetRuntimePersistenceOptions = {}) {
     this.root = assertApprovedRoot(stateDirectory, options.approvedRoot ?? FLEET_RUNTIME_V1_PRODUCTION_STATE_ROOT)
     this.nowMs = options.nowMs ?? Date.now
     this.staleAfterMs = options.staleAfterMs ?? 60_000
+    this.testOnlyBeforeOwnerWriteLockRecordRead = options.testOnlyBeforeOwnerWriteLockRecordRead
     const ownerId = options.ownerId ?? PROCESS_EXECUTION_OWNER_ID
     this.owner = {
       owner_id: ownerId,
@@ -1251,29 +1277,102 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     return join(lockDirectory, 'owner.json')
   }
 
+  private invocationWriteLockGenerationIdentity(
+    lockDirectory: string,
+    label: string,
+  ): InvocationWriteLockGenerationIdentity | null {
+    const parent = dirname(lockDirectory)
+    try {
+      assertSafeStatePath(this.root, parent)
+      const stats = lstatSync(lockDirectory)
+      return {
+        device: stats.dev,
+        inode: stats.ino,
+        is_directory: stats.isDirectory(),
+        is_symbolic_link: stats.isSymbolicLink(),
+      }
+    } catch (error) {
+      if (filesystemErrorCode(error) === 'ENOENT') {
+        if (!existsSync(parent)) {
+          return providerFail('STATE_RECORD_INVALID', `${label} parent directory disappeared`)
+        }
+        return null
+      }
+      if (error instanceof FleetRuntimeLocalProviderError && error.code === 'STATE_DIRECTORY_INVALID') {
+        return providerFail('STATE_RECORD_INVALID', `${label} is malformed or unsafe`)
+      }
+      throw error
+    }
+  }
+
+  private readInvocationWriteLockGeneration(
+    lockDirectory: string,
+    label: string,
+    invokeTestSeam: boolean,
+  ): InvocationWriteLockRecord | null {
+    const before = this.invocationWriteLockGenerationIdentity(lockDirectory, label)
+    if (!before) return null
+    if (invokeTestSeam) this.testOnlyBeforeOwnerWriteLockRecordRead?.(lockDirectory, label)
+
+    let raw: string
+    try {
+      if (before.is_symbolic_link || !before.is_directory) {
+        return providerFail('STATE_RECORD_INVALID', `${label} must be a nonempty lock directory`)
+      }
+      const recordPath = this.ownerWriteLockRecordPath(lockDirectory)
+      assertSafeStatePath(this.root, recordPath)
+      if (lstatSync(recordPath).isSymbolicLink()) {
+        return providerFail('STATE_RECORD_INVALID', `${label} owner record cannot be a symlink`)
+      }
+      raw = readFileSync(recordPath, 'utf8')
+    } catch (error) {
+      const after = this.invocationWriteLockGenerationIdentity(lockDirectory, label)
+      if (!after || after.device !== before.device || after.inode !== before.inode) return null
+      if (filesystemErrorCode(error) === 'ENOENT'
+        || (error instanceof FleetRuntimeLocalProviderError
+          && (error.code === 'READBACK_INVALID' || error.code === 'STATE_DIRECTORY_INVALID'))) {
+        return providerFail('STATE_RECORD_INVALID', `${label} is malformed or unsafe`)
+      }
+      throw error
+    }
+
+    const after = this.invocationWriteLockGenerationIdentity(lockDirectory, label)
+    if (!after || after.device !== before.device || after.inode !== before.inode) return null
+    try {
+      const record = parseJson<InvocationWriteLockRecord>(raw, label)
+      assertPlainRecord(record, label)
+      assertExactKeys(record, ['execution_owner', 'lock_token'], label)
+      const owner = record.execution_owner
+      if (typeof record.lock_token !== 'string'
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(record.lock_token)
+        || owner === null || typeof owner !== 'object'
+        || typeof owner.owner_id !== 'string' || owner.owner_id.length === 0
+        || typeof owner.host !== 'string' || owner.host.length === 0
+        || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+        || !Number.isFinite(Date.parse(owner.acquired_at)) || !Number.isFinite(Date.parse(owner.heartbeat_at))) {
+        return providerFail('STATE_RECORD_INVALID', `${label} has an invalid token or owner`)
+      }
+      return record
+    } catch (error) {
+      if (error instanceof FleetRuntimeLocalProviderError
+        && (error.code === 'READBACK_INVALID' || error.code === 'STATE_DIRECTORY_INVALID')) {
+        return providerFail('STATE_RECORD_INVALID', `${label} is malformed or unsafe`)
+      }
+      throw error
+    }
+  }
+
   private readInvocationWriteLock(lockDirectory: string, label: string): InvocationWriteLockRecord {
-    assertSafeStatePath(this.root, lockDirectory)
-    if (!existsSync(lockDirectory) || !lstatSync(lockDirectory).isDirectory()) {
-      return providerFail('STATE_RECORD_INVALID', `${label} must be a nonempty lock directory`)
-    }
-    const record = readState<InvocationWriteLockRecord>(
-      this.root,
-      this.ownerWriteLockRecordPath(lockDirectory),
-      label,
-    )
-    assertPlainRecord(record, label)
-    assertExactKeys(record, ['execution_owner', 'lock_token'], label)
-    const owner = record.execution_owner
-    if (typeof record.lock_token !== 'string'
-      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(record.lock_token)
-      || owner === null || typeof owner !== 'object'
-      || typeof owner.owner_id !== 'string' || owner.owner_id.length === 0
-      || typeof owner.host !== 'string' || owner.host.length === 0
-      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
-      || !Number.isFinite(Date.parse(owner.acquired_at)) || !Number.isFinite(Date.parse(owner.heartbeat_at))) {
-      return providerFail('STATE_RECORD_INVALID', `${label} has an invalid token or owner`)
-    }
+    const record = this.readInvocationWriteLockGeneration(lockDirectory, label, false)
+    if (!record) return providerFail('STATE_RECORD_INVALID', `${label} generation disappeared during readback`)
     return record
+  }
+
+  private readContendedInvocationWriteLock(
+    lockDirectory: string,
+    label: string,
+  ): InvocationWriteLockRecord | null {
+    return this.readInvocationWriteLockGeneration(lockDirectory, label, true)
   }
 
   private discardWriteLockCandidate(candidate: string): void {
@@ -1293,6 +1392,7 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     try {
       atomicWrite(this.root, this.ownerWriteLockRecordPath(candidate), record, true)
       try {
+        if (pathExistsNoFollow(lock)) return false
         renameSync(candidate, lock)
         syncDirectory(parent)
         const published = this.readInvocationWriteLock(lock, 'published owner write lock')
@@ -1301,7 +1401,7 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
         }
         return true
       } catch (error) {
-        if (existsSync(lock)) return false
+        if (pathExistsNoFollow(lock)) return false
         throw error
       }
     } finally {
@@ -1319,8 +1419,8 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     label: string,
   ): boolean {
     const lock = this.ownerWriteLockPath(key)
-    if (!existsSync(lock)) return false
-    const current = this.readInvocationWriteLock(lock, label)
+    const current = this.readContendedInvocationWriteLock(lock, label)
+    if (!current) return false
     if (current.lock_token !== observed.lock_token
       || canonicalFleetRuntimeJson(current) !== canonicalFleetRuntimeJson(observed)) return false
     const retired = this.retiredOwnerWriteLockPath(key, observed.lock_token)
@@ -1377,7 +1477,10 @@ export class FileFleetRuntimeV1Persistence implements FleetRuntimePersistencePor
     }
     if (!this.publishInvocationWriteLock(key, lockRecord)) {
       const lock = this.ownerWriteLockPath(key)
-      const observed = this.readInvocationWriteLock(lock, 'owner write lock')
+      const observed = this.readContendedInvocationWriteLock(lock, 'owner write lock')
+      if (!observed) {
+        return providerFail('IN_FLIGHT', 'invocation write lock generation changed during contention read')
+      }
       const observedOwner = observed.execution_owner
       const heartbeat = Date.parse(String(observedOwner?.heartbeat_at ?? ''))
       if (allowStaleLockBreak && observedOwner && !this.ownerAlive(observedOwner)

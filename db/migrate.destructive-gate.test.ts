@@ -265,9 +265,18 @@ describe('destructive-migration-gate / detectDestructivePatterns', () => {
 })
 
 describe('destructive-migration-gate / production DB guard', () => {
+  let previousEnvironment: Array<[string, string | undefined]> = []
+
+  beforeEach(() => {
+    previousEnvironment = [PRODUCTION_DESTRUCTIVE_GATE_ENV, TEST_DATABASE_URL_ENV]
+      .map((key): [string, string | undefined] => [key, process.env[key]])
+  })
+
   afterEach(() => {
-    delete process.env[PRODUCTION_DESTRUCTIVE_GATE_ENV]
-    delete process.env[TEST_DATABASE_URL_ENV]
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   })
 
   test('blocks destructive SQL against production agent_comms even when the base gate is enabled', () => {
