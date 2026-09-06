@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
@@ -2385,6 +2385,108 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
     expect((await contender.reserve_once(state)).acquired).toBe(true)
   })
 
+  test.each(['missing', 'malformed', 'unsafe'] as const)(
+    'a %s stale owner-write lock record remains STATE_RECORD_INVALID rather than contention',
+    async variant => {
+      const root = temporary(`frv1-invalid-stale-lock-${variant}`)
+      const stateDirectory = join(root, 'state')
+      const key = `frv1:N40:${createHash('sha256').update(variant).digest('hex')}`
+      const state: FleetRuntimeInvocationState = {
+        idempotency_key: key, request_digest: SHA_A, status: 'reserved', receipt: null,
+      }
+      const staleNow = Date.parse('2026-08-15T08:00:00Z')
+      const original = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory, ownerId: 'invalid-lock-original', ownerAlive: () => false,
+        nowMs: () => staleNow, staleAfterMs: 1_000,
+      })
+      await original.reserve_once(state)
+      const invocation = join(stateDirectory, 'invocations', key)
+      const lock = join(invocation, 'owner-write.lock')
+      const record = join(lock, 'owner.json')
+      mkdirSync(lock, { mode: 0o700 })
+      if (variant === 'malformed') writeFileSync(record, '{not-json}\n')
+      if (variant === 'unsafe') {
+        const outsideRecord = join(root, 'outside-owner.json')
+        writeFileSync(outsideRecord, `${canonicalFleetRuntimeJson({ unsafe: true })}\n`)
+        symlinkSync(outsideRecord, record)
+      }
+      const lockIdentity = lstatSync(lock)
+      const contender = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory, ownerId: 'invalid-lock-contender', ownerAlive: () => false,
+        nowMs: () => staleNow + 5_000, staleAfterMs: 1_000,
+      })
+      await expectProviderCode(() => contender.reserve_once(state), 'STATE_RECORD_INVALID')
+      expect(existsSync(lock)).toBe(true)
+      expect(lstatSync(lock)).toMatchObject({ dev: lockIdentity.dev, ino: lockIdentity.ino })
+      if (variant === 'missing') expect(existsSync(record)).toBe(false)
+      if (variant === 'malformed') expect(readFileSync(record, 'utf8')).toBe('{not-json}\n')
+      if (variant === 'unsafe') {
+        expect(lstatSync(record).isSymbolicLink()).toBe(true)
+        expect(readFileSync(record, 'utf8')).toBe(`${canonicalFleetRuntimeJson({ unsafe: true })}\n`)
+      }
+      const durable = await original.load(key) as FleetRuntimeInvocationState & { execution_owner: { owner_id: string } }
+      expect(durable.execution_owner.owner_id).toBe('invalid-lock-original')
+    },
+  )
+
+  test.each(['disappearance', 'replacement'] as const)(
+    'a stale owner-write lock generation %s during record readback is typed contention',
+    async transition => {
+      const root = temporary(`frv1-lock-generation-${transition}`)
+      const stateDirectory = join(root, 'state')
+      const key = `frv1:N40:${createHash('sha256').update(transition).digest('hex')}`
+      const state: FleetRuntimeInvocationState = {
+        idempotency_key: key, request_digest: SHA_A, status: 'reserved', receipt: null,
+      }
+      const staleNow = Date.parse('2026-08-15T08:00:00Z')
+      const original = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory, ownerId: 'generation-original', nowMs: () => staleNow,
+      })
+      await original.reserve_once(state)
+      const invocation = join(stateDirectory, 'invocations', key)
+      const lock = join(invocation, 'owner-write.lock')
+      const staleToken = '00000000-0000-4000-8000-000000000004'
+      const successorToken = '00000000-0000-4000-8000-000000000008'
+      mkdirSync(lock, { mode: 0o700 })
+      writeFileSync(join(lock, 'owner.json'), `${canonicalFleetRuntimeJson({
+        lock_token: staleToken,
+        execution_owner: { ...original.owner, owner_id: 'generation-stale-owner' },
+      })}\n`)
+      const retired = join(invocation, `owner-write.lock.retired.${staleToken}`)
+      let seamCalls = 0
+      const contender = new FileFleetRuntimeV1Persistence(stateDirectory, {
+        approvedRoot: stateDirectory, ownerId: 'generation-contender', staleAfterMs: 1,
+        nowMs: () => staleNow + 5_000, ownerAlive: () => false,
+        testOnlyBeforeOwnerWriteLockRecordRead: (lockDirectory, label) => {
+          if (label !== 'stale owner write lock reclaim') return
+          seamCalls += 1
+          renameSync(lockDirectory, retired)
+          if (transition === 'replacement') {
+            mkdirSync(lockDirectory, { mode: 0o700 })
+            writeFileSync(join(lockDirectory, 'owner.json'), `${canonicalFleetRuntimeJson({
+              lock_token: successorToken,
+              execution_owner: { ...original.owner, owner_id: 'generation-successor-owner' },
+            })}\n`)
+          }
+        },
+      })
+
+      await expectProviderCode(() => contender.reserve_once(state), 'IN_FLIGHT')
+      expect(seamCalls).toBe(1)
+      expect(JSON.parse(readFileSync(join(retired, 'owner.json'), 'utf8')).lock_token).toBe(staleToken)
+      if (transition === 'replacement') {
+        expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8'))).toMatchObject({
+          lock_token: successorToken,
+          execution_owner: { owner_id: 'generation-successor-owner' },
+        })
+      } else {
+        expect(existsSync(lock)).toBe(false)
+      }
+      const durable = await original.load(key) as FleetRuntimeInvocationState & { execution_owner: { owner_id: string } }
+      expect(durable.execution_owner.owner_id).toBe('generation-original')
+    },
+  )
+
   test('barrier-controlled real processes atomically retire one stale lock generation without deleting its successor', async () => {
     const root = temporary('frv1-dual-stale-reclaimer')
     const stateDirectory = join(root, 'state')
@@ -2489,8 +2591,15 @@ describe('FLEET_RUNTIME_V1 concrete local provider', () => {
       stdout: await new Response(child.stdout).text(), stderr: await new Response(child.stderr).text(), exit: await child.exited,
     })))
     expect(outputs.every(output => output.exit === 0), JSON.stringify(outputs)).toBe(true)
-    expect(outputs.filter(output => output.stdout.includes('ACQUIRED_'))).toHaveLength(1)
-    expect(outputs.filter(output => output.stdout.includes('IN_FLIGHT_'))).toHaveLength(1)
+    expect(results.every(existsSync)).toBe(true)
+    const resultCodes = results.map(path => readFileSync(path, 'utf8'))
+    expect([...resultCodes].sort()).toEqual(['ACQUIRED', 'IN_FLIGHT'])
+    for (const [index, output] of outputs.entries()) {
+      expect(output.stderr, JSON.stringify(outputs)).toBe('')
+      expect(output.stdout.trim()).toBe(`${resultCodes[index]}_${ids[index]}`)
+      expect(output.stdout).not.toContain('ENOENT')
+      expect(output.stderr).not.toContain('ENOENT')
+    }
     const entrantRows = readFileSync(entrants, 'utf8').trim().split('\n')
     const maxCriticalConcurrency = existsSync(overlap) ? 2 : entrantRows.length
     expect(maxCriticalConcurrency).toBe(1)

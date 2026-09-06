@@ -146,7 +146,7 @@ fi
 #   last_user_text            — for §1.4 exempt 1 (channel tag check)
 #   assistant_count           — for §1.4 exempt 2 (initial turn)
 # --------------------------------------------------------------------------
-SUMMARY=$(printf '%s' "$TAIL_CLEAN" | jq -cs '
+SUMMARY=$(printf '%s' "$TAIL_CLEAN" | jq -rs '
   def normalize:
     (.type // .message.role // "") as $role
     | ((.message.content // .content) // []) as $c
@@ -178,6 +178,8 @@ SUMMARY=$(printf '%s' "$TAIL_CLEAN" | jq -cs '
              . == "mcp__agent-comms__send" or . == "mcp__agent-comms__notify"
            ))
     }
+  | ([.any_send_since_last_user, .assistant_count, .user_text_count] | @tsv),
+    .last_user_text
 ' 2>/dev/null) || {
   log_error "jq summary failed (session_id=$SESSION_ID)"
   exit 0
@@ -188,10 +190,16 @@ if [ -z "$SUMMARY" ] || [ "$SUMMARY" = "null" ]; then
   exit 0
 fi
 
-ANY_SEND=$(printf '%s' "$SUMMARY" | jq -r '.any_send_since_last_user // false' 2>/dev/null || printf 'false')
-ASSISTANT_COUNT=$(printf '%s' "$SUMMARY" | jq -r '.assistant_count // 0' 2>/dev/null || printf 0)
-USER_TEXT_COUNT=$(printf '%s' "$SUMMARY" | jq -r '.user_text_count // 0' 2>/dev/null || printf 0)
-LAST_USER_TEXT=$(printf '%s' "$SUMMARY" | jq -r '.last_user_text // ""' 2>/dev/null || printf '')
+# The first line contains only a boolean and two integer counts. Read it
+# with shell builtins instead of spawning jq four more times. Everything
+# after that line is user text, preserved verbatim (including tabs and
+# embedded newlines); command substitution strips trailing newlines just
+# as the previous raw-text jq extraction did. Empty text has no separator.
+IFS=$'\t' read -r ANY_SEND ASSISTANT_COUNT USER_TEXT_COUNT <<< "${SUMMARY%%$'\n'*}"
+case "$SUMMARY" in
+  *$'\n'*) LAST_USER_TEXT=${SUMMARY#*$'\n'} ;;
+  *) LAST_USER_TEXT="" ;;
+esac
 
 STATE_FILE=$(state_file_for "$SESSION_ID")
 

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -17,6 +17,7 @@ import { join, resolve } from 'node:path'
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const HOOK = join(REPO_ROOT, 'hooks', 'aun-send-tool-enforcement.sh')
+const BLOCK_CONTEXT = 'ERROR: Your previous assistant turn did not invoke mcp__aun__send or mcp__aun__notify. You received a message via <channel source="agent-comms">, you MUST reply through the tool — NOT via stdout, NOT via built-in SendMessage. Invoke mcp__aun__send (pass channel_id from the inbound tag) now. Legacy aliases mcp__agent_comms__send / mcp__agent_comms__notify and mcp__agent-comms__send / mcp__agent-comms__notify are accepted during migration.'
 
 function generateLargeTranscript(path: string, targetBytes: number): void {
   // Filler turns that the hook will skip over (truncated first line on tail
@@ -71,8 +72,52 @@ function runHookTimed(payload: { transcript_path: string; session_id: string }, 
   // with a >64 KiB tail the hook must not error out on the truncated first
   // line. If status drifts to 0 we've lost the tail parse.
   expect(r.status).toBe(2)
+  expect(JSON.parse(r.stdout)).toEqual({
+    hookSpecificOutput: { hookEventName: 'Stop', additionalContext: BLOCK_CONTEXT },
+  })
   return ms
 }
+
+describe('stop-hook summary transport preserves text and exemption semantics', () => {
+  let tmpDir: string
+  let env: Record<string, string>
+
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'stop-hook-summary-'))
+    env = { AUN_LOG_DIR: join(tmpDir, 'logs'), AUN_STATE_DIR: join(tmpDir, 'state') }
+  })
+  afterAll(() => { rmSync(tmpDir, { recursive: true, force: true }) })
+
+  test.each([
+    ['multiline', '\nfalse\t0\t0\n<channel source="agent-comms">日本語 \\ "quoted"</channel>\n\n', 2],
+    ['no-tag', '\ntrue\t1\t1\nordinary user text\n', 0],
+    ['empty', '', 0],
+  ])('%s user text remains data, not summary fields', (sid, text, expectedStatus) => {
+    const transcript = join(tmpDir, `${sid}.jsonl`)
+    writeFileSync(transcript, [
+      JSON.stringify({ type: 'user', content: [{ type: 'text', text }] }),
+      JSON.stringify({ type: 'assistant', content: [{ type: 'text', text: 'no tool invocation' }] }),
+    ].join('\n') + '\n')
+    const payload = JSON.stringify({ transcript_path: transcript, session_id: sid })
+    const invoke = () => spawnSync('/bin/bash', [HOOK], {
+      input: payload, encoding: 'utf-8', env: { ...process.env, ...env },
+    })
+    const result = invoke()
+    expect(result.status).toBe(expectedStatus)
+    if (expectedStatus === 0) {
+      expect(result.stdout).toBe('')
+      expect(readFileSync(join(env.AUN_STATE_DIR, `${sid}.count`), 'utf-8')).toBe('0')
+    } else {
+      expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toBe(BLOCK_CONTEXT)
+      expect(invoke().status).toBe(2)
+      expect(invoke().status).toBe(2)
+      expect(invoke().status).toBe(0)
+      const excerpt = text.replace(/\n+$/, '').replace(/\n/g, ' ').slice(0, 200)
+      expect(readFileSync(join(env.AUN_LOG_DIR, 'send-enforcement-bypass.log'), 'utf-8'))
+        .toContain(`excerpt=${excerpt}\n`)
+    }
+  })
+})
 
 describe('test_stop_hook_performance — 10 MB transcript → p95 < 100 ms', () => {
   let tmpDir: string
