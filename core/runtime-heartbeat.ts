@@ -21,9 +21,15 @@ export type RuntimeHeartbeatInput = {
   runtimeEngine?: string | null
   runtimeKind?: string | null
   hostId?: string | null
+  /** Ambient observation only. It is never registration authority for local_process. */
+  ambientSessionName?: string | null
+  /** Ambient observation only. It is never registration authority for local_process. */
+  ambientCheckoutPath?: string | null
+  /** @deprecated Use ambientSessionName for local_process observations. */
   sessionName?: string | null
   processId?: number | null
   port?: number | null
+  /** @deprecated Use ambientCheckoutPath for local_process observations. */
   checkoutPath?: string | null
   commitSha?: string | null
   endpointUri?: string | null
@@ -35,7 +41,9 @@ export type RuntimeHeartbeatInput = {
   connectorMetadata?: Record<string, unknown>
 }
 
-export const RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA = 'runtime-registration-metadata-provenance/v1' as const
+export const RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA = 'runtime-registration-metadata-provenance/v2' as const
+export const RUNTIME_REGISTRATION_PROFILE_ERROR_SCHEMA = 'runtime-registration-profile-error/v1' as const
+export const RUNTIME_REGISTRATION_PROFILE_INCOMPLETE = 'RUNTIME_REGISTRATION_PROFILE_INCOMPLETE' as const
 
 export type RuntimeRegistrationValueSource = 'registered' | 'ambient' | 'missing'
 
@@ -51,8 +59,41 @@ export type RuntimeRegistrationMetadataProvenance = {
   schema_version: typeof RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA
   agent_id: string
   profile_found: boolean
+  resolution_status: 'resolved' | 'incomplete'
+  missing_fields: RuntimeRegistrationProfileField[]
   session_name: RuntimeRegistrationFieldProvenance
   checkout_path: RuntimeRegistrationFieldProvenance
+}
+
+export type RuntimeRegistrationProfileField = 'agent_profile' | 'home_directory' | 'metadata.tmux_session'
+
+export type RuntimeRegistrationProfileErrorRecord = {
+  schema_version: typeof RUNTIME_REGISTRATION_PROFILE_ERROR_SCHEMA
+  code: typeof RUNTIME_REGISTRATION_PROFILE_INCOMPLETE
+  agent_id: string
+  runtime_kind: string
+  reason: 'PROFILE_NOT_FOUND' | 'PROFILE_FIELDS_MISSING' | 'PROFILE_LOOKUP_FAILED'
+  missing_fields: RuntimeRegistrationProfileField[]
+  registration_metadata_provenance: RuntimeRegistrationMetadataProvenance
+}
+
+export class RuntimeRegistrationProfileError extends Error {
+  readonly code = RUNTIME_REGISTRATION_PROFILE_INCOMPLETE
+  readonly record: RuntimeRegistrationProfileErrorRecord
+
+  constructor(record: Omit<RuntimeRegistrationProfileErrorRecord, 'schema_version' | 'code'>) {
+    super(`${RUNTIME_REGISTRATION_PROFILE_INCOMPLETE}: agent_id=${record.agent_id} missing_fields=${record.missing_fields.join(',')}`)
+    this.name = 'RuntimeRegistrationProfileError'
+    this.record = {
+      schema_version: RUNTIME_REGISTRATION_PROFILE_ERROR_SCHEMA,
+      code: RUNTIME_REGISTRATION_PROFILE_INCOMPLETE,
+      ...record,
+    }
+  }
+
+  toJSON(): RuntimeRegistrationProfileErrorRecord {
+    return this.record
+  }
 }
 
 export type RuntimeHeartbeatResult = {
@@ -152,6 +193,7 @@ async function selectAgentWorkspaceProfile(
        FROM agents
       WHERE agent_id = $1
         AND COALESCE(profile_enabled, true) = true
+        AND disabled_at IS NULL
       LIMIT 1`,
     [agentId],
   )
@@ -187,20 +229,34 @@ function normalizedText(value: string | null | undefined): string | null {
 function registrationField(
   registeredValue: string | null,
   ambientValue: string | null,
-  preferRegistered: boolean,
+  authority: 'registered' | 'ambient',
 ): RuntimeRegistrationFieldProvenance {
-  const source: RuntimeRegistrationValueSource = preferRegistered && registeredValue
+  const source: RuntimeRegistrationValueSource = authority === 'registered' && registeredValue
     ? 'registered'
-    : ambientValue
+    : authority === 'ambient' && ambientValue
       ? 'ambient'
       : 'missing'
   return {
     source,
-    effective_value: preferRegistered ? registeredValue ?? ambientValue : ambientValue,
+    effective_value: authority === 'registered' ? registeredValue : ambientValue,
     registered_value: registeredValue,
     ambient_value: ambientValue,
-    mismatch: registeredValue !== ambientValue,
+    mismatch: registeredValue !== null && ambientValue !== null && registeredValue !== ambientValue,
   }
+}
+
+function runtimeRegistrationMissingFields(
+  profile: AgentWorkspaceProfile | null,
+): RuntimeRegistrationProfileField[] {
+  if (!profile) return ['agent_profile']
+  const missing: RuntimeRegistrationProfileField[] = []
+  if (!normalizeCheckoutPath(profile.home_directory)) missing.push('home_directory')
+  if (!normalizedText(
+    typeof profile.metadata.tmux_session === 'string' ? profile.metadata.tmux_session : null,
+  )) {
+    missing.push('metadata.tmux_session')
+  }
+  return missing
 }
 
 function resolveRuntimeRegistrationMetadata(
@@ -211,15 +267,21 @@ function resolveRuntimeRegistrationMetadata(
   checkoutPath: string | null
   provenance: RuntimeRegistrationMetadataProvenance
 } {
-  const ambientSession = normalizedText(input.sessionName)
-  const ambientCheckout = normalizeCheckoutPath(input.checkoutPath)
+  const ambientSession = normalizedText(
+    input.ambientSessionName !== undefined ? input.ambientSessionName : input.sessionName,
+  )
+  const ambientCheckout = normalizeCheckoutPath(
+    input.ambientCheckoutPath !== undefined ? input.ambientCheckoutPath : input.checkoutPath,
+  )
   const registeredSession = normalizedText(
     typeof profile?.metadata.tmux_session === 'string' ? profile.metadata.tmux_session : null,
   )
   const registeredCheckout = normalizeCheckoutPath(profile?.home_directory)
-  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process'
-  const sessionName = registrationField(registeredSession, ambientSession, preferRegistered)
-  const checkoutPath = registrationField(registeredCheckout, ambientCheckout, preferRegistered)
+  const useRegisteredProfile = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process'
+  const missingFields = useRegisteredProfile ? runtimeRegistrationMissingFields(profile) : []
+  const authority = useRegisteredProfile ? 'registered' : 'ambient'
+  const sessionName = registrationField(registeredSession, ambientSession, authority)
+  const checkoutPath = registrationField(registeredCheckout, ambientCheckout, authority)
   return {
     sessionName: sessionName.effective_value,
     checkoutPath: checkoutPath.effective_value,
@@ -227,6 +289,8 @@ function resolveRuntimeRegistrationMetadata(
       schema_version: RUNTIME_REGISTRATION_METADATA_PROVENANCE_SCHEMA,
       agent_id: input.agentId,
       profile_found: profile !== null,
+      resolution_status: missingFields.length === 0 ? 'resolved' : 'incomplete',
+      missing_fields: missingFields,
       session_name: sessionName,
       checkout_path: checkoutPath,
     },
@@ -533,8 +597,31 @@ export async function heartbeatRuntimeInstance(
   input: RuntimeHeartbeatInput,
   options: RuntimeHeartbeatOptions = {},
 ): Promise<RuntimeHeartbeatResult> {
-  const profile = await selectAgentWorkspaceProfile(db, input.agentId)
+  const requestedRuntimeKind = input.runtimeKind?.trim() || 'local_process'
+  let profile: AgentWorkspaceProfile | null
+  try {
+    profile = await selectAgentWorkspaceProfile(db, input.agentId)
+  } catch (error) {
+    if (requestedRuntimeKind !== 'local_process') throw error
+    const registration = resolveRuntimeRegistrationMetadata(input, null)
+    throw new RuntimeRegistrationProfileError({
+      agent_id: input.agentId,
+      runtime_kind: requestedRuntimeKind,
+      reason: 'PROFILE_LOOKUP_FAILED',
+      missing_fields: ['agent_profile'],
+      registration_metadata_provenance: registration.provenance,
+    })
+  }
   const registration = resolveRuntimeRegistrationMetadata(input, profile)
+  if (requestedRuntimeKind === 'local_process' && registration.provenance.missing_fields.length > 0) {
+    throw new RuntimeRegistrationProfileError({
+      agent_id: input.agentId,
+      runtime_kind: requestedRuntimeKind,
+      reason: profile ? 'PROFILE_FIELDS_MISSING' : 'PROFILE_NOT_FOUND',
+      missing_fields: registration.provenance.missing_fields,
+      registration_metadata_provenance: registration.provenance,
+    })
+  }
   const effectiveInput: RuntimeHeartbeatInput = {
     ...input,
     sessionName: registration.sessionName,
@@ -544,7 +631,10 @@ export async function heartbeatRuntimeInstance(
       registration_metadata_provenance: registration.provenance,
     },
   }
-  const workspaceId = await ensureWorkspaceBinding(db, effectiveInput, profile, input.checkoutPath)
+  const observedCheckoutPath = input.ambientCheckoutPath !== undefined
+    ? input.ambientCheckoutPath
+    : input.checkoutPath
+  const workspaceId = await ensureWorkspaceBinding(db, effectiveInput, profile, observedCheckoutPath)
   const metadata = JSON.stringify(effectiveInput.metadata ?? {})
   const runtime = await db.query(
     `INSERT INTO agent_runtime_instances
@@ -589,7 +679,6 @@ export async function heartbeatRuntimeInstance(
     ],
   )
 
-  const requestedRuntimeKind = effectiveInput.runtimeKind?.trim() || 'local_process'
   const reconcileMemoryReadyIdentity = options.reconcileMemoryReadyIdentity ?? reconcileRuntimeMemoryReadyIdentity
   const memoryReadyIdentity = requestedRuntimeKind === 'local_process'
     ? await reconcileMemoryReadyIdentity(db, {

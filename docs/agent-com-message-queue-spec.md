@@ -1413,14 +1413,26 @@ ordinary `local_process` heartbeat が `agent_runtime_instances` を登録・更
 `checkout_path` と `session_name` の authority は起動 process の `PWD` / `TMUX` ではなく、
 対象 `agent_id` の enabled な登録 profile とする。`agents.home_directory` が非空なら
 `checkout_path` はその値を使い、`agents.metadata.tmux_session` が非空なら `session_name` は
-その値を使う。登録値が空の場合に限り、heartbeat input の ambient 値へ field 単位で fallback
-できる。登録値と ambient 値が異なる場合も登録値を優先し、ambient 値は observation としてだけ残す。
+その値を使う。起動 process の `AGENT_COM_CHECKOUT_PATH` / `PWD` / `process.cwd()` と
+`AGENT_COM_RUNTIME_SESSION` / `TMUX` / `DISCORD_STATE_DIR` は ambient observation であり、
+登録値の代替 authority ではない。登録値が空でも ambient 値へ field 単位で fallback しては
+ならない。登録値と ambient 値が異なる場合も登録値を effective value とし、ambient 値は
+一致検証の observation としてだけ残す。
 
 heartbeat row の `metadata.registration_metadata_provenance` は schema version と、各 field の
 `source` (`registered` / `ambient` / `missing`)、effective value、registered value、ambient value、
 および mismatch boolean を持たなければならない。これにより PWD/TMUX が無い MCP server でも
 席の登録 profile と一致する row を作れ、どの authority を使ったかを後から query できる。
-profile lookup failure や両方の値の欠落を silent に ambient/default へ偽装してはならない。
+ordinary `local_process` では enabled な `agents` row、`home_directory`、
+`metadata.tmux_session` の全てを登録前に解決する。profile row が無い、又は必須 field が空なら
+`RUNTIME_REGISTRATION_PROFILE_INCOMPLETE` と不足 field (`agent_profile` / `home_directory` /
+`metadata.tmux_session`) を typed に返し、`agent_workspaces`、`agent_workspace_bindings`、
+`agent_runtime_instances`、`connector_instances`、endpoint lease のいずれも書き込まず fail-closed
+する。cwd や session の暗黙 fallback、部分 profile の登録、非構造化 error への丸め込みは禁止する。
+
+`bootstrap_bound_provider` など ordinary `local_process` 以外の runtime kind は sealed receipt 又は
+呼出側契約が束縛した session / checkout を使用できる。この場合も provenance に caller/ambient
+由来であることを残し、ordinary 登録 profile の authority と混同してはならない。
 
 profile tuple の各登録値が非空であることは ordinary resolver の完全な判定に必要である。
 resolver の呼出側は `requested_runtime_kind` を必ず指定する。candidate、current selection、

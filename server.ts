@@ -171,6 +171,7 @@ import {
   hasRuntimeConnectorIdentityEvidence,
   inferRuntimeSessionName,
   parseRuntimePort,
+  RuntimeRegistrationProfileError,
 } from './core/runtime-heartbeat'
 import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './core/git-checkout-evidence'
 import {
@@ -451,7 +452,8 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
   const registeredDiscordClient = discordClients.get(AGENT_ID) ?? null
-  const runtimeSessionName = inferRuntimeSessionName()
+  const ambientRuntimeSessionName = inferRuntimeSessionName()
+  const ambientRuntimeCheckoutPath = process.env.AGENT_COM_CHECKOUT_PATH?.trim() || process.cwd()
   const runtimePort = parseRuntimePort()
   const hasDiscordConnectorEvidence = Boolean(
     discordTokenFingerprint && hasRuntimeConnectorIdentityEvidence(),
@@ -461,10 +463,10 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     agentId: AGENT_ID,
     runtimeEngine: config.agent.runtime,
     runtimeKind: process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
-    sessionName: runtimeSessionName,
+    ambientSessionName: ambientRuntimeSessionName,
     processId: process.pid,
     port: runtimePort,
-    checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
+    ambientCheckoutPath: ambientRuntimeCheckoutPath,
     commitSha: RUNTIME_COMMIT_SHA,
     endpointUri: `http://127.0.0.1:${WEBHOOK_PORT}`,
     connectorProvider: hasDiscordConnectorEvidence ? 'discord' : null,
@@ -485,7 +487,10 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
         }
       : undefined,
   }).catch((err) => {
-    process.stderr.write(`agent-comms: runtime heartbeat evidence failed (non-fatal): ${err}\n`)
+    const detail = err instanceof RuntimeRegistrationProfileError
+      ? JSON.stringify(err.toJSON())
+      : String(err)
+    process.stderr.write(`agent-comms: runtime heartbeat evidence failed (non-fatal): ${detail}\n`)
   })
 }
 
