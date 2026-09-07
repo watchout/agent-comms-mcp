@@ -1,0 +1,63 @@
+{
+  "schema_version": "normalization-e-measurements/v1.2a",
+  "definition_id": "DEF-SD-NORMALIZATION-V12-FREEZE-20260902-001",
+  "source": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5500811424",
+    "raw_body_sha256": "8afb2ea5a97d7d56b331b225d747715c881efb3bc9221f70c26f21f45aebe5e1"
+  },
+  "approval": {
+    "decision_id": "OD-SD-940-NORMALIZATION-V12A-FREEZE-20260902-001",
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5501762709",
+    "raw_body_sha256": "bfea08c05c9db7c8ea6ec0e1499cc3dd458b001a3d60957327007fffe2fa2d56"
+  },
+  "catalog_digest_algorithm": "sha256 over canonical key-sorted compact JSON of measurements",
+  "catalog_digest": "sha256:9cd176174b179249bb25c023d9565c1753b5297b6d1ded8036be966cd94a4ba5",
+  "message_queue_status_check": "CHECK (status IN ('pending', 'read', 'received', 'in_progress', 'done', 'replied', 'skipped', 'failed'))",
+  "measurements": [
+    {
+      "id": "E1",
+      "condition": "silent terminal for substantive instructions equals zero",
+      "observation_predicate": "over the trailing 24 hours on done_at, skipped rows without a typed reason equal zero"
+    },
+    {
+      "id": "E2",
+      "condition": "attempts are finite",
+      "observation_predicate": "rows with more than three attempts that have not transitioned to failed equal zero"
+    },
+    {
+      "id": "E3",
+      "condition": "stagnation spam equals zero",
+      "observation_predicate": "new stagnation-spam artifacts over the trailing 24 hours equal zero"
+    },
+    {
+      "id": "E4",
+      "condition": "eligibility is derived from one DB source",
+      "observation_predicate": "file roster reads equal zero, human exclusion is mechanical, and one shared predicate derives eligibility"
+    },
+    {
+      "id": "E5",
+      "condition": "one verdict function",
+      "observation_predicate": "daemon and readiness verdict disagreements equal zero"
+    },
+    {
+      "id": "E6",
+      "condition": "crash-only liveness",
+      "observation_predicate": "half-dead runtimes self-terminate for bounded fail-visible KeepAlive restart with dependency-cut classification, and false activations equal zero"
+    },
+    {
+      "id": "E7",
+      "condition": "concurrency is bounded at three",
+      "observation_predicate": "work above bound three is visibly deferred without row mutation, and runner lifetime and the single timeout resolver agree"
+    },
+    {
+      "id": "E8",
+      "condition": "dispatch is exclusive",
+      "observation_predicate": "typed failures caused by stale dispatch to terminal rows equal zero"
+    },
+    {
+      "id": "E9",
+      "condition": "retryable failures are automatically redispatched",
+      "observation_predicate": "retryable provider and missing-output failures reach terminal success with finite typed attempts and zero operator intervention"
+    }
+  ]
+}

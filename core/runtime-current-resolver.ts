@@ -2,6 +2,16 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
+export {
+  CURRENT_PROVIDER_LIVENESS_TTL_MS,
+  CURRENT_PROVIDER_RESOLUTION_CODES,
+  parseRuntimeProviderObservation,
+  resolveCurrentProvider,
+  type CurrentProviderResolution,
+  type CurrentProviderResolutionCode,
+  type CurrentProviderResolutionTuple,
+} from './runtime-current-provider-resolver'
+
 export const RUNTIME_MEMORY_READY_POLICY_SCHEMA = 'runtime-memory-ready-policy/v1' as const
 export const DEFAULT_RUNTIME_MEMORY_READY_POLICY_PATH = join(
   import.meta.dir,

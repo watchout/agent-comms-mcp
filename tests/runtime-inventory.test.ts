@@ -11,6 +11,7 @@ import {
   generateAllAgentCommunicationManifestCandidates,
 } from '../core/runtime-inventory'
 import { allAgentCommunicationTargetSha256 } from '../core/all-agent-communication-manifest'
+import { buildRuntimeProviderObservation } from '../core/runtime-heartbeat'
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -204,6 +205,52 @@ describe('runtime inventory', () => {
       expect(hotel?.checkout_drift.reasons).toContain('runtime_commit_mismatch')
       expect(hotelConnector?.warnings).toContain('connector_runtime_commit_mismatch')
       expect(report.blockers).toContain('hotel-dev:runtime_commit_mismatch')
+    })
+  })
+
+  test('reports stored-preference versus observed-provider drift without changing selection', async () => {
+    await withRuntimeDb(async (db) => {
+      const providerObservation = buildRuntimeProviderObservation({
+        agentId: 'hotel-dev',
+        runtimeInstanceId: 'runtime-hotel',
+        hostProcessId: 4242,
+        hostProcessImage: '/usr/local/bin/claude',
+        observedSession: 'discord-hotel',
+        observedWorkspace: '/tmp/hotel',
+        observedAt: new Date(),
+      })
+      await db.execute(
+        `UPDATE agents
+            SET runtime_engine_preference = $1,
+                home_directory = $2,
+                metadata = $3
+          WHERE agent_id = $4`,
+        ['codex', '/tmp/hotel', JSON.stringify({ tmux_session: 'discord-hotel' }), 'hotel-dev'],
+      )
+      await db.execute(
+        `UPDATE agent_runtime_instances
+            SET metadata = $1
+          WHERE runtime_instance_id = $2`,
+        [JSON.stringify({ git_dirty: false, provider_observation: providerObservation }), 'runtime-hotel'],
+      )
+
+      const report = await buildRuntimeInventoryReport(db, { staleMinutes: 60 })
+      const hotel = report.agents.find(agent => agent.agent_id === 'hotel-dev')
+
+      expect(hotel).toMatchObject({
+        stored_runtime_preference: 'codex',
+        observed_provider: 'claude-code',
+        host_process_class: 'claude-code',
+        host_process_id: 4242,
+        observed_session: 'discord-hotel',
+        observed_workspace: '/tmp/hotel',
+        session_match: true,
+        workspace_match: true,
+        provider_drift: true,
+      })
+      expect(hotel?.warnings).toContain('runtime_provider_preference_drift')
+      expect(report.summary.provider_drifts).toBe(1)
+      expect(formatRuntimeInventoryText(report)).toContain('stored_provider=codex observed_provider=claude-code')
     })
   })
 })
