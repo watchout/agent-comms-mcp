@@ -256,6 +256,31 @@ ALTER TABLE agents DROP COLUMN IF EXISTS channel_port;
 
 全コマンドがJSON出力。全コマンドが `--agent-id` 必須。
 
+### 4.0 Opt-in bounded admission
+
+明示的に PREPARE 済みの recipient partition には
+[bounded admission 設計](design/aun-bounded-admission.md) が適用される。
+MCP next、通常 CLI next、targeted receive、headless worker は同じ SQL core を使用する。
+旧 client の直接 claim/status shortcut/claim clear/reclaim は scoped DB guard が拒否する。
+no-policy の通常動作と、PREPARE 後の policy missing/expired による deny を区別する。
+初回 PREPARE は fresh no-work check と fixed-order NOWAIT table locks の transaction で
+sticky guard を設置する。既存の pending/expired claim を enroll・更新・削除しない。
+
+通常 notify の COMMIT 時点で task/reply の outbound projection を recipient/parent join
+から識別し、既存 delivery_diagnostics JSON 配列に guard-owned HOLD を追記する。
+sender/consumer が対象 agent と異なっても適用する。返却 ID の ENROLL 前には配信しない。
+一度予約した invocation/finalizer/projection attempt は失敗・不明でも消費済みとする。
+§5 の self-reclaim、§6.4 の backoff/orphan retry、§13 の runner/finalizer retry は
+この partition を対象外とし、DB guard も reset/retry を拒否する。非対象の既定 retry は保持。
+例外はowner承認済みの返信物理配送だけ。論理reply/projectionは1件のまま、保存した
+同一request/nonceで初回込み最大3 POST（SDK/fallback含む）、失敗後10秒/30秒と
+Retry-Afterの最大値を待つ。originalは1 POST、task/LLM/finalizerは再実行しない。
+既知のDiscord成功はACK receiptを先に永続化し、DB保存のみ累積5write/20秒まで。
+DB停止・不明なcrashは未送信と推測せず停止。同hostの永続排他・receipt・累積budgetを
+保持し、上限/永久失敗は一つの非actionable system_errorへ集約する。
+read-only worker の結果を trusted host が通常 send --queue-work-finalizer --close で返信し、
+独立した業務受入は別途必要。task2 で policy/source/cohort/plist/env/cutoff を変更しない。
+
 ### 4.1 agent-com next
 
 未処理メッセージを1件取得。取得時点で既読マーク。

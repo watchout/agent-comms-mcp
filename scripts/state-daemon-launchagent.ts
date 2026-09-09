@@ -285,6 +285,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-mediated-posting-args-json') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_ARGS_JSON = next()
     else if (arg === '--queue-work-mediated-posting-timeout-ms') args.extraEnv.STATE_DAEMON_QUEUE_WORK_MEDIATED_POSTING_TIMEOUT_MS = next()
     else if (arg === '--queue-work-fence-queue-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS = next()
+    else if (arg === '--admission-policy-id') args.extraEnv.AUN_ADMISSION_POLICY_ID = next()
+    else if (arg === '--admission-config-digest') args.extraEnv.AUN_ADMISSION_CONFIG_DIGEST = next()
+    else if (arg === '--admission-source-sha') args.extraEnv.AUN_ADMISSION_SOURCE_SHA = next()
+    else if (arg === '--admission-cohort-digest') args.extraEnv.AUN_ADMISSION_COHORT_DIGEST = next()
+    else if (arg === '--admission-runtime-id') args.extraEnv.AUN_ADMISSION_RUNTIME_ID = next()
     else if (arg === '--queue-work-fence-message-ids') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = next()
     else if (arg === '--queue-work-fence-created-after') args.extraEnv.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = next()
     else if (arg === '--recover-expired-scheduler-claim') args.extraEnv.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
@@ -398,7 +403,7 @@ async function runQueueWorkCanaryResiduePreflight(
   config: StateDaemonLaunchAgentConfig,
   databaseUrl: string,
 ): Promise<void> {
-  if (!queueWorkSchedulerLaunchAgentEnabled(config.environmentVariables)) return
+  if (!queueWorkSchedulerLaunchAgentEnabled(config.environmentVariables) && !config.environmentVariables.AUN_ADMISSION_POLICY_ID) return
   const client = new Client({ connectionString: databaseUrl })
   await client.connect()
   try {
@@ -435,7 +440,7 @@ async function runProviderEffectsActivationPreflight(config: StateDaemonLaunchAg
   }
 }
 
-function commandRestore(args: ParsedArgs): void {
+async function commandRestore(args: ParsedArgs): Promise<void> {
   if (!args.commit) throw new Error('restore requires --commit <sha>')
   const requestedExtraEnv = {
     ...args.extraEnv,
@@ -476,6 +481,8 @@ function commandRestore(args: ParsedArgs): void {
     databaseUrl: args.databaseUrl,
     extraEnv,
   })
+  if (extraEnv.AUN_ADMISSION_POLICY_ID) await runQueueWorkCanaryResiduePreflight(
+    parseStateDaemonLaunchAgentPlist(renderStateDaemonLaunchAgentPlist(plan)), plan.databaseUrl)
   if (!args.execute) {
     process.stdout.write(`${JSON.stringify({ dry_run: true, plan, extraEnv }, null, 2)}\n`)
     return
@@ -490,7 +497,7 @@ function commandRestore(args: ParsedArgs): void {
   if (!installedPreflight.ok) {
     throw new Error(`staged LaunchAgent failed preflight:\n${JSON.stringify(installedPreflight, null, 2)}`)
   }
-  if (queueWorkSchedulerLaunchAgentEnabled(stagedConfig.environmentVariables)) {
+  if (queueWorkSchedulerLaunchAgentEnabled(stagedConfig.environmentVariables) || stagedConfig.environmentVariables.AUN_ADMISSION_POLICY_ID) {
     void completeRestoreAfterQueueWorkCanaryResiduePreflight(stagedConfig, plan, args, extraEnv)
     return
   }
@@ -568,7 +575,7 @@ async function main(): Promise<void> {
     process.stdout.write(usage())
     return
   }
-  if (args.command === 'restore') commandRestore(args)
+  if (args.command === 'restore') await commandRestore(args)
   else if (args.command === 'preflight') await commandPreflight(args)
   else if (args.command === 'prune') commandPrune(args)
 }

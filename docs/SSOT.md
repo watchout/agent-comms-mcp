@@ -56,6 +56,28 @@ projection であり、core identity ではない。
 agent identity、runtime、connector、queue claim、lease、audit、secret handling、
 observability が将来のenterprise設計を壊さないことをPR単位で確認する。
 
+### 1.7 Opt-in bounded admission（MVP queue correctness）
+
+明示的に設定した一つの recipient partition について、通常の notify → genuine ID →
+enroll → claim → result → host reply を共通の PostgreSQL admission core で制御する。
+詳細は [aun-bounded-admission.md](design/aun-bounded-admission.md) を従属設計とする。
+既存 lease の期限切れを deny policy として流用しない。policy は sticky deny であり、
+旧 MCP/CLI/consumer の直接 SQL claim/reclaim も DB guard で拒否する。
+
+設定は max_tasks=2、WIP=1、invocation/finalizer/original projection の各 attempt=1。
+返信は論理 message/projection を1件に保ち、同一の保存済み request/delivery ID/nonce で
+物理 Discord POST のみ初回込み最大3回（SDK/fallbackを含む）、失敗後10秒/30秒以上かつ
+Retry-After以上待つ。成功応答後はPOSTせずDB保存だけ復旧する。DB不明時は送信停止。
+同一hostの永続receipt/排他と累積予約が再起動後も上限を保持し、不明・上限到達は
+needs-attentionと一つのsystem_error通知に止める。物理重複はあり得るがタスク再実行は禁止。
+task1 の独立受入後、同じ実効設定で通常送信された task2 を enroll する。
+done/replied は transport 状態であり、Shirube の案件受入やチーム完成ではない。
+通常の非対象 partition と SQLite の既存コマンドは変更しない。
+bounded mode は PostgreSQL と installed guard が必要で、初回 PREPARE は
+transaction_timeout を備える PostgreSQL 17 が必要。非対応時は effect 前に typed error。
+code rollback は guard と HALTED ledger を保持し、queue や claim を消さない。
+実 DB の migration/role/grant/consumer 更新・送信・適用は別の exact owner admission が必要。
+
 ---
 
 ## 2. アーキテクチャ

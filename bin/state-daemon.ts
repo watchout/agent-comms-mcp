@@ -23,6 +23,7 @@
  * trigger and the new columns it depends on land via PR #329 first.
  */
 import { Client } from 'pg'
+import { admissionBindingFromEnv } from '../core/queue-admission'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
@@ -348,10 +349,10 @@ export function buildQueueWorkAgentEnv(
     AGENT_COM_EXPECTED_AGENT_ID: agentId,
     AGENT_COMMS_MEMORY_READY_PROJECT: project,
     AGENT_MEMORY_PROJECT: project,
-    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
-    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
     AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
-      base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+      (base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE)
         ?? base.AUN_RECEIVE_CLAIM_SOURCE
         ?? 'state-daemon-queue-work-scheduler',
   }
@@ -790,6 +791,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
+  set('admissionBinding', admissionBindingFromEnv(process.env))
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
   set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
   set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))

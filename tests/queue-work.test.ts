@@ -51,6 +51,11 @@ class FakeQueueDb implements QueueWorkDb {
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
     this.calls.push({ sql, params })
+    if (sql === "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed") {
+      // These existing cases exercise the default, non-admitted database path.
+      // Real installed-policy behavior is measured in the bounded PG fixtures.
+      return { rows: [{ installed: false }] as T[], rowCount: 1 }
+    }
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
       return { rows: [], rowCount: 0 }
     }
@@ -1300,10 +1305,11 @@ describe('finalizeDoneQueueWork', () => {
       queue_id: '42',
     })
     const sqls = db.calls.map((call) => call.sql)
-    expect(sqls).toHaveLength(3)
-    expect(sqls[0]).toBe('BEGIN')
-    expect(sqls[1]).toContain('FOR UPDATE')
-    expect(sqls[2]).toBe('ROLLBACK')
+    expect(sqls).toHaveLength(4)
+    expect(sqls[0]).toBe("SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed")
+    expect(sqls[1]).toBe('BEGIN')
+    expect(sqls[2]).toContain('FOR UPDATE')
+    expect(sqls[3]).toBe('ROLLBACK')
     expect(db.row.status).toBe('done')
   })
 
@@ -1526,6 +1532,7 @@ describe('finalizeDoneQueueWork', () => {
     })
     expect(sendCount).toBe(0)
     expect(db.calls.map((call) => call.sql)).toEqual([
+      "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed",
       'BEGIN',
       expect.stringContaining('FOR UPDATE'),
       'ROLLBACK',

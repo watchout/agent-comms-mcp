@@ -123,7 +123,10 @@ export interface FetchNewMessagesResult {
  * `query()` returns a `{rows}` shape so the helpers can interrogate
  * `RETURNING` output uniformly across the pg and sqlite adapters.
  */
+import { unboundedQueuePredicate } from './queue-admission'
+
 export interface ReclaimDb {
+  dialect?: 'sqlite' | 'postgres'
   query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }>
 }
 
@@ -173,6 +176,7 @@ export async function reclaimSelfOrphanedClaims(
        AND claimed_by = $1
        AND status = 'received'
        AND (claim_expires_at IS NULL OR claim_expires_at < now())
+       AND ${unboundedQueuePredicate('agent_id', db.dialect)}
      RETURNING id`,
     [agentId],
   )
@@ -237,6 +241,7 @@ export function startSelfReclaimSweeper(
            AND status = 'received'
            AND claim_expires_at IS NOT NULL
            AND claim_expires_at < now()
+           AND ${unboundedQueuePredicate('agent_id', db.dialect)}
          RETURNING id`,
         [agentId],
       )

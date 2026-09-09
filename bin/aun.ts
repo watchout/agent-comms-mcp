@@ -46,6 +46,7 @@ import { runtimeV2, runtimeV2ClaimDryRun, runtimeV2ClaimLiveCanary, runtimeV2Pla
 import { connectorChannelAccessDiscovery, connectorCredentialDiagnostic, connectorProviderIdentityVerify } from './aun/connector'
 import { validateV2NativeMeshScopeFile } from './aun/v2-native-mesh'
 import { bootstrap } from './aun/bootstrap'
+import { runAdmission } from './aun/admission'
 
 function printHelp(): void {
   const lines = [
@@ -79,6 +80,7 @@ function printHelp(): void {
     '  aun notify --agent-id <id> --channel-id <id> --content <text> --mentions <owner> [--dry-run]',
     '  aun uninstall [--backup <path>] [--surgical]',
     '  aun status',
+    '  aun admission prepare|enroll|status|enable|accept|halt [--dry-run|--execute]',
     '  aun --help | -h',
     '',
     'Environment:',
@@ -320,6 +322,7 @@ export function run(argv: string[] = process.argv): number {
 
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags, extras } = parseArgs(argv)
+  if (subcommand === 'admission') return runAdmission(extras[0], flags)
   if (
     !((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') &&
     subcommand !== 'diagnose-receive' &&

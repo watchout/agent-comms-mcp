@@ -20,6 +20,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { Client } from 'pg'
+import { tryBoundedClaim } from './core/queue-admission'
 import { createDbAdapter, type DbAdapter as NewDbAdapter, toLegacy } from './core/db'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -2222,6 +2223,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     try {
       await assertMessageQueueStatusVocabularyCompatible(client, { operation: 'mcp.next' })
+      const bounded = await tryBoundedClaim(client, agentId, { dialect: process.env.AGENT_COM_DB === 'sqlite' || !process.env.DATABASE_URL ? 'sqlite' : 'postgres' })
+      if (bounded) return { content: [{ type: 'text', text: JSON.stringify(bounded) }] }
       await client.query('BEGIN')
       // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
       // removed. The previous shape locked the agents row with FOR UPDATE,
@@ -5396,6 +5399,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // the top-level `.catch(err => process.exit(1))`, so connection
     // failure at boot is loud rather than hidden.
     const reclaimDb = await requireDbForStartup()
+    Object.assign(reclaimDb, { dialect: process.env.AGENT_COM_DB === 'sqlite' || !process.env.DATABASE_URL ? 'sqlite' : 'postgres' })
     // PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — per-bot recovery wiring.
     // The cycle 7-15 implementation only ran startup self-reclaim +
     // periodic sweeper for the primary `AGENT_ID`. In multi-bot
