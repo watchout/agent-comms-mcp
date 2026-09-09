@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -17,12 +17,81 @@ import {
   validateQueueWorkCanaryResiduePreflight,
 } from '../../../core/state-daemon/launchagent'
 import { loadQueueWorkResiduePolicyFile } from '../../../core/state-daemon/queue-work-residue-policy'
+// Collection-phase import: this canonical module also registers F01/F02 once.
+// Never dynamically import it from an already executing test callback.
+import { fixture, seedNormalTransport } from '../test_queue_bounded_admission.test'
+import { admissionStatus } from '../../../core/queue-admission'
 import {
   SHIRUBE_D1_FLEET_ACTIVATION_REF,
   SHIRUBE_D1_FLEET_TARGETS,
 } from '../../../core/shirube-d1-activation-policy'
 
 const REPO = join(import.meta.dir, '..', '..', '..')
+
+async function boundedRestoreCli(mode: 'success'|'wrong_digest'|'unreachable') {
+  await fixture(async f => {
+    const head=git(['rev-parse','HEAD'],REPO)
+    f.config.source_sha=head;f.config.runtime_id='command-json'
+    await seedNormalTransport(f.admin)
+    await f.prepare()
+    const state=(await admissionStatus(f.executor,f.config.policy_id))!
+    const root=f.config.transport.receipt_dir
+    const digest=mode==='wrong_digest'?'f'.repeat(64):state.policy.config_digest
+    const {STATE_DAEMON_AGENT_ALLOWLIST: _allowlist,...overlay}=canaryOverlayEnv('qa')
+    overlay.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST=digest
+    const snapshot=async()=>{
+      const result:Record<string,unknown>={}
+      for(const table of ['queue_admission_policies','queue_admission_tasks','message_queue','agent_messages','outbound_queue'])
+        result[table]=(await f.admin.query(`SELECT to_jsonb(t) AS row FROM ${table} t ORDER BY to_jsonb(t)::text`)).rows
+      return JSON.stringify(result)
+    }
+    const before=await snapshot()
+    const url=new URL(f.env.DATABASE_URL!)
+    if(mode==='unreachable')url.searchParams.set('host',join(root,'absent-owned-socket'))
+    const argv=[process.execPath,'scripts/state-daemon-launchagent.ts','restore','--commit',head,
+      '--restore-root',join(root,'restore'),'--launchagents-dir',join(root,'agents'),'--bun',process.execPath,
+      '--database-url',url.href,'--bootstrap-safe-defaults','--disable-codex-runner','--agent-allowlist','qa',
+      '--canary-overlay-env-json',JSON.stringify(overlay),
+      '--admission-policy-id',f.config.policy_id,'--admission-config-digest',digest,
+      '--admission-source-sha',head,'--admission-cohort-digest',f.config.cohort_digest,'--admission-runtime-id','command-json']
+    const started=Date.now(),proc=Bun.spawn(argv,{cwd:REPO,env:f.env,stdout:'pipe',stderr:'pipe'})
+    let expired=false
+    const timer=setTimeout(()=>{expired=true;proc.kill()},10000)
+    let stdout='',stderr='',exit:number
+    try{[stdout,stderr,exit]=await Promise.all([new Response(proc.stdout).text(),new Response(proc.stderr).text(),proc.exited])}
+    finally{clearTimeout(timer)}
+    writeFileSync(join(root,`restore-${mode}.stdout.log`),stdout,{mode:0o600})
+    writeFileSync(join(root,`restore-${mode}.stderr.log`),stderr,{mode:0o600})
+    writeFileSync(join(root,`restore-${mode}.child.json`),JSON.stringify({argv,cwd:REPO,started,finished:Date.now(),exit:exit!,expired}),{mode:0o600})
+    expect(expired).toBe(false)
+    expect(exit!,stderr).toBe(mode==='success'?0:1)
+    if(mode==='success'){
+      const report=JSON.parse(stdout)
+      expect(report.dry_run).toBe(true)
+      expect(report.plan.commit).toBe(head)
+      expect(report.plan.checkoutPath).toBe(join(root,'restore',head))
+      expect(report.plan.databaseUrl).toBe(url.href)
+      expect(report.extraEnv).toMatchObject({AUN_ADMISSION_POLICY_ID:f.config.policy_id,AUN_ADMISSION_CONFIG_DIGEST:state.policy.config_digest,
+        AUN_ADMISSION_SOURCE_SHA:head,AUN_ADMISSION_COHORT_DIGEST:f.config.cohort_digest,AUN_ADMISSION_RUNTIME_ID:'command-json',
+        STATE_DAEMON_AGENT_ALLOWLIST:'qa',STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED:'0',STATE_DAEMON_CODEX_RUNNER_ENABLED:'0'})
+    }else{
+      expect(stdout).not.toContain('"dry_run": true')
+      expect(stderr).toContain('state-daemon-launchagent:')
+      expect(stderr).not.toContain('unknown argument')
+      expect(stderr).toContain(mode==='wrong_digest'?'bounded_admission_readback_failed':'absent-owned-socket')
+    }
+    expect(existsSync(join(root,'restore'))).toBe(false)
+    expect(existsSync(join(root,'agents'))).toBe(false)
+    expect(await snapshot()).toBe(before)
+    console.log(JSON.stringify({subcase:`CI-AMEND-RESTORE-${mode}`,actual_child_exit:exit!,dry_run:mode==='success',
+      source_head:head,queue_policy_delta:0,launchctl:0,fixture_only:true}))
+  })
+}
+
+test('CI-AMEND-RESTORE-SUCCESS',()=>boundedRestoreCli('success'),30000)
+test('CI-AMEND-RESTORE-REJECT',async()=>{
+  await boundedRestoreCli('wrong_digest');await boundedRestoreCli('unreachable')
+},30000)
 
 function git(args: string[], cwd: string): string {
   const proc = Bun.spawnSync(['git', ...args], {

@@ -124,6 +124,44 @@ and persistence. Never steal by age, lost DB connection or the consumer60s tick 
 Recovery requires positive same-host prior-owner termination; PID reuse/unknown is blocked.
 Atomic receipt writes fsync file, rename and fsync parent. No automatic receipt GC.
 
+Explicit ended-owner recovery serializes only its fresh lock read/compare/unlink
+using Bun's built-in SQLite `BEGIN EXCLUSIVE`, busy_timeout=0, on the persistent
+`out-ID.reap.sqlite` in that same directory. This is a host-local mutex, not a
+SQLite queue backend. Atomically create the regular same-UID0600/nlink1 main with
+O_EXCL/O_NOFOLLOW, fsync file/parent and close its creation fd before SQLite opens;
+never truncate, replace or remove it. Require stable directory/main inode, main
+size <=16KiB, readwrite+NOFOLLOW (no create/URI/custom VFS), DELETE journal mode,
+4096-byte pages, at most one page and no user schema. Local filesystem OS locking
+is required; unknown/network filesystems are not an admitted deployment.
+
+SQLite can initialize page1 and create its own `-journal` even without application
+SQL writes. The exact main-path `-journal` alone may be absent or an engine-owned
+empty/partial/cold/hot regular same-UID0600/nlink1 file on the same device, <=128KiB.
+Allow SQLite's normal open/playback/finalization to recover it; application code
+never deletes, resets or parses journal contents. WAL/SHM/superjournal/extra
+companions, unsafe metadata, corrupt main or unsupported NOFOLLOW refuse recovery.
+The own-UID0700 directory is the trust boundary, not protection from a malicious
+same-UID process. Busy returns ADMISSION_RECOVERY_BUSY with no owner/receipt write;
+other engine/path errors return ADMISSION_RECOVERY_MUTEX_INVALID and retain evidence.
+No await or SQLite operation occurs between the fresh owner read and unlink.
+Finally ROLLBACK and close release the OS lock, even on error; engine rollback may
+delete a journal or truncate its empty main, but cannot undo the owner-file unlink.
+A legitimate journal from another contender after close is not corruption.
+
+Release this mutex before acquiring the existing O_EXCL delivery-owner lock.
+Re-read and revalidate the exact approved receipt SHA, source/config/request/owner,
+durable outcome and unused recovery token while holding the new owner lock,
+before modifying any receipt or DB state. A stale contender cannot overwrite a
+completed recovery's receipt, and cannot unlink a replacement owner. Crash after
+mutex acquisition or old-lock unlink leaves only an engine-recoverable main/journal;
+positive process-end evidence plus a fresh exact approved DB-only recovery is still
+required. Crash after mutex close/before new O_EXCL leaves no permanent guard.
+Post-new-owner mismatches retain existing fail-closed handling; DB loss, lock age
+or busy is never owner-end evidence. These persistent main/journal effects and all
+legacy writers must be explicitly admitted in a future nonlive application proposal.
+BA-CORE-F06/DR08 includes deterministic two-process stale-reader and crash cuts,
+actual empty-main journal/reopen evidence and invalid-file controls on Darwin/Ubuntu.
+
 Under that lock, SQL locks policy→task→outbound, checks guard/config/roles/expiry/due/budget,
 commits reservation and fsyncs INTENT before POST. Failed durability consumes the reservation
 and forbids POST. Recheck authoritative state immediately before the provider seam; DB

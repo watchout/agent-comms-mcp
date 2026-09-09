@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { Client } from 'pg'
+import { Database, constants as sqliteConstants } from 'bun:sqlite'
 
 /** SQL owns eligibility. These types/adapters do not invent per-surface rules. */
 export interface AdmissionDb {
@@ -204,11 +205,76 @@ export class BoundedReceiptStore {
     if(prior.host!==hostname())throw new AdmissionError('ADMISSION_DELIVERY_OWNER_MISMATCH')
     const probe=Bun.spawnSync(['/bin/ps','-p',String(prior.pid),'-o','lstart='],{stdout:'pipe',stderr:'pipe'})
     if (probe.exitCode!==1 || probe.stdout.toString().trim()!=='') throw new AdmissionError('ADMISSION_PRIOR_OWNER_NOT_ENDED')
-    const path=this.path(id,'lock')
-    let actual: BoundedOwner
-    try { actual=this.read(path) } catch(e) { if ((e as NodeJS.ErrnoException).code==='ENOENT') return;throw e }
-    if (JSON.stringify(actual)!==JSON.stringify(prior) || prior.host!==hostname()) throw new AdmissionError('ADMISSION_DELIVERY_OWNER_MISMATCH')
-    unlinkSync(path);this.syncParent()
+    this.withReapMutex(id, () => {
+      const fresh=Bun.spawnSync(['/bin/ps','-p',String(prior.pid),'-o','lstart='],{stdout:'pipe',stderr:'pipe'})
+      if(fresh.exitCode!==1||fresh.stdout.toString().trim()!=='')throw new AdmissionError('ADMISSION_PRIOR_OWNER_NOT_ENDED')
+      const path=this.path(id,'lock')
+      let actual: BoundedOwner
+      try { actual=this.read(path) } catch(e) { if ((e as NodeJS.ErrnoException).code==='ENOENT') return;throw e }
+      if (JSON.stringify(actual)!==JSON.stringify(prior)) throw new AdmissionError('ADMISSION_DELIVERY_OWNER_MISMATCH')
+      // No SQLite call/await between the fresh read and unlink. Another reaper
+      // cannot unlink a newly acquired owner using its pre-mutex observation.
+      unlinkSync(path);this.syncParent()
+    })
+  }
+  /** Host-local OS mutex only. SQLite never stores queue/receipt business data. */
+  private withReapMutex(id: string, action: () => void): void {
+    const main=this.path(id,'lock').replace(/\.lock$/,'.reap.sqlite')
+    const name=`${id}.reap.sqlite`
+    const invalid=()=>new AdmissionError('ADMISSION_RECOVERY_MUTEX_INVALID')
+    let db: Database | undefined
+    let failure: unknown
+    let identity=''
+    const inspect=()=>{
+      if(this.checkDirectory()!==this.directoryIdentity)throw invalid()
+      const st=lstatSync(main)
+      if(!st.isFile()||st.isSymbolicLink()||st.uid!==process.getuid!()||(st.mode&0o777)!==0o600||st.nlink!==1||st.size>16384)throw invalid()
+      const current=`${st.dev}:${st.ino}`
+      if(identity&&identity!==current)throw invalid()
+      for(const entry of readdirSync(this.directory)){
+        if(!entry.startsWith(name)||entry===name)continue
+        if(entry!==`${name}-journal`)throw invalid()
+        let journal
+        try{journal=lstatSync(join(this.directory,entry))}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e}
+        if(!journal.isFile()||journal.isSymbolicLink()||journal.uid!==process.getuid!()||(journal.mode&0o777)!==0o600
+          ||journal.nlink!==1||journal.dev!==st.dev||journal.size>131072)throw invalid()
+      }
+      return current
+    }
+    try{
+      if(!constants.O_NOFOLLOW||!sqliteConstants.SQLITE_OPEN_NOFOLLOW)throw invalid()
+      let fd: number | undefined
+      try{
+        fd=openSync(main,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600)
+        fsyncSync(fd);this.syncParent()
+      }catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e}
+      finally{if(fd!==undefined)closeSync(fd)}
+      identity=inspect()
+      db=new Database(main,sqliteConstants.SQLITE_OPEN_READWRITE|sqliteConstants.SQLITE_OPEN_NOFOLLOW)
+      db.run('PRAGMA busy_timeout = 0')
+      // The default Unix VFS owns page1 and rollback-journal initialization and
+      // recovery. No CREATE/user write or application journal cleanup is used.
+      if(lstatSync(main).size===0)db.run('PRAGMA page_size = 4096')
+      if(db.query('PRAGMA journal_mode').get()?.journal_mode!=='delete')throw invalid()
+      db.run('BEGIN EXCLUSIVE')
+      inspect()
+      if(db.query('PRAGMA page_size').get()?.page_size!==4096
+        || Number(db.query('PRAGMA page_count').get()?.page_count)>1
+        || db.query('SELECT name FROM sqlite_schema').all().length!==0)throw invalid()
+      action()
+    }catch(e){
+      failure=e instanceof AdmissionError ? e
+        : new AdmissionError((e as {errno?:number}).errno===5||(e as {code?:string}).code==='SQLITE_BUSY'
+          ? 'ADMISSION_RECOVERY_BUSY' : 'ADMISSION_RECOVERY_MUTEX_INVALID')
+    }finally{
+      if(db){
+        try{if(db.inTransaction)db.run('ROLLBACK')}catch{failure??=invalid()}
+        finally{try{db.close(true)}catch{failure??=invalid()}}
+      }
+      // A concurrent holder may already have created its own valid journal.
+      if(identity)try{inspect()}catch{failure??=invalid()}
+    }
+    if(failure)throw failure
   }
   write(r: BoundedReceipt): void {
     const target = this.path(r.delivery_id, 'json')
@@ -492,12 +558,17 @@ export async function recoverBoundedReceipt(input: {
       && typeof v.ended_at==='string' && Date.parse(v.ended_at)<=clock.now())) throw new AdmissionError('ADMISSION_PRIOR_OWNER_END_EVIDENCE_INVALID')
   const store=new BoundedReceiptStore(input.state.policy.config.transport.receipt_dir,currentBoundedOwner(prior.cohort))
   if(input.receiptPath!==join(store.directory,`${r.delivery_id}.json`))throw new AdmissionError('ADMISSION_RECEIPT_PATH_MISMATCH')
-  const receipt=store.readReceipt(r.delivery_id)
-  if(!receipt || admissionSha256(readFileSync(input.receiptPath))!==r.receipt_sha256 || receipt.request_digest!==r.request_digest
+  const readPinnedReceipt=()=>{
+    const receipt=store.readReceipt(r.delivery_id)
+    if(!receipt || admissionSha256(readFileSync(input.receiptPath))!==r.receipt_sha256 || receipt.request_digest!==r.request_digest
+    || receipt.policy_id!==r.policy_id || receipt.source_sha!==r.source_head || receipt.cohort_digest!==prior.cohort
     || receipt.config_digest!==input.state.policy.config_digest
-    || ['host','pid','start','cohort'].some(k=>receipt.owner[k as keyof BoundedOwner]!==prior[k as keyof BoundedOwner])
+    || ['token','host','pid','start','cohort'].some(k=>receipt.owner[k as keyof BoundedOwner]!==prior[k as keyof BoundedOwner])
     || receipt.persistence.recovery_tokens.includes(r.recovery_token))throw new AdmissionError('ADMISSION_RECEIPT_BINDING_MISMATCH')
-  if(!receipt.ack && !receipt.notice_pending)throw new AdmissionError('ADMISSION_RECOVERY_NO_DURABLE_OUTCOME')
+    if(!receipt.ack && !receipt.notice_pending)throw new AdmissionError('ADMISSION_RECOVERY_NO_DURABLE_OUTCOME')
+    return receipt
+  }
+  readPinnedReceipt()
   const row=(await admissionRows(input.db,'SELECT to_jsonb(o) AS row FROM public.outbound_queue o WHERE id=$1',[r.delivery_id.slice(4)]))[0]?.row
   if(!row || outboundDiagnostic(row).request_digest!==r.request_digest)throw new AdmissionError('ADMISSION_RECEIPT_BINDING_MISMATCH')
   if(input.dryRun)return {status:'UNEXECUTED',action:'persist-receipt',delivery_id:r.delivery_id,effect_count:0}
@@ -505,6 +576,7 @@ export async function recoverBoundedReceipt(input: {
   store.releaseEndedOwner(r.delivery_id,prior)
   const release=store.lock(r.delivery_id)
   try{
+    const receipt=readPinnedReceipt() // Fresh under our O_EXCL owner; never mutate a pre-lock snapshot.
     receipt.persistence={...receipt.persistence,started_at:clock.now(),writes:0,
       recovery_tokens:[...receipt.persistence.recovery_tokens,r.recovery_token]}
     store.write(receipt) // Tokens remain consumed even when the following DB response is lost.

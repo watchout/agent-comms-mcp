@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { evaluateStandingAuthorization } from "./lib/cell-conformance.mjs";
 
 // The owner published a standing authorization for frozen-roadmap A1 work:
@@ -250,13 +252,143 @@ if (isRapidLiteAdoptionPr) {
   }
 }
 
-if (pr && changedFiles.some((file) => file.startsWith(".github/workflows/"))) {
+if (pr && (changedFiles.some((file) => file.startsWith(".github/workflows/")) || body.includes("CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001"))) {
+  if (body.includes("CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001")) {
+    try { await requireBoundedCiSupply(); }
+    catch (error) { errors.push(`Bounded CI supply blocked: ${error.message}`); }
+  } else {
   if (!body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001")) {
     errors.push("Workflow changes require CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001 in the PR body.");
   }
   if (!body.includes("Risk Tier: R3")) {
     errors.push("Workflow changes require Risk Tier: R3 in the PR body.");
   }
+  }
+}
+
+// One owner-admitted CI supply, never a generic R4 or merge waiver. The digest
+// binds the complete reviewed canonical object, including all 47 allowed paths.
+async function requireBoundedCiSupply() {
+  const target="watchout/agent-comms-mcp", cell="CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001";
+  const base="0f772883db6f3b50772d3e4b82ce47795091f0a9", origin="565583c25963b7dfa9b4445543967d372091b336";
+  const odUrl=`https://github.com/${target}/issues/940#issuecomment-5602974560`;
+  const odHash="c64781ebc64f72b0191fb32e85cd87c96bcfa26eba56d5582cc8e1679cb3ff73";
+  const expiry="2026-09-11T00:00:00Z", now=Date.now();
+  const check=(condition,detail)=>{if(!condition)throw Error(detail)};
+  const hash=value=>createHash("sha256").update(value).digest("hex");
+  const sha40=value=>typeof value==="string"&&/^[0-9a-f]{40}$/.test(value);
+  const sha64=value=>typeof value==="string"&&/^[0-9a-f]{64}$/.test(value);
+  const metadata=key=>{
+    const lines=body.split(/\r?\n/).filter(line=>line.trimStart().startsWith(`${key}:`));
+    check(lines.length===1&&lines[0].startsWith(`${key}:`),`unique anchored ${key} required`);
+    return lines[0].slice(key.length+1).trim();
+  };
+  check(repo===target&&prNumber===963,"repo/PR mismatch");
+  check(metadata("CELL-ID")===cell&&metadata("Risk Tier")==="R4","cell/risk mismatch");
+  check(!body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001"),"adoption-cell contamination");
+  check(metadata("Workflow Supply")==="CI_TEST_SUPPLY_ONLY","wrong workflow scope");
+  check(changedFilesPath&&existsSync(changedFilesPath)&&changedFiles.length>0,"changed-files input required");
+  check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
+  const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
+  check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5604405614`
+    &&digest==="8357672449c6d788306e133169cd9e81e73c2c3507753b4e15eb3189a7b97262","exact published I required");
+  const fixturePath=stringArg(args["control-comments"]);
+  const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
+  if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
+  const load=async(url,expectedHash)=>{
+    const id=Number(url.split("issuecomment-")[1]);
+    const matches=fixture?.filter(comment=>comment?.id===id);
+    if(matches)check(matches.length===1,"control comment missing/duplicate");
+    const comment=matches?matches[0]:(await boundedGithubGet(`https://api.github.com/repos/${target}/issues/comments/${id}`)).value;
+    check(comment?.id===id&&comment.html_url===url&&comment.issue_url===`https://api.github.com/repos/${target}/issues/940`
+      &&comment.user?.login==="watchout"&&comment.author_association==="OWNER","control comment authenticated identity mismatch");
+    check(typeof comment.body==="string"&&hash(comment.body)===expectedHash,"control raw body digest mismatch");
+    return comment.body;
+  };
+  await load(odUrl,odHash);
+  const handoffBody=await load(ref,digest);
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-963-CI-ADMISSION-IMPLEMENTATION-20260909-001 -->";
+  check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
+  check([...handoffBody.matchAll(/^```ya?ml\s*\n[\s\S]*?^```/gm)].length===1,"one canonical YAML block required");
+  const {extractCanonicalControlHandoff}=await import("../.shirube/runtime/rapid-lite/resolve-control-handoff-ref.mjs");
+  const {canonicalControlHandoffMissingFields}=await import("../.shirube/runtime/rapid-lite/normalize-control-handoff.mjs");
+  const extraction=extractCanonicalControlHandoff(handoffBody);
+  check(!extraction.error&&canonicalControlHandoffMissingFields(extraction.handoff).length===0,"canonical handoff invalid");
+  const handoff=extraction.handoff;
+  const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==="object"
+    ?Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])):value;
+  check(hash(JSON.stringify(stable(handoff)))==="5ce6cafb435dfde9290d6f582fb57ca6d665fdb75072f82db61e285e496c9ea8","canonical reviewed object mismatch");
+  check(changedFiles.every(file=>handoff.allowed_paths.includes(file))
+    &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
+  const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();
+  git("merge-base","--is-ancestor",origin,headSha);
+  const tree=git("rev-parse",`${headSha}^{tree}`);
+  const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
+  check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)
+    .every(file=>handoff.allowed_paths.includes(file)),"candidate deletion/rename outside supply");
+  check(JSON.stringify(actualPaths)===JSON.stringify([...changedFiles].sort()),"changed-files mismatch with actual candidate");
+  const diff=hash(execFileSync("git",["diff","--binary",`${base}...${headSha}`],{timeout:15000,maxBuffer:16*1024*1024}));
+  const expected={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:target,target_pr:963,cell_id:cell,risk_class:"R4",
+    base_sha:base,origin_head_sha:origin,exact_head_sha:headSha,candidate_tree:tree,binary_diff_sha256:diff,
+    handoff_comment_ref:ref,handoff_body_sha256:digest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
+    checker_agent:"codex-cto/repair_independent_review",maker_agent:"codex-cto/gen4_validation",publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
+  let found=0;
+  for(const comment of await loadIssueComments(true)){
+    const text=String(comment?.body??"");
+    if(!text.includes("shirube-v3:ci-consumer-verdict")&&!text.includes("shirube_consumer_verdict:"))continue;
+    let fields;
+    try{fields=parseCiConsumerVerdict(text)}catch(error){
+      // Never discard a malformed current-head record in favour of a valid one.
+      if(text.includes(headSha))throw error;
+      continue;
+    }
+    if(fields.exact_head_sha!==headSha)continue;
+    check(comment.user?.login==="watchout"&&comment.author_association==="OWNER"
+      &&comment.issue_url===`https://api.github.com/repos/${target}/issues/963`
+      &&new RegExp(`^https://github.com/${target}/(?:pull|issues)/963#issuecomment-[1-9][0-9]*$`).test(comment.html_url??"")
+      &&String(comment.id)===(comment.html_url??"").split("issuecomment-")[1],"consumer publisher/issue mismatch");
+    for(const [key,value] of Object.entries(expected))check(fields[key]===value,`consumer ${key} mismatch`);
+    for(const key of ["base_sha","origin_head_sha","exact_head_sha","candidate_tree"])check(sha40(fields[key]),`consumer ${key} type`);
+    for(const key of ["binary_diff_sha256","handoff_body_sha256","owner_decision_body_sha256","evidence_sha256"])check(sha64(fields[key]),`consumer ${key} type`);
+    for(const key of ["restore_success_ref","restore_reject_ref","runtime_adapter_ref"])
+      check(/^(?:sha256:[0-9a-f]{64}|https:\/\/github\.com\/[^\s]+#issuecomment-[1-9][0-9]*)$/.test(fields[key]),`immutable ${key} required`);
+    for(const key of ["issued_at","expires_at"])check(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(fields[key])&&Number.isFinite(Date.parse(fields[key])),`UTC ${key} required`);
+    check(Date.parse(fields.issued_at)<=now&&now<Date.parse(fields.expires_at)&&Date.parse(fields.expires_at)<=Date.parse(expiry),"consumer expiry mismatch");
+    found++;
+  }
+  check(found===1,`exactly one current-head consumer receipt required; found ${found}`);
+  console.log(JSON.stringify({schema_version:"shirube-ci-supply-readback/v1",base,head:headSha,tree,binary_diff_sha256:diff,
+    input_mode:fixturePath?"offline-fixture":"GitHub-API",execution_authorization:"CI_TEST_SUPPLY_ONLY",operational_truth:"NOT_EVALUATED"}));
+}
+
+function parseCiConsumerVerdict(text){
+  const fail=()=>{throw Error("malformed current-head consumer record")};
+  if(text.split("<!-- shirube-v3:ci-consumer-verdict -->").length!==2
+    ||[...text.matchAll(/<!--\s*shirube-v3:ci-consumer-verdict[^>]*-->/g)].length!==1)fail();
+  const blocks=[...text.matchAll(/^```ya?ml\s*\n([\s\S]*?)^```\s*$/gm)];
+  if(blocks.length!==1)fail();
+  const lines=blocks[0][1].trimEnd().split(/\r?\n/);
+  if(lines.shift()!=="shirube_consumer_verdict:")fail();
+  const keys="schema_version target_repo target_pr cell_id risk_class base_sha origin_head_sha exact_head_sha candidate_tree binary_diff_sha256 handoff_comment_ref handoff_body_sha256 owner_decision_ref owner_decision_body_sha256 checker_agent maker_agent publisher verdict restore_success_ref restore_reject_ref runtime_adapter_ref evidence_sha256 issued_at expires_at".split(" ");
+  const fields={};
+  for(const line of lines){
+    const match=/^  ([a-z][a-z0-9_]*): (.+)$/.exec(line);if(!match||!keys.includes(match[1])||Object.hasOwn(fields,match[1]))fail();
+    const [,key,raw]=match;
+    if(key==="target_pr"){if(!/^[1-9][0-9]*$/.test(raw))fail();fields[key]=Number(raw)}
+    else if(raw.startsWith('"')){try{fields[key]=JSON.parse(raw)}catch{fail()};if(typeof fields[key]!=="string")fail()}
+    else{if(!/^[A-Za-z0-9][A-Za-z0-9_:/#.@-]*$/.test(raw)||/^(?:null|true|false)$/.test(raw))fail();fields[key]=raw}
+  }
+  if(Object.keys(fields).length!==keys.length)fail();return fields;
+}
+
+async function boundedGithubGet(url){
+  if(new URL(url).origin!=="https://api.github.com")throw Error("GitHub pagination host mismatch");
+  const token=process.env.GITHUB_TOKEN??process.env.GH_TOKEN;
+  if(!token)throw Error("GitHub token required for bounded CI source readback");
+  const response=await fetch(url,{signal:AbortSignal.timeout(15000),redirect:"error",headers:{Accept:"application/vnd.github+json",Authorization:`Bearer ${token}`,"X-GitHub-Api-Version":"2022-11-28"}});
+  if(!response.ok)throw Error(`GitHub source HTTP ${response.status}`);
+  return {value:await response.json(),next:nextLink(response.headers.get("link"))};
 }
 
 if (body.match(/\bmerge[- ]ready\b/i) && !labels.has("owner-exact-head-approved")) {
@@ -369,7 +501,7 @@ function requireMergeMethodSelection(ownerDecision) {
   }
 }
 
-async function loadIssueComments() {
+async function loadIssueComments(bounded=false) {
   const commentsPath = stringArg(args.comments) ?? process.env.SHIRUBE_PR_COMMENTS_PATH ?? "";
   if (commentsPath) {
     const parsed = readJsonIfPresent(commentsPath);
@@ -387,6 +519,15 @@ async function loadIssueComments() {
 
   const comments = [];
   let url = `https://api.github.com/repos/${repo}/issues/${prNumber}/comments?per_page=100`;
+  if(bounded){
+    for(let page=0;url&&page<10;page++){
+      const result=await boundedGithubGet(url);
+      if(!Array.isArray(result.value))throw Error("GitHub issue comments must be array");
+      comments.push(...result.value);url=result.next;
+    }
+    if(url)throw Error("GitHub comment pagination cap exceeded");
+    return comments;
+  }
   while (url) {
     const response = await fetch(url, {
       headers: {

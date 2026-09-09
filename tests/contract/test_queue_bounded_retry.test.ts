@@ -3,7 +3,7 @@ import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostRe
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { DiscordAdapter, postBoundedDiscordRequest } from '../../adapters/discord'
-import { chmodSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { REST } from 'discord.js'
 import { runReceivedQueueWork, finalizeDoneQueueWork } from '../../core/queue-work'
 import { buildRunQueueWorkPlan, createRuntimeAdapter } from '../../bin/aun/run-queue-work'
@@ -47,6 +47,267 @@ async function makeOwnedRetryDue(f: BoundedFixture,rowId: number|string) {
     await f.admin.query("UPDATE queue_admission_policies SET bot_not_before='{}'::jsonb WHERE policy_id=$1",[f.config.policy_id])
     await f.admin.query('COMMIT')
   }catch(e){await f.admin.query('ROLLBACK');throw e}
+}
+
+// A09 barriers exist only in owned test children. No production hook, polling
+// daemon, fake process-end identity or provider connection is introduced.
+async function ownerRecoveryFixture(cut: 'acquired'|'unlinked'|'closed'|'races') {
+  await fixture(async f=>{
+    const policyBody='A09 isolated fixture authority; never live authority'
+    f.config.authority={url:'https://github.com/fixture/repo/issues/1#issuecomment-1',sha256:admissionSha256(policyBody)}
+    const {row,binding}=await readyReply(f),directory=f.config.transport.receipt_dir,id=`out-${row.id}`
+    const runtimeUrl=new URL(f.env.DATABASE_URL!);runtimeUrl.username=f.config.roles.runtime
+    const controlUrl=new URL(f.env.DATABASE_URL!);controlUrl.username=f.config.roles.controller
+    const script=`${directory}/a09-child.ts`,inputPath=`${directory}/a09-input.json`
+    writeFileSync(script,`
+import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
+import { Database,constants as sqliteConstants } from 'bun:sqlite'
+import { existsSync,readFileSync,writeFileSync,lstatSync,renameSync } from 'node:fs'
+import { BoundedReceiptStore,currentBoundedOwner,deliverBoundedOutbound,recoverBoundedReceipt } from '${candidateRoot}/core/queue-admission.ts'
+import { postBoundedDiscordRequest } from '${candidateRoot}/adapters/discord.ts'
+const i=JSON.parse(readFileSync(process.argv[2],'utf8')),mode=process.argv[3],tag=process.argv[4]||mode
+const client=new Client({connectionString:i.url});await client.connect()
+const mark=(name,value={})=>writeFileSync(i.directory+'/'+tag+'-'+name+'.json',JSON.stringify({at:Date.now(),pid:process.pid,...value}),{mode:0o600})
+const barrier=name=>{mark(name);const until=Date.now()+8000;while(!existsSync(i.directory+'/'+tag+'-'+name+'.go')){
+ if(Date.now()>until)throw Error('A09_BARRIER_TIMEOUT '+name);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2)}}
+const store=new BoundedReceiptStore(i.directory,currentBoundedOwner(i.binding.cohortDigest));const main=i.directory+'/'+i.id+'.reap.sqlite'
+const snapshot=()=>Object.fromEntries([main,main+'-journal'].filter(existsSync).map(path=>{const s=lstatSync(path);return[path,{dev:s.dev,ino:s.ino,size:s.size,mode:s.mode&511,uid:s.uid,nlink:s.nlink}]}))
+if(mode==='seed'){
+ const save=BoundedReceiptStore.prototype.write;BoundedReceiptStore.prototype.write=function(r){save.call(this,r);if(r.ack)process.exit(23)}
+ const adapter={prepareBoundedRequest:async(r)=>({delivery_id:i.id,channel_id:r.channel_external_id,author_id:'111111111111111111',
+ body:{content:r.content,nonce:i.id,enforce_nonce:true,allowed_mentions:{parse:['users','roles'],replied_user:false}}}),
+ sendBoundedRequest:(r,p)=>postBoundedDiscordRequest(r,p,'fixture',async()=>new Response(JSON.stringify({id:'222222222222222222',channel_id:r.channel_id,author:{id:r.author_id},nonce:i.id,content:r.body.content}),{status:200,headers:{'content-type':'application/json'}}))}
+ await deliverBoundedOutbound({db:client,row:i.row,binding:i.binding,adapter});process.exit(24)
+}
+const before=store.readReceipt(i.id);mark('pre-read',{receipt:before})
+if(mode==='missing-nofollow')sqliteConstants.SQLITE_OPEN_NOFOLLOW=0
+if(mode==='wrong-uid')process.getuid=()=>i.fixture_uid+1
+const run=Database.prototype.run,read=store.read.bind(store),sync=store.syncParent.bind(store),reap=store.releaseEndedOwner.bind(store)
+Database.prototype.run=function(sql,...args){const result=run.call(this,sql,...args);if(sql==='BEGIN EXCLUSIVE'){
+ mark('journal',{files:snapshot(),bun:Bun.version,sqlite:this.query('SELECT sqlite_version() AS v').get().v})
+ if(mode==='acquired')process.exit(23)
+ if(mode==='inode-drift'){renameSync(main,i.directory+'/replaced-main');writeFileSync(main,'',{mode:0o600})}
+ }return result}
+store.read=function(path){const result=read(path);if(path.endsWith('.lock')&&mode==='held')barrier('fresh-read');return result}
+store.syncParent=function(){sync();if(mode==='unlinked'&&!existsSync(i.directory+'/'+i.id+'.lock')){mark('cut',{files:snapshot()});process.exit(23)}}
+try{
+ if(mode==='before-guard'||mode==='concurrent-create')barrier('before-guard')
+ if(mode==='lost-db-held'){await client.end();store.read=function(path){const result=read(path);if(path.endsWith('.lock'))barrier('fresh-read');return result}}
+ if(mode==='recover'){
+  const lock=BoundedReceiptStore.prototype.lock
+  if(tag.startsWith('stale'))BoundedReceiptStore.prototype.lock=function(id){barrier('before-lock');return lock.call(this,id)}
+  const bodies=new Map(i.bodies)
+  const result=await recoverBoundedReceipt({db:client,state:i.state,deliveryId:i.id,receiptPath:i.directory+'/'+i.id+'.json',
+   recovery:i.recovery,readBody:async ref=>bodies.get(ref.url),dryRun:false,sleep:async()=>{}})
+  mark('result',{result})
+ }else{
+  reap(i.id,i.prior)
+  if(mode==='closed'){mark('cut',{files:snapshot()});process.exit(23)}
+  if(mode==='race-lock')barrier('before-lock')
+  const release=store.lock(i.id)
+  const fresh=store.readReceipt(i.id);fresh.persistence.recovery_tokens.push('fixture-owner-'+tag);store.write(fresh)
+  const lockStat=lstatSync(i.directory+'/'+i.id+'.lock')
+  mark('owner',{owner:store.owner,files:snapshot(),owner_file:{dev:lockStat.dev,ino:lockStat.ino,uid:lockStat.uid,mode:lockStat.mode&511,size:lockStat.size}})
+  if(mode==='winner'||mode==='held'||mode==='before-guard'||mode==='race-lock'||mode==='lost-db-held'||mode==='concurrent-create')barrier('new-owner')
+  release();mark('result',{status:'released'})
+ }
+}catch(e){mark('error',{code:e.code||e.message})}
+await client.end().catch(()=>{});process.exit(0)
+`,{mode:0o600})
+    const base:any={row,binding,directory,id,url:runtimeUrl.href}
+    writeFileSync(inputPath,JSON.stringify(base),{mode:0o600})
+    const children:ReturnType<typeof Bun.spawn>[]=[]
+    const childCommands=new Map<number,string[]>()
+    const launch=(mode:string,tag=mode,path=inputPath)=>{
+      const argv=[process.execPath,script,path,mode,tag]
+      const p=Bun.spawn(argv,{cwd:candidateRoot,env:{PATH:process.env.PATH,LC_ALL:'C'},stdout:'pipe',stderr:'pipe'})
+      children.push(p);childCommands.set(p.pid,argv);return p
+    }
+    const wait=async(path:string)=>{
+      const until=Date.now()+9000
+      while(!existsSync(path)){if(Date.now()>until)throw Error(`A09_PARENT_BARRIER_TIMEOUT ${path}`);await new Promise(r=>setTimeout(r,2))}
+      return JSON.parse(readFileSync(path,'utf8'))
+    }
+    const marker=(tag:string,name:string)=>`${directory}/${tag}-${name}.json`
+    const go=(tag:string,name:string)=>writeFileSync(`${directory}/${tag}-${name}.go`,'go',{mode:0o600})
+    const end=async(p:ReturnType<typeof Bun.spawn>,expected=0)=>{
+      const timer=setTimeout(()=>p.kill(),10000)
+      try{
+        const exit=await p.exited,stderr=await new Response(p.stderr).text()
+        writeFileSync(`${directory}/child-${p.pid}.stderr.log`,stderr,{mode:0o600})
+        writeFileSync(`${directory}/child-${p.pid}.receipt.json`,JSON.stringify({argv:childCommands.get(p.pid),pid:p.pid,exit,finished:Date.now(),stderr_sha256:admissionSha256(stderr)}),{mode:0o600})
+        expect(exit,stderr).toBe(expected);return exit
+      }
+      finally{clearTimeout(timer)}
+    }
+    try{
+      const seeded=launch('seed');await end(seeded,23)
+      const receiptPath=`${directory}/${id}.json`,lockPath=`${directory}/${id}.lock`
+      const raw=readFileSync(receiptPath,'utf8'),prior=JSON.parse(readFileSync(lockPath,'utf8'))
+      expect(prior.pid).toBe(seeded.pid)
+      const receipt=JSON.parse(raw),endBody=JSON.stringify({ended:true,host:prior.host,pid:prior.pid,start:prior.start,ended_at:new Date().toISOString()})
+      const endRef={url:'https://github.com/fixture/repo/issues/1#issuecomment-2',sha256:admissionSha256(endBody)}
+      const request={policy_id:f.config.policy_id,delivery_id:id,receipt_sha256:admissionSha256(raw),request_digest:receipt.request_digest,
+        source_head:f.config.source_sha,recovery_token:'a09-recovery',max_writes:5,window_ms:20000,prior_owner_end_evidence:{owner:prior,ref:endRef}}
+      const approval=JSON.stringify({...request,decision:'APPROVED',action:'persist-receipt',expires_at:new Date(Date.now()+60000).toISOString()})
+      const approvalRef={url:'https://github.com/fixture/repo/issues/1#issuecomment-3',sha256:admissionSha256(approval)}
+      const recovery={...request,authority_url:approvalRef.url,authority_sha256:approvalRef.sha256}
+      const bodies=new Map([[f.config.authority.url,policyBody],[endRef.url,endBody],[approvalRef.url,approval]])
+      const state=(await admissionStatus(f.control,f.config.policy_id))!
+      Object.assign(base,{prior,recovery,bodies:[...bodies],state,url:controlUrl.href})
+      writeFileSync(inputPath,JSON.stringify(base),{mode:0o600})
+      if(cut==='races'){
+        const dbSnapshot=async()=>JSON.stringify((await f.admin.query("SELECT (SELECT jsonb_agg(to_jsonb(o)) FROM outbound_queue o) outbound,(SELECT jsonb_agg(to_jsonb(t)) FROM queue_admission_tasks t) tasks,(SELECT jsonb_agg(to_jsonb(q)) FROM message_queue q) queue")).rows)
+        const dbBefore=await dbSnapshot()
+        // Each schedule has isolated files but the same actual ended owner and
+        // durable receipt; children open distinct connections to this fixture DB.
+        for(const order of ['AB','BA'])for(const schedule of ['held','before-guard','race-lock','lost-db-held','concurrent-create']){
+          const sub=`${directory}/${order}-${schedule}`;mkdirSync(sub,{mode:0o700})
+          writeFileSync(`${sub}/${id}.json`,raw,{mode:0o600})
+          if(schedule!=='race-lock')writeFileSync(`${sub}/${id}.lock`,JSON.stringify(prior),{mode:0o600})
+          const path=`${sub}/input.json`;writeFileSync(path,JSON.stringify({...base,directory:sub}),{mode:0o600})
+          const a=order[0],b=order[1]
+          let winnerTag=a
+          const m=(tag:string,name:string)=>`${sub}/${tag}-${name}.json`
+          const release=(tag:string,name:string)=>writeFileSync(`${sub}/${tag}-${name}.go`,'go',{mode:0o600})
+          if(schedule==='concurrent-create'){
+            const first=launch(schedule,a,path),second=launch(schedule,b,path)
+            await Promise.all([wait(m(a,'before-guard')),wait(m(b,'before-guard'))])
+            expect(existsSync(`${sub}/${id}.reap.sqlite`)).toBe(false)
+            release(a,'before-guard');release(b,'before-guard')
+            const deadline=Date.now()+9000
+            while(!existsSync(m(a,'new-owner'))&&!existsSync(m(b,'new-owner'))&&!(existsSync(m(a,'error'))&&existsSync(m(b,'error')))){
+              if(Date.now()>deadline)throw Error('A09_NO_CREATION_WINNER')
+              await new Promise(resolve=>setTimeout(resolve,2))
+            }
+            if(existsSync(m(a,'error'))&&existsSync(m(b,'error'))){
+              // Two zero-timeout upgrades may both decline safely. They are
+              // not guaranteed a winner; no automatic retry is inferred.
+              await Promise.all([end(first),end(second)])
+              for(const tag of [a,b])expect((await wait(m(tag,'error'))).code).toBe('ADMISSION_RECOVERY_BUSY')
+              expect(readFileSync(`${sub}/${id}.lock`,'utf8')).toBe(JSON.stringify(prior))
+              expect(readFileSync(`${sub}/${id}.json`,'utf8')).toBe(raw)
+              const fresh=new BoundedReceiptStore(sub,currentBoundedOwner(binding.cohortDigest))
+              fresh.releaseEndedOwner(id,prior)
+              const unlock=fresh.lock(id),updated=fresh.readReceipt(id)!
+              updated.persistence.recovery_tokens.push(`fixture-owner-${a}`);fresh.write(updated);unlock()
+            }else{
+              const win=existsSync(m(a,'new-owner'))?a:b
+              winnerTag=win;const loser=win===a?b:a
+              const err=await wait(m(loser,'error'))
+              expect(['ADMISSION_RECOVERY_BUSY','ADMISSION_DELIVERY_OWNER_MISMATCH']).toContain(err.code)
+              release(win,'new-owner');await Promise.all([end(first),end(second)])
+            }
+          }else if(schedule==='before-guard'){
+            const second=launch('before-guard',b,path);await wait(m(b,'before-guard'))
+            const first=launch('winner',a,path);await wait(m(a,'new-owner'))
+            const winner=readFileSync(`${sub}/${id}.lock`,'utf8');release(b,'before-guard');await end(second)
+            expect((await wait(m(b,'error'))).code).toBe('ADMISSION_DELIVERY_OWNER_MISMATCH')
+            expect(readFileSync(`${sub}/${id}.lock`,'utf8')).toBe(winner);release(a,'new-owner');await end(first)
+          }else if(schedule==='race-lock'){
+            const first=launch(schedule,a,path);await wait(m(a,'before-lock'))
+            const second=launch(schedule,b,path);await wait(m(b,'before-lock'))
+            release(a,'before-lock');await wait(m(a,'new-owner'));release(b,'before-lock');await end(second)
+            expect((await wait(m(b,'error'))).code).toBe('ADMISSION_DELIVERY_OWNER_UNRESOLVED')
+            release(a,'new-owner');await end(first)
+          }else{
+            const first=launch(schedule,a,path);await wait(m(a,'fresh-read'))
+            const journal=await wait(m(a,'journal'));expect(Object.keys(journal.files).some(x=>x.endsWith('-journal'))).toBe(true)
+            const second=launch('winner',b,path);await end(second)
+            expect((await wait(m(b,'error'))).code).toBe('ADMISSION_RECOVERY_BUSY')
+            expect(readFileSync(`${sub}/${id}.lock`,'utf8')).toBe(JSON.stringify(prior))
+            release(a,'fresh-read');await wait(m(a,'new-owner'));release(a,'new-owner');await end(first)
+          }
+          const saved=JSON.parse(readFileSync(`${sub}/${id}.json`,'utf8'))
+          expect(saved.persistence.recovery_tokens).toEqual([`fixture-owner-${winnerTag}`])
+          for(const tag of [a,b])expect((await wait(m(tag,'pre-read'))).receipt).toEqual(receipt)
+          console.log(JSON.stringify({subcase:'A09',schedule,order,actual_two_processes:true,receipt_sha256:admissionSha256(raw),provider_posts:0,task_invocations:0}))
+        }
+        // Actual filesystem damage is isolated per case; no production mutex
+        // cleanup/repair API is used. Valid cold journal is a positive control.
+        for(const damage of ['clean-reopen','cold-journal','corrupt','directory','symlink','hardlink','mode','oversize',
+          'journal-mode','journal-symlink','journal-hardlink','journal-oversize','wal','shm','extra']){
+          const sub=`${directory}/file-${damage}`;mkdirSync(sub,{mode:0o700})
+          const main=`${sub}/${id}.reap.sqlite`,journal=`${main}-journal`,lock=`${sub}/${id}.lock`,saved=`${sub}/${id}.json`
+          writeFileSync(lock,JSON.stringify(prior),{mode:0o600});writeFileSync(saved,raw,{mode:0o600})
+          const put=(path:string,data:string|Buffer='')=>writeFileSync(path,data,{mode:0o600})
+          if(damage==='directory')mkdirSync(main,{mode:0o700})
+          else if(damage==='symlink'){put(`${sub}/target`);symlinkSync(`${sub}/target`,main)}
+          else put(main,damage==='corrupt'?'not SQLite':damage==='oversize'?Buffer.alloc(16385):'')
+          if(damage==='hardlink')linkSync(main,`${sub}/main-alias`)
+          if(damage==='mode')chmodSync(main,0o644)
+          if(damage==='cold-journal')put(journal)
+          if(damage==='journal-mode'){put(journal);chmodSync(journal,0o644)}
+          if(damage==='journal-symlink'){put(`${sub}/target`);symlinkSync(`${sub}/target`,journal)}
+          if(damage==='journal-hardlink'){put(journal);linkSync(journal,`${sub}/journal-alias`)}
+          if(damage==='journal-oversize')put(journal,Buffer.alloc(131073))
+          if(['wal','shm','extra'].includes(damage))put(`${main}-${damage}`)
+          const store=new BoundedReceiptStore(sub,currentBoundedOwner(binding.cohortDigest))
+          if(damage==='clean-reopen'||damage==='cold-journal'){
+            const inode=lstatSync(main).ino;store.releaseEndedOwner(id,prior);store.releaseEndedOwner(id,prior)
+            expect(lstatSync(main).ino).toBe(inode);expect(existsSync(lock)).toBe(false)
+          }else{
+            expect(()=>store.releaseEndedOwner(id,prior)).toThrow('ADMISSION_RECOVERY_MUTEX_INVALID')
+            expect(readFileSync(lock,'utf8')).toBe(JSON.stringify(prior))
+          }
+          expect(readFileSync(saved,'utf8')).toBe(raw)
+          console.log(JSON.stringify({subcase:'A09',file_case:damage,positive:['clean-reopen','cold-journal'].includes(damage),provider_posts:0,task_invocations:0}))
+        }
+        for(const mode of ['missing-nofollow','wrong-uid','inode-drift']){
+          const sub=`${directory}/file-${mode}`;mkdirSync(sub,{mode:0o700})
+          writeFileSync(`${sub}/${id}.lock`,JSON.stringify(prior),{mode:0o600});writeFileSync(`${sub}/${id}.json`,raw,{mode:0o600})
+          const path=`${sub}/input.json`;writeFileSync(path,JSON.stringify({...base,directory:sub,fixture_uid:process.getuid!()}),{mode:0o600})
+          const child=launch(mode,mode,path);await end(child)
+          const err=await wait(`${sub}/${mode}-error.json`)
+          expect(err.code).toBe(mode==='wrong-uid'?'ADMISSION_RECEIPT_DIRECTORY_INVALID':'ADMISSION_RECOVERY_MUTEX_INVALID')
+          expect(readFileSync(`${sub}/${id}.lock`,'utf8')).toBe(JSON.stringify(prior));expect(readFileSync(`${sub}/${id}.json`,'utf8')).toBe(raw)
+          console.log(JSON.stringify({subcase:'A09',file_case:mode,fixture_api_fault:true,owner_receipt_delta:0}))
+        }
+        expect(await dbSnapshot()).toBe(dbBefore)
+        console.log(JSON.stringify({subcase:'A09',pre_recovery_db_delta:0,provider_posts:0,task_invocations:0}))
+        // Real recovery B has read the old receipt; A persists and releases;
+        // B's later O_EXCL cannot admit the stale receipt/token overwrite.
+        for(const order of ['AB','BA']){
+          const currentRaw=readFileSync(receiptPath,'utf8'),token=`a09-race-${order}`
+          const currentRequest={...request,receipt_sha256:admissionSha256(currentRaw),recovery_token:token}
+          const currentApproval=JSON.stringify({...currentRequest,decision:'APPROVED',action:'persist-receipt',expires_at:new Date(Date.now()+60000).toISOString()})
+          const currentRecovery={...currentRequest,authority_url:approvalRef.url,authority_sha256:admissionSha256(currentApproval)}
+          bodies.set(approvalRef.url,currentApproval)
+          const currentState=(await admissionStatus(f.control,f.config.policy_id))!
+          const path=`${directory}/stale-${order}.json`
+          writeFileSync(path,JSON.stringify({...base,recovery:currentRecovery,state:currentState,bodies:[...bodies]}),{mode:0o600})
+          const tag=`stale-${order}`,stale=launch('recover',tag,path);await wait(marker(tag,'before-lock'))
+          const input={db:f.control,state:currentState,deliveryId:id,receiptPath,recovery:currentRecovery,readBody:async(ref:any)=>bodies.get(ref.url)!,dryRun:false}
+          const result=await recoverBoundedReceipt(input)
+          expect(result).toMatchObject({status:'SENT',provider_post_delta:0,task_invocation_delta:0})
+          const winner=readFileSync(receiptPath,'utf8');go(tag,'before-lock');await end(stale)
+          expect((await wait(marker(tag,'error'))).code).toBe('ADMISSION_RECEIPT_BINDING_MISMATCH')
+          expect(readFileSync(receiptPath,'utf8')).toBe(winner)
+          await expect(recoverBoundedReceipt(input)).rejects.toThrow('ADMISSION_RECEIPT_BINDING_MISMATCH')
+          console.log(JSON.stringify({subcase:'A09',schedule:'completed-before-stale-O_EXCL',order,receipt_preserved:true,token_replay_writes:0}))
+        }
+      }else{
+        const crashed=launch(cut);await end(crashed,23)
+        const journal=await wait(marker(cut,'journal'))
+        expect(Object.keys(journal.files).some(path=>path.endsWith('-journal'))).toBe(true)
+        expect(journal.bun).toBe(Bun.version);expect(journal.sqlite).toMatch(/^3\./)
+        expect(readFileSync(receiptPath,'utf8')).toBe(raw)
+        expect(existsSync(lockPath)).toBe(cut==='acquired')
+        const before=readdirSync(directory).filter(x=>x.startsWith(`${id}.reap.sqlite`)).map(name=>{
+          const path=`${directory}/${name}`,st=lstatSync(path);return{path,dev:st.dev,ino:st.ino,mode:st.mode&0o777,uid:st.uid,size:st.size,sha256:admissionSha256(readFileSync(path))}
+        })
+        const input={db:f.control,state,deliveryId:id,receiptPath,recovery,readBody:async(ref:any)=>bodies.get(ref.url)!,dryRun:false}
+        expect(await recoverBoundedReceipt(input)).toMatchObject({status:'SENT',persistence_writes:2,provider_post_delta:0,task_invocation_delta:0})
+        expect(lstatSync(`${directory}/${id}.reap.sqlite`).ino).toBe(before.find(x=>x.path.endsWith('.sqlite'))!.ino)
+        expect(JSON.parse(readFileSync(receiptPath,'utf8')).persistence.recovery_tokens).toEqual(['a09-recovery'])
+        await expect(recoverBoundedReceipt(input)).rejects.toThrow('ADMISSION_RECEIPT_BINDING_MISMATCH')
+        console.log(JSON.stringify({subcase:'A09',cut,actual_child_exit:23,bun:journal.bun,sqlite:journal.sqlite,platform:process.platform,
+          engine_journal_observed:true,files_before_reopen:before,actual_recovery_writes:2,provider_posts:0,task_invocations:0}))
+      }
+    }finally{
+      for(const child of children)if(child.exitCode===null){child.kill();await child.exited}
+    }
+  })
 }
 
 boundedTest('BA-CORE-F05',async()=>{
@@ -96,6 +357,10 @@ boundedTest('BA-CORE-F05',async()=>{
 })
 
 boundedTest('BA-CORE-F06',async()=>{
+  // Independent owned databases overlap setup, not product reservations. Capture
+  // failure immediately; every A09 promise is awaited before this same F06 ends.
+  const a09=Promise.all(['acquired','unlinked','closed','races'].map(cut=>ownerRecoveryFixture(cut as any)))
+    .then(()=>({error:null as unknown}),error=>({error}))
   for(const failure of ['before_commit','response_lost','reserved_crash']) {
     await fixture(async f=>{
       f.config.runtime_id='command-json'
@@ -568,4 +833,5 @@ await client.end();process.exit(24)
   expect(await ordinary.sendMessage(ch.id,'ordinary fixture',{replyTo:'333333333333333333'})).toEqual({messageId:'222222222222222222'})
   expect(replyCalls).toBe(1);expect(fallbackCalls).toBe(1)
   console.log(JSON.stringify({subcase:'DR12',ordinary_sdk_retries:3,ordinary_fallback:1,fixture_only:true}))
+  const a09Result=await a09;if(a09Result.error)throw a09Result.error
 })
