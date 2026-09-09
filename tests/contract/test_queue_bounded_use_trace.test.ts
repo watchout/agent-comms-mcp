@@ -172,7 +172,7 @@ boundedTest('BA-CORE-F08',async()=>{
   await fixture(async f=>{
     f.config.source_sha=subject.candidate_head
     const q=await startNormalTask(f)
-    const adapter={runtime_id:f.config.runtime_id,capabilities:{},invoke:async()=>fixtureResult()}
+    const adapter={runtime_id:f.config.runtime_id,capabilities:{},execution_timeout_ms:1000,invoke:async()=>fixtureResult()}
     expect((await runReceivedQueueWork(fixtureDb(f),{queueId:q.id,adapter,expectedClaimSource:'bounded-admission'})).ok).toBe(true)
     expect((await finalizeDoneQueueWork(fixtureDb(f),{queueId:q.id,replySender:hostReplySender(f)})).ok).toBe(true)
     const state=(await admissionStatus(f.control,f.config.policy_id))!,t=state.tasks[0]
@@ -298,7 +298,7 @@ boundedTest('BA-CORE-F10',async()=>{
   expect(stages).toHaveLength(13);expect(variants).toHaveLength(20)
   writeFileSync(join(dir,'receipt.json'),JSON.stringify({validator_command:command,validator:verdict,boundary_cases:boundaryCases,stage_cases:13,join_cases:20,
     stage_parser_sha256:hashBytes(STAGE_PARSER),join_checker_sha256:hashBytes(JOIN_CHECKER),commands,source:subject,fixture_only:true},null,2),{mode:0o600})
-  console.log(JSON.stringify({case:'BA-CORE-F10',source_count:pack.sources.length,trace:23,actual_validator:'PASS',boundary_cases:12,stage_cases:13,join_cases:20,
+  console.log(JSON.stringify({case:'BA-CORE-F10',source_count:pack.sources.length,trace:23,actual_validator:'PASS',boundary_cases:boundaryCases,stage_cases:13,join_cases:20,
     private_evidence_sha256:hashBytes(regularBytes(join(dir,'receipt.json'))),execution_authorization:'NOT_GRANTED',external_truth:'NOT_EVALUATED'}))
 })
 
