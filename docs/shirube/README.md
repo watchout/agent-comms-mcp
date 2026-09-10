@@ -32,7 +32,9 @@ PR963's separate product cell `CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001`
 is R4, not this adoption cell. Its CI_TEST_SUPPLY_ONLY admission is bounded by
 owner #940/5602974560 (raw SHA256
 c64781ebc64f72b0191fb32e85cd87c96bcfa26eba56d5582cc8e1679cb3ff73),
-the canonical I #940/5604405614, exact B/C0, the published allowed47 paths and
+C2 resource OD #940/5608052232 (SHA256 ed27e2c82b476fa65feb348b8b48a2e398ea77a1f23a99f47c427abfbdde8d89),
+the canonical I #940/5625878781 (SHA256 40b740debe54b55bd5dc1ce0be539939e89a4992a54a9e49983e939bf3036dcc),
+exact B/C0/C1 ancestry, the published allowed50 paths and
 expiry 2026-09-11T00:00:00Z. The only workflow in that supply is
 `.github/workflows/pr-checks.yml`; no required check or merge rule is weakened.
 The PR body must uniquely bind its real CELL-ID/Risk Tier, Workflow Supply,
@@ -50,11 +52,22 @@ Offline `--comments` and `--control-comments` API-shaped fixtures test only pars
 CI authenticates real GitHub GETs with the existing token. Ruby is the existing
 canonical YAML resolver prerequisite; unavailable input/dependency blocks.
 
-The delegated event budget is one body edit E1, normal push E2, one verified label
-E3, and at most one changed-input corrective push E4, all after independent
-consumer readback. Every edited/labeled/synchronize event counts toward at most
-four additional Layer0 starts and two new candidate heads. No manual rerun,
-unchanged resubmission, extra body/label mutation or cancellation. Old FAIL remains.
+Original OD5602974560 has no HTML marker: after exact API/raw-hash authentication,
+its sole JSON block must carry the unique decision_id
+`OD-CTO-963-NARROW-CI-UNBLOCK-20260909-001`. No marker is invented.
+C2 OD and approval-policy OD5609700544 require their actual unique HTML marker
+and JSON decision_id. Policy raw SHA256
+59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02
+delegates scoped correction, not extra budgets or live authority. The predecessor
+I is authenticated but its historical47/caps cannot substitute for the new exact
+canonical object. The consumer's OD fields bind C2's resource OD; both resource
+ODs and separate normalization are authenticated via the I.
+
+Cumulative limits are two candidate heads/two normal pushes/two body edits/one
+label application/five additional Layer0 starts. E1–E3 used one candidate/push/body/
+label and three starts. After distinct exact-C2 consumer publication, E4 updates
+the body once (old C1 run is not C2 proof), then E5 pushes C2 once; label remains
+untouched. No manual rerun, cancellation, C3 or additional event. Old FAIL remains.
 Draft status, existing adoption constraints below, non-draft/exact-head owner and
 merge-method checks are unchanged. CI admission/green CI is not applied real use.
 

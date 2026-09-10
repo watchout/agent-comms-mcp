@@ -1,5 +1,5 @@
 import { expect } from 'bun:test'
-import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, type BoundedFixture } from './test_queue_bounded_admission.test'
+import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, type BoundedFixture } from './test_queue_bounded_admission.test'
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { DiscordAdapter, postBoundedDiscordRequest } from '../../adapters/discord'
@@ -56,8 +56,8 @@ async function ownerRecoveryFixture(cut: 'acquired'|'unlinked'|'closed'|'races')
     const policyBody='A09 isolated fixture authority; never live authority'
     f.config.authority={url:'https://github.com/fixture/repo/issues/1#issuecomment-1',sha256:admissionSha256(policyBody)}
     const {row,binding}=await readyReply(f),directory=f.config.transport.receipt_dir,id=`out-${row.id}`
-    const runtimeUrl=new URL(f.env.DATABASE_URL!);runtimeUrl.username=f.config.roles.runtime
-    const controlUrl=new URL(f.env.DATABASE_URL!);controlUrl.username=f.config.roles.controller
+    const runtimeUrl=new URL(f.roleUrls.runtime)
+    const controlUrl=new URL(f.roleUrls.controller)
     const script=`${directory}/a09-child.ts`,inputPath=`${directory}/a09-input.json`
     writeFileSync(script,`
 import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
@@ -66,8 +66,27 @@ import { existsSync,readFileSync,writeFileSync,lstatSync,renameSync } from 'node
 import { BoundedReceiptStore,currentBoundedOwner,deliverBoundedOutbound,recoverBoundedReceipt } from '${candidateRoot}/core/queue-admission.ts'
 import { postBoundedDiscordRequest } from '${candidateRoot}/adapters/discord.ts'
 const i=JSON.parse(readFileSync(process.argv[2],'utf8')),mode=process.argv[3],tag=process.argv[4]||mode
-const client=new Client({connectionString:i.url});await client.connect()
+const client=new Client({connectionString:i.url,connectionTimeoutMillis:1000});await client.connect()
 const mark=(name,value={})=>writeFileSync(i.directory+'/'+tag+'-'+name+'.json',JSON.stringify({at:Date.now(),pid:process.pid,...value}),{mode:0o600})
+
+let clientClosed=false,clientClose:Promise<void>|undefined
+client.on('error',error=>mark('db-error',{code:error.code||null}))
+client.on('end',()=>{clientClosed=true;mark('db-end')})
+client.connection.stream.on('close',()=>{clientClosed=true;mark('db-close')})
+const closeClient=()=>{
+ if(clientClose)return clientClose
+ clientClose=(async()=>{
+  mark('db-close-start')
+  let timer
+  const done=client.end().then(()=>true)
+  const settled=await Promise.race([done,new Promise(resolve=>{timer=setTimeout(()=>resolve(false),2000)})])
+  clearTimeout(timer)
+  if(!settled){client.connection.stream.destroy();await Promise.race([done,new Promise(resolve=>{timer=setTimeout(resolve,500)})]);clearTimeout(timer);mark('db-close-failed',{closed:clientClosed});throw Error('A09_FIXTURE_DB_CLOSE_TIMEOUT')}
+  mark('db-close-settled',{closed:clientClosed})
+ })()
+ return clientClose
+}
+
 const barrier=name=>{mark(name);const until=Date.now()+8000;while(!existsSync(i.directory+'/'+tag+'-'+name+'.go')){
  if(Date.now()>until)throw Error('A09_BARRIER_TIMEOUT '+name);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2)}}
 const store=new BoundedReceiptStore(i.directory,currentBoundedOwner(i.binding.cohortDigest));const main=i.directory+'/'+i.id+'.reap.sqlite'
@@ -92,7 +111,7 @@ store.read=function(path){const result=read(path);if(path.endsWith('.lock')&&mod
 store.syncParent=function(){sync();if(mode==='unlinked'&&!existsSync(i.directory+'/'+i.id+'.lock')){mark('cut',{files:snapshot()});process.exit(23)}}
 try{
  if(mode==='before-guard'||mode==='concurrent-create')barrier('before-guard')
- if(mode==='lost-db-held'){await client.end();store.read=function(path){const result=read(path);if(path.endsWith('.lock'))barrier('fresh-read');return result}}
+ if(mode==='lost-db-held'){await closeClient();store.read=function(path){const result=read(path);if(path.endsWith('.lock'))barrier('fresh-read');return result}}
  if(mode==='recover'){
   const lock=BoundedReceiptStore.prototype.lock
   if(tag.startsWith('stale'))BoundedReceiptStore.prototype.lock=function(id){barrier('before-lock');return lock.call(this,id)}
@@ -112,7 +131,7 @@ try{
   release();mark('result',{status:'released'})
  }
 }catch(e){mark('error',{code:e.code||e.message})}
-await client.end().catch(()=>{});process.exit(0)
+await closeClient();process.exit(0)
 `,{mode:0o600})
     const base:any={row,binding,directory,id,url:runtimeUrl.href}
     writeFileSync(inputPath,JSON.stringify(base),{mode:0o600})
@@ -131,11 +150,13 @@ await client.end().catch(()=>{});process.exit(0)
     const marker=(tag:string,name:string)=>`${directory}/${tag}-${name}.json`
     const go=(tag:string,name:string)=>writeFileSync(`${directory}/${tag}-${name}.go`,'go',{mode:0o600})
     const end=async(p:ReturnType<typeof Bun.spawn>,expected=0)=>{
+      fixtureEvent('A09','child-wait',{pid:p.pid,expected})
       const timer=setTimeout(()=>p.kill(),10000)
       try{
         const exit=await p.exited,stderr=await new Response(p.stderr).text()
         writeFileSync(`${directory}/child-${p.pid}.stderr.log`,stderr,{mode:0o600})
         writeFileSync(`${directory}/child-${p.pid}.receipt.json`,JSON.stringify({argv:childCommands.get(p.pid),pid:p.pid,exit,finished:Date.now(),stderr_sha256:admissionSha256(stderr)}),{mode:0o600})
+        fixtureEvent('A09','child-ended',{pid:p.pid,exit})
         expect(exit,stderr).toBe(expected);return exit
       }
       finally{clearTimeout(timer)}
@@ -409,14 +430,14 @@ boundedTest('BA-CORE-F06',async()=>{
     const {row,binding}=await readyReply(f)
     const childPath=`${f.config.transport.receipt_dir}/crash-child.ts`
     const childInput=`${f.config.transport.receipt_dir}/crash-input.json`
-    const runtimeUrl=new URL(f.env.DATABASE_URL!);runtimeUrl.username=f.config.roles.runtime
+    const runtimeUrl=new URL(f.roleUrls.runtime)
     writeFileSync(childInput,JSON.stringify({row,binding,crash,url:runtimeUrl.href,directory:f.config.transport.receipt_dir}),{mode:0o600})
     writeFileSync(childPath,`
 import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
 import { readFileSync,writeFileSync } from 'node:fs'
 import { deliverBoundedOutbound,BoundedReceiptStore } from '${candidateRoot}/core/queue-admission.ts'
 import { postBoundedDiscordRequest } from '${candidateRoot}/adapters/discord.ts'
-const input=JSON.parse(readFileSync(process.argv[2],'utf8'));const client=new Client({connectionString:input.url});await client.connect()
+const input=JSON.parse(readFileSync(process.argv[2],'utf8'));const client=new Client({connectionString:input.url,connectionTimeoutMillis:1000});await client.connect()
 let action='';let wires=0;let now=Date.now();let mono=0
 const stop=()=>process.exit(23)
 const db={query:async(sql,params)=>{

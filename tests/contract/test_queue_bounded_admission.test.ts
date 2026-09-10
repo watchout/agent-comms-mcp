@@ -3,9 +3,9 @@ import { Client } from 'pg'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { resolve } from 'node:path'
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID, randomBytes, createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { createPostgresTestDatabase, derivePostgresTestDatabaseUrls } from '../helpers/postgres-test-database'
+import { derivePostgresTestDatabaseUrls } from '../helpers/postgres-test-database'
 import { admissionStatus, admissionTransition, tryBoundedClaim, readAdmissionBinding, admissionBindingFromEnv, deliverBoundedOutbound, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { postBoundedDiscordRequest } from '../../adapters/discord'
 import { runReceivedQueueWork, finalizeDoneQueueWork } from '../../core/queue-work'
@@ -15,6 +15,65 @@ export const stage = process.env.AUN_BOUNDED_TEST_STAGE
 if (!['local17', 'private', 'ci'].includes(stage ?? '')) throw new Error('BA_STAGE_REQUIRED')
 export const candidateRoot = resolve(import.meta.dir, '../..')
 
+export const sanitizeFixtureError = (value: unknown) => String(value)
+  .replace(/(postgres(?:ql)?:\/\/[^:/@\s]+):[^@\s]+@/gi, '$1:[REDACTED]@')
+  .replace(/(\bpassword=)[^\s]+/gi, '$1[REDACTED]')
+export function fixtureEvent(name: string, phase: string, detail: Record<string, unknown> = {}) {
+  console.log(JSON.stringify({fixture:name,phase,at:Date.now(),...detail}))
+}
+export function fixtureClients(name: string) {
+  const records: Array<{client:Client;connected:boolean;attempted:boolean;settled:boolean;closed:boolean}> = []
+  const client = (url:string) => {
+    const c = new Client({connectionString:url,connectionTimeoutMillis:1000})
+    const record = {client:c,connected:false,attempted:false,settled:false,closed:false}
+    records.push(record);fixtureEvent(name,'construct',{client:records.length})
+    c.on('error', error=>fixtureEvent(name,'client-error',{code:(error as any).code??null,message:sanitizeFixtureError(error.message)}))
+    c.on('end',()=>{record.closed=true;fixtureEvent(name,'client-end')})
+    ;(c as any).connection.stream.on('close',()=>{record.closed=true;fixtureEvent(name,'client-close')})
+    const connect=c.connect.bind(c)
+    c.connect=(async()=>{record.attempted=true;try{await connect();record.connected=true}
+      finally{record.settled=true;fixtureEvent(name,'connect-settled',{connected:record.connected})}}) as any
+    return c
+  }
+  const close=async()=>{
+    fixtureEvent(name,'close-start',{clients:records.length})
+    let endRejected=false
+    const ended=Promise.allSettled(records.map(async r=>{
+      if(!r.closed)await r.client.end()
+      if(!r.attempted)r.closed=true
+    })).then(results=>{endRejected=results.some(r=>r.status==='rejected')})
+    let timer:ReturnType<typeof setTimeout>|undefined
+    const complete=await Promise.race([ended.then(()=>true),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),2000)})])
+    clearTimeout(timer)
+    const forced=!complete
+    if(forced){
+      for(const r of records)if(!r.closed)(r.client as any).connection.stream.destroy()
+      await Promise.race([ended,new Promise(resolve=>{timer=setTimeout(resolve,500)})])
+      clearTimeout(timer)
+    }
+    const unclosed=records.filter(r=>!r.closed).length
+    const unsettled=records.filter(r=>r.attempted&&!r.settled).length
+    fixtureEvent(name,'close-end',{forced,unclosed,connect_unsettled:records.filter(r=>!r.settled && (r.client as any)._connecting).length})
+    if(forced||unclosed||unsettled||endRejected)throw Error('BA_FIXTURE_CLEANUP_FAILED')
+  }
+  return {client,close}
+}
+export function boundedFixtureDatabase(name:string,endpoint:string) {
+  if(!/^(?:ba|ba16)_[a-f0-9]{14}_test$/.test(name))throw Error('BA_OWNED_DATABASE_NAME_REQUIRED')
+  const {databaseUrl,maintenanceUrl}=derivePostgresTestDatabaseUrls(name,{AGENT_COM_TEST_DATABASE_URL:endpoint})
+  const command=(cmd:'createdb'|'dropdb')=>{
+    fixtureEvent(name,cmd+'-start')
+    try{
+      execFileSync(cmd,[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:2000,killSignal:'SIGTERM',
+        env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:'-c statement_timeout=2000 -c lock_timeout=1000'}})
+      fixtureEvent(name,cmd+'-end',{exit:0})
+    }catch(error){const e=error as any;fixtureEvent(name,cmd+'-end',{exit:e.status??null,signal:e.signal??null,code:e.code??null})
+      throw Error(`BA_FIXTURE_${cmd.toUpperCase()}_FAILED ${sanitizeFixtureError(e.stderr??e.message)}`)}
+  }
+  command('createdb')
+  return {databaseUrl,drop:()=>command('dropdb')}
+}
+
 export async function verifyFixtureEndpoint(endpoint:string,major:16|17):Promise<void>{
   const u=new URL(endpoint),socket=u.searchParams.get('host')
   if(!['postgres:','postgresql:'].includes(u.protocol)||!u.pathname.endsWith('_test'))throw Error('BA_ISOLATED_ENDPOINT_REQUIRED')
@@ -23,14 +82,15 @@ export async function verifyFixtureEndpoint(endpoint:string,major:16|17):Promise
       ||!socket.startsWith('/private/tmp/aun-bounded-fixture.')||u.searchParams.get('port')!=='55437'||u.username!=='fixture')throw Error('BA_ISOLATED_ENDPOINT_REQUIRED')
   }else if(!['localhost','127.0.0.1'].includes(u.hostname)||u.port!==String(major===17?5433:5432)||u.username!=='postgres'
     ||stage!=='ci')throw Error('BA_ISOLATED_ENDPOINT_REQUIRED')
-  const check=new Client({connectionString:derivePostgresTestDatabaseUrls('bounded_probe_test',{AGENT_COM_TEST_DATABASE_URL:endpoint}).maintenanceUrl})
+  const owned=fixtureClients('probe-'+major)
+  const check=owned.client(derivePostgresTestDatabaseUrls('bounded_probe_test',{AGENT_COM_TEST_DATABASE_URL:endpoint}).maintenanceUrl)
   try{
     await check.connect()
     const r=(await check.query("SELECT current_database() db,current_user AS actor,current_setting('server_version_num')::int version,current_setting('unix_socket_directories') socket,inet_server_port() port")).rows[0]
     expect(r.db).toBe('postgres');expect(r.actor).toBe(u.username)
     expect(r.version).toBeGreaterThanOrEqual(major*10000);expect(r.version).toBeLessThan((major+1)*10000)
     if(socket)expect(r.socket).toBe(socket);else expect(r.port).toBe(5432)
-  }finally{await check.end().catch(()=>{})}
+  }finally{await owned.close()}
 }
 
 export async function seedNormalTransport(admin: Client): Promise<void> {
@@ -44,16 +104,18 @@ export async function seedNormalTransport(admin: Client): Promise<void> {
 }
 
 /** Every connection inherits an explicitly supplied isolated versioned endpoint. */
-export async function fixture(run: (f: { admin: Client; control: Client; other: Client; executor: Client; runtime: Client; config: any; env: NodeJS.ProcessEnv; prepare: () => Promise<any> }) => Promise<void>) {
+export async function fixture(run: (f: { admin: Client; control: Client; other: Client; executor: Client; runtime: Client; config: any; env: NodeJS.ProcessEnv; prepare: () => Promise<any>; roleUrls: Record<string,string>; client: (url:string)=>Client }) => Promise<void>) {
   const endpoint = process.env.AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL
   if (!endpoint) throw new Error('BA_PG17_ENDPOINT_REQUIRED')
   await verifyFixtureEndpoint(endpoint,17)
   const u = new URL(endpoint)
   if (!u.pathname.endsWith('_test') || (!u.searchParams.get('host') && !['localhost', '127.0.0.1'].includes(u.hostname))) throw new Error('BA_ISOLATED_ENDPOINT_REQUIRED')
   const name = `ba_${randomUUID().replaceAll('-', '').slice(0, 14)}_test`
-  const target = createPostgresTestDatabase(name, { AGENT_COM_TEST_DATABASE_URL: endpoint })
-  const admin = new Client({ connectionString: target.databaseUrl })
-  const clients: Client[] = []
+  const target = boundedFixtureDatabase(name, endpoint)
+  const owned = fixtureClients(name)
+  const admin = owned.client(target.databaseUrl)
+  let originalError: unknown
+  fixtureEvent(name,'setup-start')
   try {
     await admin.connect()
     const identity = (await admin.query("SELECT current_database() AS db,current_setting('server_version_num')::integer AS version")).rows[0]
@@ -62,8 +124,11 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
     if (migrated.exitCode !== 0) throw new Error(`BA_MIGRATION_FAILED ${migrated.stderr.toString()}`)
     await admin.query(readFileSync(resolve(candidateRoot, 'db/migrations/2026-09-08-queue-bounded-admission.up.sql'), 'utf8'))
     const roles = { controller: `${name}_c`, executor: `${name}_e`, runtime: `${name}_r` }
+    const passwords = Object.fromEntries(Object.keys(roles).map(kind=>[kind,randomBytes(24).toString('hex')]))
+    await admin.query("SET password_encryption='scram-sha-256'")
     for (const [kind, role] of Object.entries(roles)) {
-      await admin.query(`CREATE ROLE "${role}" LOGIN NOSUPERUSER NOCREATEROLE NOBYPASSRLS`)
+      if(!/^[a-f0-9]{48}$/.test(passwords[kind]))throw Error('BA_PASSWORD_INVALID')
+      await admin.query(`CREATE ROLE "${role}" LOGIN NOSUPERUSER NOCREATEROLE NOBYPASSRLS PASSWORD '${passwords[kind]}'`)
       await admin.query(`GRANT aun_admission_${kind === 'controller' ? 'control' : kind} TO "${role}"`)
       // Representative old application transport rights, never owner/ledger
       // rights. The guard must enforce even with these legacy UPDATE grants.
@@ -71,14 +136,15 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
       for (const { tablename } of transport) await admin.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON public."${tablename}" TO "${role}"`)
       await admin.query(`GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
     }
-    const controlUrl = new URL(target.databaseUrl); controlUrl.username = roles.controller
-    const control = new Client({ connectionString: controlUrl.href }); const other = new Client({ connectionString: target.databaseUrl })
-    clients.push(control, other); await control.connect(); await other.connect()
-    const executorUrl = new URL(target.databaseUrl); executorUrl.username = roles.executor
-    const runtimeUrl = new URL(target.databaseUrl); runtimeUrl.username = roles.runtime
-    const executor = new Client({ connectionString: executorUrl.href }); const runtime = new Client({ connectionString: runtimeUrl.href })
-    clients.push(executor, runtime); await executor.connect(); await runtime.connect()
-    control.on('error', () => {})
+    const roleUrls=Object.fromEntries(Object.entries(roles).map(([kind,role])=>{const url=new URL(target.databaseUrl);url.username=role;url.password=passwords[kind];return [kind,url.href]}))
+    const executorUrl=new URL(roleUrls.executor)
+    const control=owned.client(roleUrls.controller),other=owned.client(target.databaseUrl),executor=owned.client(roleUrls.executor),runtime=owned.client(roleUrls.runtime)
+    await Promise.all([control.connect(),other.connect(),executor.connect(),runtime.connect()])
+    for(const [kind,c] of [['controller',control],['executor',executor],['runtime',runtime]] as const){
+      expect((await c.query("SELECT current_user actor,rolsuper,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user")).rows[0])
+        .toEqual({actor:roles[kind],rolsuper:false,rolcreaterole:false,rolbypassrls:false})
+      expect((await admin.query("SELECT rolpassword LIKE 'SCRAM-SHA-256$%' scram FROM pg_authid WHERE rolname=$1",[roles[kind]])).rows[0].scram).toBe(true)
+    }
     const config = { policy_id: `policy_${name}`, agent_id: 'qa', max_tasks: 2, max_inflight: 1, invocation_max_attempts: 1, finalizer_max_attempts: 1,
       transport: { original_max_posts:1,reply_max_posts:3,waits_ms:[10000,30000],post_timeout_ms:10000,transport_horizon_ms:120000,
         persistence_max_writes:5,persistence_window_ms:20000,host:hostname(),receipt_dir:resolve(process.env.AUN_BOUNDED_FIXTURE_ROOT??'',name) },
@@ -100,10 +166,12 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
       AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE: 'bounded-admission', AUN_QUEUE_WORK_INVOCATION_SOURCE: 'bounded-admission',
       AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: config.runtime_id,
     }
-    await run({ admin, control, other, executor, runtime, config, env, prepare })
-  } finally {
-    for (const client of clients) await client.end().catch(() => {})
-    await admin.end().catch(() => {}); target.drop()
+    fixtureEvent(name,'setup-end');fixtureEvent(name,'body-start')
+    await run({ admin, control, other, executor, runtime, config, env, prepare, roleUrls, client:owned.client })
+    fixtureEvent(name,'body-end')
+  } catch(error) { originalError=error; throw error } finally {
+    try{await owned.close();target.drop()}
+    catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}
   }
 }
 
@@ -220,6 +288,15 @@ boundedTest('BA-CORE-F02', async () => {
 
 boundedTest('BA-CORE-F01',async()=>{
   await fixture(async f=>{
+    const wrongUrl=new URL(f.roleUrls.executor);wrongUrl.password=randomBytes(24).toString('hex')
+    const negative=fixtureClients('wrong-password'),wrongPasswordClient=negative.client(wrongUrl.href)
+    const started=Date.now()
+    try{
+      const outcome=await wrongPasswordClient.connect().then(()=>({code:null}),error=>({code:error.code}))
+      if(stage==='ci')expect(outcome.code).toBe('28P01')
+      else expect(outcome.code).toBeNull()
+      fixtureEvent('wrong-password','auth-result',{status:outcome.code==='28P01'?'SCRAM_REJECTED':'AUTH_MODE_NOT_SCRAM',code:outcome.code})
+    }finally{await negative.close();expect(Date.now()-started).toBeLessThan(3500)}
     await seedNormalTransport(f.admin)
     const historical=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('qa','{\"content\":\"untouched old reminder\"}') RETURNING id")).rows[0]
     const nonqa=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('non-qa','{}') RETURNING id")).rows[0]
@@ -248,7 +325,7 @@ boundedTest('BA-CORE-F01',async()=>{
     expect(prefix).toContain('if (bounded) return')
     expect(prefix).not.toContain('inboxBuffer')
     const script=`import {Client} from 'pg';import {tryBoundedClaim} from './core/queue-admission.ts';
-const client=new Client({connectionString:process.env.DATABASE_URL});await client.connect();const agentId='qa';
+const client=new Client({connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:1000});await client.connect();const agentId='qa';
 const call=async()=>{${prefix}throw new Error('BA_UNEXPECTED_LEGACY_FALLTHROUGH')};
 try{process.stdout.write(JSON.stringify(await call()))}finally{await client.end()}`
     const mcp=JSON.parse(execFileSync(process.execPath,['-e',script],{cwd:candidateRoot,env:f.env,timeout:5000,encoding:'utf8'}))

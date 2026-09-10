@@ -171,9 +171,16 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
     const alerts = new FakeAlertSink()
     const listen = new FakePgListen()
     const legacyDb = toLegacy(db)
+    let capabilityQueries = 0
     const daemon = new StateDaemon({
       db: {
-        query: (sql, params) => legacyDb.query(sql.replace('am.id::text', 'CAST(am.id AS TEXT)'), params),
+        query: (sql, params) => {
+          if (sql.replace(/\s+/g, ' ').trim() === "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed") {
+            capabilityQueries++
+            return Promise.resolve({rows:[{installed:false}],rowCount:1})
+          }
+          return legacyDb.query(sql.replace('am.id::text', 'CAST(am.id AS TEXT)'), params)
+        },
       },
       pgListen: listen,
       tmux: new FakeTmux(),
@@ -215,6 +222,8 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
       expect(metrics.countInc('state_daemon_shirube_d1_auto_receive_total', { result: 'terminal', code: 'E2E_DONE' })).toBe(1)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'routing_non_actionable_held' })).toBe(0)
       expect(alerts.alerts).toEqual([])
+      expect(capabilityQueries).toBeGreaterThan(0)
+      await expect(legacyDb.query('SELECT unsupported_fixture_function()')).rejects.toThrow()
     } finally {
       await daemon.stop()
       await db.close()

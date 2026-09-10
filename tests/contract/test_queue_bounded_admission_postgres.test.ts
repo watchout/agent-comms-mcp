@@ -4,11 +4,10 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { createPostgresTestDatabase } from '../helpers/postgres-test-database'
 import { admissionStatus, admissionTransition, tryBoundedClaim, readAdmissionBinding, admissionBindingFromEnv, selectBoundedOutbound } from '../../core/queue-admission'
-import { runReceivedQueueWork, finalizeDoneQueueWork } from '../../core/queue-work'
+import { runReceivedQueueWork, finalizeDoneQueueWork, queueWorkClaimResultFenceMismatches } from '../../core/queue-work'
 
-import { fixture, stage, candidateRoot, seedNormalTransport, boundedTest, normalCli, fixtureSha, deliverFixtureProjection, verifyFixtureEndpoint, fixtureResult, startNormalTask, fixtureDb, enrollNormalTask } from './test_queue_bounded_admission.test'
+import { fixture, stage, candidateRoot, fixtureClients, boundedFixtureDatabase, fixtureEvent, sanitizeFixtureError, seedNormalTransport, boundedTest, normalCli, fixtureSha, deliverFixtureProjection, verifyFixtureEndpoint, fixtureResult, startNormalTask, fixtureDb, enrollNormalTask } from './test_queue_bounded_admission.test'
 import { sweepExpiredClaims } from '../../core/claim-ttl'
 import { receiveTargeted } from '../../bin/aun/receive'
 import { unboundedOutboundPredicate } from '../../core/queue-admission'
@@ -18,8 +17,9 @@ async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>
   if(!endpoint)throw Error('BA_PG16_ENDPOINT_REQUIRED')
   await verifyFixtureEndpoint(endpoint,16)
   const name=`ba16_${randomUUID().replaceAll('-','').slice(0,14)}_test`
-  const target=createPostgresTestDatabase(name,{AGENT_COM_TEST_DATABASE_URL:endpoint})
-  const admin=new Client({connectionString:target.databaseUrl})
+  const target=boundedFixtureDatabase(name,endpoint)
+  const owned=fixtureClients(name),admin=owned.client(target.databaseUrl)
+  let originalError:unknown
   const env={PATH:process.env.PATH,HOME:process.env.HOME,AGENT_ID:'qa',AGENT_COM_EXPECTED_AGENT_ID:'qa',AGENT_COM_DB:'postgres',
     DATABASE_URL:target.databaseUrl,AGENT_COM_TEST_DATABASE_URL:target.databaseUrl,AGENT_COM_TEST_DATABASE_NAME:name,AGENT_COM_PG_NOTIFY:'false'}
   const migrate=()=>{
@@ -27,7 +27,8 @@ async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>
     if(child.exitCode!==0)throw Error(`BA_PG16_MIGRATION_FAILED ${child.stderr.toString()}`)
   }
   try{await admin.connect();migrate();await run({admin,env,migrate})}
-  finally{await admin.end().catch(()=>{});target.drop()}
+  catch(error){originalError=error;throw error}
+  finally{try{await owned.close();target.drop()}catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}}
 }
 
 boundedTest('BA-16-MIGRATION',async()=>fixture16(async({admin,migrate})=>{
@@ -69,17 +70,37 @@ boundedTest('BA-16-DEFAULT-RETRY',async()=>fixture16(async f=>{
   expect((await f.admin.query('SELECT status,claimed_by FROM message_queue WHERE id=$1',[expired.id])).rows[0]).toEqual({status:'pending',claimed_by:null})
   await f.admin.query('DELETE FROM message_queue WHERE id=$1',[expired.id])
   const sent=normalCli(f as any,['notify','--channel-id','fixture-channel','--mention','qa','--content','Inspect ordinary retry.'])
-  const claimed=normalCli(f as any,['next'],'qa')
+  const source='state-daemon-queue-work-scheduler'
+  Object.assign(f.env,{AUN_RECEIVE_CLAIM_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:source,AUN_QUEUE_WORK_INVOCATION_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID:'fixture'})
+  const selected=(await f.admin.query('SELECT id FROM message_queue WHERE agent_id=$1 AND message_id=$2',['qa',sent.message_id])).rows[0]
+  const received=await receiveTargeted({agentId:'qa',queueId:String(selected.id),env:f.env,cwd:candidateRoot})
+  fixtureEvent('BA-16-DEFAULT-RETRY','receive',{outcome:received})
+  expect(received.ok).toBe(true)
+  expect(received.summary?.claimed?.queue_id).toBe(String(selected.id))
+  const claimed={queue_id:String(selected.id)}
+  const claimResultFence={expectedClaimSource:source,expectedRuntimeId:'fixture'}
   const db={dialect:'postgres' as const,query:f.admin.query.bind(f.admin)}
   let invokes=0,sends=0
-  expect((await runReceivedQueueWork(db,{queueId:claimed.queue_id,adapter:{runtime_id:'fixture',capabilities:{},invoke:async()=>{invokes++;return fixtureResult()}}})).ok).toBe(true)
+  expect((await runReceivedQueueWork(db,{queueId:claimed.queue_id,expectedClaimSource:source,invocationSource:source,requireClaimFence:true,adapter:{runtime_id:'fixture',capabilities:{},invoke:async()=>{invokes++;return fixtureResult()}}})).ok).toBe(true)
   const host={queue_close_mode:'sender' as const,sendReply:async(input:any)=>{
     sends++;if(sends===1)throw Error('fixture ordinary finalizer temporary failure')
-    const r=normalCli(f as any,['send','--content',input.content,'--mentions',input.mention,'--queue-id',input.queue_id,'--message-id',input.message_id,'--queue-work-finalizer','--close'],'qa')
+    let r:any
+    try{r=normalCli(f as any,['send','--content',input.content,'--mentions',input.mention,'--queue-id',input.queue_id,'--message-id',input.message_id,'--queue-work-finalizer','--close'],'qa');fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:0,stdout:r})}
+    catch(error){const e=error as any;fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:e.status??null,stdout:sanitizeFixtureError(e.stdout??''),stderr:sanitizeFixtureError(e.stderr??e.message)});throw error}
     return {message_id:r.message_id,queue_closed:r.work_closed===true}
   }}
-  expect((await finalizeDoneQueueWork(db,{queueId:claimed.queue_id,replySender:host})).ok).toBe(false)
-  expect((await finalizeDoneQueueWork(db,{queueId:claimed.queue_id,replySender:host})).ok).toBe(true)
+  const row=(await f.admin.query('SELECT *,clock_timestamp() database_now FROM message_queue WHERE id=$1',[claimed.queue_id])).rows[0]
+  const payload=JSON.parse(row.payload)
+  const mismatches=queueWorkClaimResultFenceMismatches({row,payload,...claimResultFence})
+  fixtureEvent('BA-16-DEFAULT-RETRY','actual-fence',{receive_claim:payload.receive_claim,execution:payload.queue_work_execution,result:payload.runner_result,mismatches})
+  expect(mismatches).toEqual([])
+  expect(queueWorkClaimResultFenceMismatches({row,payload,...claimResultFence,expectedClaimSource:'wrong'})).toContain('receive_claim.source')
+  const first=await finalizeDoneQueueWork(db,{queueId:claimed.queue_id,replySender:host,claimResultFence})
+  fixtureEvent('BA-16-DEFAULT-RETRY','finalize-first',{outcome:first})
+  expect(first.ok).toBe(false)
+  const second=await finalizeDoneQueueWork(db,{queueId:claimed.queue_id,replySender:host,claimResultFence})
+  fixtureEvent('BA-16-DEFAULT-RETRY','finalize-second',{outcome:second})
+  expect(second.ok).toBe(true)
   expect(invokes).toBe(1);expect(sends).toBe(2)
   const out=(await f.admin.query('SELECT * FROM outbound_queue WHERE message_id=$1',[sent.message_id])).rows[0]
   expect(out.max_attempts).toBe(5);expect(out.delivery_diagnostics.some((x:any)=>x.code==='AUN_BOUNDED_ADMISSION')).toBe(false)
@@ -264,8 +285,8 @@ boundedTest('BA-17-F12-C',async()=>{
     await f.control.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
     await expect(f.control.query('SELECT public.aun_admission_prepare_lock()')).rejects.toThrow('ADMISSION_PREPARE_DEADLINE_REQUIRED')
     await f.control.query('ROLLBACK')
-    const url=new URL(f.env.DATABASE_URL!);url.username=f.config.roles.controller
-    const interrupted=new Client({connectionString:url.href});interrupted.on('error',()=>{})
+    const url=new URL(f.roleUrls.controller)
+    const interrupted=f.client(url.href);interrupted.on('error',()=>{})
     let disconnected=false
     const disconnectedEvent=new Promise<void>(resolve=>interrupted.once('end',()=>{disconnected=true;resolve()}))
     await interrupted.connect()
@@ -300,8 +321,8 @@ boundedTest('BA-CORE-F03',async()=>{
       await expect(admissionTransition(f.control,state,'enroll',{...bind,...delta})).rejects.toThrow('ADMISSION_')
     }
     await expect(f.executor.query('UPDATE agent_messages SET content=$1 WHERE id=$2',['mutated',sent.message_id])).rejects.toThrow('ADMISSION_')
-    const url=new URL(f.env.DATABASE_URL!);url.username=f.config.roles.controller
-    const second=new Client({connectionString:url.href});await second.connect()
+    const url=new URL(f.roleUrls.controller)
+    const second=f.client(url.href);await second.connect()
     try {
       const enrollments=await Promise.allSettled([admissionTransition(f.control,state,'enroll',bind),admissionTransition(second,state,'enroll',bind)])
       expect(enrollments.filter(x=>x.status==='fulfilled')).toHaveLength(1)
@@ -311,7 +332,7 @@ boundedTest('BA-CORE-F03',async()=>{
     await expect(admissionTransition(f.control,state,'enroll',bind)).rejects.toThrow('ADMISSION_ENROLL_REPLAY')
     state=await admissionTransition(f.control,state,'enable',{})
     Object.assign(f.env,{AUN_ADMISSION_POLICY_ID:f.config.policy_id,AUN_ADMISSION_CONFIG_DIGEST:state.policy.config_digest,AUN_ADMISSION_SOURCE_SHA:f.config.source_sha,AUN_ADMISSION_COHORT_DIGEST:f.config.cohort_digest,AUN_ADMISSION_RUNTIME_ID:f.config.runtime_id})
-    const claimant=new Client({connectionString:f.env.DATABASE_URL});await claimant.connect()
+    const claimant=f.client(f.env.DATABASE_URL!);await claimant.connect()
     try {
       const claims=await Promise.allSettled([tryBoundedClaim(f.executor,'qa',{dialect:'postgres',env:f.env}),tryBoundedClaim(claimant,'qa',{dialect:'postgres',env:f.env})])
       expect(claims.filter(x=>x.status==='fulfilled')).toHaveLength(1)

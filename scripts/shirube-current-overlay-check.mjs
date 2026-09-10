@@ -267,12 +267,14 @@ if (pr && (changedFiles.some((file) => file.startsWith(".github/workflows/")) ||
 }
 
 // One owner-admitted CI supply, never a generic R4 or merge waiver. The digest
-// binds the complete reviewed canonical object, including all 47 allowed paths.
+// binds the complete reviewed canonical object, including all 50 allowed paths.
 async function requireBoundedCiSupply() {
   const target="watchout/agent-comms-mcp", cell="CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001";
   const base="0f772883db6f3b50772d3e4b82ce47795091f0a9", origin="565583c25963b7dfa9b4445543967d372091b336";
-  const odUrl=`https://github.com/${target}/issues/940#issuecomment-5602974560`;
-  const odHash="c64781ebc64f72b0191fb32e85cd87c96bcfa26eba56d5582cc8e1679cb3ff73";
+  const odUrl=`https://github.com/${target}/issues/940#issuecomment-5608052232`;
+  const originalOdUrl=`https://github.com/${target}/issues/940#issuecomment-5602974560`;
+  const currentC1="fbadcc82ff40cbb2410d603215d34196747aebc9";
+  const odHash="ed27e2c82b476fa65feb348b8b48a2e398ea77a1f23a99f47c427abfbdde8d89";
   const expiry="2026-09-11T00:00:00Z", now=Date.now();
   const check=(condition,detail)=>{if(!condition)throw Error(detail)};
   const hash=value=>createHash("sha256").update(value).digest("hex");
@@ -291,8 +293,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5604405614`
-    &&digest==="8357672449c6d788306e133169cd9e81e73c2c3507753b4e15eb3189a7b97262","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5625878781`
+    &&digest==="40b740debe54b55bd5dc1ce0be539939e89a4992a54a9e49983e939bf3036dcc","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -306,9 +308,10 @@ async function requireBoundedCiSupply() {
     check(typeof comment.body==="string"&&hash(comment.body)===expectedHash,"control raw body digest mismatch");
     return comment.body;
   };
-  await load(odUrl,odHash);
+  requireCiOwnerDecision(await load(originalOdUrl,"c64781ebc64f72b0191fb32e85cd87c96bcfa26eba56d5582cc8e1679cb3ff73"),"OD-CTO-963-NARROW-CI-UNBLOCK-20260909-001",false);
+  requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-963-C2-TEST-SCOPE-AND-BINDING-20260910-001",true);
   const handoffBody=await load(ref,digest);
-  const marker="<!-- shirube-v3:control-handoff:CH-CTO-963-CI-ADMISSION-IMPLEMENTATION-20260909-001 -->";
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-963-C2-IMPLEMENTATION-20260910-001 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   check([...handoffBody.matchAll(/^```ya?ml\s*\n[\s\S]*?^```/gm)].length===1,"one canonical YAML block required");
   const {extractCanonicalControlHandoff}=await import("../.shirube/runtime/rapid-lite/resolve-control-handoff-ref.mjs");
@@ -318,11 +321,15 @@ async function requireBoundedCiSupply() {
   const handoff=extraction.handoff;
   const stable=value=>Array.isArray(value)?value.map(stable):value&&typeof value==="object"
     ?Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])])):value;
-  check(hash(JSON.stringify(stable(handoff)))==="5ce6cafb435dfde9290d6f582fb57ca6d665fdb75072f82db61e285e496c9ea8","canonical reviewed object mismatch");
+  check(hash(JSON.stringify(stable(handoff)))==="5ee1dda94893bc3308e70f63942536d62584061e049d62c8dd768bb4f2cd81a8","canonical reviewed object mismatch");
+  requireCiOwnerDecision(await load(handoff.approval_policy_ref.url,handoff.approval_policy_ref.sha256),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
+  await load(handoff.predecessor_handoff_ref.url,handoff.predecessor_handoff_ref.sha256);
+  check(handoff.repository.current_head_sha===currentC1&&handoff.owner_decision_refs.length===2&&handoff.allowed_paths.length===50,"current supply mismatch");
   check(changedFiles.every(file=>handoff.allowed_paths.includes(file))
     &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
   const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();
-  git("merge-base","--is-ancestor",origin,headSha);
+  git("merge-base","--is-ancestor",origin,currentC1);
+  git("merge-base","--is-ancestor",currentC1,headSha);
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)
@@ -380,6 +387,21 @@ function parseCiConsumerVerdict(text){
     else{if(!/^[A-Za-z0-9][A-Za-z0-9_:/#.@-]*$/.test(raw)||/^(?:null|true|false)$/.test(raw))fail();fields[key]=raw}
   }
   if(Object.keys(fields).length!==keys.length)fail();return fields;
+}
+
+// Syntax only: callers MUST authenticate the exact API identity and raw body
+// digest first. Markerless form is used solely for the pinned original OD.
+function requireCiOwnerDecision(text,decisionId,marked){
+  const fail=()=>{throw Error("owner decision source form mismatch")};
+  const markers=[...text.matchAll(/<!--\s*shirube-v3:owner-decision[^>]*-->/g)];
+  const expected="<!-- shirube-v3:owner-decision:"+decisionId+" -->";
+  if(marked ? markers.length!==1||markers[0][0]!==expected : markers.length!==0)fail();
+  const blocks=[...text.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  if(blocks.length!==1||[...blocks[0][1].matchAll(/"decision_id"\s*:/g)].length!==1)fail();
+  let value;try{value=JSON.parse(blocks[0][1])}catch{fail()}
+  if(!value||Array.isArray(value)||value.schema_version!=="shirube-owner-decision/v1"||value.decision_id!==decisionId
+    ||value.decision!=="APPROVED"||value.owner!=="watchout"||value.control_source!=="watchout/agent-comms-mcp#940")fail();
+  return value;
 }
 
 async function boundedGithubGet(url){
