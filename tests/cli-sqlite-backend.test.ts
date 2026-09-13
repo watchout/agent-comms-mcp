@@ -19,7 +19,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
@@ -937,6 +937,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
         VALUES
           ('runtime-cleanup-disabled', 'cleanup-disabled', 'codex', 'local_process', 'cleanup-disabled-session', 29999, 29999, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
       `)
+      // Cleanup may stop only a runtime belonging to this host, without an active lease.
+      db.query('UPDATE agent_runtime_instances SET host_id = ? WHERE runtime_instance_id = ?')
+        .run(hostname(), 'runtime-cleanup-disabled')
       db.close()
     }
 

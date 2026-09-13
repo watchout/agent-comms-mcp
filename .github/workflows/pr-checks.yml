@@ -130,6 +130,9 @@ jobs:
             --event "$GITHUB_EVENT_PATH" \
             --changed-files changed-files.txt
 
+      - name: Prepare real native context fixture
+        run: bash scripts/prepare-seat-continuity-test-wasurezu.sh
+
       - name: Run full test suite
         run: bun test --timeout 30000
 

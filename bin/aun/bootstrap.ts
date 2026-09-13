@@ -1400,7 +1400,14 @@ type DefaultPortsOptions = {
   observeProvider?: typeof observeSeatProvider
 }
 
-function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts {
+type BootstrapConfigurationTransaction = {
+  desired_revision: number; desired_digest: string; release_tree: string; held_event_ids: string[]
+  mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
+}
+function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts & {
+  /** Internal transaction fixture surface; ordinary enrollment entry is unchanged. */
+  ensureConfigurationDesiredState(context: BootstrapStageContext): Promise<BootstrapConfigurationTransaction | null>
+} {
   const { run, env, home, repoRoot } = options
   const explicitTmuxSessionProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_SESSION')
   const explicitTmuxPaneProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_PANE')
@@ -2490,6 +2497,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   }
 
   return {
+    ensureConfigurationDesiredState,
     async lockAndSnapshot(context) {
       const dirty = await run('git', ['status', '--porcelain'], { ...commandOptions(context, 10_000), cwd: context.repoRoot })
       if (dirty.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_PRESTATE_UNREADABLE'] }

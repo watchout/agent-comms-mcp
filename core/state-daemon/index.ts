@@ -1955,6 +1955,18 @@ export class StateDaemon {
     }
 
     const now = this.clock.now()
+    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, observe:this.providerObserver})
+    if (!providerSelection.ok) {
+      this.metrics.inc('state_daemon_wake_actions_total', {result: providerSelection.code})
+      return false
+    }
+    const explicitProfile = this.config.hostRuntimeInvocationProfile
+    if (explicitProfile && explicitProfile.runtime !== providerSelection.provider) {
+      this.metrics.inc('state_daemon_wake_actions_total', {result:'host_runtime_profile_provider_mismatch'})
+      await this.alert.alert(`host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: RUNTIME_PROFILE_PROVIDER_MISMATCH`)
+      return false
+    }
+
     const reserved = await this.dbQuery(
       `UPDATE agents
           SET last_wake_attempt_at=$1
@@ -2066,18 +2078,10 @@ export class StateDaemon {
       autoFinalReply,
       payload: row.payload,
     }
-    // Per-agent adapter selection: if the agent has a runtime_engine_preference
-    // that maps to a known LLM (claude-code, codex), use the per-agent profile.
-    // This allows auditor/devauditor (claude-code) and codex-* bots to each get
-    // the correct headless invocation without global config changes.
-    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, observe:this.providerObserver})
-    if (!providerSelection.ok) {
-      this.metrics.inc('state_daemon_wake_actions_total', {result: providerSelection.code})
-      return false
-    }
+    // Explicit invocation policy retains its sandbox, cwd and directory scope.
     const agentAdapter = selectAgentAdapter(providerSelection.provider)
     const effectiveProfile: RuntimeInvocationProfile | undefined =
-      agentAdapter.profile ?? this.config.hostRuntimeInvocationProfile
+      explicitProfile ?? agentAdapter.profile ?? undefined
     const hostAdapterEnabled =
       this.config.hostRuntimeAdapterEnabled || agentAdapter.kind === 'claude-code'
     const hostSelection = selectHostRuntimeAdapter({

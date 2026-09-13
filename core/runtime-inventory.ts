@@ -238,10 +238,16 @@ export async function readV2NativeFrozenEnabledSet(
     })
     if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
     const runtime = live[0]
-    const metadata = metadataObject(agent.metadata)
-    const companyDevOs = metadataObject(metadata.companyDevOs)
-    const provider = await resolveSeatProvider(db, {agentId:String(agent.agent_id),now:new Date(nowMs)})
-    const engine = provider.provider
+    // The S0 mesh executes a provider-free TurnRuntime. Its runtime identity
+    // is distinct from a Codex/Claude host and must not require an LLM ancestor.
+    // LLM seats still require current observation of the exact frozen instance.
+    const declaredEngine = normalizeString(runtime.runtime_engine)
+    const provider = declaredEngine === 'deterministic-s0' ? null
+      : await resolveSeatProvider(db, {agentId:String(agent.agent_id),now:new Date(nowMs)})
+    const engine = declaredEngine === 'deterministic-s0' ? declaredEngine
+      : provider?.ok && provider.code === 'SELECTED_LIVE'
+        && provider.observation?.runtime_instance_id === String(runtime.runtime_instance_id)
+        ? provider.provider : null
     const instanceId = normalizeString(runtime.runtime_instance_id)
     const checkoutRoot = normalizeString(runtime.checkout_path)
     const checkoutSha = normalizeString(runtime.commit_sha)
