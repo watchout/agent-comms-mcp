@@ -57,7 +57,7 @@ aun status
 | B0 lock and snapshot | One per-agent lock, exact repository head, redacted pre-state journal |
 | B1 dependency preflight | Read-only Bun, Node, Git, tmux, launchd, selected provider executable/version/config scope, parsed/canonical provider-native Wasurezu JSON, and unambiguous live provider identity checks; an absent SQLite database is not created |
 | B2 database migration | Successful migration, successful identical rerun, and a digest of the resulting SQLite artifact family or PostgreSQL schema |
-| B3 agent profile | Exact agent/runtime/workspace/tmux/port tuple; locked desired-state/outbox preimage; any exact new event held at `available_at='infinity'`; durable private rollback artifact |
+| B3 agent profile | Stable enabled seat identity; existing profile location/provider/port are not rewritten; locked desired-state/outbox preimage; any exact new event held at `available_at='infinity'`; durable private rollback artifact |
 | B4 MCP registration | `codex mcp add` or `claude mcp add`, followed by exact provider-native get/list tuple readback; the one recognized disabled legacy Codex tuple is upgraded through fenced backup/remove/add/readback |
 | B5 memory readiness | Exact live runtime receipt plus a real MCP `initialize` → `tools/list` → Wasurezu `recover_context` call |
 | B6 ordinary daemon | Durable checkout, exact plist bytes/mode plus independent launchctl domain/label/load/PID state, one ordinary receiver, matching runtime identity, safe D1 values |
@@ -89,22 +89,33 @@ itself.
 
 ## Runtime selection
 
-`--runtime auto` accepts either:
+`--runtime auto` selects the exact live provider from verified process ancestry.
+A stale `runtime_engine_preference` cannot override or block it. Ordinary cold
+start requires explicit invocation intent or qualified same-seat last-runtime
+observation; missing or contradictory evidence returns a typed error without
+launching. See [seat runtime continuity](../spec/seat-runtime-continuity.md).
 
-1. one exact agent-profile provider that agrees with one verified current
-   process identity; or
-2. one verified current process identity when no profile exists.
+For an existing live Codex target, account-root provenance comes from its
+PID/start-bound `CODEX_HOME`, or its actual process `HOME/.codex` when unset.
+The directory identity and same process are rechecked before native readback.
+Caller environment and stale DB roots cannot redirect it. Missing provenance
+fails closed. This permits no account switch or shared config mutation:
+observed account roots receive exact readback only; invocation/project config
+binds seat identity. Clean-host enrollment retains its separately bounded path.
+The detached launch plan includes its verified account root and target runtime
+identity environment alongside argv and cwd; consumers must execute that plan,
+not discard its environment. A logical memory project comes from explicit
+invocation or verified same-seat durable/native binding, never a moved directory's
+basename or a foreign global registration.
 
-Version output is dependency evidence only and never selects a provider.
-Conflicting Codex/Claude evidence returns `NO_GO_RUNTIME_AMBIGUOUS`; missing
-live identity returns `NO_GO_RUNTIME_UNDETECTED`.
-
-For an existing PostgreSQL-backed Codex target, `agents.metadata.codex_home`
-is the sole provider-root authority. It must be an absolute normalized real
-directory and must equal `ordinary_projection.provider_config_root`. Caller
-`CODEX_HOME`, TUI, and tmux values are evidence-only and cannot fill or
-override it. Clean hosts initialize the canonical real `${HOME}/.codex` root.
-Every target Codex command receives that selected root.
+B2 applies the stable desired-format migration after the base schema. Existing
+complete, exactly verified legacy documents advance once with one existing
+outbox event; runtime-only updates then produce no desired revision. History and
+queue/account/runtime values remain intact. An incompatible rollback of populated
+stable-format history is denied. This shared migration effect requires its own
+explicit coverage in the application plan. A clean enrollment's native rollback
+keeps the original admission basis and independently rechecks the current root;
+subsequent live-process provenance does not erase that ownership fence.
 
 Codex configuration is changed only through `codex mcp add aun` and read back
 with both `codex mcp get aun --json` and `codex mcp list --json`. Claude configuration uses the existing `aun init`
@@ -125,10 +136,13 @@ Any enabled, duplicate, or unrecognized tuple is zero-mutation
 `NO_GO_PROVIDER_ADAPTER_MISMATCH`. The bootstrap journal stores hashes
 and redacted identities, not provider configuration bodies or credentials.
 
-The selected provider's configured `wasurezu` stdio transport is also invoked
-directly. READY requires successful MCP initialization, discovery of the
-`recover_context` tool, and a non-error recovery response for the exact
-project. A prewritten or CLI-flag-only memory receipt is not sufficient.
+The selected provider's Wasurezu transport is bound to the exact seat/project.
+B5 reads `native_context_delivery` for the independently observed current
+provider PID/start/workspace and native session. Only an accepted stored native
+SessionStart output receipt can establish consumed context; a fresh controller
+`recover_context` response cannot. The sealed bootstrap row records the exact
+MCP runtime UUID and verified provider observation, and memory-ready additionally
+requires that MCP instance's live endpoint lease. B5 independently requests a second verified native receipt for the actual local MCP runtime UUID and records its own evidence through the current process/lease/ancestry gate. Ordinary receive selects that local evidence; the sealed bootstrap receipt remains a separate runtime kind. Neither receipt is relabeled or copied to another runtime.
 
 For PostgreSQL, the provider and daemon use the normalized `DATABASE_URL`.
 For SQLite, bootstrap records and passes the exact `AGENT_COM_DB=sqlite` and
@@ -145,6 +159,11 @@ with its realpath, device/inode, mode, byte digest, and post-state DB/WAL/SHM
 artifact digest. Restore is atomic and allowed only under those fences. A
 run-created SQLite database removes the exact DB, WAL, and SHM artifacts and
 verifies all three are absent.
+The SQLite adapter finalizes its own prepared statements on successful and
+failed queries before returning. Closing the connection therefore completes
+its writes before an artifact fence is captured; later garbage collection
+must not change that closed connection's DB/WAL/SHM bytes. This does not relax
+the checks for an externally modified or replaced database.
 
 ## Desired-event isolation
 
@@ -215,3 +234,11 @@ before the per-agent lock is released. An unresolved target returns
 Run bootstrap only on the seat being installed. Do not use it as a fleet
 activation command. Merge, distribution inclusion, D1 activation, protected
 target changes, and production rollout remain separate owner decisions.
+
+For an already enrolled seat, `aun memory-ready-bootstrap --agent-id <seat>` can
+verify native context delivery and establish the current local runtime's ordinary
+readiness without full bootstrap or shared desired migration. Supply `--project`
+only as the expected same-seat logical project when no durable project is recorded.
+Runtime UUID, session, port and checkout arguments, when provided, must match current
+observations. Missing, pending, foreign or stale native proof fails before readiness
+is recorded. `--dry-run` reports a plan; it does not read native proof or mark ready.

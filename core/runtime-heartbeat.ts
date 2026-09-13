@@ -217,7 +217,11 @@ function resolveRuntimeRegistrationMetadata(
     typeof profile?.metadata.tmux_session === 'string' ? profile.metadata.tmux_session : null,
   )
   const registeredCheckout = normalizeCheckoutPath(profile?.home_directory)
-  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process'
+  const observed = input.metadata?.provider_observation as Record<string, unknown> | undefined
+  const verifiedLocation = observed?.verified === true && observed.agent_id === input.agentId
+    && observed.runtime_instance_id === input.runtimeInstanceId && observed.workspace === ambientCheckout
+    && observed.session_name === ambientSession
+  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process' && !verifiedLocation
   const sessionName = registrationField(registeredSession, ambientSession, preferRegistered)
   const checkoutPath = registrationField(registeredCheckout, ambientCheckout, preferRegistered)
   return {
@@ -371,7 +375,7 @@ async function heartbeatRuntimeEndpointLease(
   })
 
   const current = await db.query(
-    `SELECT lease_id, fencing_token, expires_at
+    `SELECT lease_id, fencing_token, expires_at, holder_agent_id, holder_runtime_instance_id, metadata
        FROM control_plane_leases
       WHERE lease_scope_type = 'runtime_instance'
         AND lease_scope_id = $1
@@ -382,6 +386,17 @@ async function heartbeatRuntimeEndpointLease(
     [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE],
   ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
   const active = current.rows[0]
+
+  if (active && ((active.holder_agent_id && active.holder_agent_id !== input.agentId)
+    || (active.holder_runtime_instance_id && String(active.holder_runtime_instance_id) !== input.runtimeInstanceId))) {
+    throw new Error('RUNTIME_ENDPOINT_HOLDER_MISMATCH')
+  }
+  if (active?.metadata) {
+    const prior = typeof active.metadata === 'string' ? JSON.parse(active.metadata) : active.metadata
+    if (prior.process_id !== (input.processId ?? null) || prior.endpoint_uri !== (input.endpointUri ?? null)) {
+      throw new Error('RUNTIME_ENDPOINT_HOLDER_MISMATCH')
+    }
+  }
 
   if (active && (parseDateMs(active.expires_at) ?? 0) > now.getTime()) {
     const updated = await db.query(
@@ -394,6 +409,8 @@ async function heartbeatRuntimeEndpointLease(
               metadata = COALESCE($8::jsonb, '{}'::jsonb)
         WHERE lease_id = $1
           AND fencing_token = $2
+          AND holder_agent_id = $3
+          AND holder_runtime_instance_id = $4
           AND status = 'active'
           AND expires_at > $6
         RETURNING lease_id, heartbeat_at, expires_at`,
@@ -426,6 +443,7 @@ async function heartbeatRuntimeEndpointLease(
           AND expires_at <= $3`,
       [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE, heartbeatAt],
     )
+    throw new Error('RUNTIME_ENDPOINT_LEASE_EXPIRED')
   }
 
   const token = await db.query(
@@ -437,6 +455,7 @@ async function heartbeatRuntimeEndpointLease(
     [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE],
   ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
   const fencingToken = Number(token.rows[0]?.max_token ?? 0) + 1
+  if (fencingToken > 1) throw new Error('RUNTIME_ENDPOINT_LEASE_REVOKED')
   const inserted = await db.query(
     `INSERT INTO control_plane_leases (
        lease_scope_type, lease_scope_id, lease_purpose,
@@ -571,6 +590,13 @@ export async function heartbeatRuntimeInstance(
        stopped_at = NULL,
        last_seen_at = now(),
        metadata = COALESCE(agent_runtime_instances.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
+     WHERE agent_runtime_instances.agent_id = EXCLUDED.agent_id
+       AND agent_runtime_instances.host_id = EXCLUDED.host_id
+       AND agent_runtime_instances.process_id = EXCLUDED.process_id
+       AND (agent_runtime_instances.port = EXCLUDED.port OR (agent_runtime_instances.port IS NULL AND EXCLUDED.port IS NULL))
+       AND (agent_runtime_instances.endpoint_uri = EXCLUDED.endpoint_uri OR (agent_runtime_instances.endpoint_uri IS NULL AND EXCLUDED.endpoint_uri IS NULL))
+       AND agent_runtime_instances.status IN ('running', 'active')
+       AND agent_runtime_instances.stopped_at IS NULL
      RETURNING runtime_instance_id, agent_id, status, last_seen_at`,
     [
       effectiveInput.runtimeInstanceId,
@@ -588,6 +614,8 @@ export async function heartbeatRuntimeInstance(
       metadata,
     ],
   )
+
+  if (!runtime.rows[0]) throw new Error('RUNTIME_INSTANCE_HOLDER_MISMATCH')
 
   const requestedRuntimeKind = effectiveInput.runtimeKind?.trim() || 'local_process'
   const reconcileMemoryReadyIdentity = options.reconcileMemoryReadyIdentity ?? reconcileRuntimeMemoryReadyIdentity

@@ -247,7 +247,7 @@ describe('runtime heartbeat evidence', () => {
     expect(calls.some((call) => call.sql.includes('INSERT INTO control_plane_leases'))).toBe(false)
   })
 
-  test('expires stale runtime endpoint lease before takeover with next fencing token', async () => {
+  test('expired runtime endpoint cannot be resurrected by its delayed heartbeat', async () => {
     const calls: Array<{ sql: string; params: any[] }> = []
     const runtimeInstanceId = '00000000-0000-4000-8000-000000000004'
     const db = {
@@ -303,7 +303,7 @@ describe('runtime heartbeat evidence', () => {
       },
     }
 
-    const result = await heartbeatRuntimeInstance(db, {
+    await expect(heartbeatRuntimeInstance(db, {
       runtimeInstanceId,
       agentId: 'agent-com-dev',
       runtimeEngine: 'claude-code',
@@ -312,15 +312,12 @@ describe('runtime heartbeat evidence', () => {
       endpointUri: 'http://127.0.0.1:8795',
       connectorProvider: 'discord',
       connectorUri: 'discord://agents/agent-com-dev',
-    })
-
-    expect(result.endpoint_lease_id).toBe('lease-takeover')
+    })).rejects.toThrow('RUNTIME_ENDPOINT_LEASE_EXPIRED')
     const expireIndex = calls.findIndex((call) => call.sql.includes("SET status = 'expired'"))
     const insertIndex = calls.findIndex((call) => call.sql.includes('INSERT INTO control_plane_leases'))
     expect(expireIndex).toBeGreaterThan(-1)
-    expect(insertIndex).toBeGreaterThan(expireIndex)
+    expect(insertIndex).toBe(-1)
     expect(calls[expireIndex].params.slice(0, 2)).toEqual([runtimeInstanceId, 'worker'])
-    expect(calls[insertIndex].params[5]).toBe(8)
   })
 
   test('uses agent profile home_directory as the canonical workspace when present', async () => {
