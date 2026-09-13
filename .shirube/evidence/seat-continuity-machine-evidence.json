@@ -322,5 +322,68 @@
     },
     "mandatory_ci": "PENDING_NEW_PUSH",
     "production_effects": 0
+  },
+  "companion_kernel_correction": {
+    "new_fixture_companion_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+    "new_fixture_companion_tree": "9d5dc2d9cbbef19d0e2a24281c78d768942f129c",
+    "scope": "Only existing pinned test companion source changes. Existing737d/283c observations retain original inputs; current AUN fullCI must run on the new pin.",
+    "companion_CI": {
+      "url": "https://github.com/watchout/agent-memory/actions/runs/34743923817",
+      "head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+      "conclusion": "success",
+      "jobs": [
+        "build-and-test (18)",
+        "build-and-test (20)",
+        "build-and-test (22)"
+      ],
+      "independent_source_admission": {
+        "verdict": "PASS",
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/was-source-independent-gate-e919c611.json",
+        "sha256": "6609a4cdd4b6d94c38a4c1aa5923cd5adeb9b9eb173a589dbad66bcc9a75d63a"
+      }
+    },
+    "local_actual_supply": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--timeout",
+        "30000",
+        "tests/contract/test_aun_receive_actionable.test.ts",
+        "--test-name-pattern",
+        "dry-run surfaces|claims only the selected actionable"
+      ],
+      "exit_code": 0,
+      "seconds": 6.633569040997827,
+      "log_sha256": "2e82fdb9026fc2ec9e757838f86ea06258ca946d1a726b944ff751c42763a5ef",
+      "build_count": 1,
+      "output_roots": [
+        "/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-lazy-e919-wxix5g7s/aun-wasurezu-zpNZrz"
+      ],
+      "script_sha256": "0816e57c29fb82553fcf91da8565c6e705d50ea2400812e2f57e0151f2a39fc6",
+      "source_working_diff_sha256": "734b864337c5a7092f4f11a5e1f4ecfa9b61419c3194b7b679ed1d92d4f02e52",
+      "prebuilt_input_present": false,
+      "built_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+      "built_tree": "9d5dc2d9cbbef19d0e2a24281c78d768942f129c",
+      "pass": 2,
+      "fail": 0,
+      "assertions": 12,
+      "filtered_out": 18,
+      "receipt_sha256": "b78c26cb1f4daaf030dea6d22a53b1334cf30a3c444c76ea30fd0ffe631caa74"
+    },
+    "historical_AUN_linux_failure": {
+      "head": "283c6a433c9d9c9042faa8a7160fe7773c5c062d",
+      "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34742695975",
+      "pass": 2978,
+      "fail": 133,
+      "skip": 59,
+      "assertions": 14107,
+      "executed": 3111,
+      "selected": 3170,
+      "files": 339,
+      "status": "FAIL; native receipt collector failure cascaded into helper consumers; not a waiver"
+    },
+    "current_AUN_mandatory_CI": "PENDING_NEW_PUSH",
+    "production_effects": 0
   }
 }

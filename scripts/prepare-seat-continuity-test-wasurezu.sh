@@ -11,8 +11,8 @@ set -euo pipefail
 [[ "${CI:-}" = true ]] || exit 2
 node -e 'const fs=require("fs"),p=require("path"),out=process.env.AUN_TEST_WASUREZU_OUTPUT;const root=fs.realpathSync(process.env.RUNNER_TEMP),parent=fs.realpathSync(p.dirname(out));if(!p.isAbsolute(out)||fs.existsSync(out)||!parent.startsWith(root+p.sep))process.exit(2)'
 
-was_commit=4cf952c7da186952180f81812c903a3f8434561d
-was_tree=0a088ec9a950a99f4d0c22dfc20ff756c1f67a14
+was_commit=e919c6112185a2fe6637ac5d585fb2e65f567f8e
+was_tree=9d5dc2d9cbbef19d0e2a24281c78d768942f129c
 was_fixture=$(mktemp -d "$RUNNER_TEMP/aun-wasurezu-XXXXXX")
 git init -q "$was_fixture"
 GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c http.extraHeader= -C "$was_fixture" fetch --depth=1 https://github.com/watchout/agent-memory.git "$was_commit"
