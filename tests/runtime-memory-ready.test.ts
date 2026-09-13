@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
@@ -650,6 +650,63 @@ describe('runtime memory-ready evidence gate', () => {
       live_discord_send: false,
       launchagent_mutation: false,
     })
+  })
+
+  test('SQLite dry-run never creates a missing database or journal', async () => {
+    const path = join(tmp, 'absent.db')
+    const before = readdirSync(tmp).sort()
+    expect(existsSync(path)).toBe(false)
+    const result = await memoryReadyBootstrap({agentId:'wasurezu',dryRun:true,
+      env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:path}})
+    expect(result.code).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ok:false,mutation_performed:false})
+    expect(existsSync(path)).toBe(false)
+    expect(readdirSync(tmp).sort()).toEqual(before)
+  })
+
+  test('SQLite dry-run refuses WAL before touching existing database or shared-memory bytes', async () => {
+    await seedRuntime('wasurezu', 39120)
+    await db.execute("UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'",[new Date().toISOString()])
+    const snapshot = () => Object.fromEntries(readdirSync(tmp).sort().map(name => {
+      const path=join(tmp,name), stat=statSync(path)
+      return [name,{size:stat.size,mtime:stat.mtimeMs,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}]
+    }))
+    const before=snapshot()
+    const result=await memoryReadyBootstrap({agentId:'wasurezu',project:'agent-comms-mcp',dryRun:true,
+      env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:dbPath,PATH:'/unavailable-native-tools'}})
+    expect(result.code).toBe(1)
+    expect(JSON.parse(result.stdout)).toMatchObject({ok:false,mutation_performed:false,reason:'MEMORY_SQLITE_DRY_RUN_WAL_OR_JOURNAL_UNSUPPORTED'})
+    expect(snapshot()).toEqual(before)
+    expect((await db.queryOne<any>('SELECT COUNT(*) AS n FROM runtime_memory_ready_evidence'))?.n).toBe(0)
+    const closedPath=join(tmp,'wal-header-without-sidecars.db')
+    copyFileSync(dbPath,closedPath)
+    const checkpointed=snapshot()
+    expect(readFileSync(closedPath)[18]).toBe(2)
+    expect(existsSync(closedPath+'-wal')).toBe(false)
+    expect(existsSync(closedPath+'-shm')).toBe(false)
+    const closed=await memoryReadyBootstrap({agentId:'wasurezu',dryRun:true,env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:closedPath}})
+    expect(JSON.parse(closed.stdout).reason).toBe('MEMORY_SQLITE_DRY_RUN_WAL_OR_JOURNAL_UNSUPPORTED')
+    expect(snapshot()).toEqual(checkpointed)
+  })
+
+  test('SQLite dry-run reads a clean rollback-journal database without file or journal changes', async () => {
+    await seedRuntime('wasurezu',39120)
+    await db.execute("UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'",[new Date().toISOString()])
+    const cleanPath=join(tmp,'clean.db')
+    await db.execute('VACUUM INTO $1',[cleanPath])
+    expect(readFileSync(cleanPath)[18]).toBe(1)
+    const snapshot=()=>Object.fromEntries(readdirSync(tmp).sort().map(name=>[name,createHash('sha256').update(readFileSync(join(tmp,name))).digest('hex')]))
+    const before=snapshot()
+    const result=await memoryReadyBootstrap({agentId:'wasurezu',project:'agent-comms-mcp',dryRun:true,
+      env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:cleanPath,PATH:'/unavailable-native-tools'}})
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ok:true,dry_run:true,mutation_performed:false,native_receipt_checked:false,readiness_recorded:false})
+    expect(snapshot()).toEqual(before)
+    writeFileSync(cleanPath+'-journal','pending-journal')
+    const journalBefore=snapshot()
+    const journalResult=await memoryReadyBootstrap({agentId:'wasurezu',dryRun:true,env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:cleanPath}})
+    expect(JSON.parse(journalResult.stdout)).toMatchObject({ok:false,mutation_performed:false,reason:'MEMORY_SQLITE_DRY_RUN_WAL_OR_JOURNAL_UNSUPPORTED'})
+    expect(snapshot()).toEqual(journalBefore)
   })
 
   test('transport-free bootstrap cannot claim context consumption', async () => {

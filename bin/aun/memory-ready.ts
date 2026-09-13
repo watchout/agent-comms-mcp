@@ -11,6 +11,7 @@ import { readNativeSeatContextReceipt } from '../../core/seat-context-recovery'
 import { readConfiguredWasurezuTransport } from './bootstrap'
 import { execFile } from 'node:child_process'
 import { resolve } from 'node:path'
+import { closeSync, existsSync, openSync, readSync } from 'node:fs'
 
 export interface MemoryReadyBootstrapOptions {
   agentId?: string
@@ -67,9 +68,21 @@ function dbKind(env: Record<string, string>): 'postgres' | 'sqlite' {
   return env.DATABASE_URL?.trim() ? 'postgres' : 'sqlite'
 }
 
-async function withDb<T>(env: Record<string, string>, fn: (db: DbAdapter) => Promise<T>): Promise<T> {
+async function withDb<T>(env: Record<string, string>, fn: (db: DbAdapter) => Promise<T>, readOnly = false): Promise<T> {
   if (dbKind(env) === 'sqlite') {
-    const db = new SqliteAdapter(env.AGENT_COM_SQLITE_PATH)
+    const path = env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
+    if (readOnly) {
+      // SQLite readonly connections can still create/update WAL shared memory.
+      // Refuse that format before opening it, including a checkpointed WAL DB
+      // whose sidecars are temporarily absent. Do not create a snapshot here.
+      const fd = openSync(path, 'r')
+      const header = Buffer.alloc(20)
+      try { readSync(fd, header, 0, header.length, 0) } finally { closeSync(fd) }
+      if (header[18] === 2 || header[19] === 2 || ['-wal','-shm','-journal'].some(suffix => existsSync(path + suffix))) {
+        throw new Error('MEMORY_SQLITE_DRY_RUN_WAL_OR_JOURNAL_UNSUPPORTED')
+      }
+    }
+    const db = new SqliteAdapter(path, readOnly ? {readonly: true, create: false} : {})
     try {
       return await fn(db)
     } finally {
@@ -155,7 +168,7 @@ export async function memoryReadyBootstrap(opts: MemoryReadyBootstrapOptions = {
       const gate=await evaluateRuntimeMemoryReadyGate(db,{agent_id:agentId,project,requested_runtime_kind:'local_process'})
       return {ok:gate.ok,dry_run:false,plan:{...plan,project},native_receipt_checked:true,readiness_recorded:true,
         evidence_id:evidence.evidence_id,evidence_log_id:evidence.evidence_log_id,memory_ready:gate}
-    })
+    }, opts.dryRun === true)
     return {ok:result.ok,code:result.ok?0:1,stdout:`${JSON.stringify({...result,mode:'memory-ready-bootstrap',mutation_performed:recorded,
       live_discord_send:false,launchagent_mutation:false,queue_dependency:false},null,2)}\n`,stderr:''}
   } catch (error) {

@@ -225,6 +225,7 @@ same strict helper as B5. It does not run bootstrap B2/B7/B8, migrate desired st
 change profiles/claims or restart a daemon. Optional runtime/session/port/project
 arguments are expectations against the observed target, never overrides. Dry-run
 performs only read-only planning and no native provider/MCP call or readiness write.
+SQLite dry-run opens only an existing clean rollback-journal database with readonly/create-false flags. WAL header mode or any WAL/shared-memory/journal sidecar is rejected before opening: SQLite readonly alone can modify shared-memory bytes. It creates neither a missing database nor a replacement snapshot. PostgreSQL and ordinary non-dry-run behavior are unchanged.
 
 Ambient `AGENT_MEMORY_PROJECT` is target intent only when the accompanying memory
 agent identity is the requested seat and no expected-seat binding contradicts it.
