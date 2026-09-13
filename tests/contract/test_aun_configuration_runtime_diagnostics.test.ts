@@ -16,7 +16,14 @@ const projection = { provider_repo_root:'/old/provider',provider_config_root:'/o
 
 async function fixture(run: (db: PgAdapter) => Promise<void>) {
   // A missing explicit test endpoint is an error, never a skip or ambient DB fallback.
-  const base = process.env.AGENT_COM_TEST_DATABASE_URL
+  let base = process.env.AGENT_COM_TEST_DATABASE_URL
+  if (!base && process.env.CI === 'true') {
+    const candidate = process.env.DATABASE_URL
+    if (candidate && !/[\r\n]/.test(candidate)) {
+      const url = new URL(candidate)
+      if (['postgres:', 'postgresql:'].includes(url.protocol) && url.pathname === '/agent_comms_test') base = candidate
+    }
+  }
   if (!base) throw new Error('EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED')
   const database = createPostgresTestDatabase(`seat_diag_${process.pid}_${randomUUID().replaceAll('-','')}`, {AGENT_COM_TEST_DATABASE_URL:base})
   let db: PgAdapter | undefined

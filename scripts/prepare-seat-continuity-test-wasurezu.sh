@@ -4,12 +4,12 @@ set -euo pipefail
 # Actual public companion build for the native pipe/MCP boundary tests.
 # This only prepares a private CI fixture; it publishes or activates nothing.
 : "${RUNNER_TEMP:?RUNNER_TEMP must identify the private fixture parent}"
-: "${GITHUB_ENV:?GITHUB_ENV must identify the CI environment output file}"
+: "${AUN_TEST_WASUREZU_OUTPUT:?AUN_TEST_WASUREZU_OUTPUT must identify a private fixture output file}"
 [[ "$RUNNER_TEMP" = /* && -d "$RUNNER_TEMP" ]] || exit 2
 
-# Only the existing explicitly isolated CI service can supply the second alias.
-node -e 'const u=new URL(process.env.DATABASE_URL||""); if(u.pathname!=="/agent_comms_test" || !["postgres:","postgresql:"].includes(u.protocol) || /[\r\n]/.test(process.env.DATABASE_URL)) process.exit(2)'
-printf 'AGENT_COM_TEST_DATABASE_URL=%s\n' "$DATABASE_URL" >> "$GITHUB_ENV"
+# The helper supplies a fresh output path inside its private CI fixture directory.
+[[ "${CI:-}" = true ]] || exit 2
+node -e 'const fs=require("fs"),p=require("path"),out=process.env.AUN_TEST_WASUREZU_OUTPUT;const root=fs.realpathSync(process.env.RUNNER_TEMP),parent=fs.realpathSync(p.dirname(out));if(!p.isAbsolute(out)||fs.existsSync(out)||!parent.startsWith(root+p.sep))process.exit(2)'
 
 was_commit=4cf952c7da186952180f81812c903a3f8434561d
 was_tree=0a088ec9a950a99f4d0c22dfc20ff756c1f67a14
@@ -28,5 +28,5 @@ git -C "$was_fixture" checkout -q --detach FETCH_HEAD
   test -f dist/codex-session-start.js
   test -z "$(git status --porcelain --untracked-files=no)"
 )
-printf 'AUN_TEST_WASUREZU_ROOT=%s\n' "$was_fixture" >> "$GITHUB_ENV"
+printf '%s\n' "$was_fixture" > "$AUN_TEST_WASUREZU_OUTPUT"
 printf 'Native fixture built from Was %s tree %s\n' "$was_commit" "$was_tree"

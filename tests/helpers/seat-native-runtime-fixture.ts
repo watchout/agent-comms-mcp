@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { PgAdapter } from '../../core/db/pg-adapter'
@@ -12,9 +12,31 @@ import { recordVerifiedNativeRuntimeMemoryReady } from '../../core/runtime-memor
 // Only the harmless Node host's provider classification is injected. PID/start,
 // parentage, held socket, native stdout pipe, stored hook receipt and MCP are real.
 const nativeHosts: Array<ReturnType<typeof Bun.spawn>> = []
+let preparedWas: Promise<string> | undefined
+async function nativeFixtureSource(): Promise<string> {
+  const explicit = process.env.AUN_TEST_WASUREZU_ROOT
+  if (explicit) {
+    if (!existsSync(join(explicit, 'dist/native-context-delivery.js'))) throw new Error('AUN_TEST_WASUREZU_ROOT_BUILT_CANDIDATE_REQUIRED')
+    return explicit
+  }
+  if (!preparedWas) preparedWas = (async () => {
+    const parent = process.env.RUNNER_TEMP
+    if (process.env.CI !== 'true' || !parent || !isAbsolute(parent) || !existsSync(parent)) {
+      throw new Error('EXPLICIT_PRIVATE_CI_NATIVE_FIXTURE_PARENT_REQUIRED')
+    }
+    const output = join(mkdtempSync(join(realpathSync(parent), 'aun-native-supply-')), 'built-root')
+    const child = Bun.spawn(['bash', join(import.meta.dir, '../../scripts/prepare-seat-continuity-test-wasurezu.sh')], {
+      env: {...process.env, AUN_TEST_WASUREZU_OUTPUT: output}, stdout: 'inherit', stderr: 'inherit',
+    })
+    if (await child.exited !== 0) throw new Error('PINNED_NATIVE_FIXTURE_BUILD_FAILED')
+    const root = readFileSync(output, 'utf8').trim()
+    if (!isAbsolute(root) || !existsSync(join(root, 'dist/native-context-delivery.js'))) throw new Error('PINNED_NATIVE_FIXTURE_BUILD_OUTPUT_INVALID')
+    return root
+  })()
+  return preparedWas
+}
 export async function nativeHostFixture(home:string,workspace:string,agent:string,project:string,session:string,mode:'accepted'|'pending'|'absent'='accepted') {
-  const was = process.env.AUN_TEST_WASUREZU_ROOT
-  if (!was || !existsSync(join(was,'dist/native-context-delivery.js'))) throw new Error('AUN_TEST_WASUREZU_ROOT_BUILT_CANDIDATE_REQUIRED')
+  const was = await nativeFixtureSource()
   const node=execFileSync('which',['node'],{encoding:'utf8'}).trim()
   const modules=join(was,'dist'),sdk=join(was,'node_modules/@modelcontextprotocol/sdk/dist/esm')
   const holder=join(home,'held-endpoint.ts'),memory=join(home,'native-memory.mjs'),hook=join(home,'native-hook.mjs'),host=join(home,'native-host.mjs'),report=join(home,'native-host.json')
