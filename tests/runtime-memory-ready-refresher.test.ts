@@ -58,6 +58,17 @@ async function seedSeat(agentId: string, status: 'idle' | 'busy' = 'idle'): Prom
 }
 
 describe('memory-ready fleet refresher', () => {
+  test('default liveness refresh cannot manufacture a recovery receipt', async () => {
+    await seedSeat('no-recovery')
+    const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
+      now, policy,
+      resolveProject: async (_db, agentId) => ({ agent_id: agentId, project: agentId, workspace_path: null, source: 'agent_metadata_override' }),
+    })
+    expect(report.ok).toBe(false)
+    expect(report.seats[0].status).toBe('failed')
+    expect(report.seats[0].details.error).toContain('MEMORY_CONTEXT_RECOVERY_REQUIRED')
+    expect(await db.query('SELECT * FROM runtime_memory_ready_evidence')).toHaveLength(0)
+  })
   test('returns N/N terminal results and isolates one seat failure', async () => {
     await seedSeat('alpha', 'idle')
     await seedSeat('bravo', 'busy')

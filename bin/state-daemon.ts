@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { resolveSeatProvider } from '../core/seat-runtime-selection'
 /**
  * state-daemon entry point (Issue #323 spec v0.6 §5.3 / §6).
  *
@@ -45,6 +46,8 @@ import {
 } from '../core/aun-configuration-reconciler'
 import {
   buildDefaultAunConfigurationCandidate,
+  resolveConfigurationRuntime,
+  configurationRuntimeIdentity,
   type AunConfigurationCandidate,
 } from '../core/aun-configuration-candidate'
 import { configurationDigest, type AunConfigurationDesiredState } from '../core/aun-configuration-desired-state'
@@ -420,16 +423,12 @@ export function queueWorkRuntimeForPreference(preference: unknown): QueueWorkRun
 export async function resolveQueueWorkRuntimeForAgent(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
+  observationOptions: Pick<Parameters<typeof resolveSeatProvider>[1], 'observe' | 'hostId' | 'now'> = {},
 ): Promise<QueueWorkRuntimeSelection> {
-  const result = await db.query<{ runtime_engine_preference: string | null }>(
-    `SELECT runtime_engine_preference
-       FROM agents
-      WHERE agent_id = $1
-        AND profile_enabled = true
-        AND disabled_at IS NULL`,
-    [agentId],
-  )
-  return queueWorkRuntimeForPreference(result.rows[0]?.runtime_engine_preference ?? null)
+  const selection = await resolveSeatProvider(db, {agentId,...observationOptions})
+  if (!selection.ok) return selection.code === 'PROVIDER_UNSUPPORTED' ? 'runtime-preference-unsupported' : 'runtime-preference-required'
+  return selection.provider === 'codex' ? 'codex-exec' : 'claude-code'
+
 }
 
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
@@ -961,10 +960,11 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   async render(input: { hostId: string; desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
     const projection = input.desired.ordinaryProjection
     const providerRepoRoot = typeof projection.provider_repo_root === 'string' ? projection.provider_repo_root.trim() : ''
-    const providerConfigRoot = typeof projection.provider_config_root === 'string' ? projection.provider_config_root.trim() : ''
     const daemonCheckout = typeof projection.daemon_checkout === 'string' ? projection.daemon_checkout.trim() : ''
-    if (!providerRepoRoot || !providerConfigRoot || !daemonCheckout) throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
+    if (!providerRepoRoot || !daemonCheckout) throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
+    const observedRuntime=await resolveConfigurationRuntime(this.db,input.desired.agentId,process.env as Record<string,string>,providerRepoRoot)
     return buildDefaultAunConfigurationCandidate({
+      observedRuntime,
       hostId: input.hostId,
       desired: input.desired,
       databaseLocatorRef: process.env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
@@ -972,7 +972,7 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
       bunPath: Bun.which('bun') ?? process.execPath,
       serverEntry: 'server.ts',
       providerRepoRoot: resolve(providerRepoRoot),
-      providerConfigRoot: resolve(providerConfigRoot),
+      providerConfigRoot: observedRuntime.providerConfigRoot,
       daemonCheckout: resolve(daemonCheckout),
       daemonEntry: join(resolve(daemonCheckout), 'bin', 'state-daemon.ts'),
       restartRequired: true,
@@ -983,6 +983,7 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
     const reasons: string[] = []
     if (!/^[0-9a-f]{64}$/.test(candidate.candidateDigest)) reasons.push('CANDIDATE_DIGEST_INVALID')
     if (candidate.providerMcp.databaseLocatorRef !== candidate.launchAgent.databaseLocatorRef) reasons.push('MIXED_DATABASE_ENDPOINT_CANDIDATE')
+    if(candidate.runtimeSelection && !await this.runtimeMatches(candidate)) reasons.push('CONFIGURATION_CURRENT_RUNTIME_CHANGED')
     const [providerRelease, daemonRelease] = await Promise.all([
       readNativeReleaseIdentity(candidate.providerMcp.checkoutRoot),
       readNativeReleaseIdentity(candidate.launchAgent.workingDirectory),
@@ -1114,6 +1115,12 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   }
 
   private async runtimeMatches(candidate: AunConfigurationCandidate): Promise<boolean> {
+    if(candidate.runtimeSelection) {
+      try {
+        const actual=await resolveConfigurationRuntime(this.db,candidate.agentId,process.env as Record<string,string>,candidate.runtimeRegistration.workspace)
+        return configurationDigest(configurationRuntimeIdentity(actual))===configurationDigest(candidate.runtimeSelection)
+      } catch {return false}
+    }
     const rows = await this.db.query<any>(
       `SELECT r.runtime_engine, r.port, r.status, w.local_path
          FROM agent_runtime_instances r

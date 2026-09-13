@@ -5,6 +5,17 @@ Slice: NORM-022
 Status: Spec ready, pre-implementation audit next
 Created: 2026-05-27
 
+## Seat continuity amendment (2026-09-13)
+
+[Seat runtime continuity](seat-runtime-continuity.md) governs the current local
+bridge: bind loopback port 0 and hold the socket, then register its actual port,
+PID and runtime UUID in one existing heartbeat/endpoint lease transaction.
+Failed registration closes only that socket. Resolver consumers require the
+same local host, runtime and lease holder; stale/profile ports are unavailable.
+Status checks require the actual listener PID. Cleanup cannot act on a foreign,
+unidentified or actively leased holder. Old generated port environment values
+are ignored; explicit `AUN_STATIC_WEBHOOK_PORT` requires successful owned bind.
+
 ## Problem
 
 Current local operations still mix three different concepts:

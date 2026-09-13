@@ -17,7 +17,7 @@
  *   - aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
- *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
+ *   - aun memory-ready-bootstrap --agent-id <id> [--project <project>] [--runtime-instance-id <id>] [--session-name <name>] [--port <n>] [--dry-run]
  *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
@@ -67,7 +67,7 @@ function printHelp(): void {
     '  aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
-    '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
+    '  aun memory-ready-bootstrap --agent-id <id> [--project <project>] [--runtime-instance-id <id>] [--session-name <name>] [--port <n>] [--dry-run]',
     '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
@@ -165,17 +165,8 @@ export function run(argv: string[] = process.argv): number {
       return res.ok ? 0 : 1
     }
     case 'start': {
-      const res = start({ extraArgs: extras, spawn: !flags['dry-run'] })
-      printSummary('aun start', ['command: ' + res.argv.join(' '), ...res.driftWarnings], res.errors)
-      if (res.spawned) {
-        // The child's `exit` handler in start() owns the eventual
-        // `process.exit(...)`. Returning a non-zero code here would
-        // race that handler and kill the claude process mid-flight.
-        // Hand control to the event loop until the child exits.
-        // -1 is a sentinel the runner below maps to "do not exit yet".
-        return -1
-      }
-      return res.ok ? 0 : 1
+      process.stderr.write('aun start requires the asynchronous runtime selection entrypoint\n')
+      return 2
     }
     case 'receive':
     case 'next': {
@@ -323,6 +314,13 @@ export function run(argv: string[] = process.argv): number {
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags, extras } = parseArgs(argv)
   if (subcommand === 'admission') return runAdmission(extras[0], flags)
+  if (subcommand === 'start') {
+    const res = await start({agentId:typeof flags['agent-id'] === 'string' ? flags['agent-id'] : undefined,
+      project:typeof flags.project === 'string' ? flags.project : undefined,
+      runtime:typeof flags.runtime === 'string' ? flags.runtime : undefined,extraArgs:extras,spawn:!flags['dry-run']})
+    printSummary('aun start',['command: '+res.argv.join(' '),...res.driftWarnings],res.errors)
+    return res.spawned ? -1 : res.ok ? 0 : 1
+  }
   if (
     !((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') &&
     subcommand !== 'diagnose-receive' &&

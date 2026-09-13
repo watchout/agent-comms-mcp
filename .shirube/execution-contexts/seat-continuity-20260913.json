@@ -1,0 +1,81 @@
+{
+  "schema_version": "shirube-execution-context/v1",
+  "mode": "bounded_product_implementation",
+  "active_function": "implementation_executor",
+  "active_role": "dev",
+  "primary": {
+    "repo": "watchout/agent-comms-mcp",
+    "product": "AUN",
+    "work_order": "watchout/agent-comms-mcp#575",
+    "pr": "watchout/agent-comms-mcp#964"
+  },
+  "control_source_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+    "sha256": "068864d3f38656952d4b07ca6669e7547f7bdb17b9f560ad2bae68b5f54227b4"
+  },
+  "control_handoff_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652166090",
+    "sha256": "f3b78b8d6fd8e851182c5430ef1149432e31a5dc4b254ea43978ee187626403c"
+  },
+  "repo_relations": [
+    {
+      "repo": "watchout/agent-comms-mcp",
+      "relation": "primary",
+      "allowed": [
+        "inspect_repo",
+        "implement_allowed_paths",
+        "run_validation",
+        "produce_impl_evidence"
+      ],
+      "forbidden": [
+        "approve_merge",
+        "self_approve",
+        "production_mutation"
+      ]
+    },
+    {
+      "repo": "watchout/agent-memory",
+      "relation": "dependency",
+      "allowed": [
+        "read",
+        "cite",
+        "isolated_pinned_test_build"
+      ],
+      "forbidden": [
+        "implementation_target_in_this_context",
+        "production_mutation"
+      ]
+    }
+  ],
+  "common_contract": {
+    "owner_decision_required_for_merge_ready": true,
+    "exact_head_required_for_merge_ready": true,
+    "llm_final_authority_forbidden": true
+  },
+  "actor": "codex-cto/restore_executor",
+  "supplemental_handoff_refs": [
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651614978",
+      "sha256": "7b3342f0ca739b3be2320b5193e6592e51048189925e062aae12be55c0058392"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652025740",
+      "sha256": "a1b86bd055eefc71ce9a7b1cbbaa44ef77ee6709835660545c04444a8f569401"
+    }
+  ],
+  "current_integration_context": {
+    "control_handoff_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656810349",
+      "sha256": "4e247d515e785bf4ff57fc500e9dbf9fad5a8befa78c3b9d9dea56a7302824e9"
+    },
+    "maker_agent": "codex-cto/runtime_status",
+    "checker_agent": "codex-cto/goal_gap",
+    "source_donors": [
+      "8d38f3bd6a99a2f4615949dd747d708f8b6943d6",
+      "81be7f051f85973bb9533e87d3258825082ad158"
+    ],
+    "scope": "Local 122-path integration only; the preceding fields preserve historical donor provenance and measurements.",
+    "current_candidate_evidence": "Pending exact local HEAD and independent audit; no donor result is relabeled.",
+    "live_effects": 0
+  }
+}

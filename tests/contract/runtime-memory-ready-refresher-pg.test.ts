@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { PgAdapter } from '../../core/db/pg-adapter'
+import { createReadyNativeRuntimeWithDb, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
+const fixtureHomes:string[]=[]
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
@@ -40,21 +45,22 @@ describe('memory-ready refresher PostgreSQL parity', () => {
 
   afterAll(async () => {
     try {
+      await stopNativeFixtures()
+      for(const home of fixtureHomes)rmSync(home,{recursive:true,force:true})
       if (pg) await pg.end()
     } finally {
       scratchDatabase?.drop()
     }
   })
 
-  test('records and reads back ready evidence for every eligible seat on migrated PostgreSQL', async () => {
-    const now = new Date()
+  test('confirms current native evidence without extending it and denies a seat missing that evidence', async () => {
     const ids = [`${prefix}-alpha`, `${prefix}-bravo`]
     for (const [index, agentId] of ids.entries()) {
       const runtimeId = index === 0
         ? 'aaaaaaaa-1111-4111-8111-111111111111'
         : 'bbbbbbbb-2222-4222-8222-222222222222'
       const session = `${agentId}-session`
-      const home = `/tmp/${agentId}`
+      const home = mkdtempSync(join(tmpdir(),'refresh-native-'));fixtureHomes.push(home)
       await pg.query(
         `INSERT INTO agents
            (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
@@ -68,17 +74,15 @@ describe('memory-ready refresher PostgreSQL parity', () => {
           home,
         ],
       )
-      await pg.query(
-        `INSERT INTO agent_runtime_instances
-           (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-            port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-         VALUES ($1::uuid, $2, 'codex', 'local_process', $3, $4, $5, 'fixture-head',
-                 'running', $6, $6, '{"source":"server.ts"}'::jsonb)`,
-        [runtimeId, agentId, session, 39_500 + index, home, now],
-      )
+      const db=new PgAdapter(databaseUrl)
+      try {await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId)}
+      finally {await db.close()}
+
     }
 
-    const report = await runRuntimeMemoryReadyFleetRefresh({
+    const evidenceRows=()=>pg.query(`SELECT * FROM runtime_memory_ready_evidence WHERE agent_id LIKE $1 ORDER BY agent_id`,[`${prefix}-%`])
+    const before=(await evidenceRows()).rows
+    const refresh=()=>runRuntimeMemoryReadyFleetRefresh({
       async query<T = any>(sql: string, params?: any[]) {
         const fleetInventory = sql.includes("status IN ('idle', 'busy')") && sql.includes('ORDER BY agent_id')
         const scopedSql = fleetInventory
@@ -90,10 +94,12 @@ describe('memory-ready refresher PostgreSQL parity', () => {
       },
     }, {
       denylist: [],
-      now,
+      now: new Date(),
       policy: loadRuntimeMemoryReadyPolicy(),
     })
 
+    const report=await refresh()
+    expect((await evidenceRows()).rows).toEqual(before)
     const fixtureSeats = report.seats.filter(row => row.agent_id.startsWith(prefix))
     expect(fixtureSeats).toHaveLength(2)
     expect(fixtureSeats.every(row => row.status === 'ready')).toBe(true)
@@ -107,5 +113,12 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     expect(evidence.rows).toEqual(ids.map(agent_id => ({ agent_id, result_status: 'ready' })))
     expect(report.provider_effects).toBe(0)
     expect(report.discord_visible_sends).toBe(0)
+    await pg.query('DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1',[ids[1]])
+    const missing=await refresh()
+    expect(missing.seats.find(row=>row.agent_id===ids[0])?.status).toBe('ready')
+    expect(missing.seats.find(row=>row.agent_id===ids[1])?.status).not.toBe('ready')
+    expect((await evidenceRows()).rows).toEqual(before.filter(row=>row.agent_id===ids[0]))
+    expect(missing.provider_effects).toBe(0)
+    expect(missing.discord_visible_sends).toBe(0)
   })
 })

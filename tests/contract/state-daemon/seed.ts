@@ -8,8 +8,75 @@
  */
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { nativeHostFixture, registerNativeFixtureRuntime, stopNativeFixtures } from '../../helpers/seat-native-runtime-fixture'
+import { readNativeSeatContextReceipt } from '../../../core/seat-context-recovery'
+import { recordVerifiedNativeRuntimeMemoryReady } from '../../../core/runtime-memory-ready'
+import type { observeSeatProvider } from '../../../core/seat-runtime-selection'
+
+type NativeFixture = Awaited<ReturnType<typeof nativeHostFixture>>
+const nativeModes = new WeakMap<Client, { epoch: number; origin: number;
+  seats: Map<string, { fixture: NativeFixture; home: string; id: string; session: string; providerVisible: boolean }> }>()
+
+/** Only the opted-in caller tests use real native evidence. Business-clock offsets
+ * remain deterministic, translated near the genuine receipt's wall clock. */
+export function enableNativeRuntimeFixtures(client: Client, epoch: string): void {
+  nativeModes.set(client, { epoch: Date.parse(epoch), origin: Date.now() + 60_000, seats: new Map() })
+}
+export function fixtureDate(client: Client, original: Date | string): Date {
+  const mode = nativeModes.get(client)
+  if (!mode) throw new Error('NATIVE_FIXTURE_CLOCK_NOT_ENABLED')
+  return new Date(mode.origin + new Date(original).getTime() - mode.epoch)
+}
+export function fixtureProviderObserver(client: Client): typeof observeSeatProvider {
+  return input => {
+    const seat = nativeModes.get(client)?.seats.get(input.agentId)
+    return seat?.providerVisible ? seat.fixture.observeProvider(input) : null
+  }
+}
+
+export async function refreshNativeFixtureHeartbeat(client: Client, agentId: string, now: Date): Promise<void> {
+  const seat = nativeModes.get(client)?.seats.get(agentId)
+  if (!seat) throw new Error('NATIVE_FIXTURE_SEAT_MISSING')
+  const endpoint = seat.fixture.observed.endpoint
+  const observation = seat.fixture.observeProvider({agentId,runtimeInstanceId:seat.id,
+    processId:endpoint.pid,sessionName:seat.session,workspace:seat.home,now})
+  if (!observation) throw new Error('NATIVE_FIXTURE_PROVIDER_EXITED')
+  // Simulate the existing heartbeat on this test's clock, preserving the actual
+  // native input receipt and its original delivery time and PID/start binding.
+  await client.query(`UPDATE agent_runtime_instances SET last_seen_at=$3, metadata=$4::jsonb
+    WHERE runtime_instance_id=$1 AND process_id=$2`,
+    [seat.id,endpoint.pid,now,JSON.stringify({provider_observation:observation})])
+  await client.query('UPDATE agents SET last_seen_at=$2 WHERE agent_id=$1', [agentId,now])
+}
+
+async function seedNativeRuntime(client: Client, agent: SeedAgent, session: string): Promise<void> {
+  const mode = nativeModes.get(client)!
+  let seat = mode.seats.get(agent.agent_id)
+  if (!seat) {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'daemon-native-seat-')))
+    const fixture = await nativeHostFixture(home, home, agent.agent_id, 'agent-comms-mcp', session)
+    seat = { fixture, home, id: agent.runtime_instance_id ?? randomUUID(), session,
+      providerVisible: agent.observed_provider === 'codex' }
+    mode.seats.set(agent.agent_id, seat)
+  }
+  const db = {
+    query: async (sql: string, params?: any[]) => (await client.query(sql, params)).rows,
+    execute: async (sql: string, params?: any[]) => ({ rowCount: (await client.query(sql, params)).rowCount ?? 0 }),
+  }
+  await registerNativeFixtureRuntime(db as any, seat.fixture, agent.agent_id, 'agent-comms-mcp', seat.session, seat.home, seat.id)
+  if (agent.memoryReady !== false) {
+    const receipt = await readNativeSeatContextReceipt({agentId:agent.agent_id,project:'agent-comms-mcp',runtimeInstanceId:seat.id,
+      targetRuntime:'codex',providerPid:seat.fixture.observed.provider.pid,providerStartedAt:seat.fixture.observed.provider.startedAt,
+      hostSessionId:seat.session,transport:{command:seat.fixture.node,args:[seat.fixture.memory],env:seat.fixture.env},cwd:seat.home})
+    await recordVerifiedNativeRuntimeMemoryReady(db,{agentId:agent.agent_id,project:'agent-comms-mcp',runtimeInstanceId:seat.id,
+      receipt,observeProvider:seat.fixture.observeProvider})
+  }
+  await client.query(`INSERT INTO channels (id, name, type, members) VALUES ($1, $1, 'channel', ARRAY[$2]::text[])
+    ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`, [`${TEST_PREFIX}channel-${agent.agent_id}`, agent.agent_id])
+}
 
 export const TEST_PREFIX = 'sd-test-'
 
@@ -64,6 +131,12 @@ export async function openClient(): Promise<Client> {
 }
 
 export async function cleanAll(c: Client): Promise<void> {
+  const mode = nativeModes.get(c)
+  if (mode?.seats.size) {
+    await stopNativeFixtures()
+    for (const seat of mode.seats.values()) rmSync(seat.home, {recursive:true,force:true})
+    mode.seats.clear()
+  }
   await c.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
   await c.query(`DELETE FROM agent_messages WHERE channel_id LIKE $1`, [`${TEST_PREFIX}channel-%`])
   await c.query(`DELETE FROM channels WHERE id LIKE $1`, [`${TEST_PREFIX}channel-%`])
@@ -71,6 +144,8 @@ export async function cleanAll(c: Client): Promise<void> {
 }
 
 export interface SeedAgent {
+  /** Explicit fixture process observation, independent of stored profile hints. */
+  observed_provider?: 'codex' | null
   agent_id: string
   runtime?: 'TUI' | 'SIG' | 'codex' | 'codex-runner'
   runtime_engine_preference?: 'codex' | 'codex-runner' | 'claude-code' | null
@@ -132,6 +207,10 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
     ],
   )
   await c.query(`UPDATE agents SET channel_port=$2 WHERE agent_id=$1`, [a.agent_id, port])
+  if (nativeModes.has(c) && port !== null) {
+    await seedNativeRuntime(c, a, metadata.tmux_session as string)
+    return
+  }
   if (a.memoryReady === false || port === null) return
 
   const runtimeInstanceId = a.runtime_instance_id ?? randomUUID()

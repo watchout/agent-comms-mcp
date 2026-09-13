@@ -5,6 +5,20 @@
 >
 > **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
+Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
+Provider preference and profile port are legacy hints. Current provider ancestry,
+held OS endpoint ownership and its existing runtime lease govern operation;
+current-host native context delivery governs memory-ready. Physical provider/home/workspace/port diagnostics are excluded from the canonical desired digest; the exact legacy-format transition and incompatible rollback guard are defined in that spec.
+
+The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
+and seat continuity. Provider and endpoint observations do not replace the immutable
+recipient/policy digest, claim owner/token/expiry, invocation fence or memory-ready gate.
+Source integration is bound by [I1](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656810349)
+(raw SHA256 `4e247d515e785bf4ff57fc500e9dbf9fad5a8befa78c3b9d9dea56a7302824e9`).
+Shared schema/desired-format application, distinct safe database principals,
+loaded shared daemon/reconciler and same-configuration ordinary QA use require
+separate applied evidence; a native-context fixture or one seat startup cannot close them.
+
 ## 1. プロダクト概要
 
 ### 1.1 名前
@@ -576,8 +590,8 @@ npx agent-comms-mcp status   # health endpoint 問合せ
 # 社内 multi-bot 運用（bot-registry.txt 準拠）
 # WEBHOOK_PORT は bot ごとに registry の値を渡す。Issue #248 cycle 1 以降、
 # 暗黙 default の 8789 は撤廃 (CTO bot 衝突源)。env を渡さない場合は
-# server.ts が AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection
-# (8801-8900) の順で解決する。下記は CTO の社内運用例 (port 8889)。
+# 通常の server.ts は OS の port 0 を保持して bind し、実 port を runtime lease に登録する。
+# 既存 AUN_WEBHOOK_PORT / WEBHOOK_PORT は固定割当の権限ではない。下記の数値は旧運用例。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 claude server:agent-comms \

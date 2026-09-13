@@ -1,7 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
@@ -11,6 +11,7 @@ import {
   generateAllAgentCommunicationManifestCandidates,
 } from '../core/runtime-inventory'
 import { allAgentCommunicationTargetSha256 } from '../core/all-agent-communication-manifest'
+import * as seatSelection from '../core/seat-runtime-selection'
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -209,6 +210,26 @@ describe('runtime inventory', () => {
 })
 
 describe('ordinary all-agent manifest candidate inventory', () => {
+  const resolveProvider = seatSelection.resolveSeatProvider
+  let providerSpy: ReturnType<typeof spyOn>
+  let observedProvider = 'codex'
+  let observedAgent = 'dev-001'
+  beforeEach(() => {
+    observedProvider = 'codex'
+    observedAgent = 'dev-001'
+    // Keep the production resolver and ancestry/identity parser. Only its OS snapshot
+    // dependency is supplied here; no CLI process, native receipt, or provider API runs.
+    providerSpy = spyOn(seatSelection, 'resolveSeatProvider').mockImplementation((db, input) =>
+      resolveProvider(db, { ...input, observe: (target) => seatSelection.observeSeatProvider({
+        ...target, providerStartedAt: '2026-07-25T23:00:00Z', processes: [
+          { pid: target.processId, ppid: 4200, command: `bun server.ts AGENT_ID=${target.agentId === 'dev-001' ? observedAgent : target.agentId}` },
+          { pid: 4200, ppid: 1, command: observedProvider },
+        ],
+      }) }),
+    )
+  })
+  afterEach(() => providerSpy.mockRestore())
+
   function fakeManifestDb(
     includeUnresolvedNewSeat = false,
     liveRuntimeEngine = 'codex',
@@ -216,6 +237,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     includeUnclassifiedSeat = false,
   ) {
     const now = '2026-07-26T00:00:00Z'
+    observedProvider = liveRuntimeEngine
     return {
       async query(sql: string, params: unknown[] = []) {
         const agentId = String(params[0] ?? '')
@@ -250,10 +272,14 @@ describe('ordinary all-agent manifest candidate inventory', () => {
         }
         if (/FROM agent_runtime_instances/.test(sql)) {
           if (agentId === 'dev-001') {
-            return [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', runtime_engine: liveRuntimeEngine, status: 'active', stopped_at: null, last_seen_at: now }]
+            return [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', agent_id: agentId,
+              host_id: hostname(), process_id: 4201, session_name: 'discord-dev-001', checkout_path: '/work/dev-001',
+              runtime_engine: 'TUI', status: 'active', stopped_at: null, last_seen_at: now }]
           }
           if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
-            return [{ runtime_instance_id: 'runtime-contest', workspace_id: 'workspace-contest-dev', runtime_engine: 'codex', status: 'active', stopped_at: null, last_seen_at: now }]
+            return [{ runtime_instance_id: 'runtime-contest', workspace_id: 'workspace-contest-dev', agent_id: agentId,
+              host_id: hostname(), process_id: 4202, session_name: 'discord-contest-dev', checkout_path: '/work/contest-dev',
+              runtime_engine: 'TUI', status: 'active', stopped_at: null, last_seen_at: now }]
           }
           return []
         }
@@ -356,13 +382,23 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     expect(report.expected_agent_ids).toEqual(['dev-001'])
   })
 
-  test('profile/runtime engine mismatch fails closed instead of choosing either value', async () => {
+  test('observed Claude overrides a stale Codex profile without profile writes', async () => {
     const report = await generateAllAgentCommunicationManifestCandidates(
       fakeManifestDb(false, 'claude'),
       candidateOptions(),
     )
+    expect(report.ok).toBe(true)
+    expect(report.targets[0].runtime_engine).toBe('claude-exec')
+    expect(report.targets[0].runtime_profile_ref).toBe('agent-profile://dev-001/revision/7')
+    expect(report.blockers).toEqual([])
+  })
+
+  test('unverified provider ownership cannot fall back to the configured Codex preference', async () => {
+    const db = fakeManifestDb()
+    observedAgent = 'foreign-agent'
+    const report = await generateAllAgentCommunicationManifestCandidates(db, candidateOptions())
     expect(report.ok).toBe(false)
-    expect(report.blockers).toContain('dev-001:runtime_engine_profile_mismatch')
+    expect(report.blockers).toContain('dev-001:PROVIDER_MISSING')
     expect(report.resolved_target_count).toBe(0)
   })
 })
