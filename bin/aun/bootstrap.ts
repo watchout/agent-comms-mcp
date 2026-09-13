@@ -1253,8 +1253,8 @@ function stringEnvironment(value: unknown): Record<string, string> | null {
   return Object.fromEntries(entries) as Record<string, string>
 }
 
-async function readConfiguredWasurezuTransport(
-  context: BootstrapStageContext,
+export async function readConfiguredWasurezuTransport(
+  context: Pick<BootstrapStageContext, 'resolvedRuntime' | 'workspaceRoot' | 'env' | 'abortSignal'>,
   run: BootstrapAdapterCommandRunner,
 ): Promise<ConfiguredMcpTransport | null> {
   for(const alias of ['wasurezu','agent-memory']) {

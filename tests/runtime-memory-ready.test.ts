@@ -678,29 +678,8 @@ describe('runtime memory-ready evidence gate', () => {
     })
 
     expect(result.code).toBe(1)
-    const body = JSON.parse(result.stdout)
-    expect(body).toMatchObject({
-      ok: false,
-      mode: 'memory-ready-bootstrap',
-      mutation_performed: true,
-      live_discord_send: false,
-      launchagent_mutation: false,
-      queue_dependency: false,
-      evidence_log_id: 'wasurezu-bootstrap-memory-ready-log',
-      memory_ready: {
-        ok: false,
-        reason: 'not_ready',
-        evidence_path: '/tmp/wasurezu-bootstrap-memory-ready.json',
-      },
-    })
-    const evidenceRow = await db.queryOne<{ metadata: string }>(
-      `SELECT metadata FROM runtime_memory_ready_evidence WHERE agent_id=$1 AND evidence_log_id=$2`,
-      ['wasurezu', 'wasurezu-bootstrap-memory-ready-log'],
-    )
-    expect(JSON.parse(evidenceRow?.metadata ?? '{}')).toMatchObject({
-      bootstrap_without_aun_queue: true,
-      live_discord_send: false,
-      launchagent_mutation: false,
-    })
+    expect(JSON.parse(result.stdout)).toMatchObject({ok:false,mode:'memory-ready-bootstrap',mutation_performed:false})
+    expect((await db.queryOne<any>('SELECT COUNT(*) AS n FROM runtime_memory_ready_evidence'))?.n).toBe(0)
+
   })
 })

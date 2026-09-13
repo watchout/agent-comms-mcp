@@ -39,6 +39,7 @@ export class StartSpawnError extends Error {
 
 export interface StartOptions {
   agentId?: string
+  project?: string
   runtime?: string
   db?: {query:(sql:string,params?:any[])=>Promise<any>;close?:()=>Promise<void>}
   home?: string
@@ -205,7 +206,9 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
       }
     }
     if (previous.env?.AGENT_ID === agentId && previous.env?.AGENT_MEMORY_PROJECT?.trim()) sameSeatProjects.add(previous.env.AGENT_MEMORY_PROJECT.trim())
-    const explicitProject = env.AGENT_MEMORY_PROJECT?.trim()
+    const explicitProject = opts.project?.trim() || (env.AGENT_MEMORY_AGENT_ID === agentId
+      && (!env.AGENT_COM_EXPECTED_AGENT_ID || env.AGENT_COM_EXPECTED_AGENT_ID === agentId)
+      ? env.AGENT_MEMORY_PROJECT?.trim() : undefined)
     if (!explicitProject && sameSeatProjects.size > 1) throw new StartSpawnError('SEAT_MEMORY_PROJECT_AMBIGUOUS')
     const project = explicitProject || [...sameSeatProjects][0]
     if (!project) throw new StartSpawnError('SEAT_MEMORY_PROJECT_REQUIRED')

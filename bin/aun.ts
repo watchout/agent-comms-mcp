@@ -17,7 +17,7 @@
  *   - aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]
  *   - aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]
  *   - aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]
- *   - aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]
+ *   - aun memory-ready-bootstrap --agent-id <id> [--project <project>] [--runtime-instance-id <id>] [--session-name <name>] [--port <n>] [--dry-run]
  *   - aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json
  *   - aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json
  *   - aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json
@@ -66,7 +66,7 @@ function printHelp(): void {
     '  aun codex-runner-preflight --agent-id <id> [--queue-id <id>] [--max-inspect <n>]',
     '  aun processing|done|record-no-reply --agent-id <id> --queue-id <id> [--reason <text>]',
     '  aun renew-claim --agent-id <id> --queue-id <id> [--reason <text>] [--ttl-seconds <n>]',
-    '  aun memory-ready-bootstrap --agent-id <id> --runtime-instance-id <id> --session-name <name> --port <n> [--project <project>] [--dry-run]',
+    '  aun memory-ready-bootstrap --agent-id <id> [--project <project>] [--runtime-instance-id <id>] [--session-name <name>] [--port <n>] [--dry-run]',
     '  aun runtime-v2 plan --agent-id <id> [--queue-id <id>] [--message-id <id>] [--created-after <ts>] --json',
     '  aun runtime-v2 claim --agent-id <id> --queue-id <id> --message-id <id> --created-after <ts> --dry-run --json',
     '  aun runtime-v2 claim --agent-id kodama --queue-id <id> --message-id <id> --created-after <ts> --live-canary --json',
@@ -313,6 +313,7 @@ export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags, extras } = parseArgs(argv)
   if (subcommand === 'start') {
     const res = await start({agentId:typeof flags['agent-id'] === 'string' ? flags['agent-id'] : undefined,
+      project:typeof flags.project === 'string' ? flags.project : undefined,
       runtime:typeof flags.runtime === 'string' ? flags.runtime : undefined,extraArgs:extras,spawn:!flags['dry-run']})
     printSummary('aun start',['command: '+res.argv.join(' '),...res.driftWarnings],res.errors)
     return res.spawned ? -1 : res.ok ? 0 : 1

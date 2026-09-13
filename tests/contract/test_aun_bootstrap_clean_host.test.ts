@@ -24,7 +24,7 @@ import { observeSeatProvider } from '../../core/seat-runtime-selection'
 // Only the harmless Node host's provider classification is injected. PID/start,
 // parentage, held socket, native stdout pipe, stored hook receipt and MCP are real.
 const nativeHosts: Array<ReturnType<typeof Bun.spawn>> = []
-async function nativeHostFixture(home:string,workspace:string,agent:string,project:string,session:string) {
+async function nativeHostFixture(home:string,workspace:string,agent:string,project:string,session:string,mode:'accepted'|'pending'|'absent'='accepted') {
   const was = process.env.AUN_TEST_WASUREZU_ROOT
   if (!was || !existsSync(join(was,'dist/native-context-delivery.js'))) throw new Error('AUN_TEST_WASUREZU_ROOT_BUILT_CANDIDATE_REQUIRED')
   const node=execFileSync('which',['node'],{encoding:'utf8'}).trim()
@@ -50,7 +50,9 @@ async function nativeHostFixture(home:string,workspace:string,agent:string,proje
     const seed=nativeAttemptSeed({binding,rawInput:raw,runtime:'codex',storeBinding:resolveCodexStoreBinding(),adapter:{id:'native-pipe-fixture',version:'1'}});
     const target={schema_version:'kusabi-runtime-event-target/v1',manifest_id:'native-pipe-fixture',build:{commit_sha:'a'.repeat(40),tree_sha:'b'.repeat(40),artifact_sha256:'c'.repeat(64)},configuration:{config_sha256:'d'.repeat(64),trust_fingerprint_sha256:'e'.repeat(64)},storage:{backend:'sqlite',binding_sha256:seed.store_binding.binding_sha256}};
     const observe=()=>observeNativeProcess(process.ppid);
+    if(${JSON.stringify(mode)}==='absent')process.exit(0);
     const handle=await beginNativeContextAttempt({evidence:seed,runtime:'codex',observeAncestor:observe,emission:{target,timeoutMs:5000}});
+    if(${JSON.stringify(mode)}==='pending')process.exit(0);
     const result=await runCodexSessionStart(raw,binding);
     const receipt=await writeNativeContextResult({result,runtime:'codex',handle,observeProvider:observe});
     if(!receipt)throw new Error('native receipt missing:'+JSON.stringify({handle,evidence:result.evidence,work:result.native_work_digest}));
@@ -68,7 +70,7 @@ async function nativeHostFixture(home:string,workspace:string,agent:string,proje
     const native=spawn(process.execPath,[${JSON.stringify(hook)}],{cwd:${JSON.stringify(workspace)},env,stdio:['ignore','pipe','inherit']});children.push(native);
     let content='';native.stdout.on('data',d=>{content+=d.toString()});
     await new Promise((resolve,reject)=>native.on('exit',code=>code===0?resolve():reject(new Error('native hook failed'))));
-    if(!content.includes('Continue the stable seat task')||!content.includes('Run the next bounded fixture step'))throw new Error('actual host input missing');
+    if(${JSON.stringify(mode)}==='accepted'&&(!content.includes('Continue the stable seat task')||!content.includes('Run the next bounded fixture step')))throw new Error('actual host input missing');
     const connected=spawn(process.execPath,[${JSON.stringify(memory)}],{cwd:${JSON.stringify(workspace)},env,stdio:['pipe','pipe','inherit']});children.push(connected);
     writeFileSync(${JSON.stringify(report)},JSON.stringify({endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content}));
   `)
@@ -845,6 +847,107 @@ describe('aun bootstrap clean-host journal', () => {
     expect(bootstrapDigest(finalOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
     await db.close()
   }, 30_000)
+
+  test('ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects', async () => {
+    const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-native-cli-')));roots.push(home)
+    const repoRoot=realpathSync(join(import.meta.dir,'../..'))
+    const fixtureDb=createPostgresTestDatabase(`native_cli_${process.pid}_${Date.now()}`);postgresDatabases.push(fixtureDb)
+    const env={...process.env,HOME:home,AGENT_COM_DB:'postgres',DATABASE_URL:fixtureDb.databaseUrl} as Record<string,string>
+    expect(Bun.spawnSync([process.execPath,'--no-env-file','db/migrate.ts'],{cwd:repoRoot,env}).exitCode).toBe(0)
+    const db=new PgAdapter(fixtureDb.databaseUrl)
+    try {
+      await db.execute(readFileSync(join(repoRoot,'db/migrations/2026-07-26-aun-configuration-reconciliation.up.sql'),'utf8'))
+      await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status) VALUES('preserved-seat','Preserved','bot','TUI',true,'idle')`)
+      await db.execute(`INSERT INTO message_queue(agent_id,message_id,status,claimed_by,claimed_at,payload) VALUES('preserved-seat',$1,'in_progress','preserved-seat',now(),'{}')`,[randomUUID()])
+      const snapshot=async()=>bootstrapDigest({
+        agents:await db.query('SELECT to_jsonb(a) AS row FROM agents a ORDER BY agent_id'),
+        queues:await db.query('SELECT to_jsonb(q) AS row FROM message_queue q ORDER BY id'),
+        runtimes:await db.query('SELECT to_jsonb(r) AS row FROM agent_runtime_instances r ORDER BY runtime_instance_id'),
+        leases:await db.query('SELECT to_jsonb(l) AS row FROM control_plane_leases l ORDER BY lease_id'),
+        outbox:await db.query('SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o ORDER BY event_id'),
+        newMigration:await db.queryOne("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"),
+      })
+      for(const scenario of [{mode:'accepted',durableProject:true},{mode:'accepted',durableProject:false},{mode:'pending',durableProject:true},{mode:'absent',durableProject:true}] as const) {
+        const {mode,durableProject}=scenario,key=`${mode}-${durableProject}`
+        const agent=`native-cli-${key}`,project='stable-cli-project',session=`session-${key}`,runtimeId=randomUUID()
+        const localHome=join(home,key);mkdirSync(localHome);mkdirSync(join(localHome,'.codex'));mkdirSync(join(localHome,'bin'))
+        const native=await nativeHostFixture(localHome,repoRoot,agent,project,session,mode)
+        await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status,runtime_engine_preference,metadata)
+          VALUES($1,$1,'bot','TUI',true,'idle','claude-code',$2)`,[agent,JSON.stringify(durableProject?{memory_project:project}:{})])
+        await registerNativeFixtureRuntime(db,native,agent,project,session,repoRoot,runtimeId)
+        const queue=await db.queryOne<any>(`INSERT INTO message_queue(agent_id,message_id,status,payload) VALUES($1,$2,'pending',$3) RETURNING id`,
+          [agent,randomUUID(),JSON.stringify({author_id:'aun-bootstrap',message_type:'instruction',content:'fixture native ready receive',next_action:'none',no_reply_required:true})])
+        const configCalls=join(localHome,'config-calls'),codex=join(localHome,'bin','codex'),wrapper=join(localHome,'native-cli.ts')
+        writeFileSync(codex,`#!${process.execPath}\nimport {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(configCalls)},'get\\n');console.log(${JSON.stringify(JSON.stringify({enabled:true,transport:{type:'stdio',command:native.node,args:[native.memory],env:native.env}}))});`);chmodSync(codex,0o755)
+        // Execute the actual CLI dispatcher in its own process. Only classification
+        // of the real harmless Node host is injected; PID/start/root/pipe/lease and
+        // registered Wasurezu lookup all remain actual observations.
+        writeFileSync(wrapper,`
+          import {mock} from 'bun:test';import {execFileSync} from 'node:child_process';
+          const mod=await import(${JSON.stringify(join(repoRoot,'core/seat-runtime-selection.ts'))});
+          const observe=mod.observeSeatProvider,readRoot=mod.readObservedProviderRoot;
+          const provider=${JSON.stringify(native.observed.provider)};
+          mock.module(${JSON.stringify(join(repoRoot,'core/seat-runtime-selection.ts'))},()=>({...mod,
+            observeSeatProvider:(input)=>{
+              const ppid=Number(execFileSync('ps',['-p',String(input.processId),'-o','ppid='],{encoding:'utf8'}).trim());
+              const start=new Date(execFileSync('ps',['-p',String(provider.pid),'-o','lstart='],{encoding:'utf8'}).trim()).toISOString();
+              if(ppid!==provider.pid||start!==provider.startedAt)return null;
+              const actual=execFileSync('ps',['eww','-p',String(input.processId),'-o','command='],{encoding:'utf8'});
+              return observe({...input,providerStartedAt:start,processes:[{pid:input.processId,ppid,command:actual},{pid:ppid,ppid:1,command:'/fixture/codex'}]});
+            },
+            readObservedProviderRoot:(run,input)=>readRoot(async(command,args,options)=>{
+              const r=await run(command,args,options);if(command==='ps'&&args.includes('eww'))r.stdout=r.stdout.replace(/^\\s*\\S+/,'/fixture/codex');return r;
+            },input)
+          }));
+          const {runAsync}=await import(${JSON.stringify(join(repoRoot,'bin/aun.ts'))});
+          process.exit(await runAsync([process.execPath,'aun',...process.argv.slice(2)]));
+        `)
+        const cliEnv={...env,HOME:localHome,PATH:`${join(localHome,'bin')}:${env.PATH}`,AGENT_ID:agent,AGENT_COM_EXPECTED_AGENT_ID:agent,
+          AGENT_MEMORY_AGENT_ID:'foreign-controller',AGENT_MEMORY_PROJECT:'foreign-controller-project',AGENT_COMMS_MEMORY_READY_PROJECT:project,AUN_RECEIVE_CLAIM_SOURCE:'native-cli-fixture'}
+        const invoke=async(args:string[],ordinary=false)=>{
+          const child=Bun.spawn([process.execPath,'--no-env-file',ordinary?join(repoRoot,'bin/aun.ts'):wrapper,...args],{cwd:repoRoot,env:cliEnv,stdout:'pipe',stderr:'pipe'})
+          const [stdout,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);return {code,stdout,stderr,pid:child.pid}
+        }
+        const before=await snapshot()
+        const plan=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--dry-run'])
+        expect(plan.code).toBe(0);expect(JSON.parse(plan.stdout)).toMatchObject({dry_run:true,native_receipt_checked:false,mutation_performed:false})
+        expect(existsSync(configCalls)).toBe(false);expect(await snapshot()).toBe(before)
+        expect(JSON.parse(plan.stdout).plan.project).toBe(durableProject?project:null)
+        const foreign=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--runtime-instance-id',randomUUID()])
+        expect(foreign.code).toBe(1);expect(JSON.parse(foreign.stdout).reason).toBe('MEMORY_EXPECTATION_MISMATCH:runtime_instance')
+        expect(await snapshot()).toBe(before)
+        const wrongProject=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--project','foreign-project'])
+        expect(wrongProject.code).toBe(1);expect(JSON.parse(wrongProject.stdout).mutation_performed).toBe(false)
+        expect(await snapshot()).toBe(before)
+        const ready=await invoke(['memory-ready-bootstrap','--agent-id',agent])
+        if(mode==='accepted'&&ready.code!==0)console.error('NATIVE_CLI_RESULT',ready)
+        expect(ready.code).toBe(mode==='accepted'?0:1)
+        expect(await snapshot()).toBe(before)
+        const evidence=await db.query<any>('SELECT * FROM runtime_memory_ready_evidence WHERE agent_id=$1',[agent])
+        expect(evidence).toHaveLength(mode==='accepted'?1:0)
+        const receive=await invoke(['receive-actionable','--agent-id',agent,'--queue-id',String(queue.id)],true)
+        expect(receive.code).toBe(mode==='accepted'?0:1)
+        if(mode==='accepted') {
+          expect(JSON.parse(ready.stdout)).toMatchObject({mutation_performed:true,native_receipt_checked:true,memory_ready:{ok:true,runtime_instance_id:runtimeId}})
+          expect(evidence[0].runtime_instance_id).toBe(runtimeId)
+          expect(evidence[0].metadata.seat_context_receipt.native_delivery.provider_pid).toBe(native.observed.provider.pid)
+          expect(evidence[0].metadata.seat_context_receipt.native_delivery.project).toBe(project)
+          expect((await db.queryOne<any>('SELECT status,claimed_by FROM message_queue WHERE id=$1',[queue.id]))).toMatchObject({status:'received',claimed_by:agent})
+          await db.execute("UPDATE control_plane_leases SET expires_at=now()-interval '1 second' WHERE lease_id=$1",[runtimeId])
+          const stale=await invoke(['memory-ready-bootstrap','--agent-id',agent])
+          expect(stale.code).toBe(1);expect(JSON.parse(stale.stdout).mutation_performed).toBe(false)
+          expect((await db.query<any>('SELECT id FROM runtime_memory_ready_evidence WHERE agent_id=$1',[agent]))).toHaveLength(1)
+        } else {
+          expect(JSON.parse(ready.stdout)).toMatchObject({mutation_performed:false,reason:'MEMORY_NATIVE_CONTEXT_IDENTITY_MISMATCH'})
+          expect((await db.queryOne<any>('SELECT status FROM message_queue WHERE id=$1',[queue.id]))?.status).toBe('pending')
+        }
+        expect(existsSync(join(localHome,'Library/LaunchAgents'))).toBe(false)
+        expect(existsSync(join(localHome,'.aun/bootstrap'))).toBe(false)
+      }
+      expect((await db.queryOne<any>("SELECT status,claimed_by FROM message_queue WHERE agent_id='preserved-seat'"))).toMatchObject({status:'in_progress',claimed_by:'preserved-seat'})
+      expect((await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"))?.function).toBeNull()
+    } finally {await db.close()}
+  },30_000)
 
   for (const fixture of ['sqlite-new', 'sqlite-existing', 'postgres'] as const) test(`real default ${fixture} path performs genuine MCP recovery and separate-process ordinary receive`, async () => {
     const backend = fixture === 'postgres' ? 'postgres' : 'sqlite'

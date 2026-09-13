@@ -217,3 +217,17 @@ Receipt destination: `/Users/yuji/Developer/codex/control-artifacts/seat-continu
 SC3 ordinary readiness uses evidence for the exact selected local MCP runtime UUID. B5 may separately keep a sealed-provider receipt; it must independently validate the native stored input for the actual MCP UUID before recording ordinary readiness. Evidence lookup separates known runtime kinds, then requires the exact selected UUID so sealed and ordinary views cannot shadow each other. A newer invalid same-kind or unknown-runtime record still denies; no older-success fallback is introduced. A UUID rewrite or a metadata-only mapping never substitutes for current provider PID/start/session/workspace, child ancestry and lease verification.
 
 SC3 logical project resolution uses explicit `agents.metadata.memory_project`, or exactly one currently valid native context receipt for the selected local MCP runtime. The same-seat/project receipt must pass the existing exact runtime/lease/provider readiness checks. No absolute path, local workspace row, or basename selects a memory namespace. Missing or multiple verified projects fail explicitly; bootstrap must carry its explicit target project before ordinary readiness can discover it.
+
+The existing `aun memory-ready-bootstrap` command observes the current local MCP
+runtime/lease/provider and the actual host's connected memory binding, then reads
+the already accepted native receipt and records ordinary readiness through the
+same strict helper as B5. It does not run bootstrap B2/B7/B8, migrate desired state,
+change profiles/claims or restart a daemon. Optional runtime/session/port/project
+arguments are expectations against the observed target, never overrides. Dry-run
+performs only read-only planning and no native provider/MCP call or readiness write.
+
+Ambient `AGENT_MEMORY_PROJECT` is target intent only when the accompanying memory
+agent identity is the requested seat and no expected-seat binding contradicts it.
+A foreign or unbound caller project cannot replace the target's stable DB/native
+project. Explicit `aun start --project` supplies invocation intent; native/project
+configuration remains scoped to that invocation and preserves shared account files.

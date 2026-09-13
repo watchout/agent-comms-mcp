@@ -229,3 +229,11 @@ before the per-agent lock is released. An unresolved target returns
 Run bootstrap only on the seat being installed. Do not use it as a fleet
 activation command. Merge, distribution inclusion, D1 activation, protected
 target changes, and production rollout remain separate owner decisions.
+
+For an already enrolled seat, `aun memory-ready-bootstrap --agent-id <seat>` can
+verify native context delivery and establish the current local runtime's ordinary
+readiness without full bootstrap or shared desired migration. Supply `--project`
+only as the expected same-seat logical project when no durable project is recorded.
+Runtime UUID, session, port and checkout arguments, when provided, must match current
+observations. Missing, pending, foreign or stale native proof fails before readiness
+is recorded. `--dry-run` reports a plan; it does not read native proof or mark ready.
