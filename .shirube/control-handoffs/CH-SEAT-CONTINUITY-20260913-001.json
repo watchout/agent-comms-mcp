@@ -1,0 +1,456 @@
+{
+  "schema_version": "shirube-v3/control_handoff/v1",
+  "handoff_id": "CH-SEAT-CONTINUITY-IMPLEMENT-AUDIT-20260913-001",
+  "control_source": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+  "control_source_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+    "sha256": "068864d3f38656952d4b07ca6669e7547f7bdb17b9f560ad2bae68b5f54227b4"
+  },
+  "implementation_scope_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650237424",
+    "sha256": "814763d8a0b111807e400149325b605f889cc1a5d01c48d72d4ef5792e97c6c9"
+  },
+  "repository": {
+    "name": "watchout/agent-comms-mcp",
+    "base": "0f772883db6f3b50772d3e4b82ce47795091f0a9"
+  },
+  "cell": {
+    "id": "CELL-SEAT-CONTINUITY-20260913-001",
+    "cell_type": "defect_repair",
+    "risk_class": "R4",
+    "goal": "基本的な考え方として、LLMをいつどこで入れ替えても文脈が残るのが席を用意するということでしょう",
+    "protected_surfaces": {
+      "declared": [
+        "runtime code",
+        "api",
+        "database",
+        "provider invocation",
+        "queue and scheduler source",
+        "test-only workflow fixture supply"
+      ],
+      "touched": true
+    },
+    "CELL-ID": "CELL-SEAT-CONTINUITY-20260913-001"
+  },
+  "execution_context": {
+    "to": {
+      "agent_id": "codex-cto/restore_executor",
+      "active_function": "implementation_executor"
+    }
+  },
+  "lifecycle_state": "READY_FOR_IMPLEMENTATION",
+  "spec_review_state": "ready_for_implementation",
+  "owner_confirmation_ref": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+  "premise_confirmation_ref": "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+  "premise_ref": "docs/spec/seat-runtime-continuity.md",
+  "repo_spec_ref": ".shirube/repo-spec.yaml",
+  "allowed_paths": [
+    ".github/workflows/pr-checks.yml",
+    ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json",
+    ".shirube/evidence/seat-continuity-machine-evidence.json",
+    ".shirube/execution-contexts/seat-continuity-20260913.json",
+    "bin/aun-watchdog.ts",
+    "bin/aun.ts",
+    "bin/aun/bootstrap-adapter-codex.ts",
+    "bin/aun/bootstrap-types.ts",
+    "bin/aun/bootstrap.ts",
+    "bin/aun/memory-ready.ts",
+    "bin/aun/start.ts",
+    "bin/state-daemon.ts",
+    "core/aun-configuration-candidate.ts",
+    "core/aun-configuration-desired-state.ts",
+    "core/bot-health.ts",
+    "core/bot-lifecycle.ts",
+    "core/bot-status-db.ts",
+    "core/runtime-cleanup.ts",
+    "core/runtime-current-resolver.ts",
+    "core/runtime-endpoint.ts",
+    "core/runtime-heartbeat.ts",
+    "core/runtime-inventory.ts",
+    "core/runtime-memory-ready-refresher.ts",
+    "core/runtime-memory-ready.ts",
+    "core/seat-context-recovery.ts",
+    "core/seat-runtime-selection.ts",
+    "core/startup-safety.ts",
+    "core/state-daemon/action-planner.ts",
+    "core/state-daemon/index.ts",
+    "core/state-daemon/stall-detector.ts",
+    "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql",
+    "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql",
+    "docs/SSOT.md",
+    "docs/agent-com-message-queue-spec.md",
+    "docs/operations/aun-bootstrap.md",
+    "docs/operations/runtime-health-monitoring.md",
+    "docs/spec/aun-runtime-supervisor-adapter-contract.md",
+    "docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md",
+    "docs/spec/seat-runtime-continuity.md",
+    "scripts/prepare-seat-continuity-test-wasurezu.sh",
+    "scripts/restart-bot.sh",
+    "scripts/sync-mcp-config.sh",
+    "scripts/verify-seat-context-continuity.ts",
+    "scripts/watchdog.sh",
+    "server.ts",
+    "tests/aun-bootstrap-claude-adapter.test.ts",
+    "tests/aun-bootstrap-codex-adapter.test.ts",
+    "tests/aun-bootstrap.test.ts",
+    "tests/aun-configuration-candidate.test.ts",
+    "tests/aun-configuration-desired-state.test.ts",
+    "tests/bot-health.test.ts",
+    "tests/cli-sqlite-backend.test.ts",
+    "tests/contract/runtime-memory-ready-refresher-pg.test.ts",
+    "tests/contract/state-daemon/m2-sweep.test.ts",
+    "tests/contract/state-daemon/m3-heartbeat-liveness.test.ts",
+    "tests/contract/state-daemon/seed.ts",
+    "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+    "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+    "tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts",
+    "tests/contract/state-daemon/test_state_action_matrix.test.ts",
+    "tests/contract/state-daemon/test_wake_invocation_bounded.test.ts",
+    "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+    "tests/contract/test_aun_bootstrap_failure_matrix.test.ts",
+    "tests/contract/test_aun_codex_runner.test.ts",
+    "tests/contract/test_aun_codex_runner_preflight.test.ts",
+    "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts",
+    "tests/contract/test_aun_port_collision.test.ts",
+    "tests/contract/test_aun_receive_actionable.test.ts",
+    "tests/contract/test_aun_start_spawn_argv.test.ts",
+    "tests/contract/test_routing_v3_stage_a.test.ts",
+    "tests/contract/test_seat_runtime_continuity.test.ts",
+    "tests/contract/test_session_start_drain.test.ts",
+    "tests/contract/test_watchdog.test.ts",
+    "tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts",
+    "tests/helpers/seat-native-runtime-fixture.ts",
+    "tests/migrations/aun-configuration-reconciliation.test.ts",
+    "tests/norm-022-runtime-endpoint-lease.test.ts",
+    "tests/runtime-cleanup.test.ts",
+    "tests/runtime-current-resolver.test.ts",
+    "tests/runtime-heartbeat.test.ts",
+    "tests/runtime-inventory.test.ts",
+    "tests/runtime-memory-ready-identity.test.ts",
+    "tests/runtime-memory-ready-refresher.test.ts",
+    "tests/runtime-memory-ready.test.ts",
+    "tests/runtime-session-env-bridge.test.ts",
+    "tests/seat-context-recovery.test.ts",
+    "tests/seat-runtime-continuity.test.ts",
+    "tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts",
+    "tests/spec-enforcement/watchdog-false-positive-guards.test.ts",
+    "tests/state-daemon-queue-work-scheduler.test.ts",
+    "tests/unit/ports/bot-inventory-port.test.ts"
+  ],
+  "forbidden_paths": [
+    ".env*",
+    "auth.json",
+    "credentials/**",
+    ".github/workflows/post-merge.yml",
+    "scripts/shirube-current-overlay-check.mjs",
+    ".shirube/runtime/**"
+  ],
+  "forbidden_operations": [
+    "production DB/configuration/queue/credential mutation",
+    "provider API calls",
+    "Ready/merge/deploy",
+    "self audit or approval"
+  ],
+  "stop_conditions": [
+    "outside exact allowed paths",
+    "live effects required",
+    "independent finding unresolved before acceptance",
+    "exact-head approval absent before merge/application"
+  ],
+  "required_evidence": [
+    "exact source/head/tree and scoped changed paths",
+    "observed provider/current account/session/cwd selection without DB preference authority",
+    "held OS socket and same-holder fresh endpoint lease consumers",
+    "actual native pipe/current MCP stored evidence and ordinary receive",
+    "isolated SQL/TS desired hash parity and verified one-time migration",
+    "all affected existing caller tests and current mandatory CI",
+    "independent code/evidence verdict"
+  ],
+  "required_checks": [
+    "git diff --check",
+    "changed TypeScript parse and shell syntax",
+    "isolated selected seat/runtime/bootstrap/endpoint/memory/desired/migration regressions",
+    "actual compiled Was native/PG/SQLite fixture and ordinary receive",
+    "current mandatory Layer 0 full bun test with pinned public companion source"
+  ],
+  "acceptance": [
+    "SC1: Same seat logical identity remains durable while provider/account/PID/session/cwd are observed from the target. Stale DB provider preference cannot override live target proof.",
+    "SC2: Ordinary startup holds OS-assigned socket and publishes actual endpoint through existing lease. Stale stored ports do not route or veto.",
+    "SC3: Same logical seat/project preserves objective,decisions,unfinished work,next action across provider/workspace replacement. Readiness requires newest valid native input receipt bound to current local MCP and lease.",
+    "Pending/failed/foreign/missing native attempts deny ordinary claims; queue identity/fencing/uniqueness/rollback remain enforced.",
+    "Desired stable hash excludes diagnostic provider/physicalpaths/port; verified complete old canonical format transitions once, preserving ordinary data/history.",
+    "Required current CI and independent evidence remain visible; no live source/config/DB/queue/runtime/account effects or applied outcome claim."
+  ],
+  "owner_decision": {
+    "required_before_merge": true,
+    "exact_head_sha": null,
+    "decision_ref": null,
+    "committed_pending_policy_only": true
+  },
+  "design_rule_exceptions": [
+    {
+      "rule_id": "DR-CODE-001",
+      "scope": [
+        "core/aun-configuration-desired-state.ts"
+      ],
+      "reason": "18-line restart receipt validation SQL at599-616/698-715 is byte-identical to baseline617-634/716-733. Separate fenced update paths preserve existing lease/control refs; no duplication added. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-CODE-001",
+      "scope": [
+        "core/runtime-memory-ready.ts"
+      ],
+      "reason": "13 shared evidence-column lines473-485/505-517 are byte-identical to baseline520-532/552-564 and retain SQLite/PostgreSQL schema parity; no duplication added. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-CODE-001",
+      "scope": [
+        "core/state-daemon/index.ts"
+      ],
+      "reason": "15-line runner-error recovery branches1259-1273/1318-1332 equal baseline1246-1260/1305-1319; no duplicate added. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-CODE-001",
+      "scope": [
+        "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql"
+      ],
+      "reason": "New13-line common authority/release/control-reference validation at46-58/99-111 is intentionally repeated in immutable legacy-completeness and current stable-completeness SQL. Legacy keeps old provider/path/port conditions; stable excludes them. Their common authority predicates must agree; private SQL/TS parity/populated migration tests verify agreement. Factored application helper cannot replace historical SQL function semantics. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-CODE-001",
+      "scope": [
+        "server.ts"
+      ],
+      "reason": "24 normalized send-path routeInbound/queue-payload lines2698-2727/3293-3318 equal baseline2810-2839/3405-3430; no duplicate added. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "bin/aun/bootstrap-adapter-codex.ts"
+      ],
+      "reason": "All17 unlink sites are baseline transaction-owned temporary/displaced-artifact cleanup with exact ownership/sentinel and foreign-artifact restoration guards. These are real deletes within already accepted rollback lifecycle, not general durable-record delete authority; this PR adds none. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "bin/aun/bootstrap.ts"
+      ],
+      "reason": "DELETEs3483/3596 are unchanged baseline rollback of run-owned held outbox and observed projection. Event/agent/revision/digest plus undelivered attempt0/infinity and owner-key/host/candidate guards bound the rollback. No general history deletion is introduced. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "core/runtime-cleanup.ts"
+      ],
+      "reason": "owners.delete at208 is unchanged in-memory Set deletion, not persistent data deletion. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "core/state-daemon/index.ts"
+      ],
+      "reason": "Existing gcRepliedRows831 is real persisted retention GC, not a false positive: only replied rows before replied_at cutoff, bounded batch and agent scope, failed rows excluded. This existing retention policy/source is unchanged and this source-only scope authorizes no live GC invocation. Other matches1039/1607/1608/1710 are unchanged in-memory Map/Set deletion. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "server.ts"
+      ],
+      "reason": "Matched Map deletions and expired *.signal unlink at1777 are baseline in-memory state and temporary notification GC; all matched delete lines unchanged. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/test_watchdog.test.ts"
+      ],
+      "reason": "Existing beforeEach/afterAll cleanup is bounded to random TEST_PREFIX fixture rows. Actual executions use private task-owned/CI PG; generic ambient DATABASE_URL is not claimed production-safe or authorized. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/migrations/aun-configuration-reconciliation.test.ts"
+      ],
+      "reason": "drop-column at82 is a string assertion on old down SQL. Fixture cleanup476-483 is existing except added outbox478 cleanup for four fixtures in createPostgresTestDatabase-owned private PG after down-negative case. No production namespace deletion authorized. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/runtime-memory-ready.test.ts"
+      ],
+      "reason": "Evidence DELETE494 is baseline; added lease DELETE286 creates the missing-current-lease negative in the beforeEach-owned temporary SQLite file. Fixture-local destructive setup only. Classification verified independently against base0f772 and accepted4e3; reuse only while exact matched product bytes remain unchanged.",
+      "approved_by": "codex-cto applying existing published source/fixture scope and independent CI classification; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/runtime-memory-ready-refresher-pg.test.ts"
+      ],
+      "reason": "Line116 deletes only ids[1] native evidence to verify missing-proof denial and preservation of ids[0]. The suite creates a per-run scratch PostgreSQL database. This is intentional negative-fixture construction, not product retention or runtime deletion. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/state-daemon/m2-sweep.test.ts"
+      ],
+      "reason": "Line203 deletes only makeAgentId(t10-memory-block) evidence to exercise the received-row reclaim memory gate. The ordinary reclaim positives and queue invariants remain. Verified run uses explicitly isolated PostgreSQL, not the seed helper ambient default. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/state-daemon/seed.ts"
+      ],
+      "reason": "Lines140-143 retain baseline cleanup scoped to sd-test agent IDs and sd-test-channel IDs; no product delete added. New filesystem cleanup removes only native fixture mkdtemp homes. The helper still has an ambient DATABASE_URL fallback: this exception applies only to the recorded isolated test runs and CI agent_comms_test service, not arbitrary invocation safety. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ],
+      "reason": "Line139 deletes evidence only for the explicitly supplied fixture agent to verify no dispatch when current memory proof is missing. Test transaction and missing/stale/foreign evidence assertions remain. Actual accepted execution uses isolated PostgreSQL. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/test_aun_receive_actionable.test.ts"
+      ],
+      "reason": "Lines111/127 remove or replace only TEST_AGENT evidence in a fresh per-test mkdtemp SQLite test.db; DATABASE_URL is empty and AGENT_COM_SQLITE_PATH is explicit. These construct missing/stale/foreign negatives from genuine accepted native evidence. They do not delete live history. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/test_routing_v3_stage_a.test.ts"
+      ],
+      "reason": "Lines197/206/207 clean leases and runtime projections only for the test-hb random fixture agent or its runtime UUIDs. Existing queue/agent cleanup is also exact fixture ID scoped. Actual execution used private PostgreSQL and CI uses the declared test service; no product cleanup path added. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    },
+    {
+      "rule_id": "DR-DATA-001",
+      "scope": [
+        "tests/contract/test_session_start_drain.test.ts"
+      ],
+      "reason": "Lines41-56 clean exact fixture agent queue/evidence/lease/runtime/agent rows before or after fixture enrollment. Line147 intentionally removes only TEST_AGENT evidence to assert pending rows remain untouched when proof is absent. Actual execution uses isolated PostgreSQL. No product retention change. Classified from pinned737d source, exact matched sites and actual private-run receipt5de8f9a8; invalid with changed deletion scope or live database.",
+      "approved_by": "codex-cto applying published isolated fixture scope; no protected live authority",
+      "expires_at": "2026-09-14T00:00:00+09:00"
+    }
+  ],
+  "next_action": {
+    "blocking": true,
+    "owner_agent": "codex-cto/reboot_evidence",
+    "owner_function": "code_audit_gate",
+    "action": "Consume actual current task and executed machine evidence and bind exact-head structured independent review after any measured caller fixture correction.",
+    "handoff_method": "Native collaboration plus published exact PR comment",
+    "input_refs": [
+      "https://github.com/watchout/agent-comms-mcp/issues/575#issuecomment-5650158508",
+      "https://github.com/watchout/agent-comms-mcp/pull/964",
+      "commit:737d41af82b17eab9b143903c3be7ff5859647b8",
+      "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651333822"
+    ],
+    "scope": "Current source/test/metadata independent acceptance only",
+    "deliverable": "Exacthead audit and checklist",
+    "completion_evidence": "Actual rawhandoff checklist + versioned machine evidence, unchanged-product links and current CI",
+    "stop_reason": "INDEPENDENT_REVIEW_REQUIRED"
+  },
+  "implementation_actor": "codex-cto/restore_executor",
+  "pr": "https://github.com/watchout/agent-comms-mcp/pull/964",
+  "work_order": "watchout/agent-comms-mcp#964",
+  "validation": {
+    "required_commands": [
+      "git diff --check",
+      "changed TypeScript parse and shell syntax",
+      "isolated selected seat/runtime/bootstrap/endpoint/memory/desired/migration regressions",
+      "actual compiled Was native/PG/SQLite fixture and ordinary receive",
+      "current mandatory Layer 0 full bun test with pinned public companion source"
+    ],
+    "required_evidence": [
+      "PR_head_SHA",
+      "changed_files",
+      "validation_commands",
+      "validation_results",
+      "audit_checklist_report"
+    ]
+  },
+  "implementation_acceptance_evidence": [
+    "exact source/head/tree and scoped changed paths",
+    "observed provider/current account/session/cwd selection without DB preference authority",
+    "held OS socket and same-holder fresh endpoint lease consumers",
+    "actual native pipe/current MCP stored evidence and ordinary receive",
+    "isolated SQL/TS desired hash parity and verified one-time migration",
+    "all affected existing caller tests and current mandatory CI",
+    "independent code/evidence verdict"
+  ],
+  "implementation_helpers": [
+    "codex-cto/restore_inventory"
+  ],
+  "scope_supplements": [
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651363880",
+      "sha256": "bc93deb29efec4f66779c33dcf55e3df1771db0da980daa36dc038bf14af00d3"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651347596",
+      "sha256": "ee8a239085ae599427d3e98ef829ceb254493a8e2852c4a6a0d4c32eb346f6be"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651404432",
+      "sha256": "409be5fb11ca0f542d04122b85d013494060bcb2669b5e5fbf897a4cf20fa6cd"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651424216",
+      "sha256": "dd16d489a8fe6546cda4114f2e76b394d2fc8dfe4540462d524aaf8a285f309d"
+    }
+  ],
+  "supersedes_input_mirror_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651378216",
+    "sha256": "0a5abd3d85972bbf691110b504a8be66d788c0a582c1153456ce3450a9ecb836",
+    "prepared_json_sha256": "92ca154abcd1f63e2e71ecf481a6ce0c7c8258fd2478f8bcec1608772e443f82"
+  },
+  "source_test_pin": {
+    "head_sha": "737d41af82b17eab9b143903c3be7ff5859647b8",
+    "tree_sha": "e7fdedd4767d6697bee77abc439bf63754f1a0e7",
+    "actual_affected_test_results": {
+      "passed": 304,
+      "failed": 0,
+      "unchanged_skipped": 6,
+      "assertions": 2205,
+      "files": 23
+    },
+    "receipt_sha256": "5de8f9a8a25b542e9409285b52967b86e47438c7a29a6b10c26c9b1e43780a01",
+    "mandatory_current_full_ci": "PENDING; earlier4e3 99fail retained, not waived"
+  }
+}
