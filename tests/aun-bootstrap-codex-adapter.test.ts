@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readObservedProviderRoot } from '../core/seat-runtime-selection'
 import { bootstrapDigest } from '../core/aun-bootstrap-state'
 import { createCodexBootstrapAdapter, expectedBootstrapMcpTuple } from '../bin/aun/bootstrap-adapter-codex'
 import type { BootstrapStageContext } from '../bin/aun/bootstrap-types'
@@ -83,6 +84,29 @@ function absentPrestateMutation(
 }
 
 describe('aun bootstrap Codex adapter', () => {
+  test('observed account root never permits a foreign global tuple to be rewritten and fences PID reuse',async()=>{
+    const root=realpathSync(mkdtempSync(join(tmpdir(),'aun-observed-root-')))
+    const started='2026-09-13T00:00:00.000Z'
+    const calls:string[][]=[]
+    let changed=false
+    const run=async (command:string,args:string[])=>{
+      calls.push(args)
+      if(command==='ps') return {exitCode:0,stderr:'',stdout:args.includes('lstart=')
+        ? changed?'2026-09-13T00:00:01.000Z':started:`/bin/codex CODEX_HOME=${root}`}
+      return {exitCode:0,stderr:'',stdout:args.includes('get')?exactGet({transport:{type:'stdio',command:'foreign',args:[],env:{AGENT_ID:'other'}}}):JSON.stringify([{name:'aun',enabled:true}])}
+    }
+    try {
+      const observed=await readObservedProviderRoot(run,{pid:123,startedAt:started,cwd:root,env:{}})
+      const candidate={...context,providerRootAuthority:{...withProviderAuthority(root).providerRootAuthority!,
+        existingTarget:true,canonicalSourceField:'observed_provider_process' as const,authorityTupleDigest:observed!.digest,
+        canonicalRealpathDigest:observed!.directoryDigest,observedProviderPid:123,observedProviderStartedAt:started}}
+      const adapter=createCodexBootstrapAdapter({bunPath:'/bin/bun',serverEntry:'server.ts',run})
+      expect((await adapter.applyMcpRegistration(candidate)).ok).toBe(false)
+      changed=true
+      expect((await adapter.applyMcpRegistration(candidate)).reasonCodes).toContain('NO_GO_PROVIDER_ROOT_CONFLICT')
+      expect(calls.some(args=>args.includes('add')||args.includes('remove'))).toBe(false)
+    } finally {rmSync(root,{recursive:true,force:true})}
+  })
   test('uses provider CLI registration and exact get/list readback', async () => {
     const calls: Array<{ command: string; args: string[] }> = []
     let added = false

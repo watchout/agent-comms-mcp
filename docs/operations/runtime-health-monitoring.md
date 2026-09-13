@@ -8,6 +8,11 @@ a provider, or mutate tmux, launchd, systemd, an endpoint, or a host.
 
 Control handoff: `CH-AUN-MONITORING-M1-20260721-001` in Issue #794.
 
+The legacy `scripts/watchdog.sh` delegates a single `--once` observation to this
+same monitor. It performs no restart. A bounded invocation exits nonzero on an
+empty inventory, non-HEALTHY report or observation error, and preserves failures
+for its caller. No stale profile port can create a restart loop.
+
 ## Health projection
 
 Every report contains `agent_id`, the current `runtime_instance_id` when
@@ -40,9 +45,10 @@ Missing applicability evidence remains `UNKNOWN`.
 Runtime-labelled observations are bound to the selected
 `agent_runtime_instances.runtime_instance_id`. Supervisor and UI probes use
 that row's `session_name`; endpoint probes use that row's `port`, or the port
-from its `endpoint_uri` when `port` is absent. An agent profile is comparison
-evidence only: a different profile session or port fails closed and the profile
-target is never probed as though it belonged to the selected runtime. A claim
+from the exact same local runtime/PID holder and active endpoint lease. Historical
+profile session and port are diagnostics; they cannot veto the current runtime
+or supply a fallback endpoint. Missing, expired, foreign or ambiguous endpoint
+leases remain `UNKNOWN`. A claim
 is healthy presentation evidence only when
 `message_queue.claimed_runtime_instance_id` equals the selected runtime ID.
 
@@ -59,8 +65,6 @@ is healthy presentation evidence only when
 | Probe completed and the target is absent | `DOWN` | domain reason such as `ENDPOINT_PORT_UNBOUND` |
 | Expected and observed agent identities differ | `DOWN` | `IDENTITY_MISMATCH` |
 | Non-applicability lacks positive evidence | `UNKNOWN` | `APPLICABILITY_EVIDENCE_MISSING` |
-| Runtime and profile session differ | `UNKNOWN` | `RUNTIME_PROFILE_SESSION_MISMATCH` |
-| Runtime and profile port differ | `UNKNOWN` | `RUNTIME_PROFILE_PORT_MISMATCH` |
 | Runtime port and endpoint URI port differ | `UNKNOWN` | `RUNTIME_PORT_ENDPOINT_URI_MISMATCH` |
 | Agent claim is not bound to the selected runtime | `UNKNOWN` | `CLAIM_RUNTIME_OWNERSHIP_UNPROVEN` |
 

@@ -115,7 +115,7 @@ const resolveProject = async (_db: any, agentId: string) => ({
 })
 
 describe('runtime memory-ready identity reconciliation', () => {
-  test('heartbeat rotation refreshes evidence to the devauditor current instance and clears mismatch', async () => {
+  test('heartbeat rotation cannot transfer a prior runtime recovery receipt', async () => {
     await seedAgent({
       agentId: 'devauditor',
       session: 'discord-auditor',
@@ -162,9 +162,8 @@ describe('runtime memory-ready identity reconciliation', () => {
       observedRuntimeInstanceId: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     }, { now, policy, resolveProject })
     expect(reconciled).toMatchObject({
-      status: 'REFRESHED',
-      code: 'EVIDENCE_BINDING_REFRESHED',
-      previous_evidence_runtime_instance_id: 'ec08bc6f-466f-4727-853f-81895e4f6d05',
+      status: 'REFRESH_FAILED',
+      code: 'EVIDENCE_BINDING_REFRESH_FAILED',
       current_runtime_instance_id: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     })
 
@@ -174,15 +173,18 @@ describe('runtime memory-ready identity reconciliation', () => {
       now,
       policy,
     })
-    expect(after.ok).toBe(true)
-    expect(after.reason).toBe('ready')
+    expect(after.ok).toBe(false)
+    expect(after.reason).toBe('runtime_instance_mismatch')
     expect(after.runtime_instance_id).toBe('2e8da261-9017-4b2d-ab2d-1378432801a1')
 
     const idempotent = await reconcileRuntimeMemoryReadyIdentity(db as any, {
       agentId: 'devauditor',
       observedRuntimeInstanceId: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     }, { now, policy, resolveProject })
-    expect(idempotent.status).toBe('UNCHANGED')
+    expect(idempotent.status).toBe('REFRESH_FAILED')
+    const evidenceRows = await db.query<any>('SELECT runtime_instance_id FROM runtime_memory_ready_evidence WHERE agent_id=$1', ['devauditor'])
+    expect(evidenceRows).toHaveLength(1)
+    expect(evidenceRows[0].runtime_instance_id).toBe('ec08bc6f-466f-4727-853f-81895e4f6d05')
   })
 
   test('read-only monitor types codex-cto registration drift and devauditor superseded binding', async () => {

@@ -337,7 +337,7 @@ export function canonicalDesiredDocument(
   desired: Omit<AunConfigurationDesiredState, 'desiredRevision' | 'desiredDigest' | 'updatedAt' | 'updatedBy'>,
 ): Record<string, unknown> {
   if (!desired.agentId.trim()) throw new Error('AGENT_ID_REQUIRED')
-  if (!Number.isSafeInteger(desired.channelPort) || desired.channelPort < 1 || desired.channelPort > 65_535) {
+  if (!Number.isSafeInteger(desired.channelPort) || desired.channelPort < 0 || desired.channelPort > 65_535) {
     throw new Error('CHANNEL_PORT_INVALID')
   }
   if (!isAbsolute(desired.canonicalWorkspace) || !isAbsolute(desired.canonicalHome)) {

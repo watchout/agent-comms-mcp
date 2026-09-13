@@ -1,3 +1,4 @@
+import { readObservedProviderRoot } from '../../core/seat-runtime-selection'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
@@ -155,7 +156,15 @@ function providerAuthorityTupleDigest(agentId: string, row: Record<string, unkno
   })
 }
 
-async function liveProviderAuthorityDigest(context: BootstrapStageContext): Promise<string | null> {
+async function liveProviderAuthorityDigest(context: BootstrapStageContext, run: BootstrapAdapterCommandRunner): Promise<string | null> {
+  const authority = context.providerRootAuthority
+  if (authority?.canonicalSourceField === 'observed_provider_process') {
+    if (!authority.observedProviderPid || !authority.observedProviderStartedAt) return null
+    const current = await readObservedProviderRoot(run,{pid:authority.observedProviderPid,
+      startedAt:authority.observedProviderStartedAt,cwd:context.repoRoot,env:context.env})
+    return current?.root === authority.canonicalRoot && current.directoryDigest === authority.canonicalRealpathDigest
+      ? current.digest : null
+  }
   const recorded = context.providerRootAuthority?.authorityTupleDigest ?? null
   const runtimeState = context.priorState?.schema_version === 'shirube-v3/aun-bootstrap-run/v1'
   const explicit = context.env.AGENT_COM_DB?.trim().toLowerCase()
@@ -1272,6 +1281,15 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
 
     async applyMcpRegistration(context): Promise<BootstrapStageOutcome> {
       const options = commandOptions(context)
+      if (context.providerRootAuthority?.canonicalSourceField === 'observed_provider_process') {
+        const digest = await liveProviderAuthorityDigest(context, deps.run)
+        if (!digest || digest !== context.providerRootAuthority.authorityTupleDigest) {
+          return {ok:false,reasonCodes:['NO_GO_PROVIDER_ROOT_CONFLICT']}
+        }
+        // An observed account root is read-only. A shared native registration
+        // cannot be rebound to one seat; existing project/invocation config owns it.
+        return exactReadback(context, deps)
+      }
       const beforeGet = await deps.run('codex', ['mcp', 'get', 'aun', '--json'], options)
       const beforeList = await deps.run('codex', ['mcp', 'list', '--json'], options)
       const parsedBefore = parseJson(beforeGet)
@@ -1441,7 +1459,7 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
 
       const tuple = expectedBootstrapMcpTuple(context, deps)
       const args = registrationArgs(tuple)
-      const admittedProviderAuthorityDigest = await liveProviderAuthorityDigest(context)
+      const admittedProviderAuthorityDigest = await liveProviderAuthorityDigest(context, deps.run)
       if (context.priorState?.schema_version === 'shirube-v3/aun-bootstrap-run/v1'
         && !admittedProviderAuthorityDigest) {
         return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
@@ -1661,7 +1679,7 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
       const admittedAuthorityDigest = typeof payload.admitted_provider_authority_digest === 'string'
         ? payload.admitted_provider_authority_digest
         : null
-      const liveAuthorityDigest = await liveProviderAuthorityDigest(context)
+      const liveAuthorityDigest = await liveProviderAuthorityDigest(context, deps.run)
       const ownershipFences = {
         absent_prestate: mutation.before_digest === bootstrapDigest({ absent: true }),
         tuple_digest_present: tupleDigest !== null,
@@ -1726,7 +1744,7 @@ export function createCodexBootstrapAdapter(deps: BootstrapAdapterDependencies):
         }
       }
       deps.beforeOwnedTupleConditionalRemove?.(join(root, 'config.toml'))
-      if (admittedAuthorityDigest !== await liveProviderAuthorityDigest(context)) {
+      if (admittedAuthorityDigest !== await liveProviderAuthorityDigest(context, deps.run)) {
         return {
           ok: false,
           reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'],

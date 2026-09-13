@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 import {
   buildAunConfigurationCandidate,
+  buildDefaultAunConfigurationCandidate,
   candidateByteEquality,
   type BuildAunConfigurationCandidateInput,
 } from '../core/aun-configuration-candidate'
@@ -63,6 +64,31 @@ function input(overrides: Partial<BuildAunConfigurationCandidateInput> = {}): Bu
 }
 
 describe('AUN immutable configuration candidate', () => {
+  test('default generated bridge requests OS port zero despite an old desired profile port',()=>{
+    const fixture=input()
+    const candidate=buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,
+      observedRuntime:{observation:{schema_version:'seat-provider-observation/v1',agent_id:'misell',host_id:'host-a',runtime_instance_id:'current',process_id:12,provider_pid:13,
+        provider_started_at:new Date(Date.now()-1000).toISOString(),provider:'claude',workspace:'/new-host/misell',session_name:'new-session',observed_at:new Date().toISOString(),source:'process_ancestry',verified:true},
+        providerHome:'/new-home',providerConfigRoot:'/new-home/.claude',port:19001,leaseId:'lease-current',fencingToken:2},
+      providerConfigRoot:fixture.providerMcp.providerConfigRoot,providerRepoRoot:fixture.providerMcp.checkoutRoot,
+      daemonCheckout:fixture.launchAgent.workingDirectory,bunPath:'/bin/bun',serverEntry:'server.ts',daemonEntry:'bin/state-daemon.ts',
+      databaseLocatorRef:'env:DATABASE_URL',databaseCredentialRef:'env:DATABASE_URL'})
+    expect(candidate.providerMcp.environmentRefs.AUN_WEBHOOK_PORT).toBe('literal:0')
+    expect(candidate.providerMcp.environmentRefs.AGENT_ID).toBe('literal:misell')
+    expect(fixture.desired.channelPort).toBe(8810)
+    expect(candidate.providerMcp.provider).toBe('claude')
+    expect(candidate.providerMcp.providerHome).toBe('/new-home')
+    expect(candidate.runtimeRegistration.workspace).toBe('/new-host/misell')
+    expect(candidate.runtimeRegistration.channelPort).toBe(19001)
+    expect(fixture.desired.runtimeEnginePreference).toBe('codex')
+  })
+  test('ordinary projection without fresh runtime facts cannot fall back to desired preference',()=>{
+    const fixture=input()
+    expect(()=>buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,
+      providerConfigRoot:fixture.providerMcp.providerConfigRoot,providerRepoRoot:fixture.providerMcp.checkoutRoot,
+      daemonCheckout:fixture.launchAgent.workingDirectory,bunPath:'/bin/bun',serverEntry:'server.ts',daemonEntry:'bin/state-daemon.ts',
+      databaseLocatorRef:'env:DATABASE_URL',databaseCredentialRef:'env:DATABASE_URL'} as any)).toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+  })
   test('renders twice to byte-identical envelopes and digests', () => {
     const first = buildAunConfigurationCandidate(input())
     const second = buildAunConfigurationCandidate(input())

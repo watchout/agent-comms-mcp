@@ -254,13 +254,17 @@ describe('aun bootstrap B0-B8 state machine', () => {
     }
   }, 10_000)
 
-  test('auto runtime requires live identity and rejects provider conflict', () => {
+  test('auto runtime selects actual provider over stale preference and rejects real provider conflicts', () => {
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
     ]).reason).toBe('NO_GO_RUNTIME_UNDETECTED')
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
       { source: 'process_identity', runtime: 'claude', verified: true, evidence: 'process' },
+    ]).runtime).toBe('claude')
+    expect(selectBootstrapRuntime('auto', [
+      {source:'process_identity',runtime:'claude',verified:true,evidence:'live1'},
+      {source:'process_identity',runtime:'codex',verified:true,evidence:'live2'},
     ]).reason).toBe('NO_GO_RUNTIME_AMBIGUOUS')
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },

@@ -1,4 +1,6 @@
-import { existsSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { resolveRuntimeEndpoint } from './runtime-endpoint'
+import { validateSeatContextReceipt, type SeatContextReceipt } from './seat-context-recovery'
 import { basename, isAbsolute } from 'node:path'
 import {
   loadRuntimeMemoryReadyPolicy,
@@ -93,6 +95,8 @@ export interface RuntimeMemoryReadyGateResult {
     | 'bypass_scope_mismatch'
     | 'bypass_expired'
     | 'read_error'
+    | 'context_consumption_missing'
+    | 'endpoint_unavailable'
   agent_id: string
   project: string
   checked_at: string
@@ -160,20 +164,8 @@ function projectFromWorkspace(agentId: string, workspacePath: string): string {
       { workspace_path: workspacePath },
     )
   }
-  if (!existsSync(workspacePath)) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_NOT_FOUND',
-      `memory-ready workspace does not exist for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
-  if (!statSync(workspacePath).isDirectory()) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_NOT_DIRECTORY',
-      `memory-ready workspace is not a directory for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
+  // This is the persisted logical project fallback. An old host path need not
+  // still exist after relocation; filesystem liveness is not memory identity.
   const project = basename(workspacePath).trim()
   if (!project || project === '.' || project === '/') {
     throw new RuntimeMemoryReadyProjectResolutionError(
@@ -692,29 +684,8 @@ export async function evaluateRuntimeMemoryReadyGate(
   }
   if (!agent) return fail(base, 'agent_missing')
 
-  const agentMetadata = parseObject(agent.metadata)
-  const expectedPort = normalizeNumber(agent.channel_port)
-  if (expectedPort !== null) {
-    const occupants = await queryRows<RuntimeRow>(
-      db,
-      `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
-         FROM agent_runtime_instances
-        WHERE port = $1
-          AND status IN ('running', 'active')
-          AND agent_id <> $2
-        ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
-        LIMIT 1`,
-      [expectedPort, input.agent_id],
-    ).catch(() => [])
-    const occupant = occupants[0]
-    if (occupant) {
-      return fail(base, 'port_identity_mismatch', {
-        expected_port: expectedPort,
-        occupant_agent_id: occupant.agent_id,
-        occupant_runtime_instance_id: occupant.runtime_instance_id,
-      })
-    }
-  }
+  // Profile ports are legacy projection. Endpoint ownership is evaluated for
+  // the selected runtime, never by looking for another seat at a profile port.
 
   const policy = input.policy ?? loadRuntimeMemoryReadyPolicy()
   let currentResolution
@@ -818,35 +789,9 @@ export async function evaluateRuntimeMemoryReadyGate(
     })
   }
 
-  const expectedSession = normalizeText(agentMetadata.tmux_session)
-  if (expectedSession && currentRuntime.session_name !== expectedSession) {
-    return fail(withEvidence, 'session_mismatch', {
-      profile_session_name: expectedSession,
-      runtime_session_name: currentRuntime.session_name,
-    })
-  }
-  if (expectedPort !== null && currentRuntime.port !== expectedPort) {
-    return fail(withEvidence, 'port_mismatch', {
-      profile_port: expectedPort,
-      runtime_port: currentRuntime.port,
-    })
-  }
-  const expectedCheckoutPath = normalizeText(agent.home_directory)
-  if (expectedCheckoutPath && currentRuntime.checkout_path !== expectedCheckoutPath) {
-    return fail(withEvidence, 'checkout_path_mismatch', {
-      profile_checkout_path: expectedCheckoutPath,
-      runtime_checkout_path: currentRuntime.checkout_path,
-    })
-  }
-  const currentRegistrationMismatch = currentResolution.profile_mismatch_observations.find(
-    observation => observation.current && observation.runtime_instance_id === currentRuntime.runtime_instance_id,
-  ) ?? null
-  if (currentRegistrationMismatch) {
-    return fail(withEvidence, 'registration_profile_mismatch', {
-      repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
-      registration_profile_mismatch: currentRegistrationMismatch,
-    })
-  }
+  // Current observed identity and its recovery receipt are compared below.
+  // Historical profile session/path/port differences do not rewrite or reject
+  // an otherwise verified replacement of this same seat.
   if (evidence.runtime_instance_id !== currentRuntime.runtime_instance_id) {
     return fail(withEvidence, 'runtime_instance_mismatch', { evidence_runtime_instance_id: evidence.runtime_instance_id })
   }
@@ -911,6 +856,50 @@ export async function evaluateRuntimeMemoryReadyGate(
     if (bypassFailure) return bypassFailure
   }
 
+  if (evidence.result_status !== 'bypassed') {
+    const receipt = parseObject(evidence.metadata).seat_context_receipt
+    if (!validateSeatContextReceipt(receipt, {
+      agentId: expectedAgentId, project: input.project,
+      runtimeInstanceId: currentRuntime.runtime_instance_id,
+    })) return fail(withEvidence, 'context_consumption_missing', { code: 'MEMORY_CONTEXT_RECOVERY_REQUIRED' })
+    const nativeDelivery = (receipt as SeatContextReceipt).native_delivery
+    if (nativeDelivery) {
+      const metadata = parseObject(selectedRuntime.metadata)
+      const observation = parseObject(metadata.provider_observation)
+      const observedRuntimeId = selectedRuntime.runtime_kind === 'bootstrap_bound_provider'
+        ? metadata.mcp_runtime_instance_id : currentRuntime.runtime_instance_id
+      if (observation.verified !== true || observation.source !== 'process_ancestry'
+        || observation.agent_id !== expectedAgentId || observation.runtime_instance_id !== observedRuntimeId
+        || observation.provider_pid !== nativeDelivery.provider_pid || observation.provider !== nativeDelivery.target_runtime
+        || observation.provider_started_at !== nativeDelivery.provider_started_at
+        || (observation.host_session_id && observation.host_session_id !== nativeDelivery.host_session_id)
+        || typeof observation.workspace !== 'string'
+        || createHash('sha256').update(observation.workspace).digest('hex') !== nativeDelivery.workspace_sha256) {
+        return fail(withEvidence, 'context_consumption_missing', { code: 'MEMORY_NATIVE_CONTEXT_PROVENANCE_MISMATCH' })
+      }
+    }
+    const consumedAt = dateMs((receipt as SeatContextReceipt).completed_at)
+    if (consumedAt === null || (startedMs !== null && consumedAt < startedMs) || consumedAt > now.getTime()) {
+      return fail(withEvidence, 'stale_runtime_restore', { code: 'MEMORY_CONTEXT_RECEIPT_TIME_MISMATCH' })
+    }
+  }
+
+  // A sealed provider receipt and the MCP listener are different runtime kinds.
+  // Local runtime gates bind the exact instance; provider receipts additionally
+  // require their sealed MCP instance binding to match the observed endpoint.
+  try {
+    const endpointRuntimeId = (input.requested_runtime_kind ?? 'local_process') === 'local_process'
+      ? currentRuntime.runtime_instance_id
+      : normalizeText(selectedRuntime.metadata.mcp_runtime_instance_id)
+    if (!endpointRuntimeId) return fail(withEvidence, 'endpoint_unavailable', { code: 'MCP_RUNTIME_BINDING_MISSING' })
+    const endpoint = await resolveRuntimeEndpoint(db, {
+      agentId: input.agent_id, runtimeInstanceId: endpointRuntimeId, now,
+    })
+    if (!endpoint.ok || !endpoint.endpoint || endpoint.endpoint.port !== currentRuntime.port) {
+      return fail(withEvidence, 'endpoint_unavailable', { code: endpoint.code })
+    }
+  } catch { return fail(withEvidence, 'endpoint_unavailable', { code: 'RUNTIME_ENDPOINT_READ_FAILED' }) }
+
   return pass(
     withEvidence,
     evidence.result_status === 'bypassed' ? 'bypassed' : 'ready',
@@ -933,10 +922,12 @@ export function buildWasurezuBootstrapEvidence(input: {
   evidence_path?: string | null
   evidence_log_id?: string | null
   recovery_command?: string | null
+  recovery_receipt?: SeatContextReceipt | null
 }): RuntimeMemoryReadyEvidenceInput {
   const completedAt = input.completed_at ?? new Date()
   const completedMs = dateMs(completedAt) ?? Date.now()
   const validForSeconds = input.valid_for_seconds ?? 1800
+  const consumed = validateSeatContextReceipt(input.recovery_receipt, { agentId: input.agent_id, project: input.project, runtimeInstanceId: input.runtime_instance_id })
   return {
     agent_id: input.agent_id,
     project: input.project,
@@ -949,8 +940,8 @@ export function buildWasurezuBootstrapEvidence(input: {
     checkout_path: input.checkout_path ?? null,
     checkout_commit_sha: input.checkout_commit_sha ?? null,
     recovery_command: input.recovery_command ?? 'mcp__wasurezu__recover_context',
-    result_status: 'ready',
-    failure_reason: null,
+    result_status: consumed ? 'ready' : 'failed',
+    failure_reason: consumed ? null : 'MEMORY_CONTEXT_RECOVERY_REQUIRED',
     completed_at: completedAt,
     evidence_path: input.evidence_path ?? null,
     evidence_log_id: input.evidence_log_id ?? null,
@@ -959,6 +950,7 @@ export function buildWasurezuBootstrapEvidence(input: {
       ? 'wasurezu_boot_recovery'
       : 'agent_memory_boot_recovery',
     metadata: {
+      seat_context_receipt: consumed ? input.recovery_receipt : null,
       bootstrap_without_aun_queue: true,
       live_discord_send: false,
       launchagent_mutation: false,

@@ -1,3 +1,4 @@
+import { observeSeatProvider, resolveSeatProvider } from '../seat-runtime-selection'
 /**
  * StateDaemon — queue-state-driven dispatch supervisor (Issue #323, spec v0.6).
  *
@@ -140,8 +141,8 @@ function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
 }
 
-function effectiveRuntime(agent: AgentRow): string | null {
-  return agent.runtime_engine_preference?.trim() || agent.runtime?.trim() || null
+function effectiveRuntime(agent: AgentRow & {observed_runtime_provider?:string|null}): string | null {
+  return agent.observed_runtime_provider ?? null
 }
 
 function isInactiveAgentStatus(status: string | null | undefined): boolean {
@@ -225,7 +226,7 @@ export function automaticProcessingInputsFromAgent(
     enrolled: agent !== null,
     enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
     runtimeReady: agent !== null
-      && Boolean(effectiveRuntime(agent as AgentRow))
+      && Boolean(agent.runtime?.trim())
       && Boolean(agent.status?.trim())
       && !isInactiveAgentStatus(agent.status ?? null),
     channelMember,
@@ -295,7 +296,10 @@ export class StateDaemon {
   private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
-  constructor(deps: StateDaemonDeps) {
+  private readonly providerObserver: typeof observeSeatProvider
+
+  constructor(deps: StateDaemonDeps & {providerObserver?: typeof observeSeatProvider}) {
+    this.providerObserver = deps.providerObserver ?? observeSeatProvider
     this.db = deps.db
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
@@ -916,6 +920,14 @@ export class StateDaemon {
     return { refreshed: rowCount, skipped }
   }
 
+  private async observedAgent<T extends AgentRow>(agent:T|null,now:Date):Promise<(T & {observed_runtime_provider:string|null})|null> {
+    if(!agent) return null
+    const selected=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)},
+      {agentId:agent.agent_id,now,observe:this.providerObserver})
+    return {...agent,observed_runtime_provider:selected.ok?selected.provider:null,
+      ...(selected.observation?{tmux_session:selected.observation.session_name,last_seen_at:new Date(selected.observation.observed_at)}:{})}
+  }
+
   // ── Bot liveness (§5.4 / R7 / 補強 #5) ─────────────────────────────────────
 
   async checkBotLiveness(): Promise<LivenessResult> {
@@ -927,7 +939,8 @@ export class StateDaemon {
     const { rows } = await this.dbQuery<AgentRow>(sql, params)
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
-    for (const bot of rows) {
+    for (const storedBot of rows) {
+      const bot=(await this.observedAgent(storedBot,this.clock.now()))!
       if (isInactiveAgentStatus(bot.status)) {
         this.metrics.inc('state_daemon_bot_liveness_skipped_total', { status: bot.status ?? 'unknown' })
         continue
@@ -1099,7 +1112,7 @@ export class StateDaemon {
     const ctx: BotContext = {
       now,
       row: row as unknown as BotContext['row'],
-      agent: (rows[0] ?? null) as unknown as BotContext['agent'],
+      agent: await this.observedAgent(rows[0] ?? null,now),
       tmuxPaneTail: null,
       // cycle 2 Fix 3: thresholds read from env at each gate evaluation
       // (no module-level cache) so that an operator-level override via
@@ -1123,7 +1136,7 @@ export class StateDaemon {
          FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
-    const bot = rows[0]
+    const bot = await this.observedAgent(rows[0] ?? null,now)
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
     if (bot && row.status === 'pending') {
       const surface = classifyQueueSurface({
@@ -2057,7 +2070,12 @@ export class StateDaemon {
     // that maps to a known LLM (claude-code, codex), use the per-agent profile.
     // This allows auditor/devauditor (claude-code) and codex-* bots to each get
     // the correct headless invocation without global config changes.
-    const agentAdapter = selectAgentAdapter(agent?.runtime_engine_preference)
+    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, observe:this.providerObserver})
+    if (!providerSelection.ok) {
+      this.metrics.inc('state_daemon_wake_actions_total', {result: providerSelection.code})
+      return false
+    }
+    const agentAdapter = selectAgentAdapter(providerSelection.provider)
     const effectiveProfile: RuntimeInvocationProfile | undefined =
       agentAdapter.profile ?? this.config.hostRuntimeInvocationProfile
     const hostAdapterEnabled =
