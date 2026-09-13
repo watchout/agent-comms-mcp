@@ -662,5 +662,138 @@
     "change": "Use existing protected-surface taxonomy and retain detailed protected meanings; no source/test/doc/lock/runtime changes.",
     "historical_test_subjects_unchanged": true,
     "current_workflow_result": "Pending current metadata push; original dacc executed evidence remains bound to dacc."
+  },
+  "companion_noop_initialization_correction": {
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652323482",
+      "sha256": "a78a47492fa6e830febda1071e662f8695f4562cf2a6786b6dac49f7b48e0433"
+    },
+    "parent_AUN_head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+    "companion_head": "e49abc24838227776dc01be111aeb035ec7c9aad",
+    "companion_tree": "a55dd96fe6a753ea2ab6bcb8134172ca0d086a42",
+    "remote_PR321_exact_head_verified": true,
+    "Was_maker_evidence": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/was-noop-initialize/maker-source-receipt.json",
+      "sha256": "af64e09d63223dc2ce4934da6c0a0cea90caa576938fa2decd7ff304bd97bb11"
+    },
+    "Was_source_independent_acceptance": "PENDING",
+    "Was_Linux_CI": {
+      "url": "https://github.com/watchout/agent-memory/actions/runs/34748757287",
+      "status_at_integration": "PENDING; no source acceptance inferred"
+    },
+    "change": "Only frozen Was commit/tree in existing private fixture preparation script. All AUN product/test/helper/workflow bytes remain unchanged.",
+    "fixture_script_sha256": "ffbf7a851cb93892626631414ffe5a113a097b77f6550d5b847e058b9a315e9a",
+    "public_frozen_build": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/e49-public-build.json",
+        "sha256": "2d936e649d8937ed2639b6e851cf59c3c72058e870a15d1bd43703cf96056c65"
+      },
+      "exit_code": 0,
+      "seconds": 3.6282790830009617,
+      "private_root": "/private/tmp/aun-init-e49-a7pnrit9",
+      "source_root": "/private/tmp/aun-init-e49-a7pnrit9/aun-wasurezu-PKs7EQ",
+      "log_sha256": "43d3d22a9d051dc80d35250db54f328830b71178d5803e2feb7e215aec170842",
+      "live_effects": 0
+    },
+    "historical_5d4_full_runs": [
+      {
+        "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34747419808",
+        "head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+        "pass": 3114,
+        "fail": 1,
+        "skip": 59,
+        "assertions": 15056,
+        "log": {
+          "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-ci-5d4-first-full-test.log",
+          "sha256": "9f753f291c1f07a1fbb82b194843a3ad3ac72de1ac16d2dafdee6b29d04d5435"
+        }
+      },
+      {
+        "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34747689987",
+        "head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+        "pass": 3115,
+        "fail": 0,
+        "skip": 59,
+        "assertions": 15088,
+        "log": {
+          "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-ci-5d4-second-full-test.log",
+          "sha256": "19c03b191a117e4bb03922214b6967ec3c4cba41882ba00032ff272546040535"
+        }
+      }
+    ],
+    "observed_race": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/diagnosis.json",
+      "sha256": "2b9bc6c2f564517a0481b2d7d45b300ee622ac74083dda783838ff281f2ccb9e"
+    },
+    "new_test_subject": "Actual parent AUN product/test bytes with the listed uncommitted two-line companion pin diff; final commit only pins these inputs and evidence. Historical counts remain attached to their original execution subjects.",
+    "private_validation": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/corrected-candidate/pg-receipt.json",
+        "sha256": "c1d9f7e0976600cf89e90fc0b5294708f12bd624cbdb5e61544677d3619f1c55"
+      },
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--preload",
+            "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/observe-before-initialize.ts",
+            "--test-name-pattern",
+            "B5-CONCURRENCY",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 2.685,
+          "log": "before-initialize.log",
+          "sha256": "514cf235e3be41e3ad1a8be73300d061a0455ed329650fd6812c33753afce8bf",
+          "pass": 1,
+          "fail": 0,
+          "skip": 0,
+          "executed": 1,
+          "failure_lines": [],
+          "assertions": 36,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        },
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 29.291,
+          "log": "clean-host.log",
+          "sha256": "d6c627f3df31bacbde97b033ba68e2191257359337bcb510fad99753aa0bf81b",
+          "pass": 17,
+          "fail": 0,
+          "skip": 0,
+          "executed": 17,
+          "failure_lines": [],
+          "assertions": 377,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "normal_initialization": {
+        "lookup_success": 6,
+        "initialize_end": 6,
+        "persist_calls": 0,
+        "trace_sha256": "23aaa17af3d6f7085d08108cecc03e163dc0eb085ccaaef4ce0803605afbc3d8"
+      },
+      "barrier_position": "Before real initialize; no persistence or native receipt replacement; six genuine native lookups succeed with zero persistence calls",
+      "private_PG_stopped": true
+    },
+    "mandatory_current_AUN_full_CI": "PENDING_NEW_PUSH",
+    "live_effects": 0,
+    "provider_api_calls": 0
   }
 }
