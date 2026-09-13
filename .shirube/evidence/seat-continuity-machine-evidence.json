@@ -221,5 +221,106 @@
     "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651565048",
     "sha256": "773d4023c52e51470def0da38afd6375ae02b1be5464ee1cf3e5f8e266bbf9e5"
   },
-  "mirrored_handoff_sha256": "5b413e8536abead0f25a0fa946b410827ba50ab7412bafa059b6e07e12e65e6a"
+  "mirrored_handoff_sha256": "5b413e8536abead0f25a0fa946b410827ba50ab7412bafa059b6e07e12e65e6a",
+  "fixture_placement_correction": {
+    "source_head": "1cb3071af99d723bf84e62e2a146a48f0304abba",
+    "source_tree": "178b8cbb36ecca3ee1888d74f52f8767cc9c37a8",
+    "parent_head": "f3aada4f749b34f650a71f946abc03c894b19fe4",
+    "control_source_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651614978",
+      "sha256": "7b3342f0ca739b3be2320b5193e6592e51048189925e062aae12be55c0058392"
+    },
+    "scope": "Four fixture-supply paths only; all product bytes unchanged. Tests executed on these exact bytes immediately before pinning; historical 737d304 remains historical.",
+    "changed_file_sha256": {
+      ".github/workflows/pr-checks.yml": "fadf1150a269a017f5206619cd498bc224e9ef75b0561a9b8a16d7c9598316ac",
+      "scripts/prepare-seat-continuity-test-wasurezu.sh": "721a87ee5f394ca45d68c20fb8f1611a0b374f0cd78f8677548fa53bdb22d8ba",
+      "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts": "92d51a7cf933ad906de2c74d9878474a391cb5fd94784ed1156a735cffc1416f",
+      "tests/helpers/seat-native-runtime-fixture.ts": "25dad84f9d00b76ee010930e616206f8647caec6611ecedd0fc07114383a26f5"
+    },
+    "lazy_native": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--timeout",
+        "30000",
+        "tests/contract/test_aun_receive_actionable.test.ts",
+        "--test-name-pattern",
+        "dry-run surfaces|claims only the selected actionable"
+      ],
+      "exit_code": 0,
+      "seconds": 6.106231124998885,
+      "log_sha256": "c5fff58cefe7d2ad02126075960e3b3ad2cd72e9b96d9b17429d97c5485ae7e1",
+      "build_count": 1,
+      "output_roots": [
+        "/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-lazy-was-xe16g8as/aun-wasurezu-lq51WF"
+      ],
+      "pass": 2,
+      "fail": 0,
+      "assertions": 12,
+      "filtered_out": 18
+    },
+    "diagnostics_ci_alias": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--bail=1",
+        "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts"
+      ],
+      "exit_code": 0,
+      "duration_seconds": 0.408,
+      "log": "diagnostics.log",
+      "sha256": "5a14dd560ecf1b086dd7313cff1948ffdd54277cabadf3e8343897a3ae4f03d8",
+      "pass": 2,
+      "fail": 0,
+      "skip": 0,
+      "executed": 2,
+      "failure_lines": [],
+      "assertions": 77,
+      "selected_files": [
+        "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts"
+      ],
+      "stopped_after_first_failure": false,
+      "isolated_cluster_stopped": true,
+      "receipt_sha256": "790dcb950a0932512101ef2da2763f8159e20605a0e1e01d0a9ea86c2117acea"
+    },
+    "expected_rejections": {
+      "cases": [
+        {
+          "name": "missing-private-ci-parent",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_PRIVATE_CI_NATIVE_FIXTURE_PARENT_REQUIRED",
+          "log_sha256": "e62d83809faa2cb9b06c2ec4d00cb98bf3eb8e2db2db7cc4bb0e9b32f62c02e4"
+        },
+        {
+          "name": "wrong-diagnostic-db",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED",
+          "log_sha256": "acd5f3719c76b39ff314490fb1b69aef43c820d21d59187e0fb151ae855a3e17"
+        },
+        {
+          "name": "non-ci-diagnostic-alias",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED",
+          "log_sha256": "c1864d5a8c86250eb2e85e8a4e1e953a9e05f6146cb1831277807e9150c2a1d4"
+        },
+        {
+          "name": "outside-private-output",
+          "exit_code": 2,
+          "expected_rejection": null,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "build_count": 0,
+      "outside_output_created": false
+    },
+    "overlay": {
+      "result": "PASS",
+      "log_sha256": "69c503a1e6bf3ede301649c6bdc90cc0017527f7fc0edb854b929b471d6c3cb7",
+      "actual_current_pr_event": true
+    },
+    "mandatory_ci": "PENDING_NEW_PUSH",
+    "production_effects": 0
+  }
 }

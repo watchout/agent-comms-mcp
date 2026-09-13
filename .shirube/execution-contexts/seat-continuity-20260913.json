@@ -52,5 +52,11 @@
     "exact_head_required_for_merge_ready": true,
     "llm_final_authority_forbidden": true
   },
-  "actor": "codex-cto/restore_executor"
+  "actor": "codex-cto/restore_executor",
+  "supplemental_handoff_refs": [
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651614978",
+      "sha256": "7b3342f0ca739b3be2320b5193e6592e51048189925e062aae12be55c0058392"
+    }
+  ]
 }
