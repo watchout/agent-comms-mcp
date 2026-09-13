@@ -10,6 +10,7 @@ import { admissionStatus, admissionTransition, tryBoundedClaim, readAdmissionBin
 import { postBoundedDiscordRequest } from '../../adapters/discord'
 import { runReceivedQueueWork, finalizeDoneQueueWork } from '../../core/queue-work'
 import { receiveTargeted } from '../../bin/aun/receive'
+import { lifecycleTransition } from '../../bin/aun/lifecycle'
 
 export const stage = process.env.AUN_BOUNDED_TEST_STAGE
 if (!['local17', 'private', 'ci'].includes(stage ?? '')) throw new Error('BA_STAGE_REQUIRED')
@@ -286,7 +287,75 @@ boundedTest('BA-CORE-F02', async () => {
   })
 })
 
+async function verifyCompletedHistoryPrepare() {
+  await fixture(async f=>{
+    await seedNormalTransport(f.admin)
+    const message=randomUUID()
+    await f.admin.query("INSERT INTO agent_messages(id,channel_id,author_id,content,message_type) VALUES($1,'fixture-channel','codex-cto','Explicitly close this fixture without reply','request')",[message])
+    const q=(await f.admin.query("INSERT INTO message_queue(agent_id,message_id,payload,status,created_at,claimed_by,claimed_at,claim_expires_at) VALUES('qa',$1,'{}','received',clock_timestamp()-interval '3 seconds','qa',clock_timestamp()-interval '2 seconds',clock_timestamp()+interval '1 minute') RETURNING id",[message])).rows[0]
+    const closed=await lifecycleTransition('record-no-reply',{agentId:'qa',queueId:String(q.id),reason:'explicit fixture lifecycle closure',env:f.env,cwd:candidateRoot})
+    expect(closed.ok,closed.stderr).toBe(true)
+    const saved=(await f.admin.query('SELECT to_jsonb(q) row FROM message_queue q WHERE id=$1',[q.id])).rows[0].row
+    expect(saved.status).toBe('done');expect(saved.claimed_by).toBe('qa')
+    const payload=JSON.parse(saved.payload)
+    expect(payload.terminal_baton.source).toBe('record_no_reply_command')
+    // Explicitly reproduce supported JS-time-after-BEGIN/SQL-now() ordering.
+    await f.admin.query("UPDATE message_queue SET done_at=($2::jsonb->'terminal_baton'->>'set_at')::timestamptz-interval '25 milliseconds' WHERE id=$1",[q.id,JSON.stringify(payload)])
+    const original=(await f.admin.query('SELECT to_jsonb(q) row FROM message_queue q WHERE id=$1',[q.id])).rows[0].row
+    const rowBytes=()=>f.admin.query('SELECT to_jsonb(q) row FROM message_queue q ORDER BY id')
+    let negativeCases=0
+    const reject=async(label:string)=>{
+      negativeCases++
+      const before=(await rowBytes()).rows
+      await expect(f.prepare(),label).rejects.toThrow('ADMISSION_AFFECTED_WORK_PRESENT')
+      expect((await rowBytes()).rows,label+' preserves history').toEqual(before)
+      expect((await f.admin.query('SELECT count(*)::int n FROM queue_admission_policies')).rows[0].n).toBe(0)
+    }
+    const variants:Array<[string,any]>=[
+      ['missing baton',{}],['marker alone',{terminal_baton:{no_reply_required:true}}],
+      ['legacy daemon prose closure',{terminal_baton:{...payload.terminal_baton,set_by:'state_daemon',source:'deterministic_no_reply_policy'}}],
+      ['foreign closer',{terminal_baton:{...payload.terminal_baton,set_by:'foreign'}}],
+      ['wrong source',{terminal_baton:{...payload.terminal_baton,source:'deterministic_no_reply_policy'}}],
+      ['malformed timestamp',{terminal_baton:{...payload.terminal_baton,set_at:'invalid'}}],
+      ['future baton',{terminal_baton:{...payload.terminal_baton,set_at:'2099-01-01T00:00:00Z'}}],
+      ['pending finalizer',{...payload,runner_result:{schema_version:'queue_work_result_v1',ok:true,next_action:'reply'}}],
+      ['retry error',{...payload,runner_error:{retryable:true}}],
+      ['undischarged execution',{...payload,queue_work_execution:{runtime_id:'old'}}],
+      ['finalizer error',{...payload,finalizer_error:{code:'SEND_FAILED'}}],
+    ]
+    for(const [label,value]of variants){await f.admin.query('UPDATE message_queue SET payload=$2 WHERE id=$1',[q.id,JSON.stringify(value)]);await reject(label)}
+    await f.admin.query("UPDATE message_queue SET payload='{' WHERE id=$1",[q.id]);await reject('malformed JSON')
+    await f.admin.query('UPDATE message_queue SET payload=$2 WHERE id=$1',[q.id,original.payload])
+    for(const status of ['received','in_progress']){await f.admin.query('UPDATE message_queue SET status=$2 WHERE id=$1',[q.id,status]);await reject('active '+status)}
+    await f.admin.query("UPDATE message_queue SET status='done',claim_expires_at=NULL WHERE id=$1",[q.id]);await reject('partial claim tuple')
+    await f.admin.query('UPDATE message_queue SET claim_expires_at=$2 WHERE id=$1',[q.id,original.claim_expires_at])
+    const outbound=(await f.admin.query("INSERT INTO outbound_queue(message_id,status,agent_id,channel_external_id,content) VALUES($1,'pending','codex-cto','999999999999999999','fixture pending projection') RETURNING id",[message])).rows[0]
+    await reject('active original projection');await f.admin.query('DELETE FROM outbound_queue WHERE id=$1',[outbound.id])
+    const run=randomUUID(),probeMessage=randomUUID(),sent=new Date(Date.now()-2000).toISOString(),claimed=new Date(Date.now()-1000).toISOString(),done=new Date(Date.now()-500).toISOString()
+    const content=`[AUN-N1-SLO-PROBE/v1]:${run}:qa`,schema='aun-n1-slo-probe/v1'
+    const probePayload={schema_version:schema,message_type:'probe',run_id:run,from:'qa',to:'qa',content,no_op:true}
+    const n1={schema_version:schema,run_id:run,agent_id:'qa',runtime_instance_id:randomUUID(),lease_id:randomUUID(),observation_window_ms:5000,outcome:'success',failure_type:null,failure_stage:null,sent_at:sent,claimed_at:claimed,closed_at:done,rtt_ms:1500,provider_effect_count:0,discord_visible_send_count:0}
+    await f.admin.query("INSERT INTO channels(id,name,members) VALUES('pdca-daily','fixture N1',ARRAY['qa'])")
+    await f.admin.query("INSERT INTO agent_messages(id,channel_id,author_id,author_bot,content,message_type,metadata,source,direction,role,created_at) VALUES($1,'pdca-daily','qa',true,$2,'probe',$3,'agent-comms','internal','system',$4)",[probeMessage,content,JSON.stringify({n1_slo:n1}),sent])
+    const probe=(await f.admin.query("INSERT INTO message_queue(agent_id,message_id,payload,status,created_at,done_at) VALUES('qa',$1,$2,'done',$3,$4) RETURNING id",[probeMessage,JSON.stringify(probePayload),sent,done])).rows[0]
+    for(const [label,delta]of [['run mismatch',{run_id:randomUUID()}],['nonzero effect',{provider_effect_count:1}],['probe retry',{outcome:'retry_exhausted'}],['missing close',{closed_at:null}],['probe error',{failure_type:'RETRY_EXHAUSTED'}]] as const){
+      await f.admin.query('UPDATE agent_messages SET metadata=$2 WHERE id=$1',[probeMessage,JSON.stringify({n1_slo:{...n1,...delta}})]);await reject(label)
+    }
+    await f.admin.query('UPDATE agent_messages SET metadata=$2 WHERE id=$1',[probeMessage,JSON.stringify({n1_slo:n1})])
+    await f.admin.query('UPDATE message_queue SET payload=$2 WHERE id=$1',[probe.id,JSON.stringify({...probePayload,to:'foreign'})]);await reject('foreign probe recipient')
+    await f.admin.query('UPDATE message_queue SET payload=$2 WHERE id=$1',[probe.id,JSON.stringify(probePayload)])
+    const cleared=(await f.admin.query("INSERT INTO message_queue(agent_id,message_id,payload,status,created_at,done_at) VALUES('qa',$1,$2,'done',$3,$4) RETURNING id",[randomUUID(),original.payload,original.created_at,original.done_at])).rows[0]
+    await f.admin.query("INSERT INTO message_queue(agent_id,payload,status,claimed_by,claimed_at) VALUES('non-qa','{}','in_progress','non-qa',clock_timestamp())")
+    const before=(await rowBytes()).rows
+    expect((await f.prepare()).status).toBe('PREPARED')
+    expect((await rowBytes()).rows).toEqual(before)
+    expect([q.id,probe.id,cleared.id]).toHaveLength(3)
+    console.log(JSON.stringify({subcase:'I2-PREPARE-COMPLETED-HISTORY',explicit_lifecycle_retained_claim:1,explicit_lifecycle_clear_claim:1,joined_N1_success:1,negative_cases:negativeCases,history_unchanged:true,legacy_daemon_baton_denied:true}))
+  })
+}
+
 boundedTest('BA-CORE-F01',async()=>{
+  await verifyCompletedHistoryPrepare()
   await fixture(async f=>{
     const wrongUrl=new URL(f.roleUrls.executor);wrongUrl.password=randomBytes(24).toString('hex')
     const negative=fixtureClients('wrong-password'),wrongPasswordClient=negative.client(wrongUrl.href)

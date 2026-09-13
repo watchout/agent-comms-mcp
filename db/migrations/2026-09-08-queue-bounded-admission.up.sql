@@ -277,6 +277,60 @@ EXCEPTION WHEN lock_not_available THEN RAISE EXCEPTION 'ADMISSION_PREPARE_BUSY' 
 END $$;
 
 -- Called as a SEPARATE statement after the caller acquired all three locks.
+-- Original gen5 first-deny excludes only proven completed history. A done flag
+-- or caller-controlled no_op alone is insufficient. This helper is read-only,
+-- runs under the same three-table lock and has the same private owner/ACL fence.
+CREATE OR REPLACE FUNCTION public.aun_admission_completed_history(q public.message_queue) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE p jsonb; b jsonb; m public.agent_messages; n jsonb; stamp timestamptz;
+BEGIN
+  IF q.status IS DISTINCT FROM 'done' OR q.created_at IS NULL OR q.done_at IS NULL
+    OR NOT isfinite(q.created_at) OR NOT isfinite(q.done_at) OR q.done_at>clock_timestamp()
+    OR q.done_at<q.created_at OR q.failed_reason IS NOT NULL
+    OR q.replied_with IS NOT NULL OR q.replied_at IS NOT NULL THEN RETURN false; END IF;
+  p:=q.payload::jsonb;
+  IF jsonb_typeof(p) IS DISTINCT FROM 'object'
+    OR p ?| ARRAY['runner_result','runner_error','finalizer_error','queue_work_execution','writeback_result','shirube_d1','shirube_d1_invocation']
+    OR EXISTS(SELECT FROM public.agent_messages r WHERE r.reply_to::text=q.message_id)
+    OR EXISTS(SELECT FROM public.outbound_queue o WHERE o.message_id=q.message_id AND o.status NOT IN ('sent','skipped')) THEN RETURN false; END IF;
+  IF p->>'schema_version'='aun-n1-slo-probe/v1' THEN
+    SELECT * INTO m FROM public.agent_messages WHERE id::text=q.message_id;
+    n:=m.metadata->'n1_slo';
+    IF NOT FOUND OR q.claimed_by IS NOT NULL OR q.claimed_at IS NOT NULL OR q.claim_expires_at IS NOT NULL
+      OR jsonb_typeof(n) IS DISTINCT FROM 'object' OR jsonb_typeof(p->'run_id') IS DISTINCT FROM 'string' OR NULLIF(p->>'run_id','') IS NULL
+      OR p->>'message_type' IS DISTINCT FROM 'probe' OR p->'no_op' IS DISTINCT FROM 'true'::jsonb
+      OR p->>'from' IS DISTINCT FROM q.agent_id OR p->>'to' IS DISTINCT FROM q.agent_id
+      OR p->>'content' IS DISTINCT FROM '[AUN-N1-SLO-PROBE/v1]:'||(p->>'run_id')||':'||q.agent_id
+      OR m.message_type IS DISTINCT FROM 'probe' OR m.author_id IS DISTINCT FROM q.agent_id OR m.channel_id IS DISTINCT FROM 'pdca-daily'
+      OR m.content IS DISTINCT FROM p->>'content' OR m.direction IS DISTINCT FROM 'internal'
+      OR n->>'schema_version' IS DISTINCT FROM p->>'schema_version' OR n->>'run_id' IS DISTINCT FROM p->>'run_id'
+      OR n->>'agent_id' IS DISTINCT FROM q.agent_id OR n->>'outcome' IS DISTINCT FROM 'success'
+      OR n->'provider_effect_count' IS DISTINCT FROM '0'::jsonb OR n->'discord_visible_send_count' IS DISTINCT FROM '0'::jsonb
+      OR n->'failure_type' IS DISTINCT FROM 'null'::jsonb OR n->'failure_stage' IS DISTINCT FROM 'null'::jsonb
+      OR jsonb_typeof(n->'sent_at') IS DISTINCT FROM 'string' OR jsonb_typeof(n->'claimed_at') IS DISTINCT FROM 'string'
+      OR jsonb_typeof(n->'closed_at') IS DISTINCT FROM 'string'
+      OR abs(extract(epoch FROM ((n->>'closed_at')::timestamptz-q.done_at)))>=0.001
+      OR abs(extract(epoch FROM ((n->>'sent_at')::timestamptz-m.created_at)))>=0.001
+      OR (n->>'claimed_at')::timestamptz<(n->>'sent_at')::timestamptz
+      OR (n->>'claimed_at')::timestamptz>(n->>'closed_at')::timestamptz
+      OR EXISTS(SELECT FROM public.outbound_queue o WHERE o.message_id=q.message_id) THEN RETURN false; END IF;
+    RETURN true;
+  END IF;
+  b:=p->'terminal_baton';
+  IF jsonb_typeof(b) IS DISTINCT FROM 'object' OR b->'no_reply_required' IS DISTINCT FROM 'true'::jsonb
+    OR b->>'set_by' IS DISTINCT FROM q.agent_id OR jsonb_typeof(b->'reason') IS DISTINCT FROM 'string' OR NULLIF(b->>'reason','') IS NULL
+    OR b->>'source' IS DISTINCT FROM 'record_no_reply_command'
+    OR jsonb_typeof(b->'set_at') IS DISTINCT FROM 'string' THEN RETURN false; END IF;
+  stamp:=(b->>'set_at')::timestamptz;
+  -- Lifecycle stamps JS time after BEGIN while done_at=now() is transaction start.
+  IF stamp<q.created_at OR stamp>clock_timestamp() OR NOT isfinite(stamp)
+    OR ((q.claimed_by IS NULL AND q.claimed_at IS NULL AND q.claim_expires_at IS NULL)
+      OR (q.claimed_by=q.agent_id AND q.claimed_at IS NOT NULL AND q.claim_expires_at IS NOT NULL
+        AND q.claimed_at<=q.done_at AND q.claimed_at<=stamp AND q.claim_expires_at>=q.claimed_at)) IS DISTINCT FROM true THEN RETURN false; END IF;
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN RETURN false; -- malformed/unknown historical bytes remain blocked
+END $$;
+
 CREATE OR REPLACE FUNCTION public.aun_admission_prepare(config jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE pid text:=config->>'policy_id'; agent text:=config->>'agent_id'; tbl text; stem text; expiry timestamptz; role_name text;
@@ -316,8 +370,10 @@ BEGIN
       AND l.relation IN ('public.agent_messages'::regclass,'public.message_queue'::regclass,'public.outbound_queue'::regclass))<>3 THEN
     RAISE EXCEPTION 'ADMISSION_PREPARE_LOCKS_REQUIRED';
   END IF;
-  IF EXISTS(SELECT FROM public.message_queue WHERE agent_id=agent AND
-       (status IN ('received','in_progress','done','read') OR claimed_by IS NOT NULL OR claimed_at IS NOT NULL OR claim_expires_at IS NOT NULL))
+  IF EXISTS(SELECT FROM public.message_queue q WHERE q.agent_id=agent AND
+       (q.status IN ('received','in_progress','read')
+        OR ((q.status='done' OR q.claimed_by IS NOT NULL OR q.claimed_at IS NOT NULL OR q.claim_expires_at IS NOT NULL)
+          AND NOT public.aun_admission_completed_history(q))))
     OR EXISTS(SELECT FROM public.outbound_queue o WHERE o.status='claimed' AND public.aun_admission_correlation(o.message_id,agent) IS NOT NULL) THEN
     RAISE EXCEPTION 'ADMISSION_AFFECTED_WORK_PRESENT';
   END IF;

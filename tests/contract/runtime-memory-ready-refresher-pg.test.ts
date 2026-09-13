@@ -81,6 +81,9 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     }
 
     const evidenceRows=()=>pg.query(`SELECT * FROM runtime_memory_ready_evidence WHERE agent_id LIKE $1 ORDER BY agent_id`,[`${prefix}-%`])
+    // Force the same legacy-path mismatch on Linux and macOS; actual native
+    // receipt, held endpoint and current runtime still have to pass the gate.
+    await pg.query("UPDATE agents SET home_directory='/legacy/physical-path' WHERE agent_id LIKE $1",[`${prefix}-%`])
     const before=(await evidenceRows()).rows
     const refresh=()=>runRuntimeMemoryReadyFleetRefresh({
       async query<T = any>(sql: string, params?: any[]) {
@@ -102,7 +105,8 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     expect((await evidenceRows()).rows).toEqual(before)
     const fixtureSeats = report.seats.filter(row => row.agent_id.startsWith(prefix))
     expect(fixtureSeats).toHaveLength(2)
-    expect(fixtureSeats.every(row => row.status === 'ready')).toBe(true)
+    expect(fixtureSeats.every(row => row.status === 'ready'),JSON.stringify(fixtureSeats)).toBe(true)
+    expect(fixtureSeats.every(row => row.details.registration_profile_mismatch)).toBe(true)
     const evidence = await pg.query(
       `SELECT agent_id, result_status
          FROM runtime_memory_ready_evidence

@@ -47,6 +47,13 @@ describe('SC1 stable seat provider selection', () => {
         const run=async (_c:string,args:string[])=>({exitCode:0,stdout:args.includes('lstart=')?started:`/bin/codex ${nativeEnv}`})
         expect(await readObservedProviderRoot(run,input)).toBeNull()
       }
+      // ps returns a zone-less value even when the JavaScript host has a
+      // different timezone. Readback binds UTC explicitly and retains PID reuse denial.
+      expect((await readObservedProviderRoot(async(_c,args,options)=>{
+        expect(options.env.TZ).toBe('UTC')
+        expect(options.env.LC_ALL).toBe('C')
+        return {exitCode:0,stdout:args.includes('lstart=')?'Sun Sep 13 00:00:00 2026':`/bin/codex HOME=${dir}`}
+      },{...input,env:{...input.env,TZ:'Asia/Tokyo'}}))?.root).toBe(realpathSync(nativeRoot))
       let reads=0
       expect(await readObservedProviderRoot(async(_c,args)=>({exitCode:0,stdout:args.includes('lstart=')
         ? (++reads===1?started:'2026-09-13T00:00:01.000Z'):`/bin/codex HOME=${dir}`}),input)).toBeNull()

@@ -72,7 +72,7 @@ function privateSubject(){
   expect(git('rev-parse','HEAD')).toBe(expected.candidate_head)
   expect(git('rev-parse','HEAD^{tree}')).toBe(expected.candidate_tree)
   expect(expected.candidate_head).not.toBe(EXACT_BASE)
-  expect(hashBytes(execFileSync('git',['diff','--binary',`${EXACT_BASE}...HEAD`],{cwd:candidateRoot}))).toBe(expected.binary_diff_sha256)
+  expect(hashBytes(execFileSync('git',['diff','--binary',`${EXACT_BASE}...HEAD`],{cwd:candidateRoot,maxBuffer:16*1024*1024}))).toBe(expected.binary_diff_sha256)
   const paths=['admission','admission_postgres','retry','use_trace'].map(n=>`tests/contract/test_queue_bounded_${n}.test.ts`)
   expect(Object.keys(expected.test_files_sha256).sort()).toEqual(paths.sort())
   for(const file of paths)expect(hashBytes(regularBytes(join(candidateRoot,file)))).toBe(expected.test_files_sha256[file])

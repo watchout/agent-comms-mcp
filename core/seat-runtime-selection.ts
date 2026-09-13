@@ -50,6 +50,12 @@ export function providerExecutable(command: string): SeatProvider | null {
   const name = (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').replaceAll('\\', '/').split('/').pop()
   return name === 'codex' || name === 'codex.exe' ? 'codex' : name === 'claude' || name === 'claude.exe' ? 'claude' : null
 }
+// ps lstart has no zone. Read and parse it in the same explicit UTC zone;
+// the JS host/test timezone may differ from the operating-system default.
+function processStartIso(value: string): string {
+  const text = value.trim()
+  return new Date(/^\d{4}-\d\d-\d\dT/.test(text) ? text : `${text} UTC`).toISOString()
+}
 export function observeSeatProvider(input: {
   agentId: string; runtimeInstanceId: string; processId: number; sessionName: string; workspace: string
   hostId?: string; now?: Date; processes?: ProcessSnapshot[]; providerStartedAt?: string
@@ -87,7 +93,7 @@ export function observeSeatProvider(input: {
       let providerEnvironment = identityCommand
       if (!input.processes) {
         try {
-          startedAt = new Date(execFileSync('ps',['-p',String(current.pid),'-o','lstart='],{encoding:'utf8',timeout:3000}).trim()).toISOString()
+          startedAt = processStartIso(execFileSync('ps',['-p',String(current.pid),'-o','lstart='],{encoding:'utf8',timeout:3000,env:{...process.env,TZ:'UTC',LC_ALL:'C'}}))
           providerEnvironment = execFileSync('ps',['eww','-p',String(current.pid),'-o','command='],{encoding:'utf8',timeout:3000})
         } catch { return null }
       }
@@ -108,10 +114,10 @@ export function observeSeatProvider(input: {
 }
 export async function readObservedProviderRoot(run: (command:string,args:string[],options:any)=>Promise<{exitCode:number;stdout:string}>,
   input:{pid:number;startedAt:string;cwd:string;env:Record<string,string>;provider?:SeatProvider}) {
-  const options={cwd:input.cwd,env:input.env,timeoutMs:3000}
+  const options={cwd:input.cwd,env:{...input.env,TZ:'UTC',LC_ALL:'C'},timeoutMs:3000}
   const start = async () => {
     const r=await run('ps',['-p',String(input.pid),'-o','lstart='],options)
-    return r.exitCode === 0 ? new Date(r.stdout.trim()).toISOString() : null
+    return r.exitCode === 0 ? processStartIso(r.stdout) : null
   }
   try {
     if (await start() !== input.startedAt) return null
@@ -200,7 +206,7 @@ export function observeSeatMemoryBinding(input:{agentId:string;project:string;pr
     const snapshots=input.processes ?? parseProcessList(execFileSync('ps',['-axo','pid=,ppid=,command='],{encoding:'utf8',timeout:3000}))
     const byPid=new Map(snapshots.map(row=>[row.pid,row]))
     if(!input.processes) {
-      const start=new Date(execFileSync('ps',['-p',String(input.providerPid),'-o','lstart='],{encoding:'utf8',timeout:3000}).trim()).toISOString()
+      const start=processStartIso(execFileSync('ps',['-p',String(input.providerPid),'-o','lstart='],{encoding:'utf8',timeout:3000,env:{...process.env,TZ:'UTC',LC_ALL:'C'}}))
       if(start!==input.providerStartedAt) return false
     }
     const script=input.transportArgs.find(arg=>arg.includes('/') && /\.[cm]?[jt]s$/.test(arg))

@@ -30,34 +30,34 @@ Full control requires the Control State Completeness gate to pass. A repo with p
 
 PR963's product cell `CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001`
 retains R4 and the frozen bounded-admission design. The current local integration
-source admission binds [I1](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656810349),
-raw SHA256 `4e247d515e785bf4ff57fc500e9dbf9fad5a8befa78c3b9d9dea56a7302824e9`,
+source admission binds [I2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748),
+raw SHA256 `9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676`,
 and [normalization OD](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544),
 raw SHA256 `59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02`.
 The exact published JSON fixes 122 paths, C2 `8d38f3bd6a99a2f4615949dd747d708f8b6943d6`
 and seat-continuity `81be7f051f85973bb9533e87d3258825082ad158` ancestry, companion
 Was `e49abc24838227776dc01be111aeb035ec7c9aad`, and expiry `2026-09-14T03:00:00Z`.
 The only admitted workflow path is `.github/workflows/pr-checks.yml`.
-I1 permits local source and isolated tests only: zero push, body-edit, manual CI,
+I2 permits local source and isolated tests only: zero push, body-edit, manual CI,
 Ready, merge or live effects. Source admission does not grant execution authority.
 Historical C2 budgets and receipts retain their original subjects and are not renewed.
 
 The PR body uniquely binds CELL-ID, Risk Tier, Workflow Supply,
 control_handoff_comment_ref and raw control_handoff_body_sha256. The gate checks
-the actual OWNER/watchout issue940 publication, exact raw bytes, canonical I1
+the actual OWNER/watchout issue940 publication, exact raw bytes, canonical I2
 object, both donor ancestries, and actual candidate path/tree/binary diff.
 An authenticated current-head consumer receipt from `codex-cto/goal_gap`, separate
 from maker `codex-cto/runtime_status`, remains mandatory. It binds actual restore
-and runtime-adapter evidence plus the current I1 and normalization OD digests.
+and runtime-adapter evidence plus the current I2 and normalization OD digests.
 Stale, missing, duplicate, malformed, foreign or conflicting current-head records
-block; removing I1 by its exact comment ID is an explicit negative fixture.
+block; removing I2 by its exact comment ID is an explicit negative fixture.
 
 Offline `--comments` and `--control-comments` API-shaped fixtures prove parser and
 admission behavior only. They cannot replace the independently published receipt
 or authorize remote CI. A later exact remote-effect handoff is still required.
 Original source-form tests retain markerless OD5602974560 and marked OD syntax;
-the historical predecessor I cannot substitute for I1. The local15/private2/public
-CI19 stage partition, all 21 distinct required IDs, clean-candidate private byte
+the historical predecessor I cannot substitute for I2. The local15/private2/public
+CI29 stage partition, all 21 distinct required IDs, clean-candidate private byte
 checks, draft handling, non-draft owner decision and merge-method checks remain.
 Green CI and source admission do not establish applied real use.
 

@@ -13,8 +13,8 @@ current-host native context delivery governs memory-ready. Physical provider/hom
 The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
 and seat continuity. Provider and endpoint observations do not replace the immutable
 recipient/policy digest, claim owner/token/expiry, invocation fence or memory-ready gate.
-Source integration is bound by [I1](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656810349)
-(raw SHA256 `4e247d515e785bf4ff57fc500e9dbf9fad5a8befa78c3b9d9dea56a7302824e9`).
+Source integration is bound by [I2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748)
+(raw SHA256 `9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676`).
 Shared schema/desired-format application, distinct safe database principals,
 loaded shared daemon/reconciler and same-configuration ordinary QA use require
 separate applied evidence; a native-context fixture or one seat startup cannot close them.

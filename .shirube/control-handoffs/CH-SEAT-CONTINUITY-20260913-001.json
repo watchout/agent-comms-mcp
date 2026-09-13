@@ -468,8 +468,8 @@
   },
   "current_integration_context": {
     "control_handoff_ref": {
-      "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656810349",
-      "sha256": "4e247d515e785bf4ff57fc500e9dbf9fad5a8befa78c3b9d9dea56a7302824e9"
+      "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748",
+      "sha256": "9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676"
     },
     "maker_agent": "codex-cto/runtime_status",
     "checker_agent": "codex-cto/goal_gap",
@@ -479,6 +479,11 @@
     ],
     "scope": "Local 122-path integration only; the preceding fields preserve historical donor provenance and measurements.",
     "current_candidate_evidence": "Pending exact local HEAD and independent audit; no donor result is relabeled.",
-    "live_effects": 0
+    "live_effects": 0,
+    "history_classification_correction_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5657070473",
+      "sha256": "0cc4b37bd46297d8febb7d4eb6bf7967c30dc54f9566d1bf6d78e21a8736b5eb"
+    },
+    "unresolved_application_history": "Only 2 explicit lifecycle +2N1 supported candidates;18 legacy daemon batons and9 other unknowns remain blocked absent accounting. No live row has been changed."
   }
 }

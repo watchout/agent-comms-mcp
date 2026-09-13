@@ -183,6 +183,16 @@ jobs:
             --event "$GITHUB_EVENT_PATH" \
             --changed-files changed-files.txt
 
+      - name: Prepare pinned native Wasurezu fixture
+        run: |
+          set -euo pipefail
+          native_fixture_receipt_dir=$(mktemp -d "$RUNNER_TEMP/aun-native-receipt.XXXXXX")
+          AUN_TEST_WASUREZU_OUTPUT="$native_fixture_receipt_dir/source-root.txt" \
+            bash scripts/prepare-seat-continuity-test-wasurezu.sh
+          native_fixture_root=$(cat "$native_fixture_receipt_dir/source-root.txt")
+          test -f "$native_fixture_root/dist/native-context-delivery.js"
+          printf 'AUN_TEST_WASUREZU_ROOT=%s\n' "$native_fixture_root" >> "$GITHUB_ENV"
+
       - name: Run full test suite
         run: bun test --timeout 30000 --reporter=junit --reporter-outfile=bounded-full.xml
 

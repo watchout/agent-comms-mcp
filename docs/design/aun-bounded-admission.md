@@ -48,8 +48,16 @@ locks. No network/provider call or two-phase transaction is permitted inside thi
 
 1. Verify exact published authority/configuration and fresh external no-worker evidence.
 2. LOCK TABLE agent_messages, message_queue, outbound_queue IN SHARE ROW EXCLUSIVE MODE NOWAIT.
-3. A separate fresh READ COMMITTED statement refuses affected received/in_progress/done or
-   claimed projections; do not update/clear another worker's rows. Lock contention refuses.
+3. A separate fresh READ COMMITTED statement refuses received/in_progress/read, incomplete
+   done/finalizer work, unaccounted claim obligations and claimed projections. Proven completed
+   history may remain: an exact same-recipient explicit record-no-reply terminal baton with a valid completion
+   time and no runner/finalizer/reply/projection obligation, or a joined N1 successful internal
+   no-op probe with exact message/run/recipient, completion times, cleared claims and zero effects.
+   A done/no-op flag alone, malformed/foreign baton, retry/error/result awaiting finalization,
+   mismatched probe, active projection or unknown obligation refuses. Legacy daemon/prose-derived batons do not discharge obligations (#950). Retained same-owner claim
+   timestamps from normal no-reply closure are history; PREPARE never clears or rewrites them.
+   Lock contention refuses. This follows the original frozen gen5 incomplete-work criterion;
+   the former summary/SQL incorrectly treated every historical done row as incomplete.
 4. Install fixed-template recipient/policy-pinned triggers and PREPARED in the same transaction.
 5. COMMIT is first-deny. Pinned trigger arguments do not depend on snapshot-visible policy
    existence: missing/invisible/expired/HALTED/CLOSED policy denies, never legacy fallback.
@@ -248,3 +256,11 @@ Independent raw-file/API readback joins clean candidate/base/tree/diff/test byte
 verified equal-tree merge checkout; procedural counters alone do not prove execution.
 Frozen USE01–09 still require real applied version, tools, normal two-task use, nonmaker
 acceptance, returned result, safe rollback mapping and same-configuration continuation.
+
+Current source-only integration uses [I2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748)
+(raw SHA256 `9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676`).
+The [history classification correction](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5657070473)
+(raw SHA256 `0cc4b37bd46297d8febb7d4eb6bf7967c30dc54f9566d1bf6d78e21a8736b5eb`)
+keeps 18 legacy daemon batons plus 9 other unknown QA obligations blocked; the 2 explicit
+lifecycle closures and 2 successful N1 records are supported candidates only. No live
+history is modified, and this source change does not authorize application.
