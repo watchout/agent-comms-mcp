@@ -24,13 +24,21 @@
         "runtime code",
         "api",
         "database",
-        "provider invocation",
-        "queue and scheduler source",
-        "test-only workflow fixture supply"
+        "auth",
+        "permissions",
+        "workflows"
       ],
       "touched": true
     },
-    "CELL-ID": "CELL-SEAT-CONTINUITY-20260913-001"
+    "CELL-ID": "CELL-SEAT-CONTINUITY-20260913-001",
+    "protected_surface_details": {
+      "runtime code": "All existing runtime, provider invocation, queue and scheduler source changes retain the same R4 source-only boundary. No live AUN activation is authorized.",
+      "api": "Provider invocation adapters and native/current MCP API proofs remain protected; no provider API calls are authorized.",
+      "database": "Existing schema/storage/runtime proof source scope is unchanged; no live database migration or mutation is authorized.",
+      "auth": "Observed provider account/root identity remains protected; no credential/account changes are authorized.",
+      "permissions": "Observed provider explicit sandbox/invocation policy and same-owner queue/lease boundaries remain protected; no permission elevation is authorized.",
+      "workflows": "Only existing test fixture supply scope remains; the final PR changes no workflow or evaluator. No active workflow/gate/threshold/required-check changes are authorized."
+    }
   },
   "execution_context": {
     "to": {
@@ -441,9 +449,9 @@
     }
   ],
   "supersedes_input_mirror_ref": {
-    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651565048",
-    "sha256": "773d4023c52e51470def0da38afd6375ae02b1be5464ee1cf3e5f8e266bbf9e5",
-    "prepared_json_sha256": "5b413e8536abead0f25a0fa946b410827ba50ab7412bafa059b6e07e12e65e6a"
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652055546",
+    "sha256": "9831bf17b09accdb0e5b426272ce4ddde153885f629b8ea16e25052aaba37895",
+    "prepared_json_sha256": "c42f23b9ca3542b5b544a6ffc511348da32966367dc5ae652085d90dfe6fecb9"
   },
   "source_test_pin": {
     "head_sha": "737d41af82b17eab9b143903c3be7ff5859647b8",

@@ -218,10 +218,10 @@
     "The Vice-only application excludes shared desired migration and shared daemon rollout."
   ],
   "control_handoff_ref": {
-    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651565048",
-    "sha256": "773d4023c52e51470def0da38afd6375ae02b1be5464ee1cf3e5f8e266bbf9e5"
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652166090",
+    "sha256": "f3b78b8d6fd8e851182c5430ef1149432e31a5dc4b254ea43978ee187626403c"
   },
-  "mirrored_handoff_sha256": "5b413e8536abead0f25a0fa946b410827ba50ab7412bafa059b6e07e12e65e6a",
+  "mirrored_handoff_sha256": "ece9eb2d42b838edebb85f29eb77368254d801c443c9e8f0d1b625fbd0a08225",
   "fixture_placement_correction": {
     "source_head": "1cb3071af99d723bf84e62e2a146a48f0304abba",
     "source_tree": "178b8cbb36ecca3ee1888d74f52f8767cc9c37a8",
@@ -644,5 +644,23 @@
     "mandatory_current_full_ci": "PENDING",
     "independent_current_acceptance": "PENDING",
     "live_effects": 0
+  },
+  "taxonomy_metadata_correction": {
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652166090",
+      "sha256": "f3b78b8d6fd8e851182c5430ef1149432e31a5dc4b254ea43978ee187626403c"
+    },
+    "unchanged_nonmetadata_subject_head": "daccf9b1cdcb8826ff7eb873872d98ae8e67fb2e",
+    "unchanged_nonmetadata_subject_tree": "94d2301951d4241dfaaea2e785ead3a73a1396eb",
+    "excluded_metadata_paths": [
+      ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json",
+      ".shirube/execution-contexts/seat-continuity-20260913.json",
+      ".shirube/evidence/seat-continuity-machine-evidence.json"
+    ],
+    "git_ls_tree_rz_excluding_metadata_sha256": "416387bbb9dd6e9667a9834313b6488243770dba8585e300ea406c4796ac3814",
+    "nonmetadata_entry_count": 1091,
+    "change": "Use existing protected-surface taxonomy and retain detailed protected meanings; no source/test/doc/lock/runtime changes.",
+    "historical_test_subjects_unchanged": true,
+    "current_workflow_result": "Pending current metadata push; original dacc executed evidence remains bound to dacc."
   }
 }
