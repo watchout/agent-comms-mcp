@@ -18,12 +18,13 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
 import { canonicalJson } from '../core/registry-identity-reconciliation'
+import { SqliteAdapter } from '../core/db/sqlite-adapter'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const CLI = join(REPO_ROOT, 'cli', 'index.ts')
@@ -70,6 +71,33 @@ beforeEach(() => {
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
 })
+
+for (const method of ['query', 'execute'] as const) {
+  test(`SQLite ${method} releases statements before close on success, failure and rollback`, async () => {
+    const path = join(tmpDir, 'statement-lifetime.db')
+    const adapter = new SqliteAdapter(path)
+    await adapter.execute('CREATE TABLE statement_fixture (value TEXT UNIQUE NOT NULL)')
+    await adapter[method]('INSERT INTO statement_fixture VALUES ($1)', ['retained'])
+    await expect(adapter[method]('INSERT INTO statement_fixture VALUES ($1)', ['retained']))
+      .rejects.toThrow()
+    await expect(adapter.transaction(async tx => {
+      await tx[method]('INSERT INTO statement_fixture VALUES ($1)', ['rolled-back'])
+      throw new Error('bounded rollback')
+    })).rejects.toThrow('bounded rollback')
+    expect(await adapter.query('SELECT value FROM statement_fixture ORDER BY value'))
+      .toEqual([{ value: 'retained' }])
+    await adapter.close()
+    const artifacts = () => ['', '-wal', '-shm'].map(suffix => ({
+      suffix, exists: existsSync(path + suffix),
+      sha256: existsSync(path + suffix) ? createHash('sha256').update(readFileSync(path + suffix)).digest('hex') : null,
+    }))
+    const afterClose = artifacts()
+    // GC must not complete deferred writes after callers have recorded a closed-DB fence.
+    Bun.gc(true)
+    await Bun.sleep(0)
+    expect(artifacts()).toEqual(afterClose)
+  })
+}
 
 /** Seed one pending message_queue row and return the UUID + queue id. */
 function seedPendingMessage(content = 'probe-content'): { messageId: string; queueId: number } {

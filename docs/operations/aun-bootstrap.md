@@ -159,6 +159,11 @@ with its realpath, device/inode, mode, byte digest, and post-state DB/WAL/SHM
 artifact digest. Restore is atomic and allowed only under those fences. A
 run-created SQLite database removes the exact DB, WAL, and SHM artifacts and
 verifies all three are absent.
+The SQLite adapter finalizes its own prepared statements on successful and
+failed queries before returning. Closing the connection therefore completes
+its writes before an artifact fence is captured; later garbage collection
+must not change that closed connection's DB/WAL/SHM bytes. This does not relax
+the checks for an externally modified or replaced database.
 
 ## Desired-event isolation
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
@@ -38,6 +39,38 @@ afterEach(async () => {
 })
 
 describe('aun bootstrap clean-host journal', () => {
+  for (const drift of ['modified', 'replaced'] as const) {
+    test(`SQLite rollback preserves an externally ${drift} database`, async () => {
+      const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-sqlite-external-fence-')))
+      roots.push(home)
+      const dbPath=join(home,'fixture.db'),repoRoot=realpathSync(join(import.meta.dir,'..','..'))
+      const db=new Database(dbPath)
+      db.exec("CREATE TABLE fixture(value TEXT); INSERT INTO fixture VALUES ('owned')")
+      db.close()
+      const snapshot=()=>['','-wal','-shm'].map(suffix=>({suffix,exists:existsSync(dbPath+suffix),
+        digest:existsSync(dbPath+suffix)?bootstrapDigest(readFileSync(dbPath+suffix)):null}))
+      const afterDigest=bootstrapDigest(snapshot()),identity={realpath:realpathSync(dbPath),device:Number(statSync(dbPath).dev),inode:Number(statSync(dbPath).ino)}
+      if(drift==='modified') {
+        const external=new Database(dbPath);external.exec("INSERT INTO fixture VALUES ('external')");external.close()
+        expect(bootstrapDigest(snapshot())).not.toBe(afterDigest)
+      } else {
+        const replacement=join(home,'replacement.db');writeFileSync(replacement,readFileSync(dbPath));renameSync(replacement,dbPath)
+        expect(Number(statSync(dbPath).ino)).not.toBe(identity.inode)
+        expect(bootstrapDigest(snapshot())).toBe(afterDigest)
+      }
+      const externalState=snapshot()
+      const env={HOME:home,AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:dbPath}
+      const ports=bootstrapInternal.createDefaultPorts({home,repoRoot,env,run:async()=>{throw new Error('unexpected command')}})
+      const context={runId:'sqlite-fence',agentId:'fixture',requestedRuntime:'codex',resolvedRuntime:'codex',
+        repoRoot,workspaceRoot:repoRoot,repoHead:'a'.repeat(40),dryRun:false,env,priorState:{mutations:[]}} as unknown as BootstrapStageContext
+      const outcome=await ports.rollbackMutation(context,{mutation_id:'db-fence',kind:'db',stage:'B2_DB_MIGRATION',rollback_status:'not_run',
+        owner_key:'db:sqlite-fence',before_digest:null,intended_after_digest:afterDigest,actual_after_digest:afterDigest,
+        rollback_action:'remove exact run-owned database',rollback_payload:{backend:'sqlite',path:dbPath,after_identity:identity,after_digest:afterDigest,created_by_run:true}})
+      expect(outcome.ok).toBe(false)
+      expect(outcome.reasonCodes).toContain('NO_GO_ROLLBACK_UNVERIFIED')
+      expect(snapshot()).toEqual(externalState)
+    })
+  }
   test('B5-TARGET-AUTHORITY-001 uses only the validated target pane process tree when the controller differs', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-'))
     roots.push(home)
@@ -1136,6 +1169,16 @@ describe('aun bootstrap clean-host journal', () => {
       console.error('CLEAN_HOST_PROFILE_COMMANDS',JSON.stringify(profileCommandTrace))
       const state=JSON.parse(readFileSync(join(env.AUN_HOME,'bootstrap','clean-default',`${first.run_id}.json`),'utf8'))
       console.error('CLEAN_HOST_ROLLBACK_MUTATIONS',JSON.stringify(state.mutations.map((m:any)=>({kind:m.kind,stage:m.stage,status:m.rollback_status,evidence:m.rollback_payload?.rollback_evidence_refs}))))
+      if(backend==='sqlite') {
+        const payload=state.mutations.find((m:any)=>m.kind==='db')?.rollback_payload
+        const files=[dbPath,`${dbPath}-wal`,`${dbPath}-shm`].map(path=>({suffix:path.slice(dbPath.length),exists:existsSync(path),digest:existsSync(path)?bootstrapDigest(readFileSync(path)):null}))
+        const actual=existsSync(dbPath)?{realpath:realpathSync(dbPath),device:Number(statSync(dbPath).dev),inode:Number(statSync(dbPath).ino)}:null
+        let holders=''
+        try {holders=execFileSync('lsof',['-F','pfn',dbPath],{encoding:'utf8',timeout:3000})}catch{}
+        console.error('CLEAN_HOST_DB_FENCE',JSON.stringify({backend:payload?.backend,path:payload?.path,
+          expected_identity:payload?.after_identity,actual_identity:actual,
+          expected_digest:payload?.after_digest,actual_digest:bootstrapDigest(files),files,holders}))
+      }
     }
     expect(rolledBack.status).toBe('ROLLED_BACK')
     expect(rolledBack.reason_codes).toEqual([])
