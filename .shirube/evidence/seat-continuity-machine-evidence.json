@@ -548,5 +548,101 @@
       "log_sha256": "b70484902b41ac736dae0c9b14d1f131bb1f7a2a0490144025b9f848127a01e7"
     },
     "live_effects": 0
+  },
+  "sqlite_statement_lifetime_correction": {
+    "source_head": "88bc38b9ab69fe967d252f73c1d6d15a28674995",
+    "source_tree": "2d3724d98ba7a6ba64ca85bffad271c9dee008de",
+    "source_files": {
+      "core/db/sqlite-adapter.ts": "f8e21e3d2527fa2338760a209029fd2901c46e3e56c3c428add974d6143a2769",
+      "docs/operations/aun-bootstrap.md": "748994586e8c6363051e92d1b26119ab1619ab923a8ac238b5c428aad1c1a075",
+      "tests/cli-sqlite-backend.test.ts": "7165e3e8d2a102bdf3fe4c0ba67a3261fbb28df99ce9ec5f523a6de43523a2c8",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts": "f33a6e9e82c8d75e33108b8255017a60e8d5342e2ddc527d97283bd51a372779"
+    },
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652025740",
+      "sha256": "a1b86bd055eefc71ce9a7b1cbbaa44ef77ee6709835660545c04444a8f569401"
+    },
+    "observed_problem": "Actual Bun1.3.11 adapter close retained its own DB descriptor; later statement GC changed DB/WAL/SHM bytes without application SQL. Current Linux5ca had only final DB rollback failures; prior Mac profile failure remains separately recorded, not assumed identical.",
+    "change": "Finalize each owned uncached query/execute statement in finally; no checkpoint, forced GC, sleeps, journal changes, strict-close change, or rollback-fence relaxation in product code.",
+    "before": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-finalize-discriminator.log",
+      "sha256": "81c8998700cb5370640bd43cb5847252f79875625001e243fd84382030cbecdb"
+    },
+    "red": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-lifetime-red.log",
+      "sha256": "b2da950379d2feba8a3a51aa1f2e73cd04e8aa5da97fde5d1bee359d28d83a6b",
+      "pass": 0,
+      "fail": 2,
+      "assertions": 8
+    },
+    "after": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-finalize-corrected.log",
+      "sha256": "2d8c2c59fb41644988f4504844c835f37d11cfb05adeb6bcbf2a075706b56fc0"
+    },
+    "green": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-lifetime-green.log",
+      "sha256": "473be6ea1802cdb83913862f4e08704b99cf639630ecff8d475dcdf5023c8c90",
+      "pass": 2,
+      "fail": 0,
+      "assertions": 8
+    },
+    "focused": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/sqlite-lifetime-correction/pg-receipt.json",
+        "sha256": "ce6860b7e21ca857771ad6d964003ba5d5a897dc05cc874de15ea34f0e45b14f"
+      },
+      "working_diff_sha256": "9e14fde0542c4c791fe775dec07c380d343c75cb192c13ddef0ffb604691bd5a",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts",
+            "tests/cli-sqlite-backend.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 48.541,
+          "log": "clean-host.log",
+          "sha256": "0d7c039b21ff9dc7a53156473195335784d60508f61a99aaa23b4369fccfc0ab",
+          "pass": 100,
+          "fail": 0,
+          "skip": 0,
+          "executed": 100,
+          "failure_lines": [],
+          "assertions": 1147,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts",
+            "tests/cli-sqlite-backend.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "pass": 100,
+      "fail": 0,
+      "skip": 0,
+      "assertions": 1147,
+      "selected_files": 4,
+      "cluster_stopped": true
+    },
+    "test_subject_note": "Focused tests executed immediately before source commit; receipt records parent and working diff, and the exact tested source bytes are pinned above. No historical-head results are relabeled.",
+    "external_modified_and_replaced_file_fences": "Actual existing rollback ports reject both and leave external bytes untouched (included in focused100).",
+    "historical_full_ci": {
+      "url": "https://github.com/watchout/agent-comms-mcp/actions/runs/34745332054",
+      "head": "5ca7c203dd8f71bd68f50ed5b09be03391b77693",
+      "pass": 3109,
+      "fail": 2,
+      "skip": 59,
+      "assertions": 15066,
+      "log_sha256": "7f5fb1bb902110f0aecf91727ba5adf0ea08791a8459d082b328e6c131aaff0d"
+    },
+    "mandatory_current_full_ci": "PENDING",
+    "independent_current_acceptance": "PENDING",
+    "live_effects": 0
   }
 }

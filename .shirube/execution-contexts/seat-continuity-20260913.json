@@ -14,8 +14,8 @@
     "sha256": "068864d3f38656952d4b07ca6669e7547f7bdb17b9f560ad2bae68b5f54227b4"
   },
   "control_handoff_ref": {
-    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651565048",
-    "sha256": "773d4023c52e51470def0da38afd6375ae02b1be5464ee1cf3e5f8e266bbf9e5"
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652055546",
+    "sha256": "9831bf17b09accdb0e5b426272ce4ddde153885f629b8ea16e25052aaba37895"
   },
   "repo_relations": [
     {
@@ -57,6 +57,10 @@
     {
       "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651614978",
       "sha256": "7b3342f0ca739b3be2320b5193e6592e51048189925e062aae12be55c0058392"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652025740",
+      "sha256": "a1b86bd055eefc71ce9a7b1cbbaa44ef77ee6709835660545c04444a8f569401"
     }
   ]
 }

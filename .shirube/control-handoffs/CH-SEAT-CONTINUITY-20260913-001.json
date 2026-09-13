@@ -62,6 +62,7 @@
     "core/bot-health.ts",
     "core/bot-lifecycle.ts",
     "core/bot-status-db.ts",
+    "core/db/sqlite-adapter.ts",
     "core/runtime-cleanup.ts",
     "core/runtime-current-resolver.ts",
     "core/runtime-endpoint.ts",
@@ -433,12 +434,16 @@
     {
       "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651424216",
       "sha256": "dd16d489a8fe6546cda4114f2e76b394d2fc8dfe4540462d524aaf8a285f309d"
+    },
+    {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652025740",
+      "sha256": "a1b86bd055eefc71ce9a7b1cbbaa44ef77ee6709835660545c04444a8f569401"
     }
   ],
   "supersedes_input_mirror_ref": {
-    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651378216",
-    "sha256": "0a5abd3d85972bbf691110b504a8be66d788c0a582c1153456ce3450a9ecb836",
-    "prepared_json_sha256": "92ca154abcd1f63e2e71ecf481a6ce0c7c8258fd2478f8bcec1608772e443f82"
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651565048",
+    "sha256": "773d4023c52e51470def0da38afd6375ae02b1be5464ee1cf3e5f8e266bbf9e5",
+    "prepared_json_sha256": "5b413e8536abead0f25a0fa946b410827ba50ab7412bafa059b6e07e12e65e6a"
   },
   "source_test_pin": {
     "head_sha": "737d41af82b17eab9b143903c3be7ff5859647b8",
