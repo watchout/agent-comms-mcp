@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { resolveSeatProvider, readObservedProviderRoot, type SeatProviderObservation } from './seat-runtime-selection'
+import { resolveSeatProvider, readObservedProviderRoot, type observeSeatProvider, type SeatProviderObservation } from './seat-runtime-selection'
 import { resolveRuntimeEndpoint } from './runtime-endpoint'
 import {
   canonicalConfigurationJson,
@@ -12,14 +12,15 @@ import { isAbsolute, relative, resolve } from 'node:path'
 export interface ObservedConfigurationRuntime {
   observation:SeatProviderObservation; providerHome:string; providerConfigRoot:string; port:number; leaseId:string; fencingToken:number
 }
-export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:any[])=>Promise<any>},agentId:string,env:Record<string,string>,cwd:string):Promise<ObservedConfigurationRuntime> {
-  const selected=await resolveSeatProvider(db,{agentId})
+export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:any[])=>Promise<any>},agentId:string,env:Record<string,string>,cwd:string,
+  dependencies:{observeProvider?:typeof observeSeatProvider;run?:Parameters<typeof readObservedProviderRoot>[0]}={}):Promise<ObservedConfigurationRuntime> {
+  const selected=await resolveSeatProvider(db,{agentId,observe:dependencies.observeProvider})
   const endpoint=await resolveRuntimeEndpoint(db,{agentId})
   const o=selected.observation
   if(!selected.ok||!o||!endpoint.endpoint||endpoint.endpoint.runtimeInstanceId!==o.runtime_instance_id) throw new Error('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
-  const root=await readObservedProviderRoot(async(command,args)=>{
+  const root=await readObservedProviderRoot(dependencies.run ?? (async(command,args)=>{
     try {return {exitCode:0,stdout:execFileSync(command,args,{encoding:'utf8',timeout:3000})}}catch{return {exitCode:1,stdout:''}}
-  },{pid:o.provider_pid,startedAt:o.provider_started_at,provider:o.provider,cwd,env})
+  }),{pid:o.provider_pid,startedAt:o.provider_started_at,provider:o.provider,cwd,env})
   if(!root?.home) throw new Error('CONFIGURATION_CURRENT_ACCOUNT_ROOT_UNAVAILABLE')
   return {observation:o,providerHome:root.home,providerConfigRoot:root.root,port:endpoint.endpoint.port,
     leaseId:endpoint.endpoint.leaseId,fencingToken:endpoint.endpoint.fencingToken}

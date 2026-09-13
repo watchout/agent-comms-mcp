@@ -1884,7 +1884,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const daemonCheckout = typeof projection.daemon_checkout === 'string'
         ? projection.daemon_checkout
         : join(defaultStateDaemonRestoreRoot(home), desired.releaseCommit)
-      const observedRuntime=await resolveConfigurationRuntime(tx,context.agentId,env,context.workspaceRoot)
+      const observedRuntime=await resolveConfigurationRuntime(tx,context.agentId,env,context.workspaceRoot,
+        {observeProvider:options.observeProvider,run})
       const providerConfigRoot=observedRuntime.providerConfigRoot
       const candidate = buildDefaultAunConfigurationCandidate({
         observedRuntime,

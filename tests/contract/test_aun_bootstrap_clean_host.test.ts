@@ -19,6 +19,7 @@ import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helper
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { observeSeatProvider } from '../../core/seat-runtime-selection'
+import { resolveConfigurationRuntime } from '../../core/aun-configuration-candidate'
 
 import { nativeHostFixture, registerNativeFixtureRuntime, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 
@@ -906,6 +907,7 @@ describe('aun bootstrap clean-host journal', () => {
       const migrated = Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env })
       expect(migrated.exitCode).toBe(0)
     }
+    const profileCommandTrace: unknown[] = []
     let aunRegistered = false
     let daemonLoaded = false
     let queueReceiveCount = 0
@@ -995,9 +997,20 @@ describe('aun bootstrap clean-host journal', () => {
         if (args[0] === 'bin/aun.ts' && args[1] === 'receive') queueReceiveCount++
         const child = Bun.spawn([command, ...args], { cwd: options.cwd, env: options.env, stdout: 'pipe', stderr: 'pipe' })
         const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+        if(args[0]==='cli/index.ts' && args[1]==='agent' && args[2]==='profile') {
+          let profile:any=null
+          try {profile=JSON.parse(stdout).profile}catch{}
+          profileCommandTrace.push({operation:args[3],disable:args.includes('false'),exitCode,
+            profile:profile ? {runtime:profile.runtime,runtime_engine_preference:profile.runtime_engine_preference,
+              home_directory:profile.home_directory,channel_port:profile.channel_port,tmux_session:profile.tmux_session,
+              profile_enabled:profile.profile_enabled,profile_revision:profile.profile_revision} : null,
+            stdout_digest:bootstrapDigest(stdout),stderr_digest:bootstrapDigest(stderr)})
+        }
         if(exitCode===0 && args[0]==='cli/index.ts' && args.includes('set')) {
           const fixtureDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
-          try {await registerNativeFixtureRuntime(fixtureDb,native,'clean-default','bootstrap-clean-project','clean-session',repoRoot,ordinaryRuntimeId)} finally {await fixtureDb.close()}
+          try {
+            await registerNativeFixtureRuntime(fixtureDb,native,'clean-default','bootstrap-clean-project','clean-session',repoRoot,ordinaryRuntimeId)
+          } finally {await fixtureDb.close()}
         }
         return { exitCode, stdout, stderr, pid: child.pid }
       }
@@ -1008,6 +1021,19 @@ describe('aun bootstrap clean-host journal', () => {
     const first = await bootstrap(input, { run, observeProvider:native.observeProvider })
     if(first.status!=='READY') console.error('CLEAN_HOST_RESULT',JSON.stringify(first))
     expect(first.status).toBe('READY')
+    // B8 must use the same actual fixture host as B5, never an outer controller's Codex ancestor.
+    const configurationDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
+    try {
+      const current=await resolveConfigurationRuntime(configurationDb,'clean-default',env,repoRoot,
+        {observeProvider:native.observeProvider,run})
+      expect(current.observation.provider_pid).toBe(native.observed.provider.pid)
+      expect(current.observation.provider_started_at).toBe(native.observed.provider.startedAt)
+      expect(current.observation.runtime_instance_id).toBe(ordinaryRuntimeId)
+      expect(current.providerHome).toBe(home)
+      expect(current.providerConfigRoot).toBe(join(home,'.codex'))
+      await expect(resolveConfigurationRuntime(configurationDb,'clean-default',env,repoRoot,
+        {observeProvider:()=>null,run})).rejects.toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+    } finally {await configurationDb.close()}
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
@@ -1105,7 +1131,12 @@ describe('aun bootstrap clean-host journal', () => {
       await ownedDb.close()
     }
     const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run, observeProvider:native.observeProvider })
-    if(rolledBack.status!=='ROLLED_BACK')console.error('CLEAN_HOST_ROLLBACK',JSON.stringify(rolledBack))
+    if(rolledBack.status!=='ROLLED_BACK') {
+      console.error('CLEAN_HOST_ROLLBACK',JSON.stringify(rolledBack))
+      console.error('CLEAN_HOST_PROFILE_COMMANDS',JSON.stringify(profileCommandTrace))
+      const state=JSON.parse(readFileSync(join(env.AUN_HOME,'bootstrap','clean-default',`${first.run_id}.json`),'utf8'))
+      console.error('CLEAN_HOST_ROLLBACK_MUTATIONS',JSON.stringify(state.mutations.map((m:any)=>({kind:m.kind,stage:m.stage,status:m.rollback_status,evidence:m.rollback_payload?.rollback_evidence_refs}))))
+    }
     expect(rolledBack.status).toBe('ROLLED_BACK')
     expect(rolledBack.reason_codes).toEqual([])
     if (fixture === 'sqlite-new') {
