@@ -385,5 +385,168 @@
     },
     "current_AUN_mandatory_CI": "PENDING_NEW_PUSH",
     "production_effects": 0
+  },
+  "b8_observation_dependency_correction": {
+    "source_head": "51b3bfe10c25e11f8c7ac1450688282551e89ec7",
+    "source_tree": "aa21be700fff1a3bf0cea085b1d854e3d0a83892",
+    "source_files": {
+      "bin/aun/bootstrap.ts": "30d2557e5fe07c02074ae564f9492c3e42da9e2111354f410bba5d7ab4ffc4c5",
+      "core/aun-configuration-candidate.ts": "9fb17fa6b898ab264746806c0334111e55ccb64766a2b0bcd8aa4ac5d1e00ec4",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts": "6613a40e456ace862364fdbc18b75b03c051de145745b46877c320cd0cdb2440"
+    },
+    "companion_source_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+    "measurement": "Private Bun test runner reparented to PID 1 before spawning test, removing the real outer Codex controller ancestor. Default observation reproduced PROVIDER_MISSING with exact B8 error; injected observer preserved actual fixture PID/start/runtime/lease. B8 now forwards existing provider observer and bounded command reader. Production standalone/daemon defaults remain unchanged; bootstrap command reader retains explicit env/cwd.",
+    "orphan_failure": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-discriminator/pg-receipt.json",
+      "sha256": "31c32108e81eb8796d218a01bf3b9524012c7952e7a3877d4e71d09e2e42e8fb",
+      "working_diff_sha256": "39cb01a46d1e019c16c3467be8aaf4080466d6c545e5999d7f5c3e04c79f7547",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "--test-name-pattern",
+            "real default"
+          ],
+          "exit_code": 1,
+          "duration_seconds": 16.329,
+          "log": "clean-host.log",
+          "sha256": "c9eb88453a680df5dafaba2071858e90b5922ad62dd03f482a3bc073c9cca84c",
+          "pass": 2,
+          "fail": 1,
+          "skip": 0,
+          "executed": 3,
+          "failure_lines": [
+            "(fail) aun bootstrap clean-host journal > real default postgres path performs genuine MCP recovery and separate-process ordinary receive [3294.67ms]"
+          ],
+          "assertions": null,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": true
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "three_case_correction": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-b8-correction/pg-receipt.json",
+      "sha256": "329de31a79b37d3c6e54dccb1fe4ed27098e0036bc45c584689b1acc8384fa0a",
+      "working_diff_sha256": "15579e0c0499a469c5dbfe9a289b8d0e03b56e259cb1d488e6758766da8a58d4",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "--test-name-pattern",
+            "real default"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 16.905,
+          "log": "clean-host.log",
+          "sha256": "a4f4195ad7c06faee0d1ed3b9de5a3d385d430cfbd27fcb0ff5bdb283ca3888a",
+          "pass": 3,
+          "fail": 0,
+          "skip": 0,
+          "executed": 3,
+          "failure_lines": [],
+          "assertions": 118,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "expanded_sqlite_failure": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-b8-focused/pg-receipt.json",
+      "sha256": "1a2a78d5400802530492a84af33bd79ba49e0cad93dedea673ec40a6808910e9",
+      "working_diff_sha256": "15579e0c0499a469c5dbfe9a289b8d0e03b56e259cb1d488e6758766da8a58d4",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "exit_code": 1,
+          "duration_seconds": 29.495,
+          "log": "clean-host.log",
+          "sha256": "8d53c9d7e75e2a827d6f382167df93abccefc12482463058d039830be35829fe",
+          "pass": 42,
+          "fail": 1,
+          "skip": 0,
+          "executed": 43,
+          "failure_lines": [
+            "(fail) aun bootstrap clean-host journal > real default sqlite-existing path performs genuine MCP recovery and separate-process ordinary receive [5901.36ms]"
+          ],
+          "assertions": null,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "stopped_after_first_failure": true
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "latest_focused": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-profile-discriminator/pg-receipt.json",
+      "sha256": "8f3caf71f61f43192ee4c7272857703cc317eb0ae14bcfd8f580475c986f17e4",
+      "working_diff_sha256": "81c679b2132fcd3eaefa9cabaab72bfd91b3915cfc6f4decc868ecd55494e6ab",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 35.058,
+          "log": "clean-host.log",
+          "sha256": "909a86421328f60e1b585e0e62bbf181863b620fc19d666abf0bce037c2df8d7",
+          "pass": 48,
+          "fail": 0,
+          "skip": 0,
+          "executed": 48,
+          "failure_lines": [],
+          "assertions": 701,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "test_subject_note": "Tests executed immediately before source commit on the recorded diff and source bytes. Commit pins those exact bytes; historical heads and results are not relabeled.",
+    "unresolved": "Historical ca8 Linux SQLite rollback failure is not declared fixed: expanded Mac run reproduced failed profile then DB rollback; latest added per-command/per-mutation diagnostic run passed. Actual current full Linux CI remains required.",
+    "historical_full_ci": {
+      "url": "https://github.com/watchout/agent-comms-mcp/actions/runs/34744115685",
+      "head": "ca8e9a842834f4b5cae58ca6649902d1f7a3bff1",
+      "pass": 3108,
+      "fail": 3,
+      "skip": 59,
+      "assertions": 15012,
+      "log_sha256": "b70484902b41ac736dae0c9b14d1f131bb1f7a2a0490144025b9f848127a01e7"
+    },
+    "live_effects": 0
   }
 }
