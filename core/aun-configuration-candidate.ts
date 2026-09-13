@@ -7,7 +7,7 @@ import {
   configurationDigest,
   type AunConfigurationDesiredState,
 } from './aun-configuration-desired-state'
-import { isAbsolute, resolve } from 'node:path'
+import { isAbsolute, relative, resolve } from 'node:path'
 
 export interface ObservedConfigurationRuntime {
   observation:SeatProviderObservation; providerHome:string; providerConfigRoot:string; port:number; leaseId:string; fencingToken:number
@@ -199,8 +199,15 @@ export function buildAunConfigurationCandidate(
   if (!isAbsolute(input.providerMcp.checkoutRoot)) throw new Error('PROVIDER_CHECKOUT_ROOT_INVALID')
   const cwdIndex = input.providerMcp.args.indexOf('--cwd')
   if (cwdIndex < 0 || !input.providerMcp.args[cwdIndex + 1]
-    || resolve(input.providerMcp.args[cwdIndex + 1]!) !== resolve(input.providerMcp.checkoutRoot)) {
-    throw new Error('PROVIDER_CHECKOUT_COMMAND_MISMATCH')
+    || resolve(input.providerMcp.args[cwdIndex + 1]!) !== resolve(input.observedRuntime?.observation.workspace ?? input.providerMcp.checkoutRoot)) {
+    throw new Error('PROVIDER_WORKSPACE_COMMAND_MISMATCH')
+  }
+  if (input.observedRuntime) {
+    const entry = input.providerMcp.args[cwdIndex + 2]
+    const sourceRelative = entry && relative(resolve(input.providerMcp.checkoutRoot), resolve(entry))
+    if (!entry || !isAbsolute(entry) || !sourceRelative || sourceRelative === '..' || sourceRelative.startsWith('../') || isAbsolute(sourceRelative)) {
+      throw new Error('PROVIDER_CHECKOUT_ENTRY_MISMATCH')
+    }
   }
   if (input.runtimeRegistration.runtimeEngine !== (input.observedRuntime?.observation.provider ?? input.desired.runtimeEnginePreference)
     || input.runtimeRegistration.workspace !== (input.observedRuntime?.observation.workspace ?? input.desired.canonicalWorkspace)
@@ -273,7 +280,7 @@ export function buildDefaultAunConfigurationCandidate(
       checkoutRoot: input.providerRepoRoot,
       serverName: 'aun',
       command: input.bunPath,
-      args: ['run', '--cwd', input.providerRepoRoot, input.serverEntry],
+      args: ['run', '--cwd', input.observedRuntime.observation.workspace, resolve(input.providerRepoRoot, input.serverEntry)],
       environmentRefs: {
         ...commonRefs,
         AGENT_COM_EXPECTED_PROVIDER_IDENTITY_REF: input.desired.expectedProviderIdentityRef,

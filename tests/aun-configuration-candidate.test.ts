@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildAunConfigurationCandidate,
@@ -81,6 +83,27 @@ describe('AUN immutable configuration candidate', () => {
     expect(candidate.runtimeRegistration.workspace).toBe('/new-host/misell')
     expect(candidate.runtimeRegistration.channelPort).toBe(19001)
     expect(fixture.desired.runtimeEnginePreference).toBe('codex')
+  })
+  test('generated command executes the verified source entry inside the observed seat workspace',()=>{
+    const root=realpathSync(mkdtempSync(join(tmpdir(),'seat-config-cwd-')))
+    try {
+      const release=join(root,'provider-release'),workspace=join(root,'seat-workspace');mkdirSync(release);mkdirSync(workspace)
+      writeFileSync(join(release,'server.ts'),'console.log(JSON.stringify({cwd:process.cwd(),source:import.meta.path}))')
+      const fixture=input()
+      const observedRuntime={observation:{schema_version:'seat-provider-observation/v1' as const,agent_id:'misell',host_id:'host-a',runtime_instance_id:'current',process_id:12,provider_pid:13,
+        provider_started_at:new Date(Date.now()-1000).toISOString(),provider:'claude' as const,workspace,session_name:'s',observed_at:new Date().toISOString(),source:'process_ancestry' as const,verified:true as const},
+        providerHome:root,providerConfigRoot:root,port:19001,leaseId:'lease',fencingToken:1}
+      const candidate=buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,observedRuntime,
+        providerConfigRoot:root,providerRepoRoot:release,daemonCheckout:release,bunPath:process.execPath,serverEntry:'server.ts',daemonEntry:'daemon.ts',databaseLocatorRef:'env:DATABASE_URL',databaseCredentialRef:'env:DATABASE_URL'})
+      const child=Bun.spawnSync([candidate.providerMcp.command,...candidate.providerMcp.args],{cwd:root,env:{PATH:process.env.PATH},stdout:'pipe',stderr:'pipe'})
+      expect(child.exitCode).toBe(0)
+      expect(JSON.parse(child.stdout.toString())).toEqual({cwd:workspace,source:join(release,'server.ts')})
+      const inputAgain={...fixture,observedRuntime,providerMcp:candidate.providerMcp,runtimeRegistration:candidate.runtimeRegistration}
+      const wrongCwd=structuredClone(inputAgain);wrongCwd.providerMcp.args[2]=release
+      expect(()=>buildAunConfigurationCandidate(wrongCwd)).toThrow('PROVIDER_WORKSPACE_COMMAND_MISMATCH')
+      const wrongSource=structuredClone(inputAgain);wrongSource.providerMcp.args[3]=join(root,'foreign.ts')
+      expect(()=>buildAunConfigurationCandidate(wrongSource)).toThrow('PROVIDER_CHECKOUT_ENTRY_MISMATCH')
+    } finally {rmSync(root,{recursive:true,force:true})}
   })
   test('ordinary projection without fresh runtime facts cannot fall back to desired preference',()=>{
     const fixture=input()

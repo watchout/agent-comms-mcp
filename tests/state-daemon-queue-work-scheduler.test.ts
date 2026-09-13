@@ -247,7 +247,7 @@ class PendingLlmDb implements DBClient {
       lease_status:'active',expires_at:'2030-05-08T01:00:00Z',
       lease_metadata:{port:19123,process_id:1234,endpoint_uri:'http://127.0.0.1:19123'},
     }] as T[],rowCount:1}
-    if (sql.includes('FROM agent_runtime_instances')) {
+    if (sql.includes('FROM agent_runtime_instances') && !sql.includes('FROM runtime_memory_ready_evidence')) {
       return {
         rows: [{
           runtime_instance_id: 'rt-queue-scheduler',

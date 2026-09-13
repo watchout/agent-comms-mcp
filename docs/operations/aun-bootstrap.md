@@ -102,6 +102,20 @@ Caller environment and stale DB roots cannot redirect it. Missing provenance
 fails closed. This permits no account switch or shared config mutation:
 observed account roots receive exact readback only; invocation/project config
 binds seat identity. Clean-host enrollment retains its separately bounded path.
+The detached launch plan includes its verified account root and target runtime
+identity environment alongside argv and cwd; consumers must execute that plan,
+not discard its environment. A logical memory project comes from explicit
+invocation or verified same-seat durable/native binding, never a moved directory's
+basename or a foreign global registration.
+
+B2 applies the stable desired-format migration after the base schema. Existing
+complete, exactly verified legacy documents advance once with one existing
+outbox event; runtime-only updates then produce no desired revision. History and
+queue/account/runtime values remain intact. An incompatible rollback of populated
+stable-format history is denied. This shared migration effect requires its own
+explicit coverage in the application plan. A clean enrollment's native rollback
+keeps the original admission basis and independently rechecks the current root;
+subsequent live-process provenance does not erase that ownership fence.
 
 Codex configuration is changed only through `codex mcp add aun` and read back
 with both `codex mcp get aun --json` and `codex mcp list --json`. Claude configuration uses the existing `aun init`
@@ -128,7 +142,7 @@ provider PID/start/workspace and native session. Only an accepted stored native
 SessionStart output receipt can establish consumed context; a fresh controller
 `recover_context` response cannot. The sealed bootstrap row records the exact
 MCP runtime UUID and verified provider observation, and memory-ready additionally
-requires that MCP instance's live endpoint lease.
+requires that MCP instance's live endpoint lease. B5 independently requests a second verified native receipt for the actual local MCP runtime UUID and records its own evidence through the current process/lease/ancestry gate. Ordinary receive selects that local evidence; the sealed bootstrap receipt remains a separate runtime kind. Neither receipt is relabeled or copied to another runtime.
 
 For PostgreSQL, the provider and daemon use the normalized `DATABASE_URL`.
 For SQLite, bootstrap records and passes the exact `AGENT_COM_DB=sqlite` and

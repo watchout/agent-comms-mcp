@@ -89,12 +89,12 @@ SQL
   if [ -n "$observed_session" ]; then SESSION="$observed_session"; fi
   if [ -n "$observed_workspace" ]; then PROJECT_DIR="$observed_workspace"; fi
   CLAUDE_CMD=$("$BUN_BIN" -e '
-    const {start}=await import(process.argv[1]+"/bin/aun/start.ts");
+    const {start,buildStartLaunchArgv}=await import(process.argv[1]+"/bin/aun/start.ts");
     const result=await start({agentId:process.argv[2],runtime:process.argv[3],cwd:process.argv[4],spawn:false,checkSignatures:false,
       env:{...process.env,DATABASE_URL:process.argv[5],AGENT_COM_RUNTIME_SESSION:process.argv[6]}});
     if(!result.ok) throw new Error(result.errors.join(","));
     const quote=s=>String.fromCharCode(39)+s.replaceAll(String.fromCharCode(39),String.fromCharCode(39,34,39,34,39))+String.fromCharCode(39);
-    process.stdout.write(result.argv.map(quote).join(" "));
+    process.stdout.write(buildStartLaunchArgv(result).map(quote).join(" "));
   ' "$REPO_ROOT" "$AGENT_ID" "$RUNTIME_ENGINE" "$PROJECT_DIR" "$database_url" "$SESSION")
 
 }

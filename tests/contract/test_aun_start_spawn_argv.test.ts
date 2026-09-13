@@ -1,7 +1,7 @@
 import { migrateSqlite } from '../../db/migrate-sqlite'
 import { Database } from 'bun:sqlite'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, realpathSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -117,11 +117,72 @@ exit 0
     expect(result.argv).toContain('mcp_servers.agent-memory.env.AGENT_MEMORY_PROJECT="stable-project"')
     expect(readFileSync(path,'utf8')).toBe(before)
   })
+  test('both providers preserve verified same-seat logical projects after a workspace move',async()=>{
+    for(const runtime of ['codex','claude']) {
+      const fixture=mkdtempSync(join(tmpdir(),'seat-project-move-'))
+      try {
+        const workspace=join(fixture,'relocated-folder');mkdirSync(workspace)
+        mkdirSync(join(fixture,'.codex'))
+        const nativePath=runtime==='codex'?join(fixture,'.codex','config.toml'):join(fixture,'.claude.json')
+        const native=runtime==='codex'
+          ? '[mcp_servers.agent-memory]\ncommand="memory"\nargs=["/fixture/memory.ts"]\n[mcp_servers.agent-memory.env]\nAGENT_MEMORY_AGENT_ID="fixture-seat"\nAGENT_MEMORY_PROJECT="existing-stable-project"\n'
+          : JSON.stringify({mcpServers:{'agent-memory':{command:'memory',args:['/fixture/memory.ts'],env:{AGENT_MEMORY_AGENT_ID:'fixture-seat',AGENT_MEMORY_PROJECT:'existing-stable-project'}}}})
+        writeFileSync(nativePath,native)
+        const options={agentId:'fixture-seat',runtime,spawn:false,checkSignatures:false,cwd:workspace,
+          db:{query:async(sql:string)=>sql.includes('FROM agents')?[{profile_enabled:true}]:[]},env:{HOME:fixture}}
+        const plan=await start(options)
+        expect(plan.ok).toBe(true)
+        expect(plan.launch?.env.AGENT_MEMORY_PROJECT).toBe('existing-stable-project')
+        expect(readFileSync(nativePath,'utf8')).toBe(native)
+        writeFileSync(nativePath,native.replaceAll('fixture-seat','arc'))
+        expect((await start(options)).errors).toEqual(['SEAT_MEMORY_PROJECT_REQUIRED'])
+        const fromDurable=await start({...options,db:{query:async(sql:string)=>sql.includes('FROM agents')?[{profile_enabled:true,metadata:{memory_project:'durable-seat-project'}}]:[]}})
+        expect(fromDurable.ok).toBe(true)
+        expect(fromDurable.launch?.env.AGENT_MEMORY_PROJECT).toBe('durable-seat-project')
+        writeFileSync(nativePath,native)
+        writeFileSync(join(workspace,'.mcp.json'),JSON.stringify({mcpServers:{wasurezu:{command:'memory',args:[],env:{AGENT_MEMORY_AGENT_ID:'fixture-seat',AGENT_MEMORY_PROJECT:'conflicting-project'}}}}))
+        expect((await start(options)).errors).toEqual(['SEAT_MEMORY_PROJECT_AMBIGUOUS'])
+      } finally {rmSync(fixture,{recursive:true,force:true})}
+    }
+  })
+  test('direct and detached plans deliver the observed account root and exact seat environment to a real harmless child',()=>{
+    const fixture=realpathSync(mkdtempSync(join(tmpdir(),'seat-launch-env-')))
+    try {
+      const account=join(fixture,'observed-account'),caller=join(fixture,'caller-account'),workspace=join(fixture,'workspace')
+      for(const path of [account,caller,workspace]) mkdirSync(path)
+      const output=join(fixture,'received.json'),child=join(fixture,'harmless-provider'),runner=join(fixture,'runner.ts')
+      writeFileSync(child,`#!${process.execPath}\nimport {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(output)},JSON.stringify({cwd:process.cwd(),home:process.env.HOME,codex:process.env.CODEX_HOME,claude:process.env.CLAUDE_CONFIG_DIR,agent:process.env.AGENT_ID,expected:process.env.AGENT_COM_EXPECTED_AGENT_ID,project:process.env.AGENT_MEMORY_PROJECT,session:process.env.AGENT_COM_RUNTIME_SESSION}));`)
+      chmodSync(child,0o755)
+      for(const runtime of ['codex','claude']) for(const mode of ['direct','detached']) {
+        writeFileSync(runner,`
+          import {mock} from 'bun:test';
+          import {spawnSync} from 'node:child_process';
+          mock.module(${JSON.stringify(join(REPO_ROOT,'core/seat-runtime-selection.ts'))},()=>({
+            normalizeSeatProvider:()=>${JSON.stringify(runtime)},
+            resolveSeatProvider:async()=>({ok:true,code:'SELECTED_LIVE',provider:${JSON.stringify(runtime)},observation:{provider_pid:123,provider_started_at:'fixture',workspace:${JSON.stringify(workspace)}}}),
+            readObservedProviderRoot:async()=>({root:${JSON.stringify(account)},home:${JSON.stringify(account)}})
+          }));
+          const {start,buildStartLaunchArgv}=await import(${JSON.stringify(join(REPO_ROOT,'bin/aun/start.ts'))});
+          const plan=await start({agentId:'fixture-seat',runtime:${JSON.stringify(runtime)},cwd:${JSON.stringify(workspace)},checkSignatures:false,spawn:${mode==='direct'},
+            db:{query:async()=>[{profile_enabled:true}]},env:{...process.env,HOME:${JSON.stringify(caller)},CODEX_HOME:${JSON.stringify(caller)},CLAUDE_CONFIG_DIR:${JSON.stringify(caller)},
+              AGENT_MEMORY_PROJECT:'stable-project',AGENT_COM_RUNTIME_SESSION:'actual-session',AUN_CODEX_BIN:${JSON.stringify(child)},AUN_CLAUDE_BIN:${JSON.stringify(child)},UNRELATED_SECRET:'must-not-serialize'}});
+          if(!plan.ok)throw new Error(plan.errors.join(','));
+          if(Object.hasOwn(plan.launch.env,'UNRELATED_SECRET'))throw new Error('ambient secret in plan');
+          if(${mode==='detached'}) {const argv=buildStartLaunchArgv(plan);const result=spawnSync(argv[0],argv.slice(1),{cwd:plan.launch.cwd,env:{...process.env,HOME:${JSON.stringify(caller)},CODEX_HOME:${JSON.stringify(caller)},CLAUDE_CONFIG_DIR:${JSON.stringify(caller)}}});if(result.status!==0)throw new Error(String(result.stderr));}
+        `)
+        const result=spawnSync(process.execPath,['--no-env-file',runner],{cwd:fixture,env:{PATH:process.env.PATH,HOME:fixture,NODE_ENV:'test',DATABASE_URL:''},encoding:'utf8',timeout:10000})
+        expect(result.status).toBe(0)
+        const received=JSON.parse(readFileSync(output,'utf8'))
+        expect(received).toMatchObject({cwd:workspace,home:account,agent:'fixture-seat',expected:'fixture-seat',project:'stable-project',session:'actual-session'})
+        expect(received[runtime]).toBe(account)
+      }
+    } finally {rmSync(fixture,{recursive:true,force:true})}
+  })
   test('real subprocess: AUN_CLAUDE_BIN mock receives the same argv', () => {
     const r = spawnSync('bun', ['run', AUN_CLI, 'start', '--agent-id', 'fixture-seat','--runtime','claude','--', '--user-flag', 'user-value'], {
       encoding: 'utf-8',
       cwd:home,
-      env: { ...process.env, HOME: home, AUN_CLAUDE_BIN: mockClaudeBin,AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:join(home,'fixture.db'),DATABASE_URL:'' },
+      env: { ...process.env, HOME: home, AGENT_MEMORY_PROJECT:'stable-project', AUN_CLAUDE_BIN: mockClaudeBin,AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:join(home,'fixture.db'),DATABASE_URL:'' },
       timeout: 15_000,
     })
     expect(r.status).toBe(0)

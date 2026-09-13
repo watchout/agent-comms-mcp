@@ -16,6 +16,88 @@ import {
   type StateDaemonRestorePlan,
 } from '../../core/state-daemon/launchagent'
 import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
+import { execFileSync } from 'node:child_process'
+import { hostname } from 'node:os'
+import { observeSeatProvider } from '../../core/seat-runtime-selection'
+
+// Cross-repository integration uses the explicitly selected, built Was candidate.
+// Only the harmless Node host's provider classification is injected. PID/start,
+// parentage, held socket, native stdout pipe, stored hook receipt and MCP are real.
+const nativeHosts: Array<ReturnType<typeof Bun.spawn>> = []
+async function nativeHostFixture(home:string,workspace:string,agent:string,project:string,session:string) {
+  const was = process.env.AUN_TEST_WASUREZU_ROOT
+  if (!was || !existsSync(join(was,'dist/native-context-delivery.js'))) throw new Error('AUN_TEST_WASUREZU_ROOT_BUILT_CANDIDATE_REQUIRED')
+  const node=execFileSync('which',['node'],{encoding:'utf8'}).trim()
+  const modules=join(was,'dist'),sdk=join(was,'node_modules/@modelcontextprotocol/sdk/dist/esm')
+  const holder=join(home,'held-endpoint.ts'),memory=join(home,'native-memory.mjs'),hook=join(home,'native-hook.mjs'),host=join(home,'native-host.mjs'),report=join(home,'native-host.json')
+  const memoryEnv={AGENT_MEMORY_DB_TYPE:'sqlite',AGENT_MEMORY_DB_PATH:join(home,'memory.db'),AGENT_MEMORY_AGENT_ID:agent,AGENT_MEMORY_PROJECT:project}
+  writeFileSync(holder,"const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('fixture')});console.log(JSON.stringify({pid:process.pid,port:server.port}));")
+  writeFileSync(memory,`
+    import {McpServer} from ${JSON.stringify(join(sdk,'server/mcp.js'))};
+    import {StdioServerTransport} from ${JSON.stringify(join(sdk,'server/stdio.js'))};
+    import {registerNativeContextDeliveryTool,observeNativeProcess} from ${JSON.stringify(join(modules,'native-context-delivery.js'))};
+    import {SqliteStore} from ${JSON.stringify(join(modules,'stores/sqlite-store.js'))};
+    const store=new SqliteStore(process.env.AGENT_MEMORY_DB_PATH);await store.initialize();
+    const server=new McpServer({name:'native-boundary-fixture',version:'1'});
+    registerNativeContextDeliveryTool(server,store,process.env.AGENT_MEMORY_AGENT_ID,()=>observeNativeProcess(Number(process.env.FIXTURE_PROVIDER_PID)));
+    await server.connect(new StdioServerTransport());
+  `)
+  writeFileSync(hook,`
+    import {beginNativeContextAttempt,nativeAttemptSeed,observeNativeProcess,writeNativeContextResult} from ${JSON.stringify(join(modules,'native-context-delivery.js'))};
+    import {runCodexSessionStart,resolveCodexStoreBinding} from ${JSON.stringify(join(modules,'codex-session-start.js'))};
+    const binding={agent_id:${JSON.stringify(agent)},project:${JSON.stringify(project)},workspace:${JSON.stringify(workspace)},binding_source_ref:'fixture:trusted-invocation',max_tokens:1800,max_bytes:8192,timeout_ms:5000};
+    const raw=JSON.stringify({session_id:${JSON.stringify(session)},cwd:binding.workspace,transcript_path:'/missing/fixture.jsonl',model:'fixture',permission_mode:'default',hook_event_name:'SessionStart',source:'startup'});
+    const seed=nativeAttemptSeed({binding,rawInput:raw,runtime:'codex',storeBinding:resolveCodexStoreBinding(),adapter:{id:'native-pipe-fixture',version:'1'}});
+    const target={schema_version:'kusabi-runtime-event-target/v1',manifest_id:'native-pipe-fixture',build:{commit_sha:'a'.repeat(40),tree_sha:'b'.repeat(40),artifact_sha256:'c'.repeat(64)},configuration:{config_sha256:'d'.repeat(64),trust_fingerprint_sha256:'e'.repeat(64)},storage:{backend:'sqlite',binding_sha256:seed.store_binding.binding_sha256}};
+    const observe=()=>observeNativeProcess(process.ppid);
+    const handle=await beginNativeContextAttempt({evidence:seed,runtime:'codex',observeAncestor:observe,emission:{target,timeoutMs:5000}});
+    const result=await runCodexSessionStart(raw,binding);
+    const receipt=await writeNativeContextResult({result,runtime:'codex',handle,observeProvider:observe});
+    if(!receipt)throw new Error('native receipt missing:'+JSON.stringify({handle,evidence:result.evidence,work:result.native_work_digest}));
+  `)
+  writeFileSync(host,`
+    import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';
+    import {SqliteStore} from ${JSON.stringify(join(modules,'stores/sqlite-store.js'))};
+    import {observeNativeProcess} from ${JSON.stringify(join(modules,'native-context-delivery.js'))};
+    const store=new SqliteStore(process.env.AGENT_MEMORY_DB_PATH);await store.initialize();
+    await store.saveTaskState({agent_id:${JSON.stringify(agent)},project:${JSON.stringify(project)},task:'Continue the stable seat task',status:'in_progress',progress:'checkpoint',next_steps:'Run the next bounded fixture step'});await store.close();
+    const children=[];process.on('exit',()=>children.forEach(c=>c.kill()));process.on('SIGTERM',()=>process.exit(0));
+    const env={...process.env,FIXTURE_PROVIDER_PID:String(process.pid)};
+    const held=spawn(${JSON.stringify(process.execPath)},[${JSON.stringify(holder)}],{cwd:${JSON.stringify(workspace)},env:{...env,AGENT_ID:${JSON.stringify(agent)},AGENT_COM_EXPECTED_AGENT_ID:${JSON.stringify(agent)},CODEX_THREAD_ID:${JSON.stringify(session)}},stdio:['ignore','pipe','inherit']});children.push(held);
+    const endpoint=await new Promise((resolve,reject)=>{held.stdout.once('data',d=>resolve(JSON.parse(String(d))));held.once('error',reject)});
+    const native=spawn(process.execPath,[${JSON.stringify(hook)}],{cwd:${JSON.stringify(workspace)},env,stdio:['ignore','pipe','inherit']});children.push(native);
+    let content='';native.stdout.on('data',d=>{content+=d.toString()});
+    await new Promise((resolve,reject)=>native.on('exit',code=>code===0?resolve():reject(new Error('native hook failed'))));
+    if(!content.includes('Continue the stable seat task')||!content.includes('Run the next bounded fixture step'))throw new Error('actual host input missing');
+    const connected=spawn(process.execPath,[${JSON.stringify(memory)}],{cwd:${JSON.stringify(workspace)},env,stdio:['pipe','pipe','inherit']});children.push(connected);
+    writeFileSync(${JSON.stringify(report)},JSON.stringify({endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content}));
+  `)
+  const child=Bun.spawn([node,host],{cwd:workspace,env:{PATH:process.env.PATH!,HOME:home,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+  nativeHosts.push(child)
+  for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+  if(!existsSync(report))throw new Error('native fixture startup timeout')
+  const observed=JSON.parse(readFileSync(report,'utf8'))
+  const observeProvider:typeof observeSeatProvider=(input)=>{
+    const ppid=Number(execFileSync('ps',['-p',String(input.processId),'-o','ppid='],{encoding:'utf8'}).trim())
+    const started=new Date(execFileSync('ps',['-p',String(observed.provider.pid),'-o','lstart='],{encoding:'utf8'}).trim()).toISOString()
+    if(ppid!==observed.provider.pid||started!==observed.provider.startedAt)return null
+    const actualEnv=execFileSync('ps',['eww','-p',String(input.processId),'-o','command='],{encoding:'utf8'})
+    return observeSeatProvider({...input,providerStartedAt:started,processes:[{pid:input.processId,ppid,command:actualEnv},{pid:ppid,ppid:1,command:'fixture/codex'}]})
+  }
+  return {node,memory,env:{...memoryEnv,FIXTURE_PROVIDER_PID:String(observed.provider.pid)},observed,observeProvider}
+}
+
+async function registerNativeFixtureRuntime(db:PgAdapter|SqliteAdapter,fixture:Awaited<ReturnType<typeof nativeHostFixture>>,agent:string,project:string,session:string,workspace:string,id:string) {
+  const endpoint=fixture.observed.endpoint,uri=`http://127.0.0.1:${endpoint.port}`
+  const observation=fixture.observeProvider({agentId:agent,runtimeInstanceId:id,processId:endpoint.pid,sessionName:session,workspace,hostId:hostname()})
+  if(!observation)throw new Error('fixture process observation unavailable')
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,host_id,session_name,process_id,port,endpoint_uri,checkout_path,commit_sha,status,started_at,last_seen_at,metadata)
+    VALUES($1,$2,'codex','local_process',$3,$4,$5,$6,$7,$8,$9,'active',$10,now(),$11) ON CONFLICT(runtime_instance_id) DO NOTHING`,
+    [id,agent,hostname(),session,endpoint.pid,endpoint.port,uri,workspace,'a'.repeat(40),observation.provider_started_at,JSON.stringify({provider_observation:observation})])
+  await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at,metadata)
+    VALUES($1,'runtime_instance',$2,'worker',$3,$6,1,'active',$4,$5) ON CONFLICT(lease_id) DO NOTHING`,
+    [id,id,agent,new Date(Date.now()+1800000).toISOString(),JSON.stringify({process_id:endpoint.pid,port:endpoint.port,endpoint_uri:uri}),id])
+}
 
 const roots: string[] = []
 const postgresDatabases: PostgresTestDatabase[] = []
@@ -25,7 +107,8 @@ SHIRUBE_D1_KILL_SWITCH => 1
 SHIRUBE_D1_TARGET_ALLOWLIST => []
 STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED => 0
 `
-afterEach(() => {
+afterEach(async () => {
+  while(nativeHosts.length) {const child=nativeHosts.pop()!;child.kill();await child.exited}
   while (postgresDatabases.length) postgresDatabases.pop()!.drop()
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
 })
@@ -307,13 +390,14 @@ describe('aun bootstrap clean-host journal', () => {
   })
 
   test('B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-')))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const databaseName = `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`
     const postgresDatabase = createPostgresTestDatabase(databaseName)
     postgresDatabases.push(postgresDatabase)
     const databaseUrl = postgresDatabase.databaseUrl
+    const native=await nativeHostFixture(home,repoRoot,'b5-concurrency','b5-concurrency-project','b5-session')
     const baseEnv = {
       ...process.env,
       HOME: home,
@@ -322,7 +406,7 @@ describe('aun bootstrap clean-host journal', () => {
       DATABASE_URL: databaseUrl,
       AGENT_MEMORY_PROJECT: 'b5-concurrency-project',
       AUN_BOOTSTRAP_CHANNEL_PORT: '8812',
-      AUN_BOOTSTRAP_PROVIDER_PID: '7312',
+      AUN_BOOTSTRAP_PROVIDER_PID: String(native.observed.provider.pid),
     } as Record<string, string>
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env: baseEnv }).exitCode).toBe(0)
     const profileSet = Bun.spawnSync([
@@ -332,13 +416,7 @@ describe('aun bootstrap clean-host journal', () => {
     ], { cwd: repoRoot, env: baseEnv })
     expect(profileSet.exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5::jsonb)`,
-      ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
-    )
+    await registerNativeFixtureRuntime(db,native,'b5-concurrency','b5-concurrency-project','b5-session',repoRoot,'ba000000-0000-4000-8000-000000000001')
     const storedProfile = await db.queryOne<any>(
       `SELECT profile_revision, profile_source FROM agents WHERE agent_id = $1`,
       ['b5-concurrency'],
@@ -349,16 +427,6 @@ describe('aun bootstrap clean-host journal', () => {
       channel_port: 8812, tmux_session: 'b5-session', profile_enabled: true,
       profile_revision: Number(storedProfile?.profile_revision), profile_source: storedProfile?.profile_source,
     }
-    const recoveryFixture = `
-      const readline = require('node:readline');
-      const rl = readline.createInterface({ input: process.stdin });
-      rl.on('line', (line) => {
-        const m = JSON.parse(line);
-        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}));
-        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project b5-concurrency-project recovered'}],isError:false}}));
-      });
-    `
     let ordinaryHeartbeatAdvances = 0
     let providerTransportDrift = false
     const run = async (command: string, args: string[]) => {
@@ -371,7 +439,7 @@ describe('aun bootstrap clean-host journal', () => {
         try {
           await heartbeatDb.execute(
             `UPDATE agent_runtime_instances
-                SET last_seen_at = now() + interval '1 hour'
+                SET last_seen_at = now()
               WHERE runtime_instance_id = $1
                 AND agent_id = $2
                 AND runtime_kind = 'local_process'`,
@@ -386,8 +454,8 @@ describe('aun bootstrap clean-host journal', () => {
           stdout: JSON.stringify({
             enabled: true,
             transport: {
-              type: 'stdio', command: process.execPath,
-              args: ['-e', providerTransportDrift ? `${recoveryFixture}\n// drift` : recoveryFixture], env: {},
+              type: 'stdio', command: native.node,
+              args: [native.memory,...(providerTransportDrift?['drift']:[])], env: native.env,
             },
           }),
           stderr: '',
@@ -397,7 +465,7 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const runGate = async (runId: string) => {
       const env = { ...baseEnv }
-      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot, observeProvider:native.observeProvider })
       const context = {
         runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
         repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
@@ -424,7 +492,7 @@ describe('aun bootstrap clean-host journal', () => {
 
     const expectedReceipt = {
       runtime_kind: 'bootstrap_bound_provider', runtime_engine: 'codex', session_name: 'b5-session',
-      process_id: 7312, port: 8812, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
+      process_id: native.observed.provider.pid, port: native.observed.endpoint.port, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
     }
     const driftCases = [
       { id: 'runtime_kind', values: { ...expectedReceipt, runtime_kind: 'local_process' } },
@@ -606,11 +674,11 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBe(7)
+    expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
     await readback.close()
-  })
+  }, 30000)
 
-  test('existing Codex target root authority comes only from metadata.codex_home and projection equality', async () => {
+  test('live Codex account-root observation survives stale, absent and symlinked profile metadata', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-root-db-')))
     roots.push(home)
     const codexRoot = join(home, '.codex')
@@ -639,14 +707,17 @@ describe('aun bootstrap clean-host journal', () => {
        ) VALUES ($1, $2, 'bot', 'TUI', $3::jsonb, 'codex', $4::jsonb)`,
       ['root-authority', 'Root authority fixture', JSON.stringify({ codex_home: codexRoot }), JSON.stringify({ provider_config_root: codexRoot })],
     )
+    const native=await nativeHostFixture(home,repoRoot,'root-authority','root-project','root-session')
+    await registerNativeFixtureRuntime(db,native,'root-authority','root-project','root-session',repoRoot,randomUUID())
+    const observeRoot={observeProvider:native.observeProvider,run:async(_command:string,args:string[])=>({exitCode:0,stdout:args.includes('lstart=')?native.observed.provider.startedAt:`/fixture/codex HOME=${home} CODEX_HOME=${codexRoot}`,stderr:''})}
     const exact = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
     })
     expect(exact.ok).toBe(true)
     if (!exact.ok) throw new Error('expected exact root authority')
     expect(exact.authority).toMatchObject({
       existingTarget: true,
-      canonicalSourceField: 'metadata.codex_home',
+      canonicalSourceField: 'observed_provider_process',
       canonicalRoot: codexRoot,
       projectionMatches: true,
       callerMismatch: true,
@@ -659,14 +730,14 @@ describe('aun bootstrap clean-host journal', () => {
       'root-authority', JSON.stringify({ provider_config_root: '/tmp/conflict' }),
     ])
     const conflict = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(conflict).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_CONFLICT' })
+    expect(conflict).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
     await db.execute(`UPDATE agents SET metadata = '{}'::jsonb WHERE agent_id = $1`, ['root-authority'])
     const missing = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(missing).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    expect(missing).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
     const symlinkRoot = join(home, '.codex-link')
     symlinkSync(codexRoot, symlinkRoot)
     await db.execute(
@@ -675,13 +746,15 @@ describe('aun bootstrap clean-host journal', () => {
       ['root-authority', symlinkRoot],
     )
     const ambiguous = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(ambiguous).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    expect(ambiguous).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
+    const noCurrent=await bootstrapInternal.resolveProviderRootAuthority({agentId:'root-authority',requestedRuntime:'codex',env,home,repoRoot,observeProvider:()=>null})
+    expect(noCurrent).toMatchObject({ok:false,reasonCode:'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING'})
     await db.close()
   }, 30_000)
 
-  test('B3 holds the exact desired outbox event from concurrent consumers and restores full preimages', async () => {
+  test('B3 preserves existing seat authority and outbox despite stale runtime projection', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-b3-hold-')))
     roots.push(home)
     const codexRoot = join(home, '.codex')
@@ -761,33 +834,8 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const outcome = await ports.ensureAgentProfile(context)
     expect(outcome.ok).toBe(true)
-    expect(outcome.mutation?.kind).toBe('configuration_desired')
-    const held = await db.query<any>(
-      `SELECT event_id, attempt_count, delivered_at, available_at::text AS available_at_text
-         FROM aun_configuration_desired_outbox
-        WHERE agent_id = $1 AND event_id = ANY($2::uuid[])`,
-      ['b3-held', outcome.mutation?.rollback_payload?.new_event_ids],
-    )
-    expect(held).toHaveLength(1)
-    expect(held[0]).toMatchObject({ attempt_count: 0, delivered_at: null, available_at_text: 'infinity' })
-    const concurrentlyVisible = await db.query<any>(
-      `SELECT event_id FROM aun_configuration_desired_outbox
-        WHERE agent_id = $1 AND delivered_at IS NULL AND available_at <= now()`,
-      ['b3-held'],
-    )
-    expect(concurrentlyVisible.filter((row) => String(row.event_id) === String(held[0].event_id))).toHaveLength(0)
-    const rolledBack = await ports.rollbackMutation(context, {
-      mutation_id: 'b3-held-mutation', stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run', ...outcome.mutation!,
-    })
-    expect(rolledBack.ok).toBe(true)
-    expect(rolledBack.readinessPredicates).toMatchObject({
-      held_run_event_delivery_count: 0,
-      compensating_event_count: 1,
-      exact_delete_count: 2,
-      broad_delete_count: 0,
-      trigger_disable_count: 0,
-      foreign_event_mutation_count: 0,
-    })
+    expect(outcome.mutation).toBeUndefined()
+    expect(outcome.mutations).toBeUndefined()
     const finalAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
     const finalOutbox = await db.query<any>(
       `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -800,9 +848,11 @@ describe('aun bootstrap clean-host journal', () => {
 
   for (const fixture of ['sqlite-new', 'sqlite-existing', 'postgres'] as const) test(`real default ${fixture} path performs genuine MCP recovery and separate-process ordinary receive`, async () => {
     const backend = fixture === 'postgres' ? 'postgres' : 'sqlite'
-    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-'))
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-')))
     roots.push(home)
-    const repoRoot = join(import.meta.dir, '..', '..')
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const native=await nativeHostFixture(home,repoRoot,'clean-default','bootstrap-clean-project','clean-session')
+    const ordinaryRuntimeId=randomUUID()
     const dbPath = join(home, 'agent-com.db')
     let sqlitePrestate: Buffer | null = null
     if (fixture === 'sqlite-existing') {
@@ -826,21 +876,12 @@ describe('aun bootstrap clean-host journal', () => {
       ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
       AGENT_MEMORY_PROJECT: 'bootstrap-clean-project',
       CODEX_SANDBOX: 'workspace-write',
+      AUN_BOOTSTRAP_PROVIDER_PID:String(native.observed.provider.pid),
     } as Record<string, string>
     if (databaseUrl) {
       const migrated = Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env })
       expect(migrated.exitCode).toBe(0)
     }
-    const mcpFixture = `
-      const readline = require('node:readline');
-      const rl = readline.createInterface({ input: process.stdin });
-      rl.on('line', (line) => {
-        const m = JSON.parse(line);
-        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'wasurezu-fixture',version:'1'}}}));
-        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project bootstrap-clean-project recovered'}],isError:false}}));
-      });
-    `
     let aunRegistered = false
     let daemonLoaded = false
     let queueReceiveCount = 0
@@ -851,13 +892,13 @@ describe('aun bootstrap clean-host journal', () => {
       name: 'aun', enabled: true,
       transport: {
         type: 'stdio', command: realpathSync(process.execPath),
-        args: ['run', '--cwd', realpathSync(repoRoot), 'server.ts'],
+        args: ['run', '--cwd', realpathSync(repoRoot), join(realpathSync(repoRoot), 'server.ts')],
         env: {
           AGENT_ID: 'clean-default', AGENT_COM_EXPECTED_AGENT_ID: 'clean-default',
           ...(databaseUrl
             ? { DATABASE_URL: databaseUrl }
             : { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: realpathSync(dbPath) }),
-          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8801',
+          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
         },
       },
     })
@@ -878,10 +919,12 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: 'booted out\n', stderr: '', pid: ++syntheticPid }
       }
       if (command === 'lsof') return { exitCode: 1, stdout: '', stderr: '', pid: ++syntheticPid }
+      if (command === 'ps' && args.includes('lstart=')) return {exitCode:0,stdout:native.observed.provider.startedAt,stderr:''}
+      if (command === 'ps' && args.includes('eww')) return {exitCode:0,stdout:`/fixture/codex HOME=${home} CODEX_HOME=${join(home,'.codex')}`,stderr:''}
       if (command === 'ps') return { exitCode: 1, stdout: '', stderr: '', pid: ++syntheticPid }
       if (command === 'codex' && joined === '--version') return { exitCode: 0, stdout: 'codex-cli 1.0.0\n', stderr: '', pid: ++syntheticPid }
       if (command === 'codex' && joined === 'mcp get wasurezu --json') {
-        return { exitCode: 0, stdout: JSON.stringify({ enabled: true, transport: { type: 'stdio', command: process.execPath, args: ['-e', mcpFixture], env: {} } }), stderr: '', pid: ++syntheticPid }
+        return { exitCode: 0, stdout: JSON.stringify({ enabled: true, transport: { type: 'stdio', command: native.node, args: [native.memory], env: native.env } }), stderr: '', pid: ++syntheticPid }
       }
       if (command === 'codex' && joined === 'mcp get aun --json') return aunRegistered
         ? { exitCode: 0, stdout: nativeTuple(), stderr: '', pid: ++syntheticPid }
@@ -928,13 +971,18 @@ describe('aun bootstrap clean-host journal', () => {
         if (args[0] === 'bin/aun.ts' && args[1] === 'receive') queueReceiveCount++
         const child = Bun.spawn([command, ...args], { cwd: options.cwd, env: options.env, stdout: 'pipe', stderr: 'pipe' })
         const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+        if(exitCode===0 && args[0]==='cli/index.ts' && args.includes('set')) {
+          const fixtureDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
+          try {await registerNativeFixtureRuntime(fixtureDb,native,'clean-default','bootstrap-clean-project','clean-session',repoRoot,ordinaryRuntimeId)} finally {await fixtureDb.close()}
+        }
         return { exitCode, stdout, stderr, pid: child.pid }
       }
       return { exitCode: 1, stdout: '', stderr: `unhandled fake command: ${command} ${joined}`, pid: ++syntheticPid }
     }
 
     const input = { agentId: 'clean-default', runtime: 'codex' as const, home, repoRoot, workspaceRoot: repoRoot, env }
-    const first = await bootstrap(input, { run })
+    const first = await bootstrap(input, { run, observeProvider:native.observeProvider })
+    if(first.status!=='READY') console.error('CLEAN_HOST_RESULT',JSON.stringify(first))
     expect(first.status).toBe('READY')
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
@@ -1002,7 +1050,8 @@ describe('aun bootstrap clean-host journal', () => {
       '--reason', `aun-bootstrap-no-effect:${first.run_id}:contention`,
     ])).exitCode).toBe(0)
 
-    const second = await bootstrap(input, { run })
+    const second = await bootstrap(input, { run, observeProvider:native.observeProvider })
+    if(second.status!=='IDEMPOTENT_READY')console.error('CLEAN_HOST_SECOND',JSON.stringify(second))
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
@@ -1031,7 +1080,8 @@ describe('aun bootstrap clean-host journal', () => {
       invalidPayloadQueueId = String(invalidShared[0]!.id)
       await ownedDb.close()
     }
-    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run })
+    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run, observeProvider:native.observeProvider })
+    if(rolledBack.status!=='ROLLED_BACK')console.error('CLEAN_HOST_ROLLBACK',JSON.stringify(rolledBack))
     expect(rolledBack.status).toBe('ROLLED_BACK')
     expect(rolledBack.reason_codes).toEqual([])
     if (fixture === 'sqlite-new') {

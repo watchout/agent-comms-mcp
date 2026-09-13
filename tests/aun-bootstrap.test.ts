@@ -523,10 +523,10 @@ describe('aun bootstrap B0-B8 state machine', () => {
           ? { exitCode: 0, stdout: JSON.stringify({
               name: 'aun', enabled: true,
               transport: {
-                type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', process.cwd(), 'server.ts'],
+                type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', process.cwd(), join(process.cwd(), 'server.ts')],
                 env: {
                   AGENT_ID: 'stage-deadline', AGENT_COM_EXPECTED_AGENT_ID: 'stage-deadline',
-                  AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db', AGENT_COM_DB: 'sqlite',
+                  AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db', AGENT_COM_DB: 'sqlite', AUN_WEBHOOK_PORT: '0',
                   AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
                 },
               },

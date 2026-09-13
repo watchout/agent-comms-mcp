@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { start as planSeatStart } from './bin/aun/start'
+import { buildStartLaunchArgv, start as planSeatStart } from './bin/aun/start'
 /**
  * Agent Communications MCP Plugin
  *
@@ -4436,7 +4436,7 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
     env:{...process.env,AGENT_COM_RUNTIME_SESSION:entry.session}})
   if(!plan.ok) throw new Error(plan.errors.join(','))
   const quote=(value:string)=>"'"+value.replaceAll("'", "'\"'\"'")+"'"
-  const command=plan.argv.map(quote).join(' ')
+  const command=buildStartLaunchArgv(plan).map(quote).join(' ')
   const startupSafety = evaluateStartupSafety({
     agentId: entry.agentId,
     expectedAgentId: entry.agentId,
@@ -4464,7 +4464,7 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   log.push(`Killed old tmux session (if any)`)
 
   // 3. Create new session and start Claude Code
-  tmuxExec(['new-session', '-d', '-s', entry.session, '-c', expandedDir])
+  tmuxExec(['new-session', '-d', '-s', entry.session, '-c', plan.launch!.cwd])
   const tmuxTarget = `${entry.session}:0.0`
   Bun.sleepSync(1000)
   tmuxExec(['send-keys', '-t', tmuxTarget, '-l', command])

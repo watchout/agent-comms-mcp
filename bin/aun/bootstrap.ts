@@ -51,6 +51,7 @@ import {
   buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
+  recordVerifiedNativeRuntimeMemoryReady,
 } from '../../core/runtime-memory-ready'
 import {
   selectBootstrapRuntime,
@@ -595,7 +596,7 @@ function bootstrapInputDigest(input: {
           tmux: input.env.TMUX || null,
           pane: input.env.TMUX_PANE || null,
         },
-    memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(input.workspaceRoot),
+    memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || null,
     provider_snapshot: input.providerSnapshot,
     intended_aun_tuple_template_digest: bootstrapDigest({
       command: realpathOrResolve(process.execPath),
@@ -677,6 +678,7 @@ async function resolveProviderRootAuthority(input: {
   home: string
   repoRoot: string
   run?: BootstrapAdapterCommandRunner
+  observeProvider?: typeof observeSeatProvider
 }): Promise<{
   ok: true
   authority: ProviderRootAuthority | null
@@ -746,7 +748,7 @@ async function resolveProviderRootAuthority(input: {
     }
   }
   if (!row) return { ok: true, authority: cleanAuthority() }
-  const selected = await withBootstrapDb(input.env,db=>resolveSeatProvider(db,{agentId:input.agentId}),{readonly:true}).catch(()=>null)
+  const selected = await withBootstrapDb(input.env,db=>resolveSeatProvider(db,{agentId:input.agentId,observe:input.observeProvider}),{readonly:true}).catch(()=>null)
   if (selected?.ok && selected.code === 'SELECTED_LIVE' && selected.provider === 'claude') return {ok:true,authority:null}
   if (selected?.ok && selected.code === 'SELECTED_LIVE' && selected.provider === 'codex' && selected.observation) {
     const observed = await readObservedProviderRoot(input.run ?? defaultCommandRunner(), {
@@ -988,7 +990,7 @@ function expectedRuntimeReceiptTuple(
     session_name: sessionName,
     process_id: providerPid,
     port,
-    checkout_path: realpathOrResolve(context.repoRoot),
+    checkout_path: realpathOrResolve(context.workspaceRoot),
     commit_sha: context.repoHead,
   }
 }
@@ -1395,6 +1397,7 @@ type DefaultPortsOptions = {
   env: Record<string, string>
   home: string
   repoRoot: string
+  observeProvider?: typeof observeSeatProvider
 }
 
 function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts {
@@ -1614,7 +1617,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         )
         if (!preAgentResult?.row) throw new Error('configuration desired agent row unavailable')
         const preAgentRow = preAgentResult.row
-        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
+        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.canonicalSourceField === 'observed_provider_process') {
+          const authority = context.providerRootAuthority
+          const current = await readObservedProviderRoot(run, {
+            pid: authority.observedProviderPid!, startedAt: authority.observedProviderStartedAt!,
+            cwd: context.repoRoot, env: context.env,
+          })
+          if (!current || current.root !== authority.canonicalRoot
+            || current.directoryDigest !== authority.canonicalRealpathDigest
+            || current.digest !== authority.authorityTupleDigest) {
+            throw new Error('observed provider root drift under B3 row lock')
+          }
+        } else if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
           const liveMetadata = jsonRecord(preAgentRow.metadata)
           const liveProjection = jsonRecord(preAgentRow.ordinary_projection)
           const liveRoot = typeof liveMetadata.codex_home === 'string' ? liveMetadata.codex_home : ''
@@ -1696,7 +1710,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const newEvents = postBeforeHold.filter((row) => !preEventIds.has(String(row.event_id)))
         const changed = bootstrapDigest(configurationDesiredControlledRow(preAgentRow))
           !== bootstrapDigest(configurationDesiredControlledRow(postAgentRow))
-        if ((!changed && newEvents.length !== 0) || (changed && newEvents.length !== 1)) {
+        const desiredChanged = preAgentRow.desired_digest !== postAgentRow.desired_digest
+        if (newEvents.length !== (desiredChanged ? 1 : 0)) {
           throw new Error('configuration desired event cardinality invalid')
         }
         for (const event of newEvents) {
@@ -2055,7 +2070,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         readinessPredicates: { memory_recovery_readback_planned: true },
       }
     }
-    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
+    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT
+    if (!project) return {ok:false,reasonCodes:['NO_GO_MEMORY_RECOVERY'],evidenceRefs:['memory-error:SEAT_MEMORY_PROJECT_REQUIRED']}
     let runtimeInstanceId: string | null = null
     let runtimeCreated = false
     let runtimeBeforeDigest: string | null = null
@@ -2115,7 +2131,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const observedMcp = await withBootstrapDb(env, db => db.queryOne<any>(
         'SELECT process_id, session_name, checkout_path, host_id FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2',
         [endpoint.endpoint!.runtimeInstanceId, context.agentId]), {readonly:true})
-      const providerObservation = observedMcp && observeSeatProvider({agentId:context.agentId,
+      const providerObservation = observedMcp && (options.observeProvider ?? observeSeatProvider)({agentId:context.agentId,
         runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId, processId:Number(observedMcp.process_id),
         sessionName:observedMcp.session_name, workspace:observedMcp.checkout_path, hostId:observedMcp.host_id})
       if (!providerObservation || providerObservation.provider_pid !== providerPid
@@ -2185,6 +2201,10 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         hostSessionId:providerObservation.host_session_id ?? undefined,signal:context.abortSignal})
       const recovery = {responseDigest:seatReceipt.response_digest,toolCount:1,contentCount:1,
         startedAt:seatReceipt.native_delivery!.delivered_at,completedAt:seatReceipt.completed_at}
+      const ordinaryReceipt = await readNativeSeatContextReceipt({transport,agentId:context.agentId,project,
+        runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,targetRuntime:context.resolvedRuntime,cwd:context.workspaceRoot,env,
+        providerPid,providerStartedAt:providerObservation.provider_started_at,
+        hostSessionId:providerObservation.host_session_id ?? undefined,signal:context.abortSignal})
       failureDiscriminator = 'memory_post_mutation_readback'
       const result = await withBootstrapDb(env, async (db) => {
         const evidence = buildWasurezuBootstrapEvidence({
@@ -2198,6 +2218,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           checkout_path: runtimeTuple.checkout_path,
           checkout_commit_sha: context.repoHead,
           recovery_command: 'mcp:tools/call:native_context_delivery',
+          recovery_receipt: seatReceipt,
         })
         evidence.metadata = {
           ...(evidence.metadata ?? {}),
@@ -2212,6 +2233,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           runtime_tuple_digest: runtimeTupleDigest,
         }
         const recorded = await recordRuntimeMemoryReadyEvidence(db as any, evidence)
+        await recordVerifiedNativeRuntimeMemoryReady(db as any,{agentId:context.agentId,project,
+          runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,receipt:ordinaryReceipt,observeProvider:options.observeProvider})
         const storedEvidence = await db.queryOne<any>(
           'SELECT valid_until FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
           [recorded.evidence_id, runtime.id],
@@ -2305,9 +2328,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   }
 
   const memoryReadback = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
-    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
+    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT
+    if (!project) return {ok:false,reasonCodes:['NO_GO_MEMORY_RECOVERY'],evidenceRefs:['memory-error:SEAT_MEMORY_PROJECT_REQUIRED']}
     const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
     try {
+      const endpoint=await withBootstrapDb(env,db=>resolveRuntimeEndpoint(db,{agentId:context.agentId}),{readonly:true})
+      if(!endpoint.endpoint)throw new Error(endpoint.code)
+      env.AUN_BOOTSTRAP_ACTUAL_PORT=String(endpoint.endpoint.port)
       const mutationPayload = mutation?.rollback_payload ?? {}
       const selectedRuntimeInstanceId = String(
         mutationPayload.runtime_instance_id ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? '',
@@ -2642,13 +2669,18 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       const configurationMigration = join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql')
-      const configurationMigrationSql = postgres ? readFileSync(configurationMigration, 'utf8') : ''
+      const diagnosticsMigrationSql = postgres ? readFileSync(join(repoRoot,'db','migrations','2026-09-13-seat-runtime-continuity-diagnostics.up.sql'),'utf8') : ''
+      const configurationMigrationSql = postgres ? readFileSync(configurationMigration,'utf8') : ''
       const applyConfigurationMigration = async (): Promise<BootstrapCommandResult> => {
         try {
-          const applied = await withBootstrapDb(env, async (db) => db.execute(configurationMigrationSql))
+          const applied = await withBootstrapDb(env, async (db) => {
+            const installed=await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_desired_document(agents)') IS NOT NULL AS present")
+            if(!installed?.present) await db.execute(configurationMigrationSql)
+            return db.execute(diagnosticsMigrationSql)
+          })
           return {
             exitCode: 0,
-            stdout: JSON.stringify({ row_count: applied.rowCount, migration_digest: bootstrapDigest(configurationMigrationSql) }),
+            stdout: JSON.stringify({ row_count: applied.rowCount, migration_digest: bootstrapDigest([configurationMigrationSql,diagnosticsMigrationSql]) }),
             stderr: '',
           }
         } catch (error) {
@@ -2709,7 +2741,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       env.AUN_BOOTSTRAP_CHANNEL_PORT = String(port)
       const desired = {
         runtime: 'TUI', runtime_engine_preference: context.resolvedRuntime,
-        home_directory: context.workspaceRoot, channel_port: port, tmux_session: session, profile_enabled: true,
+        home_directory: context.workspaceRoot, channel_port: port || null, tmux_session: session, profile_enabled: true,
       }
       const matches = existing
         && existing.runtime === desired.runtime
@@ -2743,7 +2775,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const applied = await run(bunPath, [
         'cli/index.ts', 'agent', 'profile', 'set', context.agentId,
         '--runtime', 'TUI', '--runtime-engine', context.resolvedRuntime!,
-        '--home-directory', context.workspaceRoot, '--channel-port', String(port),
+        '--home-directory', context.workspaceRoot, ...(port > 0 ? ['--channel-port', String(port)] : []),
         '--tmux-session', session, '--enabled', 'true', '--execute',
       ], commandOptions(context, 120_000))
       const readback = await profileGet(context.agentId)
@@ -3881,6 +3913,7 @@ export type BootstrapDependencies = {
   stateStore?: BootstrapStateStore
   ports?: BootstrapExecutionPorts
   run?: BootstrapAdapterCommandRunner
+  observeProvider?: typeof observeSeatProvider
   uuid?: () => string
   stageDeadlineMs?: Partial<Record<BootstrapStage, number>>
 }
@@ -3913,6 +3946,7 @@ export async function bootstrap(
     home,
     repoRoot,
     run: runCommand,
+    observeProvider: dependencies.observeProvider,
   })
   if (rootResolution.ok && rootResolution.authority) {
     // Target Codex commands always receive the canonical root. Caller/TUI
@@ -3974,7 +4008,7 @@ export async function bootstrap(
     if (typeof runtimeId === 'string' && runtimeId) env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = runtimeId
   }
   hydrateRunEnvironment(state)
-  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot })
+  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot, observeProvider: dependencies.observeProvider })
   let lockHeld = false
   const bootstrapStartedAt = performance.now()
   const boundedDeadline = (stage: BootstrapStage, task: (signal: AbortSignal) => Promise<BootstrapStageOutcome>) =>

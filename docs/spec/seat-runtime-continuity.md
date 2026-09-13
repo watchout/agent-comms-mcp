@@ -54,6 +54,25 @@ in desired state. The candidate binds the observed runtime/PID/start/root/lease
 identity; sampling time is excluded from that identity to avoid a new candidate on
 every observation. Validation re-observes the current holder before acceptance.
 
+The canonical desired digest excludes `runtime_engine_preference`,
+`canonical_home`, `canonical_workspace`, `channel_port`, and the three physical
+projection keys `provider_repo_root`, `provider_config_root`, `daemon_checkout`.
+A runtime-only update leaves desired revision, digest, provenance and outbox
+unchanged; a stable policy change advances revision once. New dynamic seats may
+leave those diagnostics unset (or port zero); stable enrollment, account identity
+references, control references and release checks remain required.
+
+The September diagnostics migration performs one atomic format transition only
+for complete legacy rows whose positive revision and stored digest exactly match
+the legacy canonical document. Each eligible row receives revision +1, the
+stable-only digest and exactly one event through the existing trigger. All other
+identity, runtime, credential reference, control/release and queue values and all
+previous observed/outbox/restart history are preserved. Invalid or incomplete
+legacy rows remain untouched and unavailable to strict readers. Reapplying the
+migration is a no-op. The paired down migration rejects populated stable-format
+history with `AUN_DESIRED_FORMAT_ROLLBACK_INCOMPATIBLE`; application must explicitly
+cover this shared format transition, separately from any target seat restart.
+
 ## SC-3 — durable context and unfinished work
 
 1. Resolve the logical memory project using the existing target-agent memory identity contract, never the controller CWD, provider name, new checkout basename or another agent's ambient identity. The primary memory namespace is `agent_id`; `project` is its subordinate filter, as defined in Wasurezu SSOT-7. The same seat/project remains the recovery partition across Codex/Claude and host-local process replacement. Host path changes are adapter/location changes, not an instruction to invent a new memory project.
@@ -194,3 +213,7 @@ git rev-parse HEAD
 ```
 
 Receipt destination: `/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/`; bind test logs to implementation base/head/tree, command, isolated fixture configuration, per-predicate assertions and exit result. Required final receipts additionally bind the independently audited commit, actual applied checkout/process version, seat/project/runtime/endpoint identities and SC1–3 ordinary-path observations. No conversation or credential content is recorded.
+
+SC3 ordinary readiness uses evidence for the exact selected local MCP runtime UUID. B5 may separately keep a sealed-provider receipt; it must independently validate the native stored input for the actual MCP UUID before recording ordinary readiness. Evidence lookup separates known runtime kinds, then requires the exact selected UUID so sealed and ordinary views cannot shadow each other. A newer invalid same-kind or unknown-runtime record still denies; no older-success fallback is introduced. A UUID rewrite or a metadata-only mapping never substitutes for current provider PID/start/session/workspace, child ancestry and lease verification.
+
+SC3 logical project resolution uses explicit `agents.metadata.memory_project`, or exactly one currently valid native context receipt for the selected local MCP runtime. The same-seat/project receipt must pass the existing exact runtime/lease/provider readiness checks. No absolute path, local workspace row, or basename selects a memory namespace. Missing or multiple verified projects fail explicitly; bootstrap must carry its explicit target project before ordinary readiness can discover it.

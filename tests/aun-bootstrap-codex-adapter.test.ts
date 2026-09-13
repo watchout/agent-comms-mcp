@@ -40,13 +40,13 @@ const environment = {
   DATABASE_URL: 'postgresql:///probe',
   AGENT_COM_PG_NOTIFY: 'false',
   AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
-  AUN_WEBHOOK_PORT: '8891',
+  AUN_WEBHOOK_PORT: '0',
 }
 
 function exactGet(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
     name: 'aun', enabled: true,
-    transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+    transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: environment },
     ...overrides,
   })
 }
@@ -128,8 +128,8 @@ describe('aun bootstrap Codex adapter', () => {
     const add = calls.find((call) => call.args.slice(0, 3).join(' ') === 'mcp add aun')!
     expect(add.command).toBe('codex')
     expect(add.args).toContain('AGENT_ID=codex-probe')
-    expect(add.args).toContain('AUN_WEBHOOK_PORT=8891')
-    expect(add.args.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/repo', 'server.ts'])
+    expect(add.args).toContain('AUN_WEBHOOK_PORT=0')
+    expect(add.args.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/workspace', '/repo/server.ts'])
   })
 
   test('exact existing registration is idempotent and creates no mutation', async () => {
@@ -404,9 +404,9 @@ describe('aun bootstrap Codex adapter', () => {
       })
       const exactGet = JSON.stringify({
         name: 'aun', enabled: true,
-        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: {
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: {
           AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
-          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
         } },
       })
       const adapter = source.createCodexBootstrapAdapter({
@@ -566,11 +566,11 @@ describe('aun bootstrap Codex adapter', () => {
       const tupleDigest = state.bootstrapDigest(tuple)
       const environment = {
         AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
-        AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+        AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
       }
       const exactGet = JSON.stringify({
         name: 'aun', enabled: true,
-        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: environment },
       })
       const adapter = source.createCodexBootstrapAdapter({
         bunPath: '/bin/bun', serverEntry: 'server.ts',

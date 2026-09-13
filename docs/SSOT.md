@@ -8,7 +8,7 @@
 Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
 Provider preference and profile port are legacy hints. Current provider ancestry,
 held OS endpoint ownership and its existing runtime lease govern operation;
-current-host native context delivery governs memory-ready.
+current-host native context delivery governs memory-ready. Physical provider/home/workspace/port diagnostics are excluded from the canonical desired digest; the exact legacy-format transition and incompatible rollback guard are defined in that spec.
 
 ## 1. プロダクト概要
 
