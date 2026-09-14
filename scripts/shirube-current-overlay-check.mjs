@@ -267,14 +267,14 @@ if (pr && (changedFiles.some((file) => file.startsWith(".github/workflows/")) ||
 }
 
 // One owner-admitted CI supply, never a generic R4 or merge waiver. The digest
-// binds the complete reviewed canonical object, including all 122 admitted integration paths. No remote event budget is inferred.
+// binds the complete reviewed canonical object, including all 124 admitted integration paths. No remote event budget is inferred.
 async function requireBoundedCiSupply() {
   const target="watchout/agent-comms-mcp", cell="CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001";
   const base="0f772883db6f3b50772d3e4b82ce47795091f0a9", origin="565583c25963b7dfa9b4445543967d372091b336";
   const odUrl=`https://github.com/${target}/issues/940#issuecomment-5609700544`;
   const currentC1="fbadcc82ff40cbb2410d603215d34196747aebc9";
   const odHash="59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02";
-  const expiry="2026-09-14T02:00:00Z", now=Date.now();
+  const expiry="2026-09-14T03:00:00Z", now=Date.now();
   const check=(condition,detail)=>{if(!condition)throw Error(detail)};
   const hash=value=>createHash("sha256").update(value).digest("hex");
   const sha40=value=>typeof value==="string"&&/^[0-9a-f]{40}$/.test(value);
@@ -292,8 +292,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5657552797`
-    &&digest==="4f6588f90dfa5202b57f02e6153f3b1164af5eec32c4b13e30eac5953fd4dc03","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5657832183`
+    &&digest==="2716683865e384eca8496223a65b972eaa124509c2d8705c999a1e5f7b28964e","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -309,20 +309,24 @@ async function requireBoundedCiSupply() {
   };
   requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
   const handoffBody=await load(ref,digest);
-  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I3 -->";
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I4 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   const blocks=[...handoffBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
   check(blocks.length===1,"one current handoff JSON block required");
   const handoff=JSON.parse(blocks[0][1]);
   check(handoff.schema_version==="shirube-control-handoff/v1"
-    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I3"
+    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I4"
     &&handoff.subject.repository===target&&handoff.subject.pr===963
     &&handoff.subject.current_public_head===currentC1&&handoff.subject.base===base
     &&handoff.subject.c2==="8d38f3bd6a99a2f4615949dd747d708f8b6943d6"
     &&handoff.subject.seat_continuity==="81be7f051f85973bb9533e87d3258825082ad158"
     &&handoff.subject.was_companion==="e49abc24838227776dc01be111aeb035ec7c9aad"
-    &&Date.parse(handoff.bounds.expiry)===Date.parse(expiry)
-    &&handoff.bounds.remote_pushes===0&&handoff.bounds.manual_CI_starts===0
+    &&Date.parse(handoff.bounds.expires_at)===Date.parse(expiry)
+    &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===4
+    &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===5
+    &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_runs===3
+    &&handoff.bounds.correction_rounds===1&&handoff.bounds.two_callers_original_limit===20
+    &&handoff.subject.current_local_head==="f27f1484a9e7eb7bd9a232c70a3ac0c86390fb3d"
     &&handoff.execution_context.active_function==="implementation_executor"
     &&handoff.execution_context.actor_agent_id==="codex-cto/runtime_status"
     &&handoff.execution_context.checker==="/root/goal_gap"
@@ -336,6 +340,13 @@ async function requireBoundedCiSupply() {
   git("merge-base","--is-ancestor",currentC1,headSha);
   git("merge-base","--is-ancestor",handoff.subject.c2,headSha);
   git("merge-base","--is-ancestor",handoff.subject.seat_continuity,headSha);
+  git("merge-base","--is-ancestor",handoff.subject.current_local_head,headSha);
+  const repairs=["db/migrations/2026-09-08-queue-bounded-admission.up.sql",
+    "db/migrations/2026-09-08-queue-bounded-admission.down.sql","tests/contract/test_queue_bounded_admission.test.ts",
+    "docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts"];
+  check(JSON.stringify([...handoff.repair_paths].sort())===JSON.stringify(repairs.sort())
+    &&git("diff","--no-renames","--name-only",`${handoff.subject.current_local_head}...${headSha}`).split("\n").filter(Boolean)
+      .every(file=>repairs.includes(file)),"candidate repair outside current I4 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)

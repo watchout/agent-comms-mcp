@@ -17,5 +17,14 @@ END $$;
 DROP INDEX IF EXISTS public.aun_admission_unique_projection;
 DROP TABLE public.queue_admission_tasks;
 DROP TABLE public.queue_admission_policies;
+-- Leave the independently installed observation topology and history intact.
+DO $$ BEGIN
+  IF to_regclass('public.fleet_runtime_queue_observation_active') IS NOT NULL THEN
+    REVOKE SELECT ON public.fleet_runtime_queue_observation_active FROM aun_admission_owner;
+  END IF;
+  IF to_regclass('public.fleet_runtime_queue_agent_revisions') IS NOT NULL THEN
+    REVOKE SELECT,INSERT,UPDATE ON public.fleet_runtime_queue_agent_revisions FROM aun_admission_owner;
+  END IF;
+END $$;
 -- Roles may be shared by isolated DBs or future deployments; never drop them.
 COMMIT;

@@ -64,6 +64,41 @@ GRANT USAGE ON SCHEMA public TO aun_admission_owner, aun_admission_runtime, aun_
 GRANT SELECT, INSERT, UPDATE, DELETE, TRIGGER ON public.agent_messages, public.message_queue, public.outbound_queue TO aun_admission_owner;
 GRANT USAGE, SELECT ON SEQUENCE public.message_queue_id_seq, public.outbound_queue_id_seq TO aun_admission_owner;
 
+-- The existing observation-v2 AFTER trigger is SECURITY INVOKER: guarded queue
+-- updates use this fixed owner, not the caller's legacy transport grants.
+DO $$
+DECLARE
+  epoch_sequence regclass := to_regclass('public.fleet_runtime_queue_observation_epoch_seq');
+  active_table regclass := to_regclass('public.fleet_runtime_queue_observation_active');
+  revision_table regclass := to_regclass('public.fleet_runtime_queue_agent_revisions');
+  bump_function regprocedure := to_regprocedure('public.fleet_runtime_bump_queue_agent_revision_v2()');
+  queue_trigger oid;
+BEGIN
+  SELECT oid INTO queue_trigger FROM pg_trigger
+    WHERE tgrelid='public.message_queue'::regclass AND tgname='fleet_runtime_queue_agent_revision_v2' AND NOT tgisinternal;
+  IF epoch_sequence IS NULL AND active_table IS NULL AND revision_table IS NULL
+    AND bump_function IS NULL AND queue_trigger IS NULL THEN RETURN; END IF;
+  IF epoch_sequence IS NULL OR active_table IS NULL OR revision_table IS NULL
+    OR bump_function IS NULL OR queue_trigger IS NULL
+    OR NOT EXISTS(SELECT FROM pg_class WHERE oid=epoch_sequence AND relkind='S')
+    OR NOT EXISTS(SELECT FROM pg_class WHERE oid=active_table AND relkind='r')
+    OR NOT EXISTS(SELECT FROM pg_class WHERE oid=revision_table AND relkind='r')
+    OR NOT EXISTS(SELECT FROM pg_proc WHERE oid=bump_function AND NOT prosecdef AND prorettype='trigger'::regtype)
+    OR NOT EXISTS(SELECT FROM pg_trigger WHERE oid=queue_trigger AND tgfoid=bump_function
+      AND tgtype=29 AND tgenabled IN ('O','A') AND tgnargs=0) THEN
+    RAISE EXCEPTION 'ADMISSION_OBSERVATION_TOPOLOGY_INVALID';
+  END IF;
+  IF (SELECT count(*) FROM public.fleet_runtime_queue_observation_active
+    WHERE singleton=true AND schema_version='fleet-runtime-v1/observation/v2'
+      AND contract_revision=2 AND migration_epoch>0) <> 1 THEN
+    RAISE EXCEPTION 'ADMISSION_OBSERVATION_TOPOLOGY_INVALID';
+  END IF;
+  -- Resolve the actual trigger's required columns before granting dependencies.
+  PERFORM migration_epoch,agent_id,revision,updated_at FROM public.fleet_runtime_queue_agent_revisions LIMIT 0;
+  GRANT SELECT ON public.fleet_runtime_queue_observation_active TO aun_admission_owner;
+  GRANT SELECT,INSERT,UPDATE ON public.fleet_runtime_queue_agent_revisions TO aun_admission_owner;
+END $$;
+
 CREATE OR REPLACE FUNCTION public.aun_admission_digest(value jsonb) RETURNS text
 LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, public
 AS $$ SELECT encode(sha256(convert_to(value::text,'UTF8')),'hex') $$;

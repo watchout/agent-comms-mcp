@@ -33,6 +33,25 @@ consumed in the same transaction. Legacy queue-first writes use NOWAIT, never re
 Administrator bypass is outside the guarantee: live role/grant and worker tool-isolation
 readback is mandatory; sharing superuser credentials with a worker is not admitted.
 
+When the existing observation-v2 queue trigger is installed, its SECURITY INVOKER
+function runs inside the admission owner's guarded queue update. The admission
+migration therefore grants that fixed NOLOGIN owner SELECT on
+`fleet_runtime_queue_observation_active` and SELECT/INSERT/UPDATE on
+`fleet_runtime_queue_agent_revisions`, with no DELETE, sequence or owner-membership
+grant. The epoch sequence, both tables, exact enabled queue trigger and its invoker
+function must form a complete topology with the v2 active marker. Partial or
+inconsistent topology refuses installation atomically. A schema with none of those
+optional objects retains the existing installation/default and PostgreSQL 16
+behavior; installing observation-v2 later requires reapplying this migration before
+bounded use. Removal revokes only these dependency privileges and retains the
+observation objects and history.
+
+The shared PostgreSQL 17 bounded fixture installs the actual 2026-08-16 migration
+before reapplying admission. Normal claim, invocation and result each increment the
+recipient revision; revoking any required dependency must refuse the transition
+without changing the queue, task, policy or revision. These restricted-owner tests
+do not substitute for actual target-schema/principal readback at application.
+
 The installed interface revision is `2026-09-08.v1`. Read-only
 `aun_admission_capability()` returns a digest of the actual ordered SQL function
 definitions, owners and ACLs. The reviewed policy's `guard_digest` pins that value;

@@ -123,7 +123,16 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
     expect(identity.db).toBe(name); expect(identity.version).toBeGreaterThanOrEqual(170000); expect(identity.version).toBeLessThan(180000)
     const migrated = Bun.spawnSync(['bun', 'run', 'db/migrate.ts'], { cwd: candidateRoot, env: { ...process.env, AGENT_COM_DB: 'postgres', DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_NAME: name }, stdout: 'pipe', stderr: 'pipe' })
     if (migrated.exitCode !== 0) throw new Error(`BA_MIGRATION_FAILED ${migrated.stderr.toString()}`)
+    // db/migrate.ts supports the old schema without this optional topology.
+    expect((await admin.query("SELECT to_regclass('public.fleet_runtime_queue_observation_active') AS relation")).rows[0].relation).toBeNull()
+    await admin.query(readFileSync(resolve(candidateRoot, 'db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql'), 'utf8'))
     await admin.query(readFileSync(resolve(candidateRoot, 'db/migrations/2026-09-08-queue-bounded-admission.up.sql'), 'utf8'))
+    const observation=(await admin.query("SELECT t.tgtype::int AS type,t.tgenabled AS enabled,p.prosecdef AS definer FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid='public.message_queue'::regclass AND t.tgname='fleet_runtime_queue_agent_revision_v2'")).rows
+    expect(observation).toEqual([{type:29,enabled:'O',definer:false}])
+    expect((await admin.query("SELECT rolcanlogin,rolsuper,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname='aun_admission_owner'")).rows[0])
+      .toEqual({rolcanlogin:false,rolsuper:false,rolcreaterole:false,rolbypassrls:false})
+    expect((await admin.query("SELECT has_table_privilege('aun_admission_owner','fleet_runtime_queue_observation_active','SELECT') AS epoch_read,has_table_privilege('aun_admission_owner','fleet_runtime_queue_agent_revisions','SELECT,INSERT,UPDATE') AS revisions,has_table_privilege('aun_admission_owner','fleet_runtime_queue_agent_revisions','DELETE') AS delete_revision,has_sequence_privilege('aun_admission_owner','fleet_runtime_queue_observation_epoch_seq','USAGE') AS sequence_usage")).rows[0])
+      .toEqual({epoch_read:true,revisions:true,delete_revision:false,sequence_usage:false})
     const roles = { controller: `${name}_c`, executor: `${name}_e`, runtime: `${name}_r` }
     const passwords = Object.fromEntries(Object.keys(roles).map(kind=>[kind,randomBytes(24).toString('hex')]))
     await admin.query("SET password_encryption='scram-sha-256'")
@@ -145,6 +154,7 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
       expect((await c.query("SELECT current_user actor,rolsuper,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user")).rows[0])
         .toEqual({actor:roles[kind],rolsuper:false,rolcreaterole:false,rolbypassrls:false})
       expect((await admin.query("SELECT rolpassword LIKE 'SCRAM-SHA-256$%' scram FROM pg_authid WHERE rolname=$1",[roles[kind]])).rows[0].scram).toBe(true)
+      expect((await admin.query("SELECT pg_has_role($1,'aun_admission_owner','MEMBER') AS owner_member",[roles[kind]])).rows[0].owner_member).toBe(false)
     }
     const config = { policy_id: `policy_${name}`, agent_id: 'qa', max_tasks: 2, max_inflight: 1, invocation_max_attempts: 1, finalizer_max_attempts: 1,
       transport: { original_max_posts:1,reply_max_posts:3,waits_ms:[10000,30000],post_timeout_ms:10000,transport_horizon_ms:120000,
@@ -252,7 +262,75 @@ export async function deliverFixtureProjection(f: BoundedFixture,row: any,onWire
   return (await f.runtime.query('SELECT * FROM outbound_queue WHERE id=$1',[row.id])).rows[0]
 }
 
+async function verifyObservationOwnerDependencies() {
+  await fixture(async f=>{
+    const up=readFileSync(resolve(candidateRoot,'db/migrations/2026-09-08-queue-bounded-admission.up.sql'),'utf8')
+    const observationBytes=async()=> (await f.admin.query("SELECT (SELECT jsonb_agg(to_jsonb(a)) FROM fleet_runtime_queue_observation_active a) AS active,(SELECT jsonb_agg(to_jsonb(r) ORDER BY agent_id) FROM fleet_runtime_queue_agent_revisions r) AS revisions")).rows[0]
+    const beforeRemoval=await observationBytes()
+    await f.admin.query(readFileSync(resolve(candidateRoot,'db/migrations/2026-09-08-queue-bounded-admission.down.sql'),'utf8'))
+    expect((await f.admin.query("SELECT has_table_privilege('aun_admission_owner','fleet_runtime_queue_observation_active','SELECT') AS epoch_read,has_table_privilege('aun_admission_owner','fleet_runtime_queue_agent_revisions','SELECT,INSERT,UPDATE') AS revisions")).rows[0])
+      .toEqual({epoch_read:false,revisions:false})
+    expect(await observationBytes()).toEqual(beforeRemoval)
+    await f.admin.query(up)
+    const topologyNegatives=[
+      'ALTER SEQUENCE fleet_runtime_queue_observation_epoch_seq RENAME TO missing_epoch',
+      'ALTER TABLE fleet_runtime_queue_observation_active RENAME TO missing_active',
+      'ALTER TABLE fleet_runtime_queue_agent_revisions RENAME TO missing_revisions',
+      'ALTER FUNCTION fleet_runtime_bump_queue_agent_revision_v2() RENAME TO missing_bump',
+      'DROP TRIGGER fleet_runtime_queue_agent_revision_v2 ON message_queue',
+      'ALTER TABLE message_queue DISABLE TRIGGER fleet_runtime_queue_agent_revision_v2',
+      'ALTER FUNCTION fleet_runtime_bump_queue_agent_revision_v2() SECURITY DEFINER',
+      'DELETE FROM fleet_runtime_queue_observation_active',
+    ]
+    for(const mutation of topologyNegatives){
+      await f.admin.query('BEGIN')
+      try{
+        await f.admin.query(mutation)
+        await expect(f.admin.query(up),mutation).rejects.toThrow('ADMISSION_OBSERVATION_TOPOLOGY_INVALID')
+      }finally{await f.admin.query('ROLLBACK')}
+      expect(await observationBytes()).toEqual(beforeRemoval)
+    }
+    await seedNormalTransport(f.admin);await f.prepare()
+    const enrolled=await enrollNormalTask(f,1)
+    await admissionTransition(f.control,enrolled.state,'enable',{})
+    const revision=async()=>Number((await f.admin.query("SELECT r.revision FROM fleet_runtime_queue_agent_revisions r JOIN fleet_runtime_queue_observation_active a USING(migration_epoch) WHERE r.agent_id='qa'")).rows[0].revision)
+    const snapshot=async()=>({
+      queue:(await f.admin.query('SELECT to_jsonb(q) AS row FROM message_queue q WHERE id=$1',[enrolled.q.id])).rows[0].row,
+      policy:(await f.admin.query('SELECT to_jsonb(p) AS row FROM queue_admission_policies p WHERE policy_id=$1',[f.config.policy_id])).rows[0].row,
+      task:(await f.admin.query('SELECT to_jsonb(t) AS row FROM queue_admission_tasks t WHERE policy_id=$1',[f.config.policy_id])).rows[0].row,
+      observation:await observationBytes(),
+    })
+    const baseline=await revision(),beforeClaim=await snapshot()
+    const missingGrants=[['fleet_runtime_queue_observation_active','SELECT'],
+      ...['SELECT','INSERT','UPDATE'].map(privilege=>['fleet_runtime_queue_agent_revisions',privilege])]
+    for(const [table,privilege] of missingGrants){
+      await f.admin.query(`REVOKE ${privilege} ON public.${table} FROM aun_admission_owner`)
+      try{
+        await expect(tryBoundedClaim(f.executor,'qa',{dialect:'postgres',env:f.env,queueId:String(enrolled.q.id)}))
+          .rejects.toThrow(`permission denied for table ${table}`)
+        expect(await snapshot()).toEqual(beforeClaim)
+      }finally{await f.admin.query(`GRANT ${privilege} ON public.${table} TO aun_admission_owner`)}
+    }
+    await tryBoundedClaim(f.executor,'qa',{dialect:'postgres',env:f.env,queueId:String(enrolled.q.id)})
+    expect(await revision()).toBe(baseline+1)
+    let invocations=0
+    const adapter={runtime_id:f.config.runtime_id,capabilities:{},execution_timeout_ms:1000,invoke:async()=>{
+      invocations++;expect(await revision()).toBe(baseline+2)
+      expect((await admissionStatus(f.executor,f.config.policy_id))!.tasks[0]).toMatchObject({stage:'INVOKING',invocation_attempts:1})
+      return fixtureResult()
+    }}
+    expect((await runReceivedQueueWork(fixtureDb(f),{queueId:enrolled.q.id,adapter,expectedClaimSource:'bounded-admission'})).ok).toBe(true)
+    expect(invocations).toBe(1);expect(await revision()).toBe(baseline+3)
+    expect((await admissionStatus(f.executor,f.config.policy_id))!.tasks[0]).toMatchObject({stage:'RESULT_SAVED',invocation_attempts:1})
+    expect((await f.admin.query('SELECT status FROM message_queue WHERE id=$1',[enrolled.q.id])).rows[0].status).toBe('done')
+    console.log(JSON.stringify({subcase:'I4-OWNER-OBSERVATION-DEPENDENCIES',topology_negative_cases:topologyNegatives.length,
+      missing_grants_atomic_refusal:missingGrants.length,revision_baseline:baseline,claim_revision:baseline+1,invoke_revision:baseline+2,result_revision:baseline+3,
+      owner_login:false,owner_membership:false,caller_legacy_transport_grants:true,old_schema_installation:true,down_preserves_observation:true}))
+  })
+}
+
 boundedTest('BA-CORE-F02', async () => {
+  await verifyObservationOwnerDependencies()
   await fixture(async ({admin,control,executor,runtime,config,env,prepare}) => {
     await prepare()
     const state=(await admissionStatus(control,config.policy_id))!
