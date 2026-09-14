@@ -408,3 +408,10 @@ its6-second child,5-second SQL and1-second lock limits are unchanged. No force
 drop, retry, server wait-cause claim or cleanup failure waiver is introduced.
 The original focused failure remains evidence; the unconsumed full11 is the
 first current-source test after this one fixture correction.
+
+
+### I11: synchronize the retry fixture with its persisted deadline
+
+Published I11: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5659615988, raw body SHA-256 `ad63e6b996844fed6ef090004a92e9d11427e69ddd7a83b85ac763dc81096940`. C10's fixed clock padding remained 36/36/33 ms earlier than the actual persisted retry deadline. The existing product correctly returned RETRY_WAIT. After the unchanged early-denial checks and owned SQL adjustment, DR02–04 must read that row's RETRYABLE receipt, require a finite numeric next_not_before, and advance wall and monotonic clocks by the same delta to max(current wall + original required wait, persisted deadline). No arbitrary padding or product clock change is permitted. All original wire counts, minimum waits, cases, 30 s F06 cap, main concurrency 2 plus four A09 fixtures, exclusive DR10 settlement, and 100/10 ms performance gates remain.
+
+Current I11 authentication retains all prior published bodies and rejects absent I11 even when I10 remains. One candidate C11, full12 with local specimen26, and same-head private2 are admitted; focused runs are zero. Actual PG16 CI and protected application remain separate. Earlier C9 CI performance failures and C10 failures remain evidence; a later local PASS does not explain their cause.

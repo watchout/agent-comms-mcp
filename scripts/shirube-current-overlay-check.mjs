@@ -292,8 +292,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5659450041`
-    &&digest==="95df0abfbf75caeab73fb8ea70f64e22bb3b73a7f07feee71b0694db07661aab","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5659615988`
+    &&digest==="ad63e6b996844fed6ef090004a92e9d11427e69ddd7a83b85ac763dc81096940","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -309,28 +309,29 @@ async function requireBoundedCiSupply() {
   };
   requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
   const handoffBody=await load(ref,digest);
-  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I10 -->";
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I11 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   const blocks=[...handoffBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
   check(blocks.length===1,"one current handoff JSON block required");
   const handoff=JSON.parse(blocks[0][1]);
   check(handoff.schema_version==="shirube-control-handoff/v1"
-    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I10"
+    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I11"
     &&handoff.subject.repository===target&&handoff.subject.pr===963
     &&handoff.subject.current_public_head===currentC9&&handoff.subject.base===base
     &&handoff.subject.c2==="8d38f3bd6a99a2f4615949dd747d708f8b6943d6"
     &&handoff.subject.seat_continuity==="81be7f051f85973bb9533e87d3258825082ad158"
     &&handoff.subject.was_companion==="e49abc24838227776dc01be111aeb035ec7c9aad"
     &&Date.parse(handoff.bounds.expires_at)===Date.parse(expiry)
-    &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===10
-    &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===11
-    &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_runs===1
+    &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===11
+    &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===12
+    &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_runs===0
     &&handoff.bounds.correction_rounds===1&&handoff.bounds.two_callers_original_limit===20
-    &&handoff.bounds.two_callers_consumed===24&&handoff.bounds.active_minutes===45
-    &&handoff.bounds.local_completion_target==="2026-09-14T15:10:00+09:00"
+    &&handoff.bounds.two_callers_consumed===25&&handoff.bounds.active_minutes===35
+    &&handoff.bounds.local_completion_target==="2026-09-14T15:20:00+09:00"
     &&handoff.bounds.owned_fixture_setup_completion===1
-    &&handoff.bounds.two_callers_additional_local_specimens===1&&handoff.bounds.two_callers_cumulative_limit===25
-    &&handoff.subject.current_local_head===currentC9
+    &&handoff.bounds.two_callers_additional_local_specimens===1&&handoff.bounds.two_callers_cumulative_limit===26
+    &&handoff.subject.current_local_head==="67d2e1a740f8d873f1ef89d6fe5fad90a9d1253a"
+    &&handoff.subject.current_local_tree==="0c4cf9542a8ccf60ebf0f8911da2d1204de18849"
     &&handoff.execution_context.active_function==="implementation_executor"
     &&handoff.execution_context.actor_agent_id==="codex-cto/latest_delivery"
     &&handoff.execution_context.checker==="/root/goal_gap"
@@ -351,7 +352,7 @@ async function requireBoundedCiSupply() {
     "tests/contract/test_queue_bounded_use_trace.test.ts"];
   check(JSON.stringify([...handoff.repair_paths].sort())===JSON.stringify(repairs.sort())
     &&git("diff","--no-renames","--name-only",`${handoff.subject.current_local_head}...${headSha}`).split("\n").filter(Boolean)
-      .every(file=>repairs.includes(file)),"candidate repair outside current I10 scope");
+      .every(file=>repairs.includes(file)),"candidate repair outside current I11 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)

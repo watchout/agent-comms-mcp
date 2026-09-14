@@ -638,7 +638,17 @@ await client.end();process.exit(24)
           await f.admin.query("UPDATE queue_admission_policies SET bot_not_before='{}'::jsonb WHERE policy_id=$1",[f.config.policy_id])
           await f.admin.query('COMMIT')
         }catch(e){await f.admin.query('ROLLBACK');throw e}
-        now+=spec.waits[i]+100;mono+=spec.waits[i]+100
+        // SQL records its real deadline after fixture wall time was sampled.
+        // Synchronize both fixture clocks with that actual durable deadline.
+        const persisted=JSON.parse(readFileSync(`${f.config.transport.receipt_dir}/out-${row.id}.json`,'utf8'))
+        if(persisted.state!=='RETRYABLE'||typeof persisted.next_not_before!=='number'
+          ||!Number.isFinite(persisted.next_not_before))throw new Error('I11_INVALID_PERSISTED_RETRY_DEADLINE')
+        const previousWall=now,previousMono=mono
+        const nextWall=Math.max(now+spec.waits[i],persisted.next_not_before)
+        const delta=nextWall-now
+        now=nextWall;mono+=delta
+        console.log(JSON.stringify({subcase:'I11-RETRY-CLOCK',id:spec.id,step:i,previousWall,previousMono,
+          requiredWait:spec.waits[i],persistedDeadline:persisted.next_not_before,now,mono,delta}))
       }
     }
     expect(preparations).toBe(1);expect(new Set(bodies).size).toBe(1)
