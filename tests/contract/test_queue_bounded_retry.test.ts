@@ -1,5 +1,5 @@
 import { expect } from 'bun:test'
-import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, settleIndependentFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
+import { sanitizeFixtureError, boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, settleIndependentFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { DiscordAdapter, postBoundedDiscordRequest } from '../../adapters/discord'
@@ -377,18 +377,76 @@ boundedTest('BA-CORE-F05',async()=>{
   }
 })
 
-export async function withA09Fixtures(main: () => Promise<void>): Promise<void> {
-  const a09=['acquired','unlinked','closed','races'].map(cut=>ownerRecoveryFixture(cut as any))
-  await settleFixtureWork(main,a09)
+export async function withA09Fixtures(main: Array<() => Promise<void>>): Promise<void> {
+  const a09=['acquired','unlinked','closed','races'].map(cut=>()=>ownerRecoveryFixture(cut as any))
+  await settleIndependentFixtureWork([...a09,...main],6)
+}
+
+
+// I17: workers reconstruct complete cases from this file. Their budget is a
+// strict remainder of the one parent F06 deadline; this is not a new case cap.
+const f06WorkerCase=process.env.AUN_F06_WORKER_CASE
+const f06WorkerDeadline=Number(process.env.AUN_F06_WORKER_DEADLINE)
+const f06SourceFiles=['tests/contract/test_queue_bounded_retry.test.ts','tests/contract/test_queue_bounded_admission.test.ts','tests/contract/test_queue_bounded_admission_postgres.test.ts']
+function f06SourceBinding():string {
+  return admissionSha256(JSON.stringify(f06SourceFiles.map(path=>[path,admissionSha256(readFileSync(`${candidateRoot}/${path}`,'utf8'))])))
+}
+const f06WorkerKeys=['AUN_F06_WORKER_CASE','AUN_F06_WORKER_DEPTH','AUN_F06_WORKER_DEADLINE','AUN_F06_WORKER_SOURCE']
+const f06WorkerInputs=f06WorkerKeys.filter(key=>process.env[key]!==undefined)
+if(f06WorkerInputs.length && (f06WorkerInputs.length!==4||!f06WorkerCase||process.env.AUN_F06_WORKER_DEPTH!=='1'||!Number.isSafeInteger(f06WorkerDeadline)
+  ||f06WorkerDeadline<=Date.now()||f06WorkerDeadline>Date.now()+30000
+  ||process.env.AUN_F06_WORKER_SOURCE!==f06SourceBinding()))throw new Error('F06_WORKER_INPUT_DENIED')
+const f06WorkerTimeout=f06WorkerCase?Math.max(1,Math.min(30000,f06WorkerDeadline-Date.now())):30000
+const f06MainNames=[
+  ...['before_commit','response_lost','reserved_crash'].map(x=>`finalizer:${x}`),
+  ...['before_reservation','after_reservation','before_INTENT','after_INTENT','after_RETRYABLE','after_ACK','after_stage1','before_stage2','after_stage2'].map(x=>`DR07:${x}`),
+  'DR01', 'DR02','DR03','DR04','DR05',
+  ...['sent_before','sent_commit_response_lost','backfill_before','backfill_commit_response_lost','budget_cap','db_unavailable'].map(x=>`DR06:${x}`),
+  'DR08',...['long_retry_after','nonce_horizon','policy_expiry','original_max1'].map(x=>`horizon:${x}`),
+  ...['corrupt','permissions','symlink'].map(x=>`damage:${x}`),'DR11',
+]
+type F06Case={id:string;run:()=>Promise<void>;callback_sha256:string}
+async function runF06Worker(entry:F06Case,deadline:number,root:string,source:string):Promise<void> {
+  const remaining=deadline-Date.now();if(remaining<=0)throw new Error(`F06_PARENT_DEADLINE:${entry.id}`)
+  const prefix=`${root}/${entry.id.replace(/[^a-zA-Z0-9_-]/g,'_')}`
+  const argv=[process.execPath,'--no-env-file','test',f06SourceFiles[0],'--test-name-pattern','^BA-CORE-F06$',
+    '--timeout',String(remaining),'--reporter=junit',`--reporter-outfile=${prefix}.xml`]
+  const child=Bun.spawn(argv,{cwd:candidateRoot,env:{...process.env,AUN_F06_WORKER_CASE:entry.id,AUN_F06_WORKER_DEPTH:'1',
+    AUN_F06_WORKER_DEADLINE:String(deadline),AUN_F06_WORKER_SOURCE:source},stdout:'pipe',stderr:'pipe'})
+  fixtureEvent(entry.id,'case-worker-spawn',{pid:child.pid,deadline,remaining,callback_sha256:entry.callback_sha256,source_sha256:source})
+  // Start both drains at spawn, keep genuine exit and EOF/rejection separately.
+  const out=new Response(child.stdout).text().then(text=>{writeFileSync(`${prefix}.stdout.log`,text);fixtureEvent(entry.id,'case-worker-stdout-eof',{pid:child.pid});return text})
+  const err=new Response(child.stderr).text().then(text=>{writeFileSync(`${prefix}.stderr.log`,text);fixtureEvent(entry.id,'case-worker-stderr-eof',{pid:child.pid});return text})
+  const exited=child.exited.then(code=>{fixtureEvent(entry.id,'case-worker-exit',{pid:child.pid,code,signal:child.signalCode});return code})
+  const settled=await Promise.allSettled([exited,out,err])
+  const failed=settled.filter(x=>x.status==='rejected') as PromiseRejectedResult[]
+  if(failed.length)throw new AggregateError(failed.map(x=>x.reason),`F06_WORKER_LIFECYCLE:${entry.id}`)
+  const code=(settled[0] as PromiseFulfilledResult<number>).value
+  const stdout=(settled[1] as PromiseFulfilledResult<string>).value
+  const stderr=(settled[2] as PromiseFulfilledResult<string>).value
+  if(code!==0||child.signalCode)throw new Error(`F06_WORKER_EXIT:${entry.id}:${code}:${child.signalCode}:${sanitizeFixtureError(stderr.slice(-4000))}`)
+  const xml=readFileSync(`${prefix}.xml`,'utf8')
+  const cases=[...xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)]
+  const selected=cases.filter(m=>/\bname="BA-CORE-F06"/.test(m[1])&&!/<skipped\b/.test(m[2]??''))
+  const assertions=selected.length===1?Number(selected[0][1].match(/\bassertions="(\d+)"/)?.[1]):0
+  if(selected.length!==1||!Number.isInteger(assertions)||assertions<1||/<(?:failure|error)\b/.test(xml)
+    ||cases.some(m=>!selected.includes(m)&&!/<skipped\b/.test(m[2]??'')))throw new Error(`F06_WORKER_JUNIT_DENIED:${entry.id}`)
+  const markers=stdout.split('\n').filter(line=>line.startsWith('F06_CASE_COMPLETE ')).map(line=>JSON.parse(line.slice(18)))
+  if(markers.length!==1||markers[0].id!==entry.id||markers[0].source_sha256!==source
+    ||markers[0].callback_sha256!==entry.callback_sha256||markers[0].depth!==1)throw new Error(`F06_WORKER_COMPLETION_DENIED:${entry.id}`)
+  fixtureEvent(entry.id,'case-worker-accepted',{pid:child.pid,selected_tests:1,assertions,
+    junit_sha256:admissionSha256(xml),stdout_sha256:admissionSha256(stdout),stderr_sha256:admissionSha256(stderr),...markers[0]})
 }
 
 boundedTest('BA-CORE-F06',async()=>{
-  const independent: Array<() => Promise<void>>=[]
-  const exclusive: Array<() => Promise<void>>=[]
-  const queueFixture=(run:Parameters<typeof fixture>[0])=>{independent.push(()=>fixture(run))}
-  const queueExclusiveFixture=(run:Parameters<typeof fixture>[0])=>{exclusive.push(()=>fixture(run))}
-  // Each unit owns its DB/roles/files. A09 remains four independent fixtures.
-  const parallel=withA09Fixtures(async()=>{
+  const deadline=f06WorkerCase?f06WorkerDeadline:Date.now()+30000
+  const source=f06SourceBinding()
+  fixtureEvent('F06','start',{pid:process.pid})
+  const independent: F06Case[]=[]
+  const exclusive: F06Case[]=[]
+  const queueFixture=(run:Parameters<typeof fixture>[0])=>{const id=f06MainNames[independent.length];if(!id)throw new Error('F06_REGISTRY_OVERFLOW');independent.push({id,run:()=>fixture(run),callback_sha256:admissionSha256(run.toString())})}
+  const queueExclusiveFixture=(run:Parameters<typeof fixture>[0])=>{exclusive.push({id:'DR10:exclusive',run:()=>fixture(run),callback_sha256:admissionSha256(run.toString())})}
+  // Register owned callbacks before starting the shared six-slot pool.
   for(const failure of ['before_commit','response_lost','reserved_crash']) {
     queueFixture(async f=>{
       f.config.runtime_id='command-json'
@@ -441,12 +499,13 @@ boundedTest('BA-CORE-F06',async()=>{
     writeFileSync(childInput,JSON.stringify({row,binding,crash,url:runtimeUrl.href,directory:f.config.transport.receipt_dir}),{mode:0o600})
     writeFileSync(childPath,`
 import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
-import { readFileSync,writeFileSync } from 'node:fs'
+import { appendFileSync,readFileSync,writeFileSync } from 'node:fs'
 import { deliverBoundedOutbound,BoundedReceiptStore } from '${candidateRoot}/core/queue-admission.ts'
 import { postBoundedDiscordRequest } from '${candidateRoot}/adapters/discord.ts'
 const input=JSON.parse(readFileSync(process.argv[2],'utf8'));const client=new Client({connectionString:input.url,connectionTimeoutMillis:1000});await client.connect()
 let action='';let wires=0;let now=Date.now();let mono=0
-const stop=()=>process.exit(23)
+const childStage=(phase,detail={})=>appendFileSync(input.directory+'/crash-stages.jsonl',JSON.stringify({at:Date.now(),pid:process.pid,phase,crash:input.crash,...detail})+'\\n',{mode:0o600})
+const stop=()=>{childStage('exit-request',{code:23});process.exit(23)}
 const db={query:async(sql,params)=>{
  if(sql.includes('aun_admission_outbound'))action=params?.[1]??''
  if(action==='claim'&&sql.includes('aun_admission_outbound')&&input.crash==='before_reservation')stop()
@@ -458,8 +517,10 @@ const db={query:async(sql,params)=>{
 }}
 const save=BoundedReceiptStore.prototype.write
 BoundedReceiptStore.prototype.write=function(r){
+ childStage('write-entry',{state:r.state})
  if(r.state==='INTENT'&&input.crash==='before_INTENT')stop()
  save.call(this,r)
+ childStage('write-return',{state:r.state})
  if((r.state==='INTENT'&&input.crash==='after_INTENT')||(r.state==='RETRYABLE'&&input.crash==='after_RETRYABLE')||(r.state==='ACK_PENDING_DB'&&input.crash==='after_ACK'))stop()
 }
 const adapter={prepareBoundedRequest:async(r)=>({delivery_id:'out-'+r.id,channel_id:r.channel_external_id,author_id:'111111111111111111',
@@ -475,9 +536,17 @@ await deliverBoundedOutbound({db,row:input.row,binding:input.binding,adapter,clo
 await client.end();process.exit(24)
 `,{mode:0o600})
     const child=Bun.spawn([process.execPath,childPath,childInput],{cwd:candidateRoot,env:{PATH:process.env.PATH},stdout:'pipe',stderr:'pipe'})
-    const exit=await child.exited
-    const stderr=await new Response(child.stderr).text()
-    writeFileSync(`${f.config.transport.receipt_dir}/crash-stderr.log`,stderr,{mode:0o600})
+    fixtureEvent('DR07','spawn',{crash,pid:child.pid})
+    const stdoutDone=new Response(child.stdout).text().then(value=>{fixtureEvent('DR07','stdout-eof',{crash,pid:child.pid,bytes:Buffer.byteLength(value)});return value},error=>{fixtureEvent('DR07','stdout-rejected',{crash,pid:child.pid,message:sanitizeFixtureError(error instanceof Error?error.message:error)});throw error})
+    const stderrDone=new Response(child.stderr).text().then(value=>{fixtureEvent('DR07','stderr-eof',{crash,pid:child.pid,bytes:Buffer.byteLength(value)});return value},error=>{fixtureEvent('DR07','stderr-rejected',{crash,pid:child.pid,message:sanitizeFixtureError(error instanceof Error?error.message:error)});throw error})
+    const exited=child.exited.then(value=>{fixtureEvent('DR07','parent-exited',{crash,pid:child.pid,exit:value});return value},error=>{fixtureEvent('DR07','parent-exit-rejected',{crash,pid:child.pid,message:sanitizeFixtureError(error instanceof Error?error.message:error)});throw error})
+    const [childExit,childStdout,childStderr]=await Promise.allSettled([exited,stdoutDone,stderrDone] as const)
+    const childErrors: unknown[]=[childExit,childStdout,childStderr].flatMap(r=>r.status==='rejected'?[r.reason]:[])
+    if(childStdout.status==='fulfilled')writeFileSync(`${f.config.transport.receipt_dir}/crash-stdout.log`,childStdout.value,{mode:0o600})
+    if(childStderr.status==='fulfilled')writeFileSync(`${f.config.transport.receipt_dir}/crash-stderr.log`,childStderr.value,{mode:0o600})
+    if(childErrors.length===1)throw childErrors[0]
+    if(childErrors.length>1)throw new AggregateError(childErrors,'BA_CRASH_CHILD_FAILED')
+    const exit=childExit.status==='fulfilled'?childExit.value:null
     expect(exit).toBe(23)
     let parentWire=0;let now=Date.now();let mono=0
     const adapter=fakeSuccessPort(()=>{parentWire++})
@@ -731,6 +800,7 @@ await client.end();process.exit(24)
     await expect(Promise.resolve().then(()=>store.releaseEndedOwner(`out-${row.id}`,{...old,host:'foreign-host'}))).rejects.toThrow('ADMISSION_DELIVERY_OWNER_MISMATCH')
     console.log(JSON.stringify({subcase:'DR08',concurrent_wire:1,db_disconnect_overlap:0,lock_age_steal:0,active_owner_recovery:0,pid_reuse_recovery:0,foreign_owner_recovery:0,fixture_only:true}))
   })
+  if(!f06WorkerCase){
   // DR09: wait parsing and the final actual-wire deadline use deterministic
   // wall/monotonic clocks; SQL early-reservation rejection was measured above.
   expect(boundedRetryAfter('0.1234',0.25)).toBe(250)
@@ -767,6 +837,7 @@ await client.end();process.exit(24)
     expect(outcome.kind).toBe(mode==='fractional_wait'?'RETRYABLE':'NEEDS_ATTENTION')
     if(mode==='fractional_wait')expect((outcome as any).retry_after_ms).toBe(1)
   }
+  }
   for(const mode of ['long_retry_after','nonce_horizon','policy_expiry','original_max1'])queueFixture(async f=>{
     const {q,row:reply,binding}=await readyReply(f)
     const row=mode==='original_max1'?(await f.runtime.query('SELECT * FROM outbound_queue WHERE message_id=$1',[q.message_id])).rows[0]:reply
@@ -790,7 +861,7 @@ await client.end();process.exit(24)
     expect((await admissionStatus(f.control,f.config.policy_id))!.tasks[0]).toMatchObject({invocation_attempts:1,finalizer_attempts:1})
     console.log(JSON.stringify({subcase:'DR05/DR09/DR12',mode,physical_posts:wire,repeated_task:0,fixture_only:true}))
   })
-  console.log(JSON.stringify({subcase:'DR09',fractional_round_up:true,malformed_rejected:9,clock_rollback_wire:0,fixture_only:true}))
+  if(!f06WorkerCase)console.log(JSON.stringify({subcase:'DR09',fractional_round_up:true,malformed_rejected:9,clock_rollback_wire:0,fixture_only:true}))
   for(const damage of ['corrupt','permissions','symlink'])queueFixture(async f=>{
     const {row,binding}=await readyReply(f);let wire=0
     const adapter=fakeSuccessPort(()=>{wire++})
@@ -859,6 +930,7 @@ await client.end();process.exit(24)
     expect((await f.admin.query("SELECT count(*)::int AS n FROM agent_messages WHERE author_id='system'")).rows[0].n).toBe(0)
     console.log(JSON.stringify({subcase:'DR11',notice_rows:1,provider_posts:1,notice_outbound:0,fixture_only:true}))
   })
+  if(!f06WorkerCase){
   // DR12 positive control: the opt-in REST did not reconfigure the ordinary
   // SDK or remove its existing explicit-reference fallback.
   const rest=new REST()
@@ -871,12 +943,26 @@ await client.end();process.exit(24)
   expect(await ordinary.sendMessage(ch.id,'ordinary fixture',{replyTo:'333333333333333333'})).toEqual({messageId:'222222222222222222'})
   expect(replyCalls).toBe(1);expect(fallbackCalls).toBe(1)
   console.log(JSON.stringify({subcase:'DR12',ordinary_sdk_retries:3,ordinary_fallback:1,fixture_only:true}))
-    await settleIndependentFixtureWork(independent)
-  })
-  // The ACK disk-loss prototype fault must not overlap another parent fixture.
-  // Await both groups even after failure; then retain the exclusive outcome too.
-  await settleFixtureWork(async()=>{
-    await Promise.allSettled([parallel])
-    await settleIndependentFixtureWork(exclusive)
-  },[parallel])
-})
+  }
+  if(independent.length!==32||exclusive.length!==1||new Set(f06MainNames).size!==32)throw new Error('F06_REGISTRY_INCOMPLETE')
+  const a09: F06Case[]=['acquired','unlinked','closed','races'].map(cut=>({id:`A09:${cut}`,
+    run:()=>ownerRecoveryFixture(cut as any),callback_sha256:admissionSha256(ownerRecoveryFixture.toString())}))
+  const registry=[...a09,...independent,...exclusive]
+  if(f06WorkerCase){
+    const selected=registry.filter(entry=>entry.id===f06WorkerCase)
+    if(selected.length!==1)throw new Error('F06_CASE_SELECTOR_DENIED')
+    await selected[0].run()
+    console.log('F06_CASE_COMPLETE '+JSON.stringify({id:selected[0].id,source_sha256:source,
+      callback_sha256:selected[0].callback_sha256,depth:1}))
+  }else{
+    const root=`${process.env.AUN_BOUNDED_FIXTURE_ROOT}/f06-workers-${process.pid}-${Date.now()}`;mkdirSync(root,{recursive:true,mode:0o700})
+    writeFileSync(`${root}/registry.json`,JSON.stringify({source_sha256:source,deadline,cases:registry.map(({id,callback_sha256})=>({id,callback_sha256}))},null,2)+'\n')
+    fixtureEvent('F06','case-registry',{root,source_sha256:source,deadline,cases:registry.map(({id,callback_sha256})=>({id,callback_sha256}))})
+    const parallel=settleIndependentFixtureWork([...a09,...independent].map(entry=>()=>runF06Worker(entry,deadline,root,source)),6)
+    await settleFixtureWork(async()=>{
+      await Promise.allSettled([parallel])
+      await settleIndependentFixtureWork(exclusive.map(entry=>()=>runF06Worker(entry,deadline,root,source)))
+    },[parallel])
+  }
+  fixtureEvent('F06','end',{pid:process.pid,worker_case:f06WorkerCase??null})
+},f06WorkerTimeout)

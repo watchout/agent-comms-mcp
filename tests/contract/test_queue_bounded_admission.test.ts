@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { Client } from 'pg'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { resolve } from 'node:path'
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
@@ -21,6 +21,23 @@ export const sanitizeFixtureError = (value: unknown) => String(value)
   .replace(/(\bpassword=)[^\s]+/gi, '$1[REDACTED]')
 export function fixtureEvent(name: string, phase: string, detail: Record<string, unknown> = {}) {
   console.log(JSON.stringify({fixture:name,phase,at:Date.now(),...detail}))
+}
+async function drainMigrationOutput(stream:ReadableStream<Uint8Array>,name:string,pid:number,channel:'stdout'|'stderr') {
+  const directory=resolve(process.env.AUN_BOUNDED_FIXTURE_ROOT!,'migration-logs')
+  mkdirSync(directory,{recursive:true,mode:0o700})
+  const path=resolve(directory,`${name}.${channel}.log`)
+  writeFileSync(path,'',{mode:0o600})
+  const reader=stream.getReader(),chunks:Uint8Array[]=[];let total=0,stored=0
+  try {
+    for(;;){const result=await reader.read();if(result.done)break
+      chunks.push(result.value);total+=result.value.byteLength
+      const keep=result.value.subarray(0,Math.max(0,16*1024*1024-stored))
+      if(keep.byteLength){appendFileSync(path,keep);stored+=keep.byteLength}
+    }
+    fixtureEvent(name,`migration-${channel}-eof`,{pid,bytes:total,stored_bytes:stored,log_truncated:stored<total})
+    return new TextDecoder().decode(Buffer.concat(chunks))
+  }catch(error){fixtureEvent(name,`migration-${channel}-rejected`,{pid,message:sanitizeFixtureError(error instanceof Error?error.message:error)});throw error}
+  finally{reader.releaseLock()}
 }
 export function fixtureClients(name: string) {
   const records: Array<{client:Client;connected:boolean;attempted:boolean;settled:boolean;closed:boolean}> = []
@@ -68,38 +85,38 @@ export async function settleFixtureWork(main: () => Promise<void>, children: Pro
   if (errors.length === 1) throw errors[0]
   if (errors.length > 1) throw new AggregateError(errors, 'BA_FIXTURE_WORK_FAILED')
 }
-/** Complete independent owned fixtures with two workers and retain all failures. */
-export async function settleIndependentFixtureWork(tasks: Array<() => Promise<void>>): Promise<void> {
+/** Complete lazy owned fixtures within the selected existing bound; retain every failure. */
+export async function settleIndependentFixtureWork(tasks: Array<() => Promise<void>>, concurrency=2): Promise<void> {
+  if(!Number.isInteger(concurrency)||concurrency<1||concurrency>6)throw Error('BA_FIXTURE_POOL_BOUND_INVALID')
   let cursor=0,active=0,peak=0,completed=0
   const errors: unknown[]=[]
   const worker=async()=>{
     while(cursor<tasks.length){
       const index=cursor++;active++;peak=Math.max(peak,active)
       fixtureEvent('F06-main','unit-start',{index,active})
-      try{await tasks[index]()}catch(error){errors.push(error)}
+      try{await tasks[index]()}catch(error){errors.push(error);fixtureEvent('F06-main','unit-error',{index,message:sanitizeFixtureError(error instanceof Error?error.message:String(error))})}
       finally{active--;completed++;fixtureEvent('F06-main','unit-end',{index,active,completed})}
     }
   }
-  await settleFixtureWork(worker,[worker()])
+  await settleFixtureWork(worker,Array.from({length:concurrency-1},()=>worker()))
   fixtureEvent('F06-main','all-settled',{registered:tasks.length,completed,active,peak,failures:errors.length})
   if(errors.length===1)throw errors[0]
   if(errors.length>1)throw new AggregateError(errors,'BA_FIXTURE_WORK_FAILED')
 }
 
-export function boundedFixtureDatabase(name:string,endpoint:string) {
+export async function boundedFixtureDatabase(name:string,endpoint:string) {
   if(!/^(?:ba|ba16)_[a-f0-9]{14}_test$/.test(name))throw Error('BA_OWNED_DATABASE_NAME_REQUIRED')
   const {databaseUrl,maintenanceUrl}=derivePostgresTestDatabaseUrls(name,{AGENT_COM_TEST_DATABASE_URL:endpoint})
-  const command=(cmd:'createdb'|'dropdb')=>{
-    const dropping=cmd==='dropdb'
-    fixtureEvent(name,cmd+'-start')
-    try{
-      execFileSync(cmd,[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:dropping?6000:2000,killSignal:'SIGTERM',
-        env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:`-c statement_timeout=${dropping?5000:2000} -c lock_timeout=1000`}})
-      fixtureEvent(name,cmd+'-end',{exit:0})
-    }catch(error){const e=error as any;fixtureEvent(name,cmd+'-end',{exit:e.status??null,signal:e.signal??null,code:e.code??null})
-      throw Error(`BA_FIXTURE_${cmd.toUpperCase()}_FAILED ${sanitizeFixtureError(e.stderr??e.message)}`)}
-  }
-  command('createdb')
+  fixtureEvent(name,'createdb-start')
+  await new Promise<void>((resolve,reject)=>{
+    execFile('createdb',[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:2000,killSignal:'SIGTERM',maxBuffer:1024*1024,
+      env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:'-c statement_timeout=2000 -c lock_timeout=1000'}},
+      (error,_stdout,stderr)=>{
+        if(error){const e=error as any;fixtureEvent(name,'createdb-end',{exit:typeof e.code==='number'?e.code:null,signal:e.signal??null,code:e.code??null})
+          reject(Error(`BA_FIXTURE_CREATEDB_FAILED ${sanitizeFixtureError(stderr??e.message)}`))}
+        else{fixtureEvent(name,'createdb-end',{exit:0});resolve()}
+      })
+  })
   return {databaseUrl,drop:()=>new Promise<void>((resolve,reject)=>{
     // Other owned fixtures must process socket I/O while this DB is dropped.
     // Preserve existing child/SQL/lock deadlines and propagate any failure.
@@ -150,7 +167,7 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
   const u = new URL(endpoint)
   if (!u.pathname.endsWith('_test') || (!u.searchParams.get('host') && !['localhost', '127.0.0.1'].includes(u.hostname))) throw new Error('BA_ISOLATED_ENDPOINT_REQUIRED')
   const name = `ba_${randomUUID().replaceAll('-', '').slice(0, 14)}_test`
-  const target = boundedFixtureDatabase(name, endpoint)
+  const target = await boundedFixtureDatabase(name, endpoint)
   const owned = fixtureClients(name)
   const admin = owned.client(target.databaseUrl)
   let originalError: unknown
@@ -159,8 +176,20 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
     await admin.connect()
     const identity = (await admin.query("SELECT current_database() AS db,current_setting('server_version_num')::integer AS version")).rows[0]
     expect(identity.db).toBe(name); expect(identity.version).toBeGreaterThanOrEqual(170000); expect(identity.version).toBeLessThan(180000)
-    const migrated = Bun.spawnSync(['bun', 'run', 'db/migrate.ts'], { cwd: candidateRoot, env: { ...process.env, AGENT_COM_DB: 'postgres', DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_NAME: name }, stdout: 'pipe', stderr: 'pipe' })
-    if (migrated.exitCode !== 0) throw new Error(`BA_MIGRATION_FAILED ${migrated.stderr.toString()}`)
+    fixtureEvent(name,'migration-start')
+    const migrated = Bun.spawn(['bun', 'run', 'db/migrate.ts'], { cwd: candidateRoot, env: { ...process.env, AGENT_COM_DB: 'postgres', DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_NAME: name }, stdout: 'pipe', stderr: 'pipe' })
+    // Start both drains before awaiting the child; preserve every settlement.
+    fixtureEvent(name,'migration-spawn',{pid:migrated.pid,parent_pid:process.pid})
+    const migrationOut = drainMigrationOutput(migrated.stdout,name,migrated.pid,'stdout')
+    const migrationErr = drainMigrationOutput(migrated.stderr,name,migrated.pid,'stderr')
+    const exited=migrated.exited.then(exit=>{fixtureEvent(name,'migration-exited',{pid:migrated.pid,exit});return exit},error=>{fixtureEvent(name,'migration-exit-rejected',{pid:migrated.pid,message:sanitizeFixtureError(error instanceof Error?error.message:error)});throw error})
+    const [migrationExit,migrationStdout,migrationStderr] = await Promise.allSettled([exited,migrationOut,migrationErr] as const)
+    const migrationErrors: unknown[] = [migrationExit,migrationStdout,migrationStderr].flatMap(r=>r.status==='rejected'?[r.reason]:[])
+    fixtureEvent(name,'migration-end',{pid:migrated.pid,exit:migrationExit.status==='fulfilled'?migrationExit.value:null,
+      stdout_eof:migrationStdout.status==='fulfilled',stderr_eof:migrationStderr.status==='fulfilled'})
+    if(migrationExit.status==='fulfilled'&&migrationExit.value!==0) migrationErrors.push(new Error(`BA_MIGRATION_FAILED ${migrationStderr.status==='fulfilled'?sanitizeFixtureError(migrationStderr.value):'stderr stream failed'}`))
+    if(migrationErrors.length===1)throw migrationErrors[0]
+    if(migrationErrors.length>1)throw new AggregateError(migrationErrors,'BA_MIGRATION_FAILED')
     // db/migrate.ts supports the old schema without this optional topology.
     expect((await admin.query("SELECT to_regclass('public.fleet_runtime_queue_observation_active') AS relation")).rows[0].relation).toBeNull()
     await admin.query(readFileSync(resolve(candidateRoot, 'db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql'), 'utf8'))
@@ -234,9 +263,10 @@ export function boundedCaseIds(selectedStage: string): readonly string[] {
   return ALL_BOUNDED_CASES.filter(id => selectedStage==='private' ? ['BA-CORE-F08','BA-CORE-F10'].includes(id)
     : !['BA-CORE-F08','BA-CORE-F10'].includes(id) && (selectedStage==='ci' || !id.startsWith('BA-16-')))
 }
-export function boundedTest(id: string, run: () => Promise<void> | void): void {
+export function boundedTest(id: string, run: () => Promise<void> | void, timeoutMs = 30000): void {
+  if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>30000)throw new Error("BA_FIXTURE_TEST_TIMEOUT_INVALID")
   if (!ALL_BOUNDED_CASES.includes(id)) throw new Error('BA_UNKNOWN_CASE')
-  if (boundedCaseIds(stage!).includes(id)) test(id,run,30000)
+  if (boundedCaseIds(stage!).includes(id)) test(id,run,timeoutMs)
 }
 
 export type BoundedFixture = Parameters<Parameters<typeof fixture>[0]>[0]
@@ -556,3 +586,28 @@ test('I10 exclusive fault waits for main and A09 settlement and preserves both f
   const error=await result;expect(exclusive).toBe(true);expect(error.errors).toEqual([early,late])
 })
 }
+
+// A released A09 slot must admit queued main work while other slots stay busy.
+if(stage!=='private')test('I12 shared six-slot pool reuses released slots and settles all before exclusive failure',async()=>{
+  const release:Array<()=>void>=[]
+  const barriers=Array.from({length:8},(_,i)=>new Promise<void>(resolve=>{release[i]=resolve}))
+  let startedSix!:()=>void,startedSeven!:()=>void
+  const six=new Promise<void>(resolve=>{startedSix=resolve}),seven=new Promise<void>(resolve=>{startedSeven=resolve})
+  let active=0,peak=0,exclusive=false;const visits:number[]=[],ended:number[]=[]
+  const early=Error('first A09 failed'),late=Error('last main failed'),exclusiveError=Error('exclusive fault failed')
+  const parallel=settleIndependentFixtureWork(Array.from({length:8},(_,id)=>async()=>{
+    visits.push(id);active++;peak=Math.max(peak,active)
+    if(visits.length===6)startedSix();if(visits.length===7)startedSeven()
+    try{await barriers[id];if(id===0)throw early;if(id===7)throw late}
+    finally{active--;ended.push(id)}
+  }),6)
+  const result=settleFixtureWork(async()=>{
+    await Promise.allSettled([parallel]);expect(ended.length).toBe(8);expect(active).toBe(0);exclusive=true;throw exclusiveError
+  },[parallel]).then(()=>null,error=>error)
+  await six;expect(visits).toEqual([0,1,2,3,4,5]);expect(active).toBe(6);expect(exclusive).toBe(false)
+  release[0]();await seven;expect(visits).toEqual([0,1,2,3,4,5,6]);expect(active).toBe(6);expect(exclusive).toBe(false)
+  for(const unblock of release)unblock()
+  const error=await result;expect(peak).toBe(6);expect(ended.length).toBe(8);expect(exclusive).toBe(true)
+  expect(error).toBeInstanceOf(AggregateError);expect(error.errors[0]).toBe(exclusiveError)
+  expect(error.errors[1]).toBeInstanceOf(AggregateError);expect(error.errors[1].errors).toEqual([early,late])
+})

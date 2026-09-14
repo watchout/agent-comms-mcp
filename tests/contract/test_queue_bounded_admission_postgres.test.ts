@@ -17,7 +17,7 @@ async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>
   if(!endpoint)throw Error('BA_PG16_ENDPOINT_REQUIRED')
   await verifyFixtureEndpoint(endpoint,16)
   const name=`ba16_${randomUUID().replaceAll('-','').slice(0,14)}_test`
-  const target=boundedFixtureDatabase(name,endpoint)
+  const target=await boundedFixtureDatabase(name,endpoint)
   const owned=fixtureClients(name),admin=owned.client(target.databaseUrl)
   let originalError:unknown
   const env={PATH:process.env.PATH,HOME:process.env.HOME,AGENT_ID:'qa',AGENT_COM_EXPECTED_AGENT_ID:'qa',AGENT_COM_DB:'postgres',
