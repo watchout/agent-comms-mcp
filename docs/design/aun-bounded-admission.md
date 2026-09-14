@@ -302,3 +302,23 @@ history is modified, and this source change does not authorize application.
 既存 caller は従来の `--sandbox read-only`（または明示 legacy sandbox）を維持する。operator が `AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE`（fallback `STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE`）と既存 `*_CODEX_PROFILE` を明示した場合だけ、`--sandbox` と排他的に native `-c default_permissions="<name>"` と `--profile` を渡す。両 selector は ASCII 英数字で始まる 1–64 文字の英数字・`_`・`-`。空値・片方欠落・AUN/STATE の相反値・同時 sandbox 指定は child 起動および既存 launcher preflight の前で拒否する。queue payload は selector 権限を持たない。既存 `*_CODEX_EXECUTABLE` で実行ファイルを固定し、activation plan/restore が同じ executable/profile/permissions を渡す。
 
 名称・argv テストは隔離証明ではない。native loader が解釈した実 profile bytes、全 config layers、argv、実 binary hash/version、model-accessible tool inventory、QA identity、role、read-only/no-network/dummy-secret-deny の観測を trusted application admission に束縛する。task1 ENABLE 前、および ACCEPT1 後 task2 ENROLL 前に同一 config/cohort を再確認し、不一致なら依存 effect を停止する。現実装に per-invocation profile-byte verifier が存在するとは主張しない。`supportsToolAllowlist:false`、claim/attempt charging、timeout、result/finalizer、host credential containment を維持する。Codex shell sandbox は MCP host の独立した権限・telemetry 境界の代わりにはならない。
+
+### Exact CI subject collection (I6)
+
+The existing CI subject collector reads the complete binary diff with a finite
+16 MiB stdout limit and 15-second child deadline, including its other git
+readbacks. Exceeding either bound or any git failure aborts collection; it never
+hashes truncated output or emits a partial subject. Base, candidate/tested
+head/tree/parents, test hashes and frozen design identities retain their existing
+meaning. Actual workflow extraction is tested against a repository diff larger
+than the former 1 MiB default, with a separate file-backed byte hash.
+
+[I6](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5658354436)
+(raw SHA256 `a018146fd84f020908bfcf1eddfd8609232e3fbdb5d339c854af42b132dc1916`)
+binds the current C5 parent, existing donors, 124-path integration and four
+CI/docs/overlay repair paths. The current-I-missing rejection retains I5 history.
+Its one C6/full7/private2 allowance includes one additional isolated two-caller
+specimen (21 cumulative; the former 20 remain consumed). This corrects CI setup
+ENOBUFS before product tests; runtime/migration/selector behavior and all stage
+thresholds are unchanged. No public event or actual application authority is
+inferred from this local source handoff.
