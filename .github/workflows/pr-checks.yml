@@ -130,7 +130,7 @@ jobs:
           }));
           console.log(JSON.stringify({base,candidate_head,candidate_tree:git('rev-parse',`${candidate_head}^{tree}`),tested_commit,
             tested_tree:git('rev-parse','HEAD^{tree}'),tested_parents:git('rev-list','--parents','-n1','HEAD').split(' ').slice(1),
-            binary_diff_sha256:sha(execFileSync('git',['diff','--binary',`${base}...${candidate_head}`],gitOptions)),test_files_sha256,
+            binary_diff_sha256:sha(execFileSync('git',['diff','--binary','--full-index',`${base}...${candidate_head}`],gitOptions)),test_files_sha256,
             design_raw_sha256:'ed86b14f35b97d8483bf8052dd73765732c4568a945cb6e59bc6b8b7e99ea703',
             design_canonical_sha256:'880b99e5514f9791968ba8971e9d526b59173732986c12a54e8db04413f1972e',
             run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT,scope:'TESTED_CHECKOUT_OBSERVATION',private_status:'PRIVATE_STAGE_REQUIRED'}));

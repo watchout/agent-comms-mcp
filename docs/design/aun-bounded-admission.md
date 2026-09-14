@@ -350,3 +350,28 @@ missing. The raw failure is retained. I8 completes the owned fixture inputs
 before one C8/full9/private2 measurement, with one isolated two-caller specimen23
 (original20 plus21 and22 remain consumed). Source supply creates no public
 event, merge, live application or provider authority.
+
+
+### Canonical current binary patch identity (I9)
+
+Current `binary_diff_sha256` hashes the complete bytes of
+`git diff --binary --full-index <base>...<candidate_head>`. Explicit full-index
+uses all40 hexadecimal characters in patch index object IDs. CI subject
+collection, current consumer, private subject validation and current evidence
+preparation use the same command. Existing16MiB/15-second collection limits and
+failure propagation remain. Current abbreviated digests are not an alternative
+accepted representation.
+
+[I9](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5658996537)
+(raw SHA256 `33e3c0ae8d6dd045fd1bf1dddc319dc880bb1505507967674fe7ac02011f0c7c`)
+binds public/localC8 and five existing evidence-supply paths in the same126 union.
+C8 CI34805584291 tested the exact candidate tree, but its7-character index
+prefixes differed from local8-character prefixes. Both original abbreviated
+hashes and the failed CI remain historical observations; they are not rewritten
+as canonical acceptance. Same-object abbreviation7/8 checks must produce one
+full-index digest while rejecting abbreviated consumer input.
+
+The finite C9/full10/private2 correction allocates only local two-caller
+specimen24; original20/21/22/23 remain consumed. Current source expiry remains
+18JST, separate from40 active minutes and14:05 local target. Product runtime,
+quality thresholds, source separation and protected application are unchanged.
