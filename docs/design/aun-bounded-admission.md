@@ -268,6 +268,14 @@ authority, expiry and rollback metadata remains required. Restore dry-run and
 execution read back the guard and refuse affected enrolled work; old-source
 rollback requires HALTED/CLOSED and both execution schedulers disabled.
 
+The same validated `agentAllowlist` also bounds the daemon's startup memory
+identity reconciliation. Only eligible seats in that list may reach the
+per-seat resolver, identity audit, or refresh path. Null or omitted retains
+the normal eligible fleet; an explicit empty list selects none at the helper
+boundary. Existing canary admission validation and single-seat heartbeat
+reconciliation are unchanged. This scope restriction is not a memory-ready
+bypass and does not authorize startup or application.
+
 GitHub-backed tasks retain mediated host posting. The host persists its writeback
 receipt before its one normal reply attempt. D1-shaped effects cannot use the
 bounded normal-reply short path: their separate invocation/effect completion

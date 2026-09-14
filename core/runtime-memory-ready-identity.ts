@@ -79,6 +79,11 @@ export type RuntimeMemoryReadyIdentityOptions = {
   refreshSeat?: typeof refreshRuntimeMemoryReadySeat
 }
 
+export type RuntimeMemoryReadyFleetIdentityOptions = RuntimeMemoryReadyIdentityOptions & {
+  /** Narrow the eligible fleet before any per-seat effects; null/omitted keeps the fleet. */
+  agentAllowlist?: readonly string[] | null
+}
+
 async function queryRows<T>(db: RuntimeMemoryReadyDb, sql: string, params?: any[]): Promise<T[]> {
   const result = await db.query<T>(sql, params)
   return Array.isArray(result) ? result : result.rows
@@ -367,8 +372,13 @@ export async function reconcileRuntimeMemoryReadyIdentity(
 
 export async function reconcileRuntimeMemoryReadyFleetIdentity(
   db: RuntimeMemoryReadyDb,
-  options: RuntimeMemoryReadyIdentityOptions = {},
+  options: RuntimeMemoryReadyFleetIdentityOptions = {},
 ): Promise<RuntimeMemoryReadyIdentityReconcileResult[]> {
+  const allowlist = options.agentAllowlist
+  if (allowlist?.length === 0) return []
+  const agentScope = allowlist == null
+    ? ''
+    : `AND agent_id IN (${allowlist.map((_, index) => `$${index + 1}`).join(', ')})`
   const seats = await queryRows<FleetSeatRow>(
     db,
     `SELECT agent_id
@@ -377,7 +387,9 @@ export async function reconcileRuntimeMemoryReadyFleetIdentity(
         AND COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
         AND COALESCE(agent_type, 'dev') <> 'human'
+        ${agentScope}
       ORDER BY agent_id`,
+    allowlist == null ? undefined : [...allowlist],
   )
   const results: RuntimeMemoryReadyIdentityReconcileResult[] = []
   for (const seat of seats) {
