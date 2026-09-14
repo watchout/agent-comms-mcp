@@ -330,3 +330,23 @@ specimen (21 cumulative; the former 20 remain consumed). This corrects CI setup
 ENOBUFS before product tests; runtime/migration/selector behavior and all stage
 thresholds are unchanged. No public event or actual application authority is
 inferred from this local source handoff.
+
+
+### Current source-supply window and local execution budget (I8)
+
+[I8](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5658698015)
+(raw SHA256 `596b59439ef15f1aca467f64a7c557723e6f6ff71aa9327c89b6eb1921c7e2ff`)
+binds current local C7, public C5 and the same 126-path integration. Current
+CI supply and independent consumer validity end at 2026-09-14 18:00 JST
+(09:00 UTC). This is distinct from the finite 35-active-minute implementation
+budget and its 13:10 JST local completion target; the local target is not a
+CI expiry. Expiry checks remain mandatory. The current-I-missing rejection
+retains I7 and earlier published history.
+
+This three-path docs/overlay/test correction preserves every runtime, canary,
+SQL and selector byte from C7. C7 full8/local15 passed; its private F08/F10
+attempt failed before use-case execution because the owned cases parent was
+missing. The raw failure is retained. I8 completes the owned fixture inputs
+before one C8/full9/private2 measurement, with one isolated two-caller specimen23
+(original20 plus21 and22 remain consumed). Source supply creates no public
+event, merge, live application or provider authority.

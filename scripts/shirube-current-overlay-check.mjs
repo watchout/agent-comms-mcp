@@ -273,9 +273,9 @@ async function requireBoundedCiSupply() {
   const base="0f772883db6f3b50772d3e4b82ce47795091f0a9", origin="565583c25963b7dfa9b4445543967d372091b336";
   const odUrl=`https://github.com/${target}/issues/940#issuecomment-5609700544`;
   const currentC5="09d1b5e38ab3f6f16af9e85332935ad95bfd90c8";
-  const currentC6="abd9d36f1a98f6f263f3f19ea9c852def5a91ed5";
+  const currentC7="4edac19c0d10f8e86b80916476f3c096cb8871db";
   const odHash="59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02";
-  const expiry="2026-09-14T04:30:00Z", now=Date.now();
+  const expiry="2026-09-14T09:00:00Z", now=Date.now();
   const check=(condition,detail)=>{if(!condition)throw Error(detail)};
   const hash=value=>createHash("sha256").update(value).digest("hex");
   const sha40=value=>typeof value==="string"&&/^[0-9a-f]{40}$/.test(value);
@@ -293,8 +293,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5658531983`
-    &&digest==="62beca07b3527847e60efd20f0b4fffb9627f181fbd4beea54b3699783fe7f9c","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5658698015`
+    &&digest==="596b59439ef15f1aca467f64a7c557723e6f6ff71aa9327c89b6eb1921c7e2ff","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -310,26 +310,28 @@ async function requireBoundedCiSupply() {
   };
   requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
   const handoffBody=await load(ref,digest);
-  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I7 -->";
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I8 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   const blocks=[...handoffBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
   check(blocks.length===1,"one current handoff JSON block required");
   const handoff=JSON.parse(blocks[0][1]);
   check(handoff.schema_version==="shirube-control-handoff/v1"
-    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I7"
+    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I8"
     &&handoff.subject.repository===target&&handoff.subject.pr===963
     &&handoff.subject.current_public_head===currentC5&&handoff.subject.base===base
     &&handoff.subject.c2==="8d38f3bd6a99a2f4615949dd747d708f8b6943d6"
     &&handoff.subject.seat_continuity==="81be7f051f85973bb9533e87d3258825082ad158"
     &&handoff.subject.was_companion==="e49abc24838227776dc01be111aeb035ec7c9aad"
     &&Date.parse(handoff.bounds.expires_at)===Date.parse(expiry)
-    &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===7
-    &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===8
-    &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_runs===2
+    &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===8
+    &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===9
+    &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_runs===1
     &&handoff.bounds.correction_rounds===1&&handoff.bounds.two_callers_original_limit===20
-    &&handoff.bounds.two_callers_consumed===21&&handoff.bounds.active_minutes===45
-    &&handoff.bounds.two_callers_additional_local_specimens===1&&handoff.bounds.two_callers_cumulative_limit===22
-    &&handoff.subject.current_local_head===currentC6
+    &&handoff.bounds.two_callers_consumed===22&&handoff.bounds.active_minutes===35
+    &&handoff.bounds.local_completion_target==="2026-09-14T13:10:00+09:00"
+    &&handoff.bounds.owned_fixture_setup_completion===1
+    &&handoff.bounds.two_callers_additional_local_specimens===1&&handoff.bounds.two_callers_cumulative_limit===23
+    &&handoff.subject.current_local_head===currentC7
     &&handoff.execution_context.active_function==="implementation_executor"
     &&handoff.execution_context.actor_agent_id==="codex-cto/latest_delivery"
     &&handoff.execution_context.checker==="/root/goal_gap"
@@ -344,12 +346,10 @@ async function requireBoundedCiSupply() {
   git("merge-base","--is-ancestor",handoff.subject.c2,headSha);
   git("merge-base","--is-ancestor",handoff.subject.seat_continuity,headSha);
   git("merge-base","--is-ancestor",handoff.subject.current_local_head,headSha);
-  const repairs=["bin/state-daemon.ts","core/runtime-memory-ready-identity.ts",
-    "tests/runtime-memory-ready-identity.test.ts","docs/operations/memory-ready-refresh.md",
-    "docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts"];
+  const repairs=["docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts"];
   check(JSON.stringify([...handoff.repair_paths].sort())===JSON.stringify(repairs.sort())
     &&git("diff","--no-renames","--name-only",`${handoff.subject.current_local_head}...${headSha}`).split("\n").filter(Boolean)
-      .every(file=>repairs.includes(file)),"candidate repair outside current I7 scope");
+      .every(file=>repairs.includes(file)),"candidate repair outside current I8 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)
