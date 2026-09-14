@@ -424,6 +424,10 @@ async function runF06Worker(entry:F06Case,deadline:number,root:string,source:str
   const code=(settled[0] as PromiseFulfilledResult<number>).value
   const stdout=(settled[1] as PromiseFulfilledResult<string>).value
   const stderr=(settled[2] as PromiseFulfilledResult<string>).value
+  const phaseLines=stdout.split('\n').filter(line=>line.startsWith('BA_FIXTURE_PHASES '))
+  const phaseDiagnostics=phaseLines.slice(0,8).map(line=>JSON.parse(line.slice('BA_FIXTURE_PHASES '.length)))
+  fixtureEvent(entry.id,'case-worker-diagnostics',{pid:child.pid,source_sha256:source,callback_sha256:entry.callback_sha256,
+    fixture_count:phaseLines.length,truncated:phaseLines.length>8,fixtures:phaseDiagnostics})
   if(code!==0||child.signalCode)throw new Error(`F06_WORKER_EXIT:${entry.id}:${code}:${child.signalCode}:${sanitizeFixtureError(stderr.slice(-4000))}`)
   const xml=readFileSync(`${prefix}.xml`,'utf8')
   const cases=[...xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)]

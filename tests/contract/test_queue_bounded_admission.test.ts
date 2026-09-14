@@ -161,21 +161,33 @@ export async function seedNormalTransport(admin: Client): Promise<void> {
 
 /** Every connection inherits an explicitly supplied isolated versioned endpoint. */
 export async function fixture(run: (f: { admin: Client; control: Client; other: Client; executor: Client; runtime: Client; config: any; env: NodeJS.ProcessEnv; prepare: () => Promise<any>; roleUrls: Record<string,string>; client: (url:string)=>Client }) => Promise<void>) {
+  const phases: Array<{phase:string;milliseconds:number;queries:number}> = []
+  let phase='endpoint',phaseStarted=performance.now(),queryCount=0
+  const nextPhase=(name:string)=>{const now=performance.now();phases.push({phase,milliseconds:now-phaseStarted,queries:queryCount});phase=name;phaseStarted=now;queryCount=0}
   const endpoint = process.env.AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL
   if (!endpoint) throw new Error('BA_PG17_ENDPOINT_REQUIRED')
   await verifyFixtureEndpoint(endpoint,17)
+  nextPhase('create_database')
   const u = new URL(endpoint)
   if (!u.pathname.endsWith('_test') || (!u.searchParams.get('host') && !['localhost', '127.0.0.1'].includes(u.hostname))) throw new Error('BA_ISOLATED_ENDPOINT_REQUIRED')
   const name = `ba_${randomUUID().replaceAll('-', '').slice(0, 14)}_test`
   const target = await boundedFixtureDatabase(name, endpoint)
   const owned = fixtureClients(name)
-  const admin = owned.client(target.databaseUrl)
+  const client=(url:string)=>{
+    const c=owned.client(url),query=c.query.bind(c)
+    // Count without changing the original return value/callback/Promise behavior.
+    c.query=((...args:any[])=>{queryCount++;return (query as any)(...args)}) as any
+    return c
+  }
+  const admin = client(target.databaseUrl)
   let originalError: unknown
+  nextPhase('connect_admin')
   fixtureEvent(name,'setup-start')
   try {
     await admin.connect()
     const identity = (await admin.query("SELECT current_database() AS db,current_setting('server_version_num')::integer AS version")).rows[0]
     expect(identity.db).toBe(name); expect(identity.version).toBeGreaterThanOrEqual(170000); expect(identity.version).toBeLessThan(180000)
+    nextPhase('migration')
     fixtureEvent(name,'migration-start')
     const migrated = Bun.spawn(['bun', 'run', 'db/migrate.ts'], { cwd: candidateRoot, env: { ...process.env, AGENT_COM_DB: 'postgres', DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_URL: target.databaseUrl, AGENT_COM_TEST_DATABASE_NAME: name }, stdout: 'pipe', stderr: 'pipe' })
     // Start both drains before awaiting the child; preserve every settlement.
@@ -190,6 +202,7 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
     if(migrationExit.status==='fulfilled'&&migrationExit.value!==0) migrationErrors.push(new Error(`BA_MIGRATION_FAILED ${migrationStderr.status==='fulfilled'?sanitizeFixtureError(migrationStderr.value):'stderr stream failed'}`))
     if(migrationErrors.length===1)throw migrationErrors[0]
     if(migrationErrors.length>1)throw new AggregateError(migrationErrors,'BA_MIGRATION_FAILED')
+    nextPhase('schema_security')
     // db/migrate.ts supports the old schema without this optional topology.
     expect((await admin.query("SELECT to_regclass('public.fleet_runtime_queue_observation_active') AS relation")).rows[0].relation).toBeNull()
     await admin.query(readFileSync(resolve(candidateRoot, 'db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql'), 'utf8'))
@@ -202,20 +215,23 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
       .toEqual({epoch_read:true,revisions:true,delete_revision:false,sequence_usage:false})
     const roles = { controller: `${name}_c`, executor: `${name}_e`, runtime: `${name}_r` }
     const passwords = Object.fromEntries(Object.keys(roles).map(kind=>[kind,randomBytes(24).toString('hex')]))
+    nextPhase('role_provision')
     await admin.query("SET password_encryption='scram-sha-256'")
+    const transport = (await admin.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT LIKE 'queue_admission_%'")).rows
+    const transportTargets=transport.map(({tablename})=>`public."${String(tablename).replaceAll('"','""')}"`).join(',')
     for (const [kind, role] of Object.entries(roles)) {
       if(!/^[a-f0-9]{48}$/.test(passwords[kind]))throw Error('BA_PASSWORD_INVALID')
       await admin.query(`CREATE ROLE "${role}" LOGIN NOSUPERUSER NOCREATEROLE NOBYPASSRLS PASSWORD '${passwords[kind]}'`)
       await admin.query(`GRANT aun_admission_${kind === 'controller' ? 'control' : kind} TO "${role}"`)
       // Representative old application transport rights, never owner/ledger
       // rights. The guard must enforce even with these legacy UPDATE grants.
-      const transport = (await admin.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT LIKE 'queue_admission_%'")).rows
-      for (const { tablename } of transport) await admin.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON public."${tablename}" TO "${role}"`)
+      if(transportTargets)await admin.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON ${transportTargets} TO "${role}"`)
       await admin.query(`GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
     }
     const roleUrls=Object.fromEntries(Object.entries(roles).map(([kind,role])=>{const url=new URL(target.databaseUrl);url.username=role;url.password=passwords[kind];return [kind,url.href]}))
     const executorUrl=new URL(roleUrls.executor)
-    const control=owned.client(roleUrls.controller),other=owned.client(target.databaseUrl),executor=owned.client(roleUrls.executor),runtime=owned.client(roleUrls.runtime)
+    nextPhase('role_connections_and_checks')
+    const control=client(roleUrls.controller),other=client(target.databaseUrl),executor=client(roleUrls.executor),runtime=client(roleUrls.runtime)
     await Promise.all([control.connect(),other.connect(),executor.connect(),runtime.connect()])
     for(const [kind,c] of [['controller',control],['executor',executor],['runtime',runtime]] as const){
       expect((await c.query("SELECT current_user actor,rolsuper,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user")).rows[0])
@@ -244,14 +260,56 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
       AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE: 'bounded-admission', AUN_QUEUE_WORK_INVOCATION_SOURCE: 'bounded-admission',
       AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID: config.runtime_id,
     }
+    nextPhase('body')
     fixtureEvent(name,'setup-end');fixtureEvent(name,'body-start')
-    await run({ admin, control, other, executor, runtime, config, env, prepare, roleUrls, client:owned.client })
+    await run({ admin, control, other, executor, runtime, config, env, prepare, roleUrls, client })
     fixtureEvent(name,'body-end')
   } catch(error) { originalError=error; throw error } finally {
-    try{await owned.close();await target.drop()}
+    try{nextPhase('close_connections');await owned.close();nextPhase('drop_database');await target.drop()}
     catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}
+    finally{nextPhase('done');console.log('BA_FIXTURE_PHASES '+JSON.stringify({database:name,phases,query_count:phases.reduce((n,p)=>n+p.queries,0),measurement:'inclusive wall time; query-count and phase-clock bookkeeping included; no instrumentation-free baseline claimed'}))}
   }
 }
+
+test('bounded fixture transport GRANT is privilege-equivalent to original per-table grants',async()=>{
+  await fixture(async f=>{
+    const roles=Object.values(f.config.roles) as string[]
+    const tables=(await f.admin.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT LIKE 'queue_admission_%' ORDER BY tablename")).rows
+    const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"'
+    const snapshot=async()=>{
+      const relations=(await f.admin.query(`SELECT r.rolname,c.relname,c.relkind,p.privilege,
+        CASE WHEN c.relkind='S' THEN has_sequence_privilege(r.oid,c.oid,p.privilege)
+          ELSE has_table_privilege(r.oid,c.oid,p.privilege) END AS allowed
+        FROM pg_roles r CROSS JOIN pg_class c
+        CROSS JOIN LATERAL unnest(CASE WHEN c.relkind='S' THEN ARRAY['USAGE','SELECT','UPDATE']
+          ELSE ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER'] END) AS p(privilege)
+        WHERE r.rolname=ANY($1::text[]) AND c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p','v','m','S')
+        ORDER BY r.rolname,c.relname,c.relkind,p.privilege`,[roles])).rows
+      const memberships=(await f.admin.query(`SELECT r.rolname,r.rolsuper,r.rolcreaterole,r.rolbypassrls,r.rolcanlogin,
+        member.rolname AS inherited_role,m.admin_option FROM pg_roles r LEFT JOIN pg_auth_members m ON m.member=r.oid
+        LEFT JOIN pg_roles member ON member.oid=m.roleid WHERE r.rolname=ANY($1::text[]) ORDER BY r.rolname,member.rolname`,[roles])).rows
+      const acl=(await f.admin.query(`SELECT c.relname,c.relkind,x.grantor,x.grantee,x.privilege_type,x.is_grantable
+        FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) x JOIN pg_roles r ON r.oid=x.grantee
+        WHERE c.relnamespace='public'::regnamespace AND r.rolname=ANY($1::text[])
+        ORDER BY c.relname,c.relkind,x.grantee,x.privilege_type,x.grantor,x.is_grantable`,[roles])).rows
+      return {relations,memberships,acl}
+    }
+    const batched=await snapshot()
+    // Remove the tested direct transport grants, then independently execute
+    // the previous per-table procedure. Membership and sequence grants stay put.
+    for(const role of roles)for(const {tablename} of tables)await f.admin.query(`REVOKE SELECT,INSERT,UPDATE,DELETE ON public.${quote(tablename)} FROM ${quote(role)}`)
+    for(const role of roles)for(const {tablename} of tables)await f.admin.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON public.${quote(tablename)} TO ${quote(role)}`)
+    const original=await snapshot()
+    expect(batched).toEqual(original)
+    expect(roles.length).toBe(3)
+    expect(tables.length).toBeGreaterThan(0)
+    console.log('BA_TRANSPORT_PRIVILEGE_EQUIVALENCE '+JSON.stringify({database:f.config.policy_id,roles:roles.length,tables:tables.length,
+      relation_privileges:batched.relations.length,explicit_acl_entries:batched.acl.length,
+      batch_sha256:fixtureSha(JSON.stringify(batched)),original_sha256:fixtureSha(JSON.stringify(original)),
+      enumeration_queries_before:3,enumeration_queries_after:1,transport_grant_queries_before:3*tables.length,transport_grant_queries_after:3,
+      all_public_relations_sequences_memberships_and_explicit_ACL_equal:true}))
+  })
+},30000)
 
 export const ALL_BOUNDED_CASES = Object.freeze([
   ...Array.from({length:11},(_,i)=>`BA-CORE-F${String(i+1).padStart(2,'0')}`),
