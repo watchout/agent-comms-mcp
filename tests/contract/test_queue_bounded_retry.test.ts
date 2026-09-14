@@ -1,5 +1,5 @@
 import { expect } from 'bun:test'
-import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, type BoundedFixture } from './test_queue_bounded_admission.test'
+import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { DiscordAdapter, postBoundedDiscordRequest } from '../../adapters/discord'
@@ -377,11 +377,14 @@ boundedTest('BA-CORE-F05',async()=>{
   }
 })
 
+export async function withA09Fixtures(main: () => Promise<void>): Promise<void> {
+  const a09=['acquired','unlinked','closed','races'].map(cut=>ownerRecoveryFixture(cut as any))
+  await settleFixtureWork(main,a09)
+}
+
 boundedTest('BA-CORE-F06',async()=>{
-  // Independent owned databases overlap setup, not product reservations. Capture
-  // failure immediately; every A09 promise is awaited before this same F06 ends.
-  const a09=Promise.all(['acquired','unlinked','closed','races'].map(cut=>ownerRecoveryFixture(cut as any)))
-    .then(()=>({error:null as unknown}),error=>({error}))
+  // Overlap setup, but settle every A09 even when the main F06 path throws.
+  await withA09Fixtures(async()=>{
   for(const failure of ['before_commit','response_lost','reserved_crash']) {
     await fixture(async f=>{
       f.config.runtime_id='command-json'
@@ -854,5 +857,5 @@ await client.end();process.exit(24)
   expect(await ordinary.sendMessage(ch.id,'ordinary fixture',{replyTo:'333333333333333333'})).toEqual({messageId:'222222222222222222'})
   expect(replyCalls).toBe(1);expect(fallbackCalls).toBe(1)
   console.log(JSON.stringify({subcase:'DR12',ordinary_sdk_retries:3,ordinary_fallback:1,fixture_only:true}))
-  const a09Result=await a09;if(a09Result.error)throw a09Result.error
+  })
 })

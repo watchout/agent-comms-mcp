@@ -59,14 +59,24 @@ export function fixtureClients(name: string) {
   }
   return {client,close}
 }
+/** Preserve every failure, including a main-path exception before children end. */
+export async function settleFixtureWork(main: () => Promise<void>, children: Promise<void>[]): Promise<void> {
+  const settled = Promise.allSettled(children)
+  const errors: unknown[] = []
+  try { await main() } catch (error) { errors.push(error) }
+  for (const result of await settled) if (result.status === 'rejected') errors.push(result.reason)
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) throw new AggregateError(errors, 'BA_FIXTURE_WORK_FAILED')
+}
 export function boundedFixtureDatabase(name:string,endpoint:string) {
   if(!/^(?:ba|ba16)_[a-f0-9]{14}_test$/.test(name))throw Error('BA_OWNED_DATABASE_NAME_REQUIRED')
   const {databaseUrl,maintenanceUrl}=derivePostgresTestDatabaseUrls(name,{AGENT_COM_TEST_DATABASE_URL:endpoint})
   const command=(cmd:'createdb'|'dropdb')=>{
+    const dropping=cmd==='dropdb'
     fixtureEvent(name,cmd+'-start')
     try{
-      execFileSync(cmd,[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:2000,killSignal:'SIGTERM',
-        env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:'-c statement_timeout=2000 -c lock_timeout=1000'}})
+      execFileSync(cmd,[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:dropping?6000:2000,killSignal:'SIGTERM',
+        env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:`-c statement_timeout=${dropping?5000:2000} -c lock_timeout=1000`}})
       fixtureEvent(name,cmd+'-end',{exit:0})
     }catch(error){const e=error as any;fixtureEvent(name,cmd+'-end',{exit:e.status??null,signal:e.signal??null,code:e.code??null})
       throw Error(`BA_FIXTURE_${cmd.toUpperCase()}_FAILED ${sanitizeFixtureError(e.stderr??e.message)}`)}

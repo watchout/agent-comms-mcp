@@ -238,6 +238,18 @@ two-owner exclusion, clock/global limits, receipt/storage corruption, one notice
 unbound regression. Use deterministic fake wire/clock and actual isolated PG barriers only.
 Task/result/logical reply uniqueness remains; physical reply duplicates may occur within cap.
 
+The isolated test database cleanup uses a DROP-only SQL deadline of 5 seconds and
+an outer process deadline of 6 seconds, so the SQL error can return before an outer
+kill. CREATE DATABASE retains its 2-second SQL/process limits; connect and lock
+limits remain unchanged. This cleanup grace does not change PREPARE's 1 second,
+the 30-second test/F06 cap, or any product invocation/wire/persistence budget.
+Controlled owned-fixture probes distinguish a DROP that finishes after 2 seconds
+but before 5 seconds from one that exceeds the SQL limit. The original C4 DROP
+wait cause remains unknown unless separately measured; its full-suite FAIL stands.
+F06 always settles all four overlapping A09 fixtures before returning on success
+or exception. Main-path and A09 failures are retained individually or aggregated;
+an early rejection must not leave the other fixture promises running after return.
+
 ## Commands, rollback and evidence
 
 `aun admission prepare --policy FILE --dry-run|--execute`; `enroll --policy-id ID --ordinal 1|2
