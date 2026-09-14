@@ -1,6 +1,26 @@
 import { createHash } from 'node:crypto'
 import { admissionInstalled, admissionForAgent, admissionStatus, admissionTransition, type AdmissionState } from './queue-admission'
 
+/** Operator selectors only. Native Codex resolves permissions; this does not prove confinement. */
+export function resolveQueueWorkCodexPermissions(env: NodeJS.ProcessEnv): {
+  sandbox: string | null; profile: string | undefined; permissionsProfile: string | null
+} {
+  const read = (suffix: string) => env[`AUN_QUEUE_WORK_CODEX_${suffix}`]
+    ?? env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+  const optedIn = ['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE`] !== undefined)
+  if (!optedIn) return { sandbox: read('SANDBOX') ?? 'read-only', profile: read('PROFILE'), permissionsProfile: null }
+  const invalid = () => { throw new Error('queue_work_codex_permissions_selection_invalid') }
+  const pair = (suffix: string): string => {
+    const a = env[`AUN_QUEUE_WORK_CODEX_${suffix}`], b = env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+    if ((a !== undefined && !a) || (b !== undefined && !b) || (a && b && a !== b)) invalid()
+    const value = a ?? b
+    if (!value || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) invalid()
+    return value!
+  }
+  if (['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_SANDBOX`] !== undefined)) invalid()
+  return { sandbox: null, profile: pair('PROFILE'), permissionsProfile: pair('PERMISSIONS_PROFILE') }
+}
+
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
 

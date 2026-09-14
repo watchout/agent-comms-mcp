@@ -19,6 +19,7 @@ export function boundedWorkerEnvironment(env: NodeJS.ProcessEnv): NodeJS.Process
 }
 import {
   QUEUE_WORK_RESULT_VERSION,
+  resolveQueueWorkCodexPermissions,
   finalizeDoneQueueWork,
   queueWorkResultLooksValid,
   runReceivedQueueWork,
@@ -604,9 +605,7 @@ export function buildCodexExecQueueWorkCommand(input: {
     env: input.env,
   })
   const schemaPath = configuration.schemaPath
-  const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
-    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
-    ?? 'read-only'
+  const permissions = resolveQueueWorkCodexPermissions(input.env)
   const command = input.env.AUN_QUEUE_WORK_CODEX_EXECUTABLE
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE
     ?? 'codex'
@@ -615,15 +614,16 @@ export function buildCodexExecQueueWorkCommand(input: {
     '--json',
     '--output-schema', schemaPath,
     '--output-last-message', input.outputLastMessagePath,
-    '--sandbox', sandbox,
+    ...(permissions.permissionsProfile
+      ? ['-c', `default_permissions=${JSON.stringify(permissions.permissionsProfile)}`]
+      : ['--sandbox', permissions.sandbox!]),
     '--cd', input.cwd,
     // Runtime workspaces are DB-authorized agent roots and need not be Git
     // repositories. The immutable subject, read-only sandbox, and queue fence
     // remain separate authority boundaries.
     '--skip-git-repo-check',
   ]
-  const profile = input.env.AUN_QUEUE_WORK_CODEX_PROFILE
-    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE
+  const profile = permissions.profile
   if (profile) args.push('--profile', profile)
   const model = input.env.AUN_QUEUE_WORK_CODEX_MODEL
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL

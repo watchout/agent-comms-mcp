@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { Client } from 'pg'
+import { resolveQueueWorkCodexPermissions } from '../core/queue-work'
 import {
   STATE_DAEMON_LAUNCH_AGENT_LABEL,
   buildGithubWorkPullerLaunchAgentEnv,
@@ -278,6 +279,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--queue-work-codex-sandbox') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = next()
     else if (arg === '--queue-work-codex-model') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL = next()
     else if (arg === '--queue-work-codex-profile') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = next()
+    else if (arg === '--queue-work-codex-permissions-profile') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE = next()
     else if (arg === '--queue-work-codex-ignore-rules') args.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_IGNORE_RULES = '1'
     else if (arg === '--queue-work-handoff-contract') args.extraEnv.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = next()
     else if (arg === '--queue-work-github-writeback-mode') args.extraEnv.STATE_DAEMON_QUEUE_WORK_GITHUB_WRITEBACK_MODE = next()
@@ -448,6 +450,7 @@ async function commandRestore(args: ParsedArgs): Promise<void> {
     ...githubTokenFileEnvFromArgs(args),
     ...githubWorkPullerEnvFromArgs(args),
   }
+  resolveQueueWorkCodexPermissions(requestedExtraEnv)
   const overlayValidation = validateStateDaemonCanaryOverlayEnv(requestedExtraEnv)
   if (overlayValidation.issues.length > 0) {
     throw new Error(`state-daemon canary overlay failed preflight: ${overlayValidation.issues.map(issue => issue.code).join(',')}`)

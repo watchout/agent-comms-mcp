@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   QUEUE_WORK_RUNTIME_ENGINE_CONFIGURATION_CONTRACTS,
   buildCodexExecQueueWorkCommand,
   buildClaudeCodeQueueWorkCommand,
   buildRunQueueWorkPlan,
+  createRuntimeAdapter,
   describeCodexExecFailure,
   frameMediatedGithubWriteback,
   parseClaudeStreamJsonQueueWorkResult,
@@ -471,5 +474,73 @@ describe('buildRunQueueWorkPlan expected_claim_source', () => {
       type: 'string',
       enum: ['reply', 'close', 'none', 'retry'],
     })
+  })
+})
+
+
+describe('Codex operator permissions selection', () => {
+  const subjectRoot = new URL('..', import.meta.url).pathname
+  const envelope = {
+    schema_version: 'queue_work_envelope_v1' as const, queue_id: '42', message_id: 'msg-42', agent_id: 'qa',
+    channel: null, thread_id: null, requester: 'controller', content: 'read exact subject',
+    reply_contract: { required: false, reply_to: 'msg-42', mention: null },
+    runtime_contract: { do_not_call_next: true as const, do_not_call_inbox: true as const, return_schema: 'queue_work_result_v1' as const },
+    handoff_contract: { kind: 'plain_queue_work' as const, github_backed: false, required_writebacks: [], posting_mode: 'none' as const, detected_from: [] },
+  }
+  const selectors = { AUN_QUEUE_WORK_CODEX_PROFILE: 'qa-poc-readonly', AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'qa-poc-readonly' }
+  const build = (env: NodeJS.ProcessEnv) => buildCodexExecQueueWorkCommand({ envelope, cwd: subjectRoot, subjectRoot, env, outputLastMessagePath: '/tmp/final.json' })
+  test('exact opt-in argv replaces only sandbox and preserves legacy profile/default behavior', () => {
+    const legacy = build({ AUN_QUEUE_WORK_CODEX_PROFILE: selectors.AUN_QUEUE_WORK_CODEX_PROFILE })
+    const selected = build(selectors)
+    const expected = [...legacy.args], index = expected.indexOf('--sandbox')
+    expect(expected[index + 1]).toBe('read-only')
+    expected.splice(index, 2, '-c', 'default_permissions="qa-poc-readonly"')
+    expect(selected.args).toEqual(expected)
+    expect(selected.args).not.toContain('--sandbox')
+    expect(build({ STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE: 'qa-poc-readonly', STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'qa-poc-readonly' }).args).toEqual(expected)
+    expect(build({ AUN_QUEUE_WORK_CODEX_SANDBOX: 'workspace-write' }).args).toContain('workspace-write')
+    expect(build({ AUN_QUEUE_WORK_CODEX_PROFILE: 'legacy.name' }).args).toContain('legacy.name')
+  })
+  test('actual fake child receives selected argv; invalid selectors start no child', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aun-codex-selector-'))
+    try {
+      const executable = join(root, 'fake-codex'), capture = join(root, 'observed.json')
+      writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+const argv = process.argv.slice(2);
+(async () => { const stdin = await Bun.stdin.text(); fs.writeFileSync(process.env.SELECTOR_CAPTURE, JSON.stringify({argv, stdin})); fs.writeFileSync(argv[argv.indexOf('--output-last-message') + 1], JSON.stringify({schema_version:'queue_work_result_v1',ok:true,summary:'fake child only',next_action:'close'})); })();
+`)
+      chmodSync(executable, 0o755)
+      const base = { PATH: process.env.PATH, SELECTOR_CAPTURE: capture, AUN_QUEUE_WORK_CODEX_EXECUTABLE: executable }
+      const plan = buildRunQueueWorkPlan({ runtime: 'codex-exec', cwd: subjectRoot, runtimeCwd: root, env: base })
+      const adapter = createRuntimeAdapter(plan, { ...base, ...selectors })
+      expect(adapter.capabilities.supportsToolAllowlist).toBe(false)
+      expect((await adapter.invoke(envelope)).summary).toBe('fake child only')
+      const observed = JSON.parse(readFileSync(capture, 'utf8'))
+      expect(observed.argv).toContain('-c')
+      expect(observed.argv[observed.argv.indexOf('-c') + 1]).toBe('default_permissions="qa-poc-readonly"')
+      expect(observed.argv).not.toContain('--sandbox')
+      expect(observed.argv[observed.argv.indexOf('--profile') + 1]).toBe('qa-poc-readonly')
+      expect(observed.stdin).toContain('read exact subject')
+      rmSync(capture)
+      const invalid: NodeJS.ProcessEnv[] = [
+        { AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'qa-poc-readonly' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: '' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_PROFILE: '' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_PROFILE: '../qa' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'x"\nnetwork=true' },
+        { ...selectors, STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'other' },
+        { ...selectors, STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE: 'other' },
+        { ...selectors, STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: '' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_SANDBOX: 'read-only' },
+        { ...selectors, STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX: '' },
+        { ...selectors, AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: 'x'.repeat(65) },
+      ]
+      for (const env of invalid) {
+        await expect(createRuntimeAdapter(plan, { ...base, ...env }).invoke(envelope)).rejects.toThrow('queue_work_codex_permissions_selection_invalid')
+        expect(existsSync(capture)).toBe(false)
+      }
+      console.log(JSON.stringify({ subcase: 'I3-CODEX-SELECTOR', actual_fake_child: 1, rejected_before_child: invalid.length, real_provider: 0 }))
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })

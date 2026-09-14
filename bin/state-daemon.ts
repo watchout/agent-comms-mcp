@@ -71,7 +71,7 @@ import {
 } from '../core/state-daemon/queue-work-residue-policy'
 import { receiveTargeted, type TargetedReceiveResult } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
-import type { QueueWorkClaimFence } from '../core/queue-work'
+import { resolveQueueWorkCodexPermissions, type QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
@@ -523,6 +523,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     // Only process rows this scheduler claimed itself (receive_claim.source
     // match) — never rows claimed by a TUI session or another runner.
     const env = buildQueueWorkAgentEnv(this.env, agentId, project)
+    resolveQueueWorkCodexPermissions(env)
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
     }
@@ -538,6 +539,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       'CODEX_SANDBOX',
       'CODEX_MODEL',
       'CODEX_PROFILE',
+      'CODEX_PERMISSIONS_PROFILE',
       'CODEX_EPHEMERAL',
       'CODEX_IGNORE_RULES',
       'CODEX_TIMEOUT_MS',

@@ -17,7 +17,8 @@
  *     in this PR so send can resolve outbound targets in SQLite mode)
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -70,6 +71,151 @@ beforeEach(() => {
 
 afterEach(() => {
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+})
+
+function startupProcess(source: string, path: string, mode = 'write') {
+  const child = spawn(process.execPath, ['-e', source, path, mode], {
+    cwd: REPO_ROOT, env: { PATH: process.env.PATH }, stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const events: Array<Record<string, any>> = []
+  const listeners = new Set<() => void>()
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk.toString() })
+  const lines = createInterface({ input: child.stdout })
+  lines.on('line', line => {
+    events.push(JSON.parse(line))
+    for (const notify of listeners) notify()
+  })
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', code => resolve(code))
+  })
+  const signal = (event: string) => new Promise<Record<string, any>>((resolve, reject) => {
+    const timer = setTimeout(() => { listeners.delete(check); reject(new Error(`startup ${event} timeout: ${stderr}`)) }, 8000)
+    const check = () => {
+      const found = events.find(value => value.event === event)
+      if (found) { clearTimeout(timer); listeners.delete(check); resolve(found) }
+    }
+    listeners.add(check); check()
+  })
+  return {
+    events, signal, exited, stderr: () => stderr,
+    release: () => { child.stdin.end('release\n') },
+    stop: async () => { if (child.exitCode === null) child.kill(); await exited; lines.close() },
+  }
+}
+
+const startupHolder = `
+  import { Database } from 'bun:sqlite'
+  import { createInterface } from 'node:readline'
+  const db = new Database(process.argv[1])
+  db.exec('PRAGMA journal_mode=DELETE')
+  db.exec('CREATE TABLE startup_fixture (value TEXT)')
+  db.exec("INSERT INTO startup_fixture VALUES ('retained')")
+  db.exec('BEGIN EXCLUSIVE')
+  await Bun.write(Bun.stdout, JSON.stringify({ event: 'held', at: Date.now() }) + '\\n')
+  for await (const line of createInterface({ input: process.stdin })) {
+    if (line === 'release') {
+      db.exec('COMMIT'); db.close()
+      await Bun.write(Bun.stdout, JSON.stringify({ event: 'released', at: Date.now() }) + '\\n')
+      process.exit(0)
+    }
+  }
+`
+const startupCandidate = `
+  import { SqliteAdapter } from './core/db/sqlite-adapter.ts'
+  await Bun.write(Bun.stdout, JSON.stringify({ event: 'starting', at: Date.now() }) + '\\n')
+  const started = performance.now()
+  try {
+    const readonly = process.argv[2] === 'readonly'
+    const db = new SqliteAdapter(process.argv[1], { readonly })
+    const busy = await db.query('PRAGMA busy_timeout')
+    const journal = await db.query('PRAGMA journal_mode')
+    const foreignKeys = await db.query('PRAGMA foreign_keys')
+    const rows = await db.query('SELECT value FROM startup_fixture')
+    let writeError = null
+    if (readonly) {
+      try { await db.execute("INSERT INTO startup_fixture VALUES ('forbidden')") }
+      catch (error) { writeError = error.code }
+    }
+    await db.close()
+    await Bun.write(Bun.stdout, JSON.stringify({ event: 'result', ok: true,
+      elapsed_ms: performance.now() - started, busy, journal, foreignKeys, rows, writeError }) + '\\n')
+  } catch (error) {
+    await Bun.write(Bun.stdout, JSON.stringify({ event: 'result', ok: false,
+      elapsed_ms: performance.now() - started, code: error.code, message: error.message }) + '\\n')
+  }
+  process.exit(0)
+`
+
+for (const releaseWithinBound of [true, false]) {
+  test(`SQLite startup ${releaseWithinBound ? 'waits for signalled lock release' : 'returns the still-held lock error after its existing five-second wait'}`, async () => {
+    const path = join(tmpDir, 'startup-lock.db')
+    const holder = startupProcess(startupHolder, path)
+    let candidate: ReturnType<typeof startupProcess> | undefined
+    try {
+      const held = await holder.signal('held')
+      candidate = startupProcess(startupCandidate, path)
+      await candidate.signal('starting')
+      if (releaseWithinBound) {
+        // Both process barriers were observed before this bounded hold.
+        await Bun.sleep(150)
+        expect(candidate.events.some(value => value.event === 'result')).toBe(false)
+        holder.release()
+        await holder.signal('released')
+      }
+      const result = await candidate.signal('result')
+      if (releaseWithinBound) {
+        expect(result.ok).toBe(true)
+        expect(result.elapsed_ms).toBeGreaterThanOrEqual(100)
+        expect(result.elapsed_ms).toBeLessThan(5000)
+        expect(result.busy).toEqual([{ timeout: 5000 }])
+        expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
+        expect(result.journal).toEqual([{ journal_mode: 'wal' }])
+        expect(result.rows).toEqual([{ value: 'retained' }])
+      } else {
+        expect(result.ok).toBe(false)
+        expect(result.code).toMatch(/^SQLITE_BUSY/)
+        expect(result.elapsed_ms).toBeGreaterThanOrEqual(4900)
+        // Process/clock observation margin; the configured SQLite wait stays5000.
+        expect(result.elapsed_ms).toBeLessThan(6500)
+        expect(holder.events.some(value => value.event === 'released')).toBe(false)
+        holder.release()
+        const released = await holder.signal('released')
+        expect(released.at - held.at).toBeGreaterThanOrEqual(5000)
+      }
+      expect(await candidate.exited, candidate.stderr()).toBe(0)
+      expect(await holder.exited, holder.stderr()).toBe(0)
+      console.log(JSON.stringify({ subcase: 'SQLITE-STARTUP-CONTENTION', release_within_bound: releaseWithinBound,
+        holder_events: holder.events, candidate_events: candidate.events }))
+    } finally {
+      await candidate?.stop(); await holder.stop()
+    }
+  }, 15000)
+}
+
+test('SQLite readonly startup preserves journal mode and refuses writes', async () => {
+  const path = join(tmpDir, 'startup-readonly.db')
+  const db = new Database(path)
+  db.exec('PRAGMA journal_mode=DELETE')
+  db.exec('CREATE TABLE startup_fixture (value TEXT)')
+  db.exec("INSERT INTO startup_fixture VALUES ('retained')")
+  db.close()
+  const before = createHash('sha256').update(readFileSync(path)).digest('hex')
+  const candidate = startupProcess(startupCandidate, path, 'readonly')
+  try {
+    const result = await candidate.signal('result')
+    expect(result.ok).toBe(true)
+    expect(result.busy).toEqual([{ timeout: 5000 }])
+    expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
+    expect(result.journal).toEqual([{ journal_mode: 'delete' }])
+    expect(result.rows).toEqual([{ value: 'retained' }])
+    expect(result.writeError).toBe('SQLITE_READONLY')
+    expect(await candidate.exited, candidate.stderr()).toBe(0)
+    expect(createHash('sha256').update(readFileSync(path)).digest('hex')).toBe(before)
+    expect(existsSync(path + '-wal')).toBe(false)
+    console.log(JSON.stringify({ subcase: 'SQLITE-STARTUP-READONLY', candidate_events: candidate.events, file_unchanged: true }))
+  } finally { await candidate.stop() }
 })
 
 for (const method of ['query', 'execute'] as const) {

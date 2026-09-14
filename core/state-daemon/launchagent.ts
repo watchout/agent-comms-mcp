@@ -2,6 +2,7 @@ import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync 
 import { homedir } from 'node:os'
 import { admissionBindingFromEnv, readAdmissionBinding, validateBoundedTransport, BoundedReceiptStore, currentBoundedOwner } from '../queue-admission'
 import { dirname, join, resolve, sep } from 'node:path'
+import { resolveQueueWorkCodexPermissions } from '../queue-work'
 import {
   SHIRUBE_D1_FLEET_ACTIVATION_REF,
   isExactShirubeD1Fleet,
@@ -978,6 +979,9 @@ export function validateStateDaemonLaunchAgentConfig(
       })
     }
     if (effectiveRuntime === 'codex-exec') {
+      try { resolveQueueWorkCodexPermissions(env) } catch {
+        errors.push({ code: 'queue_work_codex_permissions_selection_invalid', message: 'Codex permissions selection requires a valid config/permissions profile pair and no explicit sandbox.' })
+      }
       const schemaPath = env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
         ?? env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
         ?? (workingDirectory ? join(workingDirectory, 'schemas', 'queue-work-result-v1.schema.json') : null)

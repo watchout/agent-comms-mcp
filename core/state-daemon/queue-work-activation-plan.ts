@@ -4,6 +4,7 @@ import type { DbAdapter } from '../db'
 import { readAdmissionBinding, type AdmissionBinding } from '../queue-admission'
 import {
   detectQueueWorkHandoffContract,
+  resolveQueueWorkCodexPermissions,
   type QueueWorkHandoffContract,
   type QueueWorkWritebackMode,
 } from '../queue-work'
@@ -23,6 +24,9 @@ export interface QueueWorkActivationPlanOptions {
   commit?: string | null
   runtime?: string | null
   queueWorkCommand?: string | null
+  codexProfile?: string | null
+  codexPermissionsProfile?: string | null
+  codexExecutable?: string | null
   residuePolicyFile?: string | null
   githubWritebackMode?: string | null
   mediatedPostingCommand?: string | null
@@ -412,7 +416,10 @@ function buildActivationEnv(
   if (githubTokenFile) env.STATE_DAEMON_GITHUB_TOKEN_FILE = githubTokenFile
   if (runtime === 'codex-exec') {
     env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = DEFAULT_CODEX_OUTPUT_SCHEMA
-    env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
+    if (options.codexProfile != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = options.codexProfile
+    if (options.codexPermissionsProfile != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE = options.codexPermissionsProfile
+    if (options.codexExecutable != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE = options.codexExecutable
+    if (options.codexPermissionsProfile == null) env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
   }
   if (runtime === 'command-json' && queueWorkCommand) {
     env.STATE_DAEMON_QUEUE_WORK_COMMAND = queueWorkCommand
@@ -475,6 +482,14 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX) {
     command.push('--queue-work-codex-sandbox', env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX)
+  }
+  for (const [suffix, flag] of [
+    ['EXECUTABLE', '--queue-work-codex-executable'],
+    ['PROFILE', '--queue-work-codex-profile'],
+    ['PERMISSIONS_PROFILE', '--queue-work-codex-permissions-profile'],
+  ]) {
+    const value = env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+    if (value !== undefined) command.push(flag, value)
   }
   if (env.STATE_DAEMON_QUEUE_WORK_COMMAND) {
     command.push('--queue-work-command', env.STATE_DAEMON_QUEUE_WORK_COMMAND)
@@ -571,6 +586,16 @@ export async function buildQueueWorkActivationPlan(
     summary: null,
   }
 
+  if (runtime === 'codex-exec') {
+    try {
+      resolveQueueWorkCodexPermissions({
+        ...(options.codexProfile != null ? { AUN_QUEUE_WORK_CODEX_PROFILE: options.codexProfile } : {}),
+        ...(options.codexPermissionsProfile != null ? { AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: options.codexPermissionsProfile } : {}),
+      })
+    } catch {
+      blockers.push({ code: 'queue_work_codex_permissions_selection_invalid', message: 'Codex permissions selection requires an unambiguous valid config/permissions profile pair.' })
+    }
+  }
   if (!agentId) {
     blockers.push({ code: 'agent_id_required', message: 'Queue-work activation planning requires --agent-id.' })
   }

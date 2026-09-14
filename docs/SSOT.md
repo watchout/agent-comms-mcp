@@ -45,6 +45,10 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 6. **bashが実行できれば、どのLLM CLIでも接続可能**
 7. **PostgreSQLでもSQLiteでも同じCLIコマンドが動く**
 
+SQLite 接続は既存の `busy_timeout=5000` を WAL・外部キーの初期化より先に設定し、
+起動時のロック競合にも同じ待機上限を適用する。上限後のエラーは呼び出し元へ返す。
+readonly 接続では journal mode を変更しない。再試行ループや待機上限の延長は行わない。
+
 ### 1.5 AUN正常化フェーズゲート
 
 AUNの正常化は `docs/design/aun-normalization-roadmap.md` を従属する詳細仕様として扱う。

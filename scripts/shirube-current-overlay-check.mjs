@@ -274,7 +274,7 @@ async function requireBoundedCiSupply() {
   const odUrl=`https://github.com/${target}/issues/940#issuecomment-5609700544`;
   const currentC1="fbadcc82ff40cbb2410d603215d34196747aebc9";
   const odHash="59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02";
-  const expiry="2026-09-14T03:00:00Z", now=Date.now();
+  const expiry="2026-09-14T02:00:00Z", now=Date.now();
   const check=(condition,detail)=>{if(!condition)throw Error(detail)};
   const hash=value=>createHash("sha256").update(value).digest("hex");
   const sha40=value=>typeof value==="string"&&/^[0-9a-f]{40}$/.test(value);
@@ -292,8 +292,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5656920748`
-    &&digest==="9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5657552797`
+    &&digest==="4f6588f90dfa5202b57f02e6153f3b1164af5eec32c4b13e30eac5953fd4dc03","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -309,13 +309,13 @@ async function requireBoundedCiSupply() {
   };
   requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
   const handoffBody=await load(ref,digest);
-  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I2 -->";
+  const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260914-I3 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   const blocks=[...handoffBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
   check(blocks.length===1,"one current handoff JSON block required");
   const handoff=JSON.parse(blocks[0][1]);
   check(handoff.schema_version==="shirube-control-handoff/v1"
-    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I2"
+    &&handoff.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260914-I3"
     &&handoff.subject.repository===target&&handoff.subject.pr===963
     &&handoff.subject.current_public_head===currentC1&&handoff.subject.base===base
     &&handoff.subject.c2==="8d38f3bd6a99a2f4615949dd747d708f8b6943d6"
@@ -328,7 +328,7 @@ async function requireBoundedCiSupply() {
     &&handoff.execution_context.checker==="/root/goal_gap"
     &&handoff.authority_refs.length===1&&handoff.authority_refs[0].url===odUrl
     &&handoff.authority_refs[0].sha256===odHash
-    &&handoff.allowed_paths.length===122&&new Set(handoff.allowed_paths).size===122,"current integration supply mismatch");
+    &&handoff.allowed_paths.length===124&&new Set(handoff.allowed_paths).size===124,"current integration supply mismatch");
   check(changedFiles.every(file=>handoff.allowed_paths.includes(file))
     &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
   const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();

@@ -54,11 +54,12 @@ export class SqliteAdapter implements DbAdapter {
       create: options.create ?? !options.readonly,
       readonly: options.readonly ?? false,
     })
+    // WAL initialization can contend with another process before any query.
+    this.db.exec('PRAGMA busy_timeout = 5000')
     if (!options.readonly) {
       this.db.exec('PRAGMA journal_mode = WAL')
     }
     this.db.exec('PRAGMA foreign_keys = ON')
-    this.db.exec('PRAGMA busy_timeout = 5000')
   }
 
   private prepare(sql: string, params?: any[]): { sql: string; params: any[] } {

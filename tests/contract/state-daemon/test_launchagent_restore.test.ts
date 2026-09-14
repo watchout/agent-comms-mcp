@@ -1428,3 +1428,31 @@ describe('#603 state-daemon LaunchAgent durable restore contract', () => {
     expect(bootstrap).toBeGreaterThan(rename)
   })
 })
+
+
+describe('Codex permissions restore preflight', () => {
+  test('actual restore helper rejects bad pairs before any checkout/plist effect', () => {
+    const root = mkdtempSync(join(tmpdir(), 'aun-selector-restore-'))
+    try {
+      const common = [process.execPath, '--no-env-file', 'scripts/state-daemon-launchagent.ts', 'restore', '--commit', 'a'.repeat(40),
+        '--restore-root', join(root, 'restore'), '--launchagents-dir', join(root, 'agents'),
+        '--queue-work-runtime', 'codex-exec', '--queue-work-codex-permissions-profile', 'qa-poc-readonly']
+      for (const extra of [[], ['--queue-work-codex-profile', '../qa'], ['--queue-work-codex-profile', 'qa-poc-readonly', '--queue-work-codex-sandbox', 'read-only']]) {
+        const result = Bun.spawnSync([...common, ...extra, '--execute'], { cwd: REPO, env: { PATH: process.env.PATH }, stdout: 'pipe', stderr: 'pipe', timeout: 15000 })
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stderr.toString()).toContain('queue_work_codex_permissions_selection_invalid')
+        expect(existsSync(join(root, 'restore'))).toBe(false)
+        expect(existsSync(join(root, 'agents'))).toBe(false)
+      }
+      const valid = Bun.spawnSync([...common, '--queue-work-codex-profile', 'qa-poc-readonly', '--queue-work-codex-executable', '/opt/homebrew/bin/codex'],
+        { cwd: REPO, env: { PATH: process.env.PATH }, stdout: 'pipe', stderr: 'pipe', timeout: 15000 })
+      expect(valid.exitCode, valid.stderr.toString()).toBe(0)
+      const report = JSON.parse(valid.stdout.toString())
+      expect(report.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE).toBe('qa-poc-readonly')
+      expect(report.extraEnv.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX).toBeUndefined()
+      expect(report.plan.extraEnv).toEqual(report.extraEnv)
+      expect(existsSync(join(root, 'restore'))).toBe(false)
+      expect(existsSync(join(root, 'agents'))).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})
