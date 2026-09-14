@@ -1,5 +1,5 @@
 import { expect } from 'bun:test'
-import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
+import { boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, settleIndependentFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { DiscordAdapter, postBoundedDiscordRequest } from '../../adapters/discord'
@@ -383,10 +383,14 @@ export async function withA09Fixtures(main: () => Promise<void>): Promise<void> 
 }
 
 boundedTest('BA-CORE-F06',async()=>{
-  // Overlap setup, but settle every A09 even when the main F06 path throws.
-  await withA09Fixtures(async()=>{
+  const independent: Array<() => Promise<void>>=[]
+  const exclusive: Array<() => Promise<void>>=[]
+  const queueFixture=(run:Parameters<typeof fixture>[0])=>{independent.push(()=>fixture(run))}
+  const queueExclusiveFixture=(run:Parameters<typeof fixture>[0])=>{exclusive.push(()=>fixture(run))}
+  // Each unit owns its DB/roles/files. A09 remains four independent fixtures.
+  const parallel=withA09Fixtures(async()=>{
   for(const failure of ['before_commit','response_lost','reserved_crash']) {
-    await fixture(async f=>{
+    queueFixture(async f=>{
       f.config.runtime_id='command-json'
       const q=await startNormalTask(f)
       await saveFixtureResult(f,q.id)
@@ -427,7 +431,7 @@ boundedTest('BA-CORE-F06',async()=>{
   }
   // DR07: real child exits leave locks/receipts in place. Only observed child
   // termination permits explicit fixture recovery of that exact lock.
-  for(const crash of ['before_reservation','after_reservation','before_INTENT','after_INTENT','after_RETRYABLE','after_ACK','after_stage1','before_stage2','after_stage2'])await fixture(async f=>{
+  for(const crash of ['before_reservation','after_reservation','before_INTENT','after_INTENT','after_RETRYABLE','after_ACK','after_stage1','before_stage2','after_stage2'])queueFixture(async f=>{
     const policyBody='fixture policy authority, not a live owner decision'
     f.config.authority={url:'https://github.com/fixture/repo/issues/1#issuecomment-1',sha256:admissionSha256(policyBody)}
     const {row,binding}=await readyReply(f)
@@ -536,7 +540,7 @@ await client.end();process.exit(24)
   })
   // DR01: real PG guards and the locked SDK; provider I/O replaced only at
   // makeRequest. The wrapper still owns one logical result/reply.
-  await fixture(async f=>{
+  queueFixture(async f=>{
     f.config.runtime_id='command-json'
     const q=await startNormalTask(f)
     await saveFixtureResult(f,q.id)
@@ -574,7 +578,7 @@ await client.end();process.exit(24)
     {id:'DR03',statuses:[429,503,200],waits:[12500,30000]},
     {id:'DR04',statuses:[503,503,503],waits:[10000,30000]},
     {id:'DR05',statuses:[403],waits:[]},
-  ]) await fixture(async f=>{
+  ]) queueFixture(async f=>{
     f.config.runtime_id='command-json'
     const q=await startNormalTask(f);await saveFixtureResult(f,q.id)
     expect((await finalizeDoneQueueWork(fixtureDb(f),{queueId:q.id,replySender:hostReplySender(f)})).ok).toBe(true)
@@ -653,7 +657,7 @@ await client.end();process.exit(24)
     console.log(JSON.stringify({subcase:spec.id,actual_sdk_wire_calls:wire,request_variants:new Set(bodies).size,waits_ms:sentAt.slice(1).map((x,i)=>x-sentAt[i]),fixture_only:true}))
   })
   for(const mode of ['sent_before','sent_commit_response_lost','backfill_before','backfill_commit_response_lost','budget_cap','db_unavailable']){
-    await fixture(async f=>{
+    queueFixture(async f=>{
       const {row,binding}=await readyReply(f)
       let wire=0;let now=Date.now();let mono=0;let failures=0;let action='';let writes=0
       const clock={now:()=>now,monotonic:()=>mono}
@@ -693,7 +697,7 @@ await client.end();process.exit(24)
       console.log(JSON.stringify({subcase:'DR06',mode,actual_sdk_wire_calls:wire,persistence_writes:writes,reserved_writes:receipt.persistence.writes,fixture_only:true}))
     })
   }
-  await fixture(async f=>{
+  queueFixture(async f=>{
     const {row,binding}=await readyReply(f)
     let wire=0;let releaseWire!:()=>void;let entered!:()=>void
     const atWire=new Promise<void>(resolve=>{entered=resolve})
@@ -753,7 +757,7 @@ await client.end();process.exit(24)
     expect(outcome.kind).toBe(mode==='fractional_wait'?'RETRYABLE':'NEEDS_ATTENTION')
     if(mode==='fractional_wait')expect((outcome as any).retry_after_ms).toBe(1)
   }
-  for(const mode of ['long_retry_after','nonce_horizon','policy_expiry','original_max1'])await fixture(async f=>{
+  for(const mode of ['long_retry_after','nonce_horizon','policy_expiry','original_max1'])queueFixture(async f=>{
     const {q,row:reply,binding}=await readyReply(f)
     const row=mode==='original_max1'?(await f.runtime.query('SELECT * FROM outbound_queue WHERE message_id=$1',[q.message_id])).rows[0]:reply
     let wire=0,now=Date.now(),mono=0
@@ -777,7 +781,7 @@ await client.end();process.exit(24)
     console.log(JSON.stringify({subcase:'DR05/DR09/DR12',mode,physical_posts:wire,repeated_task:0,fixture_only:true}))
   })
   console.log(JSON.stringify({subcase:'DR09',fractional_round_up:true,malformed_rejected:9,clock_rollback_wire:0,fixture_only:true}))
-  for(const damage of ['corrupt','permissions','symlink'])await fixture(async f=>{
+  for(const damage of ['corrupt','permissions','symlink'])queueFixture(async f=>{
     const {row,binding}=await readyReply(f);let wire=0
     const adapter=fakeSuccessPort(()=>{wire++})
     await deliverBoundedOutbound({db:f.runtime,row,binding,adapter})
@@ -806,7 +810,7 @@ await client.end();process.exit(24)
     expect(wire).toBe(1)
     console.log(JSON.stringify({subcase:'DR10',damage,post_damage_wire_delta:0,fixture_only:true}))
   })
-  await fixture(async f=>{
+  queueExclusiveFixture(async f=>{
     const {row,binding}=await readyReply(f);let wire=0,dbLost=false
     const adapter=fakeSuccessPort(()=>{wire++;dbLost=true})
     const db={query:(sql:string,params?:any[])=>{if(dbLost)throw Error('fixture both stores lost');return f.runtime.query(sql,params)}}
@@ -824,7 +828,7 @@ await client.end();process.exit(24)
     expect((await admissionStatus(f.control,f.config.policy_id))!.policy.status).toBe('HALTED')
     console.log(JSON.stringify({subcase:'DR10',damage:'ACK_disk_and_DB_loss',physical_posts:1,restart_POST_delta:0,delivery_success_claim:false}))
   })
-  await fixture(async f=>{
+  queueFixture(async f=>{
     const {row,binding}=await readyReply(f);let wire=0;let outage=true
     const adapter=fakeSuccessPort(()=>{})
     adapter.sendBoundedRequest=(r,permit)=>postBoundedDiscordRequest(r,permit,'fixture',async()=>{
@@ -857,5 +861,12 @@ await client.end();process.exit(24)
   expect(await ordinary.sendMessage(ch.id,'ordinary fixture',{replyTo:'333333333333333333'})).toEqual({messageId:'222222222222222222'})
   expect(replyCalls).toBe(1);expect(fallbackCalls).toBe(1)
   console.log(JSON.stringify({subcase:'DR12',ordinary_sdk_retries:3,ordinary_fallback:1,fixture_only:true}))
+    await settleIndependentFixtureWork(independent)
   })
+  // The ACK disk-loss prototype fault must not overlap another parent fixture.
+  // Await both groups even after failure; then retain the exclusive outcome too.
+  await settleFixtureWork(async()=>{
+    await Promise.allSettled([parallel])
+    await settleIndependentFixtureWork(exclusive)
+  },[parallel])
 })

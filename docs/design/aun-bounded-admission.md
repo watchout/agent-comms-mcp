@@ -375,3 +375,36 @@ The finite C9/full10/private2 correction allocates only local two-caller
 specimen24; original20/21/22/23 remain consumed. Current source expiry remains
 18JST, separate from40 active minutes and14:05 local target. Product runtime,
 quality thresholds, source separation and protected application are unchanged.
+
+
+### Current fixture execution correction (I10)
+
+[I10](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5659450041)
+(raw SHA256 `95df0abfbf75caeab73fb8ea70f64e22bb3b73a7f07feee71b0694db07661aab`)
+binds public/localC9 and seven existing fixture/evidence-supply paths in the126
+union. The BA16 diagnostic row uses the production `claimed_at::text` projection,
+retaining exact microsecond fence comparison rather than converting the claim
+incarnation to a JavaScript Date. LocalPG17 is not PG16 acceptance.
+
+F06 retains its single required identity, every DR01–12/A09 assertion and the
+30000ms total cap. Independent complete main fixtures use at most two workers
+with their own UUID database, roles and receipt directory; existing four A09
+fixtures may overlap (peak six). All launched work settles and every failure
+is propagated. The parent-process DR10 receipt-write fault is exclusive after
+both groups settle, including their failure, so its prototype injection cannot
+affect another fixture. Atomic fixture/child/crash/race ordering is unchanged.
+
+C9 CI34808107443 remains3153PASS/59SKIP/4FAIL: BA16 projection, aggregate F06
+timeout, and two genuine performance failures whose cause is still unknown.
+Eventlog100ms/10ms thresholds, full populations and SQLite product behavior
+remain unchanged. C10/full11/private2 allocates only local two-caller specimen25;
+prior24 remain consumed. Expiry18JST is distinct from45 active minutes and
+15:10 local target. Current full/publicCI measurements do not waive prior FAIL.
+
+The I10 focused specimen exposed a synchronous5-second `dropdb` wait that
+blocked the parent event loop while another fixture connected. Fixture drop
+therefore uses the same child command asynchronously and awaits completion;
+its6-second child,5-second SQL and1-second lock limits are unchanged. No force
+drop, retry, server wait-cause claim or cleanup failure waiver is introduced.
+The original focused failure remains evidence; the unconsumed full11 is the
+first current-source test after this one fixture correction.

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { resolve } from 'node:path'
 import { randomUUID, randomBytes, createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { derivePostgresTestDatabaseUrls } from '../helpers/postgres-test-database'
 import { admissionStatus, admissionTransition, tryBoundedClaim, readAdmissionBinding, admissionBindingFromEnv, deliverBoundedOutbound, type BoundedDiscordRequest } from '../../core/queue-admission'
 import { postBoundedDiscordRequest } from '../../adapters/discord'
@@ -68,6 +68,24 @@ export async function settleFixtureWork(main: () => Promise<void>, children: Pro
   if (errors.length === 1) throw errors[0]
   if (errors.length > 1) throw new AggregateError(errors, 'BA_FIXTURE_WORK_FAILED')
 }
+/** Complete independent owned fixtures with two workers and retain all failures. */
+export async function settleIndependentFixtureWork(tasks: Array<() => Promise<void>>): Promise<void> {
+  let cursor=0,active=0,peak=0,completed=0
+  const errors: unknown[]=[]
+  const worker=async()=>{
+    while(cursor<tasks.length){
+      const index=cursor++;active++;peak=Math.max(peak,active)
+      fixtureEvent('F06-main','unit-start',{index,active})
+      try{await tasks[index]()}catch(error){errors.push(error)}
+      finally{active--;completed++;fixtureEvent('F06-main','unit-end',{index,active,completed})}
+    }
+  }
+  await settleFixtureWork(worker,[worker()])
+  fixtureEvent('F06-main','all-settled',{registered:tasks.length,completed,active,peak,failures:errors.length})
+  if(errors.length===1)throw errors[0]
+  if(errors.length>1)throw new AggregateError(errors,'BA_FIXTURE_WORK_FAILED')
+}
+
 export function boundedFixtureDatabase(name:string,endpoint:string) {
   if(!/^(?:ba|ba16)_[a-f0-9]{14}_test$/.test(name))throw Error('BA_OWNED_DATABASE_NAME_REQUIRED')
   const {databaseUrl,maintenanceUrl}=derivePostgresTestDatabaseUrls(name,{AGENT_COM_TEST_DATABASE_URL:endpoint})
@@ -82,7 +100,17 @@ export function boundedFixtureDatabase(name:string,endpoint:string) {
       throw Error(`BA_FIXTURE_${cmd.toUpperCase()}_FAILED ${sanitizeFixtureError(e.stderr??e.message)}`)}
   }
   command('createdb')
-  return {databaseUrl,drop:()=>command('dropdb')}
+  return {databaseUrl,drop:()=>new Promise<void>((resolve,reject)=>{
+    // Other owned fixtures must process socket I/O while this DB is dropped.
+    // Preserve existing child/SQL/lock deadlines and propagate any failure.
+    fixtureEvent(name,'dropdb-start')
+    execFile('dropdb',[`--maintenance-db=${maintenanceUrl}`,name],{encoding:'utf8',timeout:6000,killSignal:'SIGTERM',
+      env:{PATH:process.env.PATH,HOME:process.env.HOME,PGCONNECT_TIMEOUT:'2',PGOPTIONS:'-c statement_timeout=5000 -c lock_timeout=1000'}},
+      (error,_stdout,stderr)=>{
+        if(error){const e=error as any;fixtureEvent(name,'dropdb-end',{exit:e.code??null,signal:e.signal??null});reject(Error(`BA_FIXTURE_DROPDB_FAILED ${sanitizeFixtureError(stderr||e.message)}`))}
+        else{fixtureEvent(name,'dropdb-end',{exit:0});resolve()}
+      })
+  })}
 }
 
 export async function verifyFixtureEndpoint(endpoint:string,major:16|17):Promise<void>{
@@ -191,7 +219,7 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
     await run({ admin, control, other, executor, runtime, config, env, prepare, roleUrls, client:owned.client })
     fixtureEvent(name,'body-end')
   } catch(error) { originalError=error; throw error } finally {
-    try{await owned.close();target.drop()}
+    try{await owned.close();await target.drop()}
     catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}
   }
 }
@@ -495,3 +523,36 @@ try{process.stdout.write(JSON.stringify(await call()))}finally{await client.end(
     expect(task.stage).toBe('ENROLLED');expect(task.claim_fence?.claimed_by).toBe('qa')
   })
 })
+
+// Scheduling failures cannot discard other independent fixture outcomes.
+if(stage!=='private'){
+test('I10 independent fixture workers retain every failure and never exceed two',async()=>{
+  let active=0,peak=0,release!:()=>void,entered!:()=>void
+  const atTwo=new Promise<void>(resolve=>{entered=resolve})
+  const barrier=new Promise<void>(resolve=>{release=resolve})
+  const visits:number[]=[];const first=Error('first fixture failure'),last=Error('late fixture failure')
+  const running=settleIndependentFixtureWork([0,1,2,3].map(id=>async()=>{
+    active++;peak=Math.max(peak,active);visits.push(id)
+    if(active===2)entered()
+    try{if(id<2)await barrier;if(id===0)throw first;if(id===3)throw last}
+    finally{active--}
+  }))
+  const settled=running.then(()=>null,error=>error)
+  await atTwo;expect(visits).toEqual([0,1]);expect(active).toBe(2)
+  release();const error=await settled
+  expect(visits).toEqual([0,1,2,3]);expect(active).toBe(0);expect(peak).toBe(2)
+  expect(error).toBeInstanceOf(AggregateError);expect(error.errors).toEqual([first,last])
+})
+
+test('I10 exclusive fault waits for main and A09 settlement and preserves both failures',async()=>{
+  let release!:()=>void;const barrier=new Promise<void>(resolve=>{release=resolve})
+  let exclusive=false,lateSettled=false
+  const early=Error('main failed'),late=Error('A09 failed')
+  const parallel=settleFixtureWork(async()=>{throw early},[(async()=>{await barrier;lateSettled=true;throw late})()])
+  const result=settleFixtureWork(async()=>{
+    await Promise.allSettled([parallel]);expect(lateSettled).toBe(true);exclusive=true
+  },[parallel]).then(()=>null,error=>error)
+  await Promise.resolve();expect(exclusive).toBe(false);release()
+  const error=await result;expect(exclusive).toBe(true);expect(error.errors).toEqual([early,late])
+})
+}

@@ -28,7 +28,7 @@ async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>
   }
   try{await admin.connect();migrate();await run({admin,env,migrate})}
   catch(error){originalError=error;throw error}
-  finally{try{await owned.close();target.drop()}catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}}
+  finally{try{await owned.close();await target.drop()}catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}}
 }
 
 boundedTest('BA-16-MIGRATION',async()=>fixture16(async({admin,migrate})=>{
@@ -89,7 +89,7 @@ boundedTest('BA-16-DEFAULT-RETRY',async()=>fixture16(async f=>{
     catch(error){const e=error as any;fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:e.status??null,stdout:sanitizeFixtureError(e.stdout??''),stderr:sanitizeFixtureError(e.stderr??e.message)});throw error}
     return {message_id:r.message_id,queue_closed:r.work_closed===true}
   }}
-  const row=(await f.admin.query('SELECT *,clock_timestamp() database_now FROM message_queue WHERE id=$1',[claimed.queue_id])).rows[0]
+  const row=(await f.admin.query('SELECT *,claimed_at::text AS claimed_at,clock_timestamp() database_now FROM message_queue WHERE id=$1',[claimed.queue_id])).rows[0]
   const payload=JSON.parse(row.payload)
   const mismatches=queueWorkClaimResultFenceMismatches({row,payload,...claimResultFence})
   fixtureEvent('BA-16-DEFAULT-RETRY','actual-fence',{receive_claim:payload.receive_claim,execution:payload.queue_work_execution,result:payload.runner_result,mismatches})
