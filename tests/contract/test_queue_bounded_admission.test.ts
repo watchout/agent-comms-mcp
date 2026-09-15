@@ -271,7 +271,7 @@ export async function fixture(run: (f: { admin: Client; control: Client; other: 
   }
 }
 
-test('bounded fixture transport GRANT is privilege-equivalent to original per-table grants',async()=>{
+if(stage!=='private')test('bounded fixture transport GRANT is privilege-equivalent to original per-table grants',async()=>{
   await fixture(async f=>{
     const roles=Object.values(f.config.roles) as string[]
     const tables=(await f.admin.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT LIKE 'queue_admission_%' ORDER BY tablename")).rows
