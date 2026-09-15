@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
-import { parseRuntimeMemoryReadyPolicy, type RuntimeMemoryReadyPolicy } from '../core/runtime-current-resolver'
+import { parseRuntimeMemoryReadyPolicy, resolveRuntimeMemoryReadyCurrent, type RuntimeMemoryReadyPolicy } from '../core/runtime-current-resolver'
 import {
   queryRuntimeMemoryReadyIdentityMonitor,
   reconcileRuntimeMemoryReadyIdentity,
+  reconcileRuntimeMemoryReadyFleetIdentity,
 } from '../core/runtime-memory-ready-identity'
 import { evaluateRuntimeMemoryReadyGate, recordRuntimeMemoryReadyEvidence } from '../core/runtime-memory-ready'
 
@@ -114,8 +115,106 @@ const resolveProject = async (_db: any, agentId: string) => ({
   source: 'fixture' as const,
 })
 
+describe('startup memory identity canary scope', () => {
+  async function seedRotatedSeat(agentId: string, mismatched = false) {
+    const home = `/work/${agentId}`
+    const session = `discord-${agentId}`
+    await seedAgent({ agentId, home, session, port: 8810 })
+    await seedRuntime({ runtimeId: `${agentId}-old`, agentId, session, checkout: home,
+      port: 8810, status: 'stopped', seen: '2026-08-22T23:50:00.000Z' })
+    await seedRuntime({ runtimeId: `${agentId}-current`, agentId, session,
+      checkout: mismatched ? '/work/wrong-registration' : home,
+      port: 8810, status: 'running', seen: '2026-08-23T00:09:30.000Z' })
+    await seedEvidence({ agentId, runtimeId: `${agentId}-old`, session, checkout: home, port: 8810 })
+  }
+
+  function observedOptions(agentAllowlist?: readonly string[] | null) {
+    const resolved: string[] = [], projects: string[] = [], refreshed: string[] = []
+    return {
+      resolved, projects, refreshed,
+      options: { now, policy, agentAllowlist,
+        resolveCurrent: async (...args: Parameters<typeof resolveRuntimeMemoryReadyCurrent>) => {
+          resolved.push(args[1].agentId)
+          return resolveRuntimeMemoryReadyCurrent(...args)
+        },
+        resolveProject: async (adapter: any, agentId: string) => {
+          projects.push(agentId)
+          return resolveProject(adapter, agentId)
+        },
+        refreshSeat: async (input: any) => {
+          refreshed.push(input.resolution.agent_id)
+          return { evidence_id: 999, evidence_log_id: 'owned-refresh-result' } as any
+        },
+      },
+    }
+  }
+
+  test('qa canary excludes mismatched nonQA before resolver, audit and refresh', async () => {
+    await seedRotatedSeat('qa')
+    await seedRotatedSeat('non-qa', true)
+    const probe = observedOptions(['qa'])
+    const results = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)
+    expect(results.map(row => [row.agent_id, row.status])).toEqual([['qa', 'REFRESHED']])
+    expect(probe.resolved).toEqual(['qa'])
+    expect(probe.projects).toEqual(['qa'])
+    expect(probe.refreshed).toEqual(['qa'])
+    const audits = await db.query<any>("SELECT agent_id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")
+    expect(audits).toHaveLength(2)
+    expect(audits.every(row => row.agent_id === 'qa')).toBe(true)
+  })
+
+  for (const allowlist of [undefined, null]) {
+    test(`${String(allowlist)} keeps normal eligible fleet reconciliation`, async () => {
+      await seedRotatedSeat('qa')
+      await seedRotatedSeat('non-qa', true)
+      const probe = observedOptions(allowlist)
+      const results = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)
+      expect(results.map(row => row.agent_id)).toEqual(['non-qa', 'qa'])
+      expect(results.every(row => row.status === 'REFRESHED')).toBe(true)
+      expect(probe.resolved).toEqual(['non-qa', 'qa'])
+      expect(probe.refreshed).toEqual(['non-qa', 'qa'])
+      const audits = await db.query<any>("SELECT agent_id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")
+      expect(audits.some(row => row.agent_id === 'non-qa')).toBe(true)
+    })
+  }
+
+  test('explicit empty scope has no selected seats or per-seat effects', async () => {
+    await seedRotatedSeat('qa')
+    const probe = observedOptions([])
+    expect(await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)).toEqual([])
+    expect(probe.resolved).toEqual([])
+    expect(probe.projects).toEqual([])
+    expect(probe.refreshed).toEqual([])
+    expect(await db.query<any>("SELECT id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")).toEqual([])
+  })
+
+  test('allowlist never includes disabled, offline, profile-disabled or human seats', async () => {
+    const names = ['qa', 'disabled', 'offline', 'profile-disabled', 'human', 'outside']
+    for (const name of names) await seedRotatedSeat(name)
+    await db.execute("UPDATE agents SET disabled_at = '2026-08-22' WHERE agent_id = 'disabled'")
+    await db.execute("UPDATE agents SET status = 'offline' WHERE agent_id = 'offline'")
+    await db.execute("UPDATE agents SET profile_enabled = 0 WHERE agent_id = 'profile-disabled'")
+    await db.execute("UPDATE agents SET agent_type = 'human' WHERE agent_id = 'human'")
+    await db.execute("UPDATE agents SET status = 'busy' WHERE agent_id = 'qa'")
+    const probe = observedOptions(names.filter(name => name !== 'outside'))
+    expect((await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)).map(row => row.agent_id)).toEqual(['qa'])
+    expect(probe.resolved).toEqual(['qa'])
+    expect(probe.refreshed).toEqual(['qa'])
+    const audits = await db.query<any>("SELECT agent_id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")
+    expect(audits.every(row => row.agent_id === 'qa')).toBe(true)
+  })
+
+  test('actual daemon startup forwards its existing validated canary config', () => {
+    const source = readFileSync(new URL('../bin/state-daemon.ts', import.meta.url), 'utf8')
+    const calls = [...source.matchAll(/await reconcileRuntimeMemoryReadyFleetIdentity\(db as any,\s*\{\s*agentAllowlist: config\.agentAllowlist,?\s*\}\)/g)]
+    expect(calls).toHaveLength(1)
+    expect(source.indexOf('const config = loadConfig()')).toBeLessThan(calls[0].index!)
+    expect(source.indexOf('await daemon.start()', calls[0].index)).toBeGreaterThan(calls[0].index!)
+  })
+})
+
 describe('runtime memory-ready identity reconciliation', () => {
-  test('heartbeat rotation refreshes evidence to the devauditor current instance and clears mismatch', async () => {
+  test('heartbeat rotation cannot transfer a prior runtime recovery receipt', async () => {
     await seedAgent({
       agentId: 'devauditor',
       session: 'discord-auditor',
@@ -162,9 +261,8 @@ describe('runtime memory-ready identity reconciliation', () => {
       observedRuntimeInstanceId: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     }, { now, policy, resolveProject })
     expect(reconciled).toMatchObject({
-      status: 'REFRESHED',
-      code: 'EVIDENCE_BINDING_REFRESHED',
-      previous_evidence_runtime_instance_id: 'ec08bc6f-466f-4727-853f-81895e4f6d05',
+      status: 'REFRESH_FAILED',
+      code: 'EVIDENCE_BINDING_REFRESH_FAILED',
       current_runtime_instance_id: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     })
 
@@ -174,15 +272,18 @@ describe('runtime memory-ready identity reconciliation', () => {
       now,
       policy,
     })
-    expect(after.ok).toBe(true)
-    expect(after.reason).toBe('ready')
+    expect(after.ok).toBe(false)
+    expect(after.reason).toBe('runtime_instance_mismatch')
     expect(after.runtime_instance_id).toBe('2e8da261-9017-4b2d-ab2d-1378432801a1')
 
     const idempotent = await reconcileRuntimeMemoryReadyIdentity(db as any, {
       agentId: 'devauditor',
       observedRuntimeInstanceId: '2e8da261-9017-4b2d-ab2d-1378432801a1',
     }, { now, policy, resolveProject })
-    expect(idempotent.status).toBe('UNCHANGED')
+    expect(idempotent.status).toBe('REFRESH_FAILED')
+    const evidenceRows = await db.query<any>('SELECT runtime_instance_id FROM runtime_memory_ready_evidence WHERE agent_id=$1', ['devauditor'])
+    expect(evidenceRows).toHaveLength(1)
+    expect(evidenceRows[0].runtime_instance_id).toBe('ec08bc6f-466f-4727-853f-81895e4f6d05')
   })
 
   test('read-only monitor types codex-cto registration drift and devauditor superseded binding', async () => {

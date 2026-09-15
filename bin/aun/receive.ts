@@ -6,6 +6,7 @@
  * audit and recovery workflows do not drain unrelated FIFO work.
  */
 import { spawnSync } from 'node:child_process'
+import { tryBoundedClaim } from '../../core/queue-admission'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -474,6 +475,13 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      const bounded = await tryBoundedClaim(db, plan.env.AGENT_ID, { dialect: db.dialect, env: plan.env, queueId: targetQueueId, dryRun: opts.dryRun })
+      if (bounded) return {
+        ok: true, dry_run: !!opts.dryRun, mode: 'targeted-receive' as const,
+        agent_id: plan.env.AGENT_ID, expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        queue_id: targetQueueId, selected: null, claimed: opts.dryRun ? null : bounded as ClaimedMessage,
+        waiting: 0, blocked_reason: null, observed_status: opts.dryRun ? 'pending' : 'received',
+      }
       return db.transaction<TargetedReceiveSummary>(async (tx) => {
         const row = await tx.queryOne<Record<string, unknown>>(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
@@ -1791,6 +1799,13 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
         }
 
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
+          // Preserve the existing memory/presentation gates above. Once a
+          // row is selected, bounded recipients use the same policy-first
+          // claim as next/targeted/headless; never the legacy raw UPDATE.
+          const bounded = await tryBoundedClaim(tx, plan.env.AGENT_ID, {
+            dialect: db.dialect, env: plan.env, queueId: String(selected.row.queue_id),
+          })
+          if (bounded === null) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
           const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
           const update = await tx.execute(
@@ -1805,6 +1820,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           )
           if (update.rowCount !== 1) {
             throw new Error(`selected queue row changed before claim: queue_id=${selected.row.queue_id}`)
+          }
           }
           await tx.execute(
             `UPDATE agents SET

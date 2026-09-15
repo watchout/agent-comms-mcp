@@ -20,6 +20,7 @@
  */
 
 import type { Client } from 'pg'
+import { tryBoundedClaim, admissionInstalled, admissionForAgent, admissionTransition, sealBoundedMessage, unboundedQueuePredicate, admissionBindingFromEnv } from '../core/queue-admission'
 import { truncateForDiscord } from '../core/truncate'
 import { createDbAdapter, type DbAdapter } from '../core/db'
 import { readFileSync, existsSync } from 'node:fs'
@@ -2858,6 +2859,8 @@ async function nextMessage() {
   const agentId = requireAgentId('next')
   const db = await getDb()
   try {
+    const bounded = await tryBoundedClaim(db, agentId, { dialect: isSqliteMode() ? 'sqlite' : 'postgres' })
+    if (bounded) { process.stdout.write(JSON.stringify(bounded) + '\n'); return }
     try {
       await assertMessageQueueStatusVocabularyCompatible(db, { operation: 'agent-com next' })
     } catch (err) {
@@ -3155,6 +3158,12 @@ async function sendMessage(args: string[]) {
       const explicitClose = !!queueIdRaw || !!messageIdRaw
       let claimRenewalEvidence: ClaimRenewalEvidence | null = null
       let queueWorkFinalizerCloseFence: QueueWorkFinalizerCloseFence | null = null
+      const boundedReply = !isSqliteMode() && await admissionInstalled(db, 'postgres') ? await admissionForAgent(db, agentId) : null
+      const boundedTask = boundedReply?.tasks.find(t => String(t.queue_id) === queueIdRaw)
+      if (boundedReply) {
+        if (!queueWorkFinalizer || !boundedTask) writeFailureJson('ADMISSION_REPLY_DENIED', 'bounded reply requires the reserved trusted host finalizer')
+        await admissionTransition(db, boundedReply, 'reply_lock', { ordinal: boundedTask!.ordinal, claim_fence: boundedTask!.claim_fence, result_digest: boundedTask!.result_digest })
+      }
 
       if (explicitClose) {
         let qres
@@ -3213,7 +3222,7 @@ async function sendMessage(args: string[]) {
           const runnerResult = queuePayload.runner_result && typeof queuePayload.runner_result === 'object'
             ? queuePayload.runner_result as Record<string, unknown>
             : {}
-          const expectedSource = 'state-daemon-queue-work-scheduler'
+          const expectedSource = boundedReply ? 'bounded-admission' : 'state-daemon-queue-work-scheduler'
           const mismatches = queueWorkClaimResultFenceMismatches({
             row: qrow,
             payload: queuePayload,
@@ -3782,7 +3791,10 @@ async function sendMessage(args: string[]) {
         // the only path now. #420 keeps this default path for backward
         // compatibility; ACK/progress callers opt out with --no-close.
         // ─────────────────────────────────────────────────────────────────
-        if (queueWorkFinalizerCloseFence) {
+        if (boundedReply && boundedTask) {
+          await admissionTransition(db, boundedReply, 'reply_commit', { ordinal: boundedTask.ordinal, claim_fence: boundedTask.claim_fence,
+            result_digest: boundedTask.result_digest, reply_id: id })
+        } else if (queueWorkFinalizerCloseFence) {
           // The row is already terminal-done and locked by this transaction.
           // Recheck the exact immutable claim/result identity at mutation;
           // lease expiry cannot reassign executable ownership from done, and
@@ -3847,6 +3859,7 @@ async function sendMessage(args: string[]) {
           [agentId],
         )
       }
+      await sealBoundedMessage(db, id, isSqliteMode() ? 'sqlite' : 'postgres')
       await auditLog(db, 'message.send', agentId, channelId, {
         message_id: id,
         reply_to: replyTo,
@@ -4208,6 +4221,7 @@ async function notifyMessage(args: string[]) {
         return
       }
 
+      await sealBoundedMessage(db, id, isSqliteMode() ? 'sqlite' : 'postgres')
       await db.query('COMMIT')
       txCommitted = true
 
@@ -4385,6 +4399,7 @@ async function reclaimMessages(args: string[]) {
           WHERE agent_id = $1
             AND status = 'received'
             AND read_at < now() - INTERVAL '15 minutes'
+            AND ${unboundedQueuePredicate('agent_id', isSqliteMode() ? 'sqlite' : 'postgres')}
           RETURNING id`,
         [agentId],
       )
@@ -4859,6 +4874,9 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     const db = await getDb()
     try {
       const report = await buildQueueWorkActivationPlan(db.__adapter, {
+        admission: admissionBindingFromEnv({ ...process.env,
+          ...Object.fromEntries(['policy-id','config-digest','source-sha','cohort-digest','runtime-id']
+            .filter(k => flags[`admission-${k}`]).map(k => [`AUN_ADMISSION_${k.replaceAll('-','_').toUpperCase()}`,flags[`admission-${k}`]])) }),
         agentId,
         queueId: flags['queue-id'],
         commit,
@@ -5015,7 +5033,11 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
         console.error('Usage: agent-com queue requeue-failed (--agent <agent> | --id <queue_id[,queue_id...]>) [--execute|--dry-run]')
         process.exit(2)
       }
-      const report = await requeueFailedQueueRows(db as any, { agentId, queueIds, dryRun })
+      // This existing helper's fixed SELECT/UPDATE share exactly this WHERE.
+      // Add exclusion inside each SQL statement, not a racy pre-filter of IDs.
+      const guardedRepairDb = { query: (sql: string, params?: any[]) => db.query(
+        sql.replace("WHERE status = 'failed'", `WHERE ${unboundedQueuePredicate('agent_id', isSqliteMode() ? 'sqlite' : 'postgres')} AND status = 'failed'`), params) }
+      const report = await requeueFailedQueueRows(guardedRepairDb as any, { agentId, queueIds, dryRun })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }

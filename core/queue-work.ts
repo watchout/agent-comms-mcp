@@ -1,4 +1,25 @@
 import { createHash } from 'node:crypto'
+import { admissionInstalled, admissionForAgent, admissionStatus, admissionTransition, type AdmissionState } from './queue-admission'
+
+/** Operator selectors only. Native Codex resolves permissions; this does not prove confinement. */
+export function resolveQueueWorkCodexPermissions(env: NodeJS.ProcessEnv): {
+  sandbox: string | null; profile: string | undefined; permissionsProfile: string | null
+} {
+  const read = (suffix: string) => env[`AUN_QUEUE_WORK_CODEX_${suffix}`]
+    ?? env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+  const optedIn = ['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE`] !== undefined)
+  if (!optedIn) return { sandbox: read('SANDBOX') ?? 'read-only', profile: read('PROFILE'), permissionsProfile: null }
+  const invalid = () => { throw new Error('queue_work_codex_permissions_selection_invalid') }
+  const pair = (suffix: string): string => {
+    const a = env[`AUN_QUEUE_WORK_CODEX_${suffix}`], b = env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+    if ((a !== undefined && !a) || (b !== undefined && !b) || (a && b && a !== b)) invalid()
+    const value = a ?? b
+    if (!value || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) invalid()
+    return value!
+  }
+  if (['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_SANDBOX`] !== undefined)) invalid()
+  return { sandbox: null, profile: pair('PROFILE'), permissionsProfile: pair('PERMISSIONS_PROFILE') }
+}
 
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
@@ -222,6 +243,7 @@ export type QueueWorkRunOutcome =
     }
 
 export interface RunReceivedQueueWorkOptions {
+  githubWritebackMode?: QueueWorkWritebackMode
   queueId?: string | number
   agentId?: string
   adapter: LlmRuntimeAdapter
@@ -736,6 +758,118 @@ function executionAbortDetail(signal: AbortSignal): string {
   return reason === undefined ? 'runtime execution aborted' : String(reason)
 }
 
+interface BoundedQueueWork { state: AdmissionState; row: QueueWorkRow; task: AdmissionState['tasks'][number] }
+async function boundedQueueWork(db: QueueWorkDb, queueId?: string | number, agentId?: string): Promise<BoundedQueueWork | null> {
+  if (db.dialect !== 'postgres' || !await admissionInstalled(db, db.dialect)) return null
+  // Nonlocking identification only; the SQL core obtains policy -> slot -> row.
+  const selected = await db.query<QueueWorkRow>(queueId !== undefined
+    ? 'SELECT * FROM message_queue WHERE id=$1' : "SELECT * FROM message_queue WHERE agent_id=$1 AND status IN ('received','in_progress','done') ORDER BY id LIMIT 1", [queueId ?? agentId])
+  const row = selected.rows[0]
+  if (!row) return null
+  const state = await admissionForAgent(db, row.agent_id)
+  if (!state) return null
+  const task = state.tasks.find(t => String(t.queue_id) === String(row.id))
+  if (!task) throw new Error('ADMISSION_TASK_NOT_ENROLLED')
+  return { state, row, task }
+}
+async function haltBoundedWork(db: QueueWorkDb, state: AdmissionState, reason: string): Promise<void> {
+  const current = await admissionStatus(db, state.policy.policy_id)
+  if (!current) throw new Error('ADMISSION_POLICY_NOT_VISIBLE')
+  await admissionTransition(db, current, 'failure', { reason })
+}
+async function runBoundedQueueWork(db: QueueWorkDb, opts: RunReceivedQueueWorkOptions, bound: BoundedQueueWork): Promise<QueueWorkRunOutcome> {
+  const { row, task } = bound
+  const queueId = String(row.id)
+  let state = bound.state
+  if (opts.signal?.aborted) return { ok: false, code: 'EXECUTION_ABORTED', queue_id: queueId }
+  if (opts.adapter.runtime_id !== state.policy.config.runtime_id) return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_RUNTIME_MISMATCH' }
+  if (!Number.isFinite(opts.adapter.execution_timeout_ms) || opts.adapter.execution_timeout_ms! <= 0
+    || opts.adapter.execution_timeout_ms! > state.policy.config.worker_timeout_seconds * 1000) {
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_WORKER_TIMEOUT_UNPROVEN' }
+  }
+  const envelope = buildQueueWorkEnvelope(row)
+  // Existing classification is retained; a GitHub handoff is never relabelled.
+  if (parsePayload(row.payload).shirube_v4_d1) {
+    // D1 has its own invocation/effect receipt protocol. Never short-circuit
+    // that protocol through this two-slot normal-reply trial.
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_D1_EFFECT_ROUTE_NOT_ADMITTED' }
+  }
+  if (opts.expectedClaimSource && opts.expectedClaimSource !== 'bounded-admission') {
+    return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_CLAIM_SOURCE_MISMATCH' }
+  }
+  if (opts.claimFence && (opts.claimFence.claimedBy !== task.claim_fence?.claimed_by
+    || Date.parse(opts.claimFence.claimedAt) !== Date.parse(String(task.claim_fence?.claimed_at)))) {
+    return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_CLAIM_FENCE_MISMATCH' }
+  }
+  if (envelope.handoff_contract.github_backed && opts.githubWritebackMode !== 'mediated') {
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_MEDIATED_HANDOFF_REQUIRED' }
+  }
+  envelope.handoff_contract.posting_mode = opts.githubWritebackMode ?? 'none'
+  state = await admissionTransition(db, state, 'invoke', { ordinal: task.ordinal, claim_fence: task.claim_fence })
+  let result: QueueWorkResult
+  try {
+    result = await invokeRuntimeAdapter(opts.adapter, envelope, opts.signal)
+    await opts.onInvocationSettled?.()
+    if (!resultLooksValid(result)) throw new Error('ADAPTER_RESULT_INVALID')
+    if (opts.signal?.aborted) throw new Error('EXECUTION_ABORTED')
+  } catch (error) {
+    await haltBoundedWork(db, state, error instanceof Error ? error.message : 'ADAPTER_ERROR')
+    return { ok: false, code: 'ADAPTER_ERROR', queue_id: queueId, detail: 'bounded attempt consumed; no reclaim' }
+  }
+  state = (await admissionStatus(db, state.policy.policy_id))!
+  await admissionTransition(db, state, 'result', { ordinal: task.ordinal, claim_fence: task.claim_fence, result: {
+    ...result, runtime_id: opts.adapter.runtime_id, invocation_source: opts.invocationSource ?? 'bounded-admission',
+    completed_at: new Date().toISOString(), claim_fence: task.claim_fence,
+  } })
+  if (!result.ok) return { ok: false, code: 'ADAPTER_RESULT_NOT_OK', queue_id: queueId, detail: result.summary }
+  const after = await admissionStatus(db, state.policy.policy_id)
+  if (after?.tasks.find(t => t.ordinal === task.ordinal)?.stage !== 'RESULT_SAVED') return { ok: false, code: 'EXECUTION_ABORTED', queue_id: queueId, detail: 'expired or halted; result evidence saved without another effect' }
+  return { ok: true, code: 'DONE', queue_id: queueId, final_status: 'done', result }
+}
+async function finalizeBoundedQueueWork(db: QueueWorkDb, opts: FinalizeDoneQueueWorkOptions, bound: BoundedQueueWork): Promise<QueueWorkFinalizeOutcome> {
+  const { row, task } = bound
+  const queueId = String(row.id)
+  if (task.stage === 'REPLIED' || task.stage === 'ACCEPTED') return { ok: true, code: 'ALREADY_REPLIED', queue_id: queueId, replied_with: task.reply_id }
+  const payload = parsePayload(row.payload)
+  const result = payload.runner_result as QueueWorkResult
+  const envelope = buildQueueWorkEnvelope(row)
+  if (payload.shirube_v4_d1) return { ok: false, code: 'D1_COMPLETION_RECEIPT_REQUIRED', queue_id: queueId, detail: 'ADMISSION_D1_EFFECT_ROUTE_NOT_ADMITTED' }
+  if (opts.writebackSender) envelope.handoff_contract.posting_mode = 'mediated'
+  if (!resultLooksValid(result) || !result.ok) return { ok: false, code: 'INVALID_STATE', queue_id: queueId, status: row.status }
+  const validation = opts.resultValidator?.({ row, payload, result, handoffContract: envelope.handoff_contract })
+  if (validation && !validation.ok) return { ok: false, code: 'TERMINAL_EVIDENCE_INVALID', queue_id: queueId, detail: validation.detail }
+  if (result.next_action !== 'reply' || !result.reply?.trim() || opts.replySender?.queue_close_mode !== 'sender') {
+    return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueId }
+  }
+  if (envelope.handoff_contract.github_backed && (!result.writeback || !opts.writebackSender)) {
+    return { ok: false, code: 'MISSING_WRITEBACK_SENDER', queue_id: queueId }
+  }
+  const state = await admissionTransition(db, bound.state, 'begin_finalize', { ordinal: task.ordinal, claim_fence: task.claim_fence, result_digest: task.result_digest })
+  try {
+    if (envelope.handoff_contract.github_backed) {
+      const receipt = await opts.writebackSender!.sendWriteback({ queue_id: queueId, agent_id: row.agent_id, message_id: row.message_id,
+        handoff_contract: envelope.handoff_contract, writeback: result.writeback!, runtime_result_summary: {
+          ok: result.ok, summary: result.summary, next_action: result.next_action, evidence: result.evidence ?? [],
+        } })
+      if (!receipt.posted_with) throw new Error('WRITEBACK_RECEIPT_MISSING')
+      const afterWriteback = await admissionStatus(db, state.policy.policy_id)
+      if (!afterWriteback) throw new Error('ADMISSION_POLICY_NOT_VISIBLE')
+      await admissionTransition(db, afterWriteback, 'writeback_receipt', { ordinal: task.ordinal, claim_fence: task.claim_fence,
+        result_digest: task.result_digest, posted_with: receipt.posted_with,
+        body_sha256: receipt.body_sha256 ?? createHash('sha256').update(result.writeback!.body).digest('hex') })
+    }
+    const sent = await opts.replySender!.sendReply({ queue_id: queueId, agent_id: row.agent_id, message_id: row.message_id,
+      content: result.reply!, mention: envelope.reply_contract.mention })
+    const after = await admissionStatus(db, state.policy.policy_id)
+    const actual = after?.tasks.find(t => t.ordinal === task.ordinal)
+    if (!sent.queue_closed || !sent.message_id || actual?.stage !== 'REPLIED' || actual.reply_id !== sent.message_id) throw new Error('ADMISSION_HOST_REPLY_READBACK_MISMATCH')
+    return { ok: true, code: 'REPLIED', queue_id: queueId, replied_with: sent.message_id }
+  } catch (error) {
+    await haltBoundedWork(db, state, error instanceof Error ? error.message : 'FINALIZER_ERROR')
+    return { ok: false, code: 'REPLY_SEND_FAILED', queue_id: queueId, detail: 'bounded finalizer attempt consumed; no resume/retry' }
+  }
+}
+
 async function invokeRuntimeAdapter(
   adapter: LlmRuntimeAdapter,
   envelope: QueueWorkEnvelope,
@@ -761,6 +895,8 @@ export async function runReceivedQueueWork(
   db: QueueWorkDb,
   opts: RunReceivedQueueWorkOptions,
 ): Promise<QueueWorkRunOutcome> {
+  const bounded = await boundedQueueWork(db, opts.queueId, opts.agentId)
+  if (bounded) return runBoundedQueueWork(db, opts, bounded)
   if (opts.signal?.aborted) {
     return {
       ok: false,
@@ -1102,6 +1238,8 @@ export async function finalizeDoneQueueWork(
   db: QueueWorkDb,
   opts: FinalizeDoneQueueWorkOptions,
 ): Promise<QueueWorkFinalizeOutcome> {
+  const bounded = await boundedQueueWork(db, opts.queueId)
+  if (bounded) return finalizeBoundedQueueWork(db, opts, bounded)
   await db.query('BEGIN')
   let committed = false
   try {

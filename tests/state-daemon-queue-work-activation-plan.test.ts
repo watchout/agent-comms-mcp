@@ -927,3 +927,35 @@ describe('queue-work activation planner', () => {
     }
   })
 })
+
+
+describe('Codex permissions activation selection', () => {
+  test('round trips exact executable/profile/permissions and omits sandbox', async () => {
+    const report = await buildQueueWorkActivationPlan(new FakeDb({ 121877: [row()] }), {
+      agentId: 'aun', queueId: '121877', commit: '42d2c0a2624554369d9536ed4dd0e5d2ad1ccffe',
+      codexExecutable: '/opt/homebrew/bin/codex', codexProfile: 'qa-poc-readonly', codexPermissionsProfile: 'qa-poc-readonly',
+    })
+    expect(report.ok).toBe(true)
+    expect(report.activation_env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX).toBeUndefined()
+    for (const [suffix, flag, value] of [
+      ['EXECUTABLE', '--queue-work-codex-executable', '/opt/homebrew/bin/codex'],
+      ['PROFILE', '--queue-work-codex-profile', 'qa-poc-readonly'],
+      ['PERMISSIONS_PROFILE', '--queue-work-codex-permissions-profile', 'qa-poc-readonly'],
+    ]) {
+      expect(report.activation_env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]).toBe(value)
+      for (const command of [report.dry_run_command, report.execute_command]) {
+        expect(command[command.indexOf(flag) + 1]).toBe(value)
+        expect(command).not.toContain('--queue-work-codex-sandbox')
+      }
+    }
+  })
+  test('rejects invalid opt-in before DB inspection', async () => {
+    for (const pair of [{ codexPermissionsProfile: 'qa' }, { codexProfile: 'qa', codexPermissionsProfile: '' }, { codexProfile: '../qa', codexPermissionsProfile: 'qa' }]) {
+      const db = new FakeDb()
+      const report = await buildQueueWorkActivationPlan(db, { agentId: 'qa', commit: 'a'.repeat(40), ...pair })
+      expect(report.ok).toBe(false)
+      expect(report.blockers.map(x => x.code)).toContain('queue_work_codex_permissions_selection_invalid')
+      expect(db.calls).toEqual([])
+    }
+  })
+})

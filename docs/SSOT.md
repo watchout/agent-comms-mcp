@@ -5,6 +5,20 @@
 >
 > **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
+Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
+Provider preference and profile port are legacy hints. Current provider ancestry,
+held OS endpoint ownership and its existing runtime lease govern operation;
+current-host native context delivery governs memory-ready. Physical provider/home/workspace/port diagnostics are excluded from the canonical desired digest; the exact legacy-format transition and incompatible rollback guard are defined in that spec.
+
+The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
+and seat continuity. Provider and endpoint observations do not replace the immutable
+recipient/policy digest, claim owner/token/expiry, invocation fence or memory-ready gate.
+Source integration is bound by [I2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748)
+(raw SHA256 `9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676`).
+Shared schema/desired-format application, distinct safe database principals,
+loaded shared daemon/reconciler and same-configuration ordinary QA use require
+separate applied evidence; a native-context fixture or one seat startup cannot close them.
+
 ## 1. プロダクト概要
 
 ### 1.1 名前
@@ -31,6 +45,10 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 6. **bashが実行できれば、どのLLM CLIでも接続可能**
 7. **PostgreSQLでもSQLiteでも同じCLIコマンドが動く**
 
+SQLite 接続は既存の `busy_timeout=5000` を WAL・外部キーの初期化より先に設定し、
+起動時のロック競合にも同じ待機上限を適用する。上限後のエラーは呼び出し元へ返す。
+readonly 接続では journal mode を変更しない。再試行ループや待機上限の延長は行わない。
+
 ### 1.5 AUN正常化フェーズゲート
 
 AUNの正常化は `docs/design/aun-normalization-roadmap.md` を従属する詳細仕様として扱う。
@@ -55,6 +73,28 @@ projection であり、core identity ではない。
 既存のlocal Discord運用はMVPの第一surfaceとして扱う。短期安定化のための修正でも、
 agent identity、runtime、connector、queue claim、lease、audit、secret handling、
 observability が将来のenterprise設計を壊さないことをPR単位で確認する。
+
+### 1.7 Opt-in bounded admission（MVP queue correctness）
+
+明示的に設定した一つの recipient partition について、通常の notify → genuine ID →
+enroll → claim → result → host reply を共通の PostgreSQL admission core で制御する。
+詳細は [aun-bounded-admission.md](design/aun-bounded-admission.md) を従属設計とする。
+既存 lease の期限切れを deny policy として流用しない。policy は sticky deny であり、
+旧 MCP/CLI/consumer の直接 SQL claim/reclaim も DB guard で拒否する。
+
+設定は max_tasks=2、WIP=1、invocation/finalizer/original projection の各 attempt=1。
+返信は論理 message/projection を1件に保ち、同一の保存済み request/delivery ID/nonce で
+物理 Discord POST のみ初回込み最大3回（SDK/fallbackを含む）、失敗後10秒/30秒以上かつ
+Retry-After以上待つ。成功応答後はPOSTせずDB保存だけ復旧する。DB不明時は送信停止。
+同一hostの永続receipt/排他と累積予約が再起動後も上限を保持し、不明・上限到達は
+needs-attentionと一つのsystem_error通知に止める。物理重複はあり得るがタスク再実行は禁止。
+task1 の独立受入後、同じ実効設定で通常送信された task2 を enroll する。
+done/replied は transport 状態であり、Shirube の案件受入やチーム完成ではない。
+通常の非対象 partition と SQLite の既存コマンドは変更しない。
+bounded mode は PostgreSQL と installed guard が必要で、初回 PREPARE は
+transaction_timeout を備える PostgreSQL 17 が必要。非対応時は effect 前に typed error。
+code rollback は guard と HALTED ledger を保持し、queue や claim を消さない。
+実 DB の migration/role/grant/consumer 更新・送信・適用は別の exact owner admission が必要。
 
 ---
 
@@ -554,8 +594,8 @@ npx agent-comms-mcp status   # health endpoint 問合せ
 # 社内 multi-bot 運用（bot-registry.txt 準拠）
 # WEBHOOK_PORT は bot ごとに registry の値を渡す。Issue #248 cycle 1 以降、
 # 暗黙 default の 8789 は撤廃 (CTO bot 衝突源)。env を渡さない場合は
-# server.ts が AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection
-# (8801-8900) の順で解決する。下記は CTO の社内運用例 (port 8889)。
+# 通常の server.ts は OS の port 0 を保持して bind し、実 port を runtime lease に登録する。
+# 既存 AUN_WEBHOOK_PORT / WEBHOOK_PORT は固定割当の権限ではない。下記の数値は旧運用例。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 claude server:agent-comms \

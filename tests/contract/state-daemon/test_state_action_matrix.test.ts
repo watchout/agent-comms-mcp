@@ -40,17 +40,17 @@ describe('state_daemon state/action matrix planner', () => {
   test('pending + idle Codex runtime plans invoke_codex_runner', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },
-      agent: { runtime: 'codex', tmux_session: null },
+      agent: { runtime: 'codex', observed_runtime_provider:'codex', tmux_session: null },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
     })).toEqual({ kind: 'invoke_codex_runner', terminal: false, gates: memoryReadyGate })
   })
 
-  test('pending + TUI legacy profile with Codex preference plans invoke_codex_runner', () => {
+  test('pending + TUI legacy profile with stale Claude preference and observed Codex plans invoke_codex_runner', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },
-      agent: { runtime: 'TUI', runtime_engine_preference: 'codex', tmux_session: 'legacy-session', status: 'idle' },
+      agent: { runtime: 'TUI', runtime_engine_preference: 'claude-code', observed_runtime_provider:'codex', tmux_session: 'legacy-session', status: 'idle' },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: false,
@@ -60,7 +60,7 @@ describe('state_daemon state/action matrix planner', () => {
   test('pending + busy Codex runtime plans observe_busy without duplicate runner', () => {
     expect(planQueueAction({
       row: { status: 'pending', claim_expires_at: null },
-      agent: { runtime: 'codex-runner', tmux_session: null },
+      agent: { runtime: 'codex-runner', observed_runtime_provider:'codex', tmux_session: null },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
@@ -112,7 +112,7 @@ describe('state_daemon state/action matrix planner', () => {
   test('live received Codex runtime remains observed until a processing runner lands', () => {
     expect(planQueueAction({
       row: { status: 'received', claim_expires_at: new Date(now.getTime() + 60_000) },
-      agent: { runtime: 'codex', tmux_session: null },
+      agent: { runtime: 'codex', observed_runtime_provider:'codex', tmux_session: null },
       now,
       defaultRuntime: 'TUI',
       hasActiveClaim: true,
