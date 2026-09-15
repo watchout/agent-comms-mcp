@@ -1,13 +1,17 @@
 schema_version: shirube-cell/v1
 CELL-ID: CELL-MCP-001
-SPEC-ID: SPEC-MCP-GOV-001
+SPEC-ID: SPEC-MCP-001
 risk_tier: R2
-goal: Draft a registry schema policy for MCP tools, agent identities, runtime surfaces, and evidence anchors.
+goal: Define the warn-only registry schema policy for MCP tools, CLI surfaces, agent identities, runtime surfaces, queue resources, delivery resources, and governance evidence anchors.
 covered_req_ids:
-  - REQ-MCP-GOV-003
-  - DATA-MCP-GOV-001
+  - REQ-MCP-001-001
+  - REQ-MCP-001-002
+  - REQ-MCP-001-003
+  - REQ-MCP-001-004
+  - SEC-MCP-001-001
+  - DATA-MCP-001-001
 dependencies:
-  - CELL-MCP-GOV-001
+  - SPEC-MCP-GOV-001
 allowed_paths:
   - .shirube/**
   - docs/**
@@ -18,50 +22,89 @@ forbidden_paths:
   - bin/**
   - cli/**
   - core/**
+  - db/**
+  - adapters/**
+  - entrypoints/**
   - server.ts
   - .github/workflows/**
+  - deploy/**
+  - package.json
+  - bun.lock
 acceptance_criteria:
   - id: AC-MCP-001-001
-    statement: Registry entities and ownership boundaries are documented.
+    statement: Feature Spec SPEC-MCP-001 exists and defines stable registry policy requirements.
     linked_req_ids:
-      - DATA-MCP-GOV-001
+      - REQ-MCP-001-001
+      - REQ-MCP-001-002
   - id: AC-MCP-001-002
-    statement: Required evidence fields are identified without enabling enforcement.
+    statement: Registry classes, ownership boundaries, source-of-truth boundaries, evidence anchors, approval boundaries, and non-goals are documented.
     linked_req_ids:
-      - REQ-MCP-GOV-003
+      - REQ-MCP-001-001
+      - REQ-MCP-001-003
+      - DATA-MCP-001-001
+  - id: AC-MCP-001-003
+    statement: Impl handoff IMPL-MCP-001 exists and can be executed by a bounded coding agent without touching forbidden paths.
+    linked_req_ids:
+      - REQ-MCP-001-004
+      - SEC-MCP-001-001
+  - id: AC-MCP-001-004
+    statement: Evidence records changed files, commands run, validation results, scope confirmation, conveyor availability, and next gate.
+    linked_req_ids:
+      - REQ-MCP-001-004
+  - id: AC-MCP-001-005
+    statement: No runtime, MCP/tool behavior, queue/runtime/state-daemon behavior, workflow, ruleset, required-check, deployment, secret, DB migration, or AUN activation changes are made.
+    linked_req_ids:
+      - SEC-MCP-001-001
 required_tests:
-  - TEST-MCP-GOV-001
-  - TEST-MCP-GOV-002
+  - TEST-MCP-001-001
+  - TEST-MCP-001-002
+  - TEST-MCP-001-003
+  - TEST-MCP-001-004
 required_evidence:
   - changed files
-  - yaml parse results
+  - git diff --check result
+  - YAML parse result for .shirube/**/*.yaml
+  - existing lightweight smoke check result
+  - Shirube conveyor warn-only availability or result
   - scope confirmation
-  - Shirube command review result
+  - next gate
 non_goals:
   - No runtime registry implementation.
+  - No MCP tool or CLI behavior change.
+  - No queue, runtime, state-daemon, provider delivery, or AUN activation change.
   - No active validation enforcement.
-  - No migration or DB schema change.
+  - No workflow, required-check, branch protection, or ruleset change.
+  - No migration, DB schema change, production DB access, secret access, or secret mutation.
 stop_conditions:
   - Implementation would touch forbidden_paths.
-  - Runtime registry behavior would change.
-  - Required owner confirmation is missing for authoritative boundary decisions.
+  - Runtime, MCP/tool, queue, state-daemon, provider delivery, workflow, ruleset, deployment, or AUN behavior would change.
+  - Secret access, secret mutation, DB migration, or production DB access is required.
+  - Conveyor check requires adding dependencies or workflows only to run it.
+  - A terminal Shirube command review, human maintainer merge authorization, or CTO Go/No-Go decision is required.
 waiver_refs: []
 execution_contract:
   canonical_term: Goal-directed bounded execution
   shorthand: Goal-mode Implementation
   allowed_commands:
     - git diff --check
-    - YAML parse for .shirube/**/*.yaml
+    - ruby YAML.parse for .shirube/**/*.yaml
     - existing lightweight smoke checks
+    - Shirube conveyor check in warn-only mode if available
+    - git status
+    - git diff
   forbidden_commands:
     - git push --force
     - destructive production commands
     - active workflow or branch protection mutation
+    - required-check activation
+    - runtime or deployment activation
+    - AUN activation or live multi-agent automation
   handoff_conditions:
     - Shirube command review
-    - repository owner/domain designer confirmation
+    - human maintainer merge authorization after Shirube command review
   completion_evidence:
     - changed files
     - commands run
     - validation results
+    - remote PR checks status if a PR is opened
     - next required gate
