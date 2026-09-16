@@ -64,7 +64,6 @@ import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
 import { Database,constants as sqliteConstants } from 'bun:sqlite'
 import { existsSync,readFileSync,writeFileSync,lstatSync,renameSync } from 'node:fs'
 import { BoundedReceiptStore,currentBoundedOwner,deliverBoundedOutbound,recoverBoundedReceipt } from '${candidateRoot}/core/queue-admission.ts'
-import { postBoundedDiscordRequest } from '${candidateRoot}/adapters/discord.ts'
 const i=JSON.parse(readFileSync(process.argv[2],'utf8')),mode=process.argv[3],tag=process.argv[4]||mode
 const client=new Client({connectionString:i.url,connectionTimeoutMillis:1000});await client.connect()
 const mark=(name,value={})=>writeFileSync(i.directory+'/'+tag+'-'+name+'.json',JSON.stringify({at:Date.now(),pid:process.pid,...value}),{mode:0o600})
@@ -92,6 +91,7 @@ const barrier=name=>{mark(name);const until=Date.now()+8000;while(!existsSync(i.
 const store=new BoundedReceiptStore(i.directory,currentBoundedOwner(i.binding.cohortDigest));const main=i.directory+'/'+i.id+'.reap.sqlite'
 const snapshot=()=>Object.fromEntries([main,main+'-journal'].filter(existsSync).map(path=>{const s=lstatSync(path);return[path,{dev:s.dev,ino:s.ino,size:s.size,mode:s.mode&511,uid:s.uid,nlink:s.nlink}]}))
 if(mode==='seed'){
+ const { postBoundedDiscordRequest } = await import('${candidateRoot}/adapters/discord.ts')
  const save=BoundedReceiptStore.prototype.write;BoundedReceiptStore.prototype.write=function(r){save.call(this,r);if(r.ack)process.exit(23)}
  const adapter={prepareBoundedRequest:async(r)=>({delivery_id:i.id,channel_id:r.channel_external_id,author_id:'111111111111111111',
  body:{content:r.content,nonce:i.id,enforce_nonce:true,allowed_mentions:{parse:['users','roles'],replied_user:false}}}),
