@@ -1085,6 +1085,37 @@ describe("CI-01 source admission before protected release", () => {
     }
   });
 
+  test("existing standing-authorized ordinary route passes both modes without owner or overlay label", () => {
+    const body = baseBody("CELL-AUN-602-ORDINARY-DOCS", "R0")
+      + "\nOD-AUN-602-STANDING-MERGE-AND-NO-DRIFT-20260816-001"
+      + "\nhttps://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5306783646";
+    for (const cliArgs of [[], ["--mode", "full"], ["--mode", "source-admission"]]) {
+      const result = runGate(body, ["docs/ordinary.md"], {
+        draft: false, labels: ["merge-method:squash"], ownerDecisions: [], cliArgs,
+      });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      if (cliArgs.includes("source-admission")) expect(result.stdout).toContain("release authority NOT_EVALUATED");
+      else expect(result.stdout).toContain("Exact-head owner decision waived under OD-AUN-602-STANDING-MERGE-AND-NO-DRIFT-20260816-001");
+    }
+  });
+
+  test("the same standing waiver still refuses protected, uncited and breaking routes without overlay", () => {
+    const ordinary = baseBody("CELL-AUN-602-ORDINARY-DOCS", "R0");
+    const cited = ordinary + "\nOD-AUN-602-STANDING-MERGE-AND-NO-DRIFT-20260816-001"
+      + "\nhttps://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5306783646";
+    for (const [body, files, labels] of [
+      [cited, ["config/protected.json"], ["merge-method:squash"]],
+      [ordinary, ["docs/ordinary.md"], ["merge-method:squash"]],
+      [cited, ["docs/ordinary.md"], ["merge-method:squash", "breaking-change-verified"]],
+    ] as Array<[string, string[], string[]]>) {
+      for (const cliArgs of [[], ["--mode", "source-admission"]]) {
+        const result = runGate(body, files, {draft: false, labels, ownerDecisions: [], cliArgs});
+        expect(result.status, result.stdout + result.stderr).toBe(1);
+        expect(result.stdout).toContain("Non-draft PRs require label shirube-current-overlay.");
+      }
+    }
+  });
+
   test("source mode retains expired, invalid, ambiguous source and current-overlay checks", () => {
     const cases: Array<[string, (x: any) => void, string]> = [
       ["expired source", x => x.now = "2026-09-17T09:00:00Z", "head/base/expiry mismatch"],

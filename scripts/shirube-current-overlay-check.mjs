@@ -203,7 +203,8 @@ if (pr) {
   if (headSha && pr.draft !== true && !body.includes(headSha)) {
     errors.push(`PR body must include the current exact head SHA ${headSha}.`);
   }
-  if (pr.draft !== true && sourceAdmissionOnly && !labels.has("shirube-current-overlay")) {
+  if (pr.draft !== true && sourceAdmissionOnly
+    && !evaluateStandingAuthorization_fromDisk().applies && !labels.has("shirube-current-overlay")) {
     errors.push("Non-draft PRs require label shirube-current-overlay.");
   }
   if (pr.draft !== true && !sourceAdmissionOnly) {

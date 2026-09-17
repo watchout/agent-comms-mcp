@@ -500,7 +500,8 @@ corrects sequencing; it grants no release, live CI publication or runtime author
 
 The existing checker defaults to full validation. Explicit `--mode source-admission`
 omits only exact-head release-owner/owner-label and merge-method selection checks.
-It retains current-overlay identity for non-draft PRs, exact event/body identity,
+It retains current-overlay identity for non-draft PRs that do not qualify for the
+same existing standing authorization used by full mode, exact event/body identity,
 misleading merge-ready rejection, all scope checks, authenticated raw source bodies,
 actual source/consumer expiry, exact tree/full-index/ancestry and exactly one current
 independent consumer. Unknown, duplicate, valueless or ambiguous arguments fail
@@ -521,6 +522,9 @@ Offline metadata tests bind their source fixture explicitly to immutable C17
 historically admitted subject, and preserve every historical raw authority body.
 Positive source-only/missing-release cases, expired/invalid-source negatives,
 full-mode missing/wrong-owner and malformed-argument rejection test behavior.
+The standing-authorized ordinary route must pass both modes without an overlay
+label; protected paths, missing standing citations and breaking-change labels
+retain the existing non-waiver overlay requirement. No new waiver is introduced.
 Workflow structural checks support these tests but are not GitHub execution proof.
 
 I21 still permits only its exact four-path C16-to-C17 delta and expires at
