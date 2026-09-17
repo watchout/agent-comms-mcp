@@ -534,3 +534,38 @@ the actual new delta and finite public-test capacity, fresh independent exact-he
 binding and source/consumer validity. This design neither invents I22 nor extends
 expiry or resets any consumed operation. Protected application remains separately
 bound to exact approved head, valid operating window and available capacity.
+
+
+### I22 independent current supply for CI-01/03 (2026-09-17)
+
+Current source handoff: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5711335296,
+raw SHA256 `3e58b9990c5bf73f4c12f01b8e84e685deb01c6ecf763e11677e4438d973db6d`.
+I22 is a distinct finite ordinary task under existing correction authority and the
+current owner request. I21 keeps its September17T09:00Z expiry and exact four-path
+C16-to-C17 history. It is authenticated and checked against pinned C17
+`9a48756fee1d21c047bbda02666c4fa8bbce6b13` / tree
+`d5679c1675d324e04f23b0e0b60a216e0f158219`, never broadened to cover the workflow.
+The independently reviewed CI-01/03 delta from C17 to
+`eac39beb49da9b00a1bc9bf0cf988006b08caad1` / tree
+`dfcde6d4177c2ec41a96225f13b8725121f7fa07` contains exactly four paths (workflow,
+this document, checker and metadata tests), full-index SHA256
+`177c0e7c64abea30b474c1876cd56945ea43b6e58385d86378a1fe74a42ab450`.
+Only this document/checker/metadata tests may change after eac39. Runtime8,
+migrations, private fixture inputs and workflow bytes remain unchanged.
+
+I22 source and independent consumer validity end September18T09:00Z; this is not
+an I21 or protected-operation renewal. The local task has20 active minutes and
+September17 19:00JST execution expiry, one candidate, at most2 focused metadata
+runs with one changed-input correction, one canonical private2 run and no runtime
+full-suite rerun. Earlier failures, clocks and consumed counts remain history.
+All original25 API-shaped raw authority fixtures are retained with one I22 fixture
+appended. Current missing/duplicate/stale/raw-identity/scope/ancestry/full-index
+negatives and real Date.now expiry continue to fail closed.
+
+The current consumer must name maker `codex-cto/ci_sequence_fix` and independent
+checker `codex-cto/ci_sequence_plan_gate` and bind actual final head/tree/full-index
+source identity. Canonical private2 retains675 assertions and owned-fixture
+cleanup. Public19 and the strict same-candidate private/public join remain pending;
+no C17 whole-head PASS is carried over. Public supply, push/event capacity and
+fresh consumer publication need a subsequent finite handoff. This task grants no
+GitHub write, external CI, merge, runtime, live DB or expired application window.

@@ -280,7 +280,10 @@ async function requireBoundedCiSupply() {
   const odUrl=`https://github.com/${target}/issues/940#issuecomment-5609700544`;
   const currentC16="ef5a34853b56b8ce788a5403a0f8cabb34fc5476";
   const odHash="59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02";
-  const expiry="2026-09-17T09:00:00Z", now=Date.now();
+  const expiry="2026-09-18T09:00:00Z", now=Date.now();
+  const historicalExpiry="2026-09-17T09:00:00Z";
+  const historicalC17="9a48756fee1d21c047bbda02666c4fa8bbce6b13";
+  const reviewedCiHead="eac39beb49da9b00a1bc9bf0cf988006b08caad1";
   const check=(condition,detail)=>{if(!condition)throw Error(detail)};
   const hash=value=>createHash("sha256").update(value).digest("hex");
   const sha40=value=>typeof value==="string"&&/^[0-9a-f]{40}$/.test(value);
@@ -298,8 +301,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5694821959`
-    &&digest==="10cb824bb9bdca062a73a0c3ed56131b197b57209f9b0223f6a3c0136d3dfe03","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5711335296`
+    &&digest==="3e58b9990c5bf73f4c12f01b8e84e685deb01c6ecf763e11677e4438d973db6d","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -318,7 +321,9 @@ async function requireBoundedCiSupply() {
   const historicalI20Body=await load(`https://github.com/${target}/issues/940#issuecomment-5688909231`,
     "3b0d39b5c7a96201220154adc5a16b4f24b86e8831348b8bbf41aeacf001bbaa");
   check(historicalI20Body.includes("CH-CTO-AUN-POC-INTEGRATION-20260916-I20"),"historical I20 mismatch");
-  const handoffBody=await load(ref,digest);
+  // I21 is immutable historical admission for C17, not authority for this successor.
+  const handoffBody=await load(`https://github.com/${target}/issues/940#issuecomment-5694821959`,
+    "10cb824bb9bdca062a73a0c3ed56131b197b57209f9b0223f6a3c0136d3dfe03");
   const marker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260916-I21 -->";
   check(handoffBody.split(marker).length===2&&[...handoffBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"canonical marker must occur once");
   const blocks=[...handoffBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
@@ -331,7 +336,7 @@ async function requireBoundedCiSupply() {
     &&handoff.subject.c2==="8d38f3bd6a99a2f4615949dd747d708f8b6943d6"
     &&handoff.subject.seat_continuity==="81be7f051f85973bb9533e87d3258825082ad158"
     &&handoff.subject.was_companion==="e49abc24838227776dc01be111aeb035ec7c9aad"
-    &&Date.parse(handoff.bounds.expires_at)===Date.parse(expiry)
+    &&Date.parse(handoff.bounds.expires_at)===Date.parse(historicalExpiry)
     &&handoff.bounds.new_candidates===1&&handoff.bounds.cumulative_candidate_limit===17
     &&handoff.bounds.new_full_suite_runs===1&&handoff.bounds.cumulative_full_suite_limit===19
     &&handoff.bounds.new_private2_runs===1&&handoff.bounds.focused_performance_runs_max===2
@@ -371,8 +376,59 @@ async function requireBoundedCiSupply() {
   check(JSON.stringify([...handoff.repair_paths].sort())===JSON.stringify(repairs.sort())
     &&JSON.stringify([...handoff.implementation_paths].sort())===JSON.stringify(implementationPaths.sort())
     &&handoff.subject.entry_full_index_diff_sha256==="aba59ab64e7f117155ea570b01abe1a78712e74a0bbdc1453535aa2028fde807"
-    &&git("diff","--no-renames","--name-only",`${handoff.subject.current_local_head}...${headSha}`).split("\n").filter(Boolean)
-      .every(file=>implementationPaths.includes(file)),"candidate repair outside current I21 scope");
+    &&git("diff","--no-renames","--name-only",`${handoff.subject.current_local_head}...${historicalC17}`).split("\n").filter(Boolean)
+      .every(file=>implementationPaths.includes(file)),"historical C17 repair outside I21 scope");
+  git("merge-base","--is-ancestor",currentC16,historicalC17);
+  git("merge-base","--is-ancestor",historicalC17,reviewedCiHead);
+  git("merge-base","--is-ancestor",reviewedCiHead,headSha);
+  check(git("rev-parse",`${historicalC17}^{tree}`)==="d5679c1675d324e04f23b0e0b60a216e0f158219",
+    "historical C17 tree mismatch");
+  const supplyBody=await load(ref,digest);
+  const supplyMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I22 -->";
+  check(supplyBody.split(supplyMarker).length===2&&[...supplyBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,
+    "current I22 marker must occur once");
+  const supplyBlocks=[...supplyBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(supplyBlocks.length===1,"one current I22 JSON block required");
+  const supply=JSON.parse(supplyBlocks[0][1]);
+  const currentMetadata=[...historicalMetadata].sort();
+  const reviewedPaths=[...historicalMetadata,".github/workflows/pr-checks.yml"].sort();
+  check(supply.schema_version==="shirube-control-handoff/v1"
+    &&supply.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260917-I22"
+    &&supply.control_source===`${target}#940`
+    &&supply.subject.repository===target&&supply.subject.pr===963
+    &&supply.subject.base===base&&supply.subject.current_public_head===currentC16
+    &&supply.subject.c2===handoff.subject.c2&&supply.subject.seat_continuity===handoff.subject.seat_continuity
+    &&supply.subject.was_companion===handoff.subject.was_companion
+    &&supply.subject.current_local_head===reviewedCiHead
+    &&supply.subject.current_local_tree==="dfcde6d4177c2ec41a96225f13b8725121f7fa07"
+    &&supply.subject.entry_full_index_diff_sha256==="69fc999b8007c62291ebf29ded21ebb01472650e4153ee4bf02f51b3fe464fa6"
+    &&supply.subject.historical_C17_head===historicalC17
+    &&supply.subject.historical_C17_tree==="d5679c1675d324e04f23b0e0b60a216e0f158219"
+    &&supply.subject.ci_sequence_delta_sha256==="177c0e7c64abea30b474c1876cd56945ea43b6e58385d86378a1fe74a42ab450"
+    &&supply.execution_context.active_function==="implementation_executor"
+    &&supply.execution_context.actor_agent_id==="codex-cto/ci_sequence_fix"
+    &&supply.execution_context.checker==="/root/ci_sequence_plan_gate"
+    &&supply.authority_refs.length===1&&supply.authority_refs[0].url===odUrl&&supply.authority_refs[0].sha256===odHash
+    &&supply.historical_I21_ref.url===`https://github.com/${target}/issues/940#issuecomment-5694821959`
+    &&supply.historical_I21_ref.sha256==="10cb824bb9bdca062a73a0c3ed56131b197b57209f9b0223f6a3c0136d3dfe03"
+    &&Date.parse(supply.bounds.expires_at)===Date.parse(expiry)
+    &&supply.bounds.execution_expires_at==="2026-09-17T19:00:00+09:00"
+    &&supply.bounds.active_minutes===20&&supply.bounds.new_candidates===1&&supply.bounds.cumulative_candidate_limit===20
+    &&supply.bounds.new_full_suite_runs===0&&supply.bounds.cumulative_full_suite_limit===19
+    &&supply.bounds.new_private2_runs===1&&supply.bounds.focused_metadata_runs_max===2&&supply.bounds.correction_rounds===1
+    &&supply.bounds.publicCIstarts===0&&supply.bounds.pushes===0&&supply.bounds.protected_effects===0
+    &&JSON.stringify([...supply.allowed_paths].sort())===JSON.stringify([...handoff.allowed_paths].sort())
+    &&JSON.stringify([...supply.repair_paths].sort())===JSON.stringify([...repairs].sort())
+    &&JSON.stringify([...supply.implementation_paths].sort())===JSON.stringify(currentMetadata)
+    &&JSON.stringify([...supply.validated_ci_sequence_paths].sort())===JSON.stringify(reviewedPaths),"current I22 supply mismatch");
+  const binaryHash=(from,to)=>hash(execFileSync("git",["diff","--binary","--full-index",`${from}...${to}`],{timeout:15000,maxBuffer:16*1024*1024}));
+  check(git("rev-parse",`${reviewedCiHead}^{tree}`)===supply.subject.current_local_tree
+    &&binaryHash(base,reviewedCiHead)===supply.subject.entry_full_index_diff_sha256
+    &&binaryHash(historicalC17,reviewedCiHead)===supply.subject.ci_sequence_delta_sha256
+    &&JSON.stringify(git("diff","--no-renames","--name-only",`${historicalC17}...${reviewedCiHead}`).split("\n").filter(Boolean).sort())===JSON.stringify(reviewedPaths),
+    "reviewed CI sequence delta mismatch");
+  check(git("diff","--no-renames","--name-only",`${reviewedCiHead}...${headSha}`).split("\n").filter(Boolean)
+    .every(file=>currentMetadata.includes(file)),"candidate repair outside current I22 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)
@@ -382,7 +438,7 @@ async function requireBoundedCiSupply() {
   const expected={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:target,target_pr:963,cell_id:cell,risk_class:"R4",
     base_sha:base,origin_head_sha:origin,exact_head_sha:headSha,candidate_tree:tree,binary_diff_sha256:diff,
     handoff_comment_ref:ref,handoff_body_sha256:digest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
-    checker_agent:"codex-cto/goal_gap",maker_agent:"codex-cto/application_review",publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
+    checker_agent:"codex-cto/ci_sequence_plan_gate",maker_agent:"codex-cto/ci_sequence_fix",publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
   let found=0;
   for(const comment of await loadIssueComments(true)){
     const text=String(comment?.body??"");

@@ -403,28 +403,39 @@ const ciAuthorityFixtures=[
   "author_association": "OWNER"
 }
 ];
+// I22 appended separately so every original25 raw fixture byte remains immutable.
+ciAuthorityFixtures.push({
+  "id": 5711335296,
+  "body": "<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I22 -->\n# I22 current source supply for ordinary CI sequencing correction\n\nThis is a new finite ordinary source task under the current owner request and existing delegated correction authority. It preserves expired historical I21/application records; it grants no merge/runtime/DB or public CI effect.\n\n```json\n{\n  \"schema_version\": \"shirube-control-handoff/v1\",\n  \"handoff_id\": \"CH-CTO-AUN-POC-INTEGRATION-20260917-I22\",\n  \"control_source\": \"watchout/agent-comms-mcp#940\",\n  \"cell\": \"Existing ordinary CI sequencing correction, exact current source supply and bounded quality publication preparation\",\n  \"owner_goal_verbatim\": \"全体の開発高速チームの構築を成立させる\",\n  \"authority_refs\": [\n    {\n      \"url\": \"https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544\",\n      \"sha256\": \"59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02\"\n    }\n  ],\n  \"current_task_ref\": {\n    \"url\": \"https://github.com/watchout/iyasaka/issues/171#issuecomment-5710978180\",\n    \"sha256\": \"cad55925848eff340036b243a3225ae6ead8394a5b0f345c6ff2eaab3a519946\"\n  },\n  \"execution_context\": {\n    \"actor_agent_id\": \"codex-cto/ci_sequence_fix\",\n    \"native_actor\": \"/root/ci_sequence_fix\",\n    \"active_function\": \"implementation_executor\",\n    \"controller\": \"codex-cto\",\n    \"checker\": \"/root/ci_sequence_plan_gate\",\n    \"maker_history\": \"CI-01/03 ci_sequence_fix; C17 application_review; prior runtime_status/latest_delivery preserved. Checker never maker.\"\n  },\n  \"subject\": {\n    \"repository\": \"watchout/agent-comms-mcp\",\n    \"pr\": 963,\n    \"current_public_head\": \"ef5a34853b56b8ce788a5403a0f8cabb34fc5476\",\n    \"public_branch\": \"codex/aun-bounded-admission-20260908\",\n    \"base\": \"0f772883db6f3b50772d3e4b82ce47795091f0a9\",\n    \"c2\": \"8d38f3bd6a99a2f4615949dd747d708f8b6943d6\",\n    \"seat_continuity\": \"81be7f051f85973bb9533e87d3258825082ad158\",\n    \"was_companion\": \"e49abc24838227776dc01be111aeb035ec7c9aad\",\n    \"isolated_workspace\": \"/Users/yuji/Developer/.worktrees/agent-comms-mcp-ci-sequence-20260917\",\n    \"current_local_head\": \"eac39beb49da9b00a1bc9bf0cf988006b08caad1\",\n    \"permitted_dirty_paths\": [],\n    \"current_local_tree\": \"dfcde6d4177c2ec41a96225f13b8725121f7fa07\",\n    \"entry_full_index_diff_sha256\": \"69fc999b8007c62291ebf29ded21ebb01472650e4153ee4bf02f51b3fe464fa6\",\n    \"local_branch\": \"codex/aun-ci-sequence-20260917\",\n    \"historical_C17_head\": \"9a48756fee1d21c047bbda02666c4fa8bbce6b13\",\n    \"historical_C17_tree\": \"d5679c1675d324e04f23b0e0b60a216e0f158219\",\n    \"ci_sequence_delta_sha256\": \"177c0e7c64abea30b474c1876cd56945ea43b6e58385d86378a1fe74a42ab450\"\n  },\n  \"allowed_paths\": [\n    \".github/workflows/pr-checks.yml\",\n    \".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json\",\n    \".shirube/evidence/seat-continuity-machine-evidence.json\",\n    \".shirube/execution-contexts/seat-continuity-20260913.json\",\n    \"adapters/discord.ts\",\n    \"adapters/outbound-consumer.ts\",\n    \"bin/aun-watchdog.ts\",\n    \"bin/aun.ts\",\n    \"bin/aun/admission.ts\",\n    \"bin/aun/bootstrap-adapter-codex.ts\",\n    \"bin/aun/bootstrap-types.ts\",\n    \"bin/aun/bootstrap.ts\",\n    \"bin/aun/memory-ready.ts\",\n    \"bin/aun/receive.ts\",\n    \"bin/aun/run-queue-work.ts\",\n    \"bin/aun/start.ts\",\n    \"bin/state-daemon.ts\",\n    \"cli/index.ts\",\n    \"core/aun-configuration-candidate.ts\",\n    \"core/aun-configuration-desired-state.ts\",\n    \"core/bot-health.ts\",\n    \"core/bot-lifecycle.ts\",\n    \"core/bot-status-db.ts\",\n    \"core/claim-ttl.ts\",\n    \"core/db/sqlite-adapter.ts\",\n    \"core/inbox-cursor.ts\",\n    \"core/queue-admission.ts\",\n    \"core/queue-work.ts\",\n    \"core/runtime-cleanup.ts\",\n    \"core/runtime-current-resolver.ts\",\n    \"core/runtime-endpoint.ts\",\n    \"core/runtime-heartbeat.ts\",\n    \"core/runtime-inventory.ts\",\n    \"core/runtime-memory-ready-identity.ts\",\n    \"core/runtime-memory-ready-refresher.ts\",\n    \"core/runtime-memory-ready.ts\",\n    \"core/seat-context-recovery.ts\",\n    \"core/seat-runtime-selection.ts\",\n    \"core/startup-safety.ts\",\n    \"core/state-daemon/action-planner.ts\",\n    \"core/state-daemon/index.ts\",\n    \"core/state-daemon/launchagent.ts\",\n    \"core/state-daemon/queue-work-activation-plan.ts\",\n    \"core/state-daemon/stall-detector.ts\",\n    \"core/state-daemon/types.ts\",\n    \"db/migrate-sqlite.ts\",\n    \"db/migrate.ts\",\n    \"db/migrations/2026-09-08-queue-bounded-admission.down.sql\",\n    \"db/migrations/2026-09-08-queue-bounded-admission.up.sql\",\n    \"db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql\",\n    \"db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql\",\n    \"docs/SSOT.md\",\n    \"docs/agent-com-message-queue-spec.md\",\n    \"docs/design/aun-bounded-admission.md\",\n    \"docs/operations/aun-bootstrap.md\",\n    \"docs/operations/memory-ready-refresh.md\",\n    \"docs/operations/runtime-health-monitoring.md\",\n    \"docs/shirube/README.md\",\n    \"docs/spec/aun-runtime-supervisor-adapter-contract.md\",\n    \"docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md\",\n    \"docs/spec/seat-runtime-continuity.md\",\n    \"scripts/prepare-seat-continuity-test-wasurezu.sh\",\n    \"scripts/restart-bot.sh\",\n    \"scripts/shirube-current-overlay-check.mjs\",\n    \"scripts/state-daemon-launchagent.ts\",\n    \"scripts/sync-mcp-config.sh\",\n    \"scripts/verify-seat-context-continuity.ts\",\n    \"scripts/watchdog.sh\",\n    \"server.ts\",\n    \"tests/aun-bootstrap-claude-adapter.test.ts\",\n    \"tests/aun-bootstrap-codex-adapter.test.ts\",\n    \"tests/aun-bootstrap.test.ts\",\n    \"tests/aun-configuration-candidate.test.ts\",\n    \"tests/aun-configuration-desired-state.test.ts\",\n    \"tests/aun-runtime-v2.test.ts\",\n    \"tests/bot-health.test.ts\",\n    \"tests/cli-sqlite-backend.test.ts\",\n    \"tests/contract/runtime-memory-ready-refresher-pg.test.ts\",\n    \"tests/contract/state-daemon/m2-sweep.test.ts\",\n    \"tests/contract/state-daemon/m3-heartbeat-liveness.test.ts\",\n    \"tests/contract/state-daemon/seed.ts\",\n    \"tests/contract/state-daemon/test_codex_runner_dispatch.test.ts\",\n    \"tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts\",\n    \"tests/contract/state-daemon/test_launchagent_restore.test.ts\",\n    \"tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts\",\n    \"tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts\",\n    \"tests/contract/state-daemon/test_state_action_matrix.test.ts\",\n    \"tests/contract/state-daemon/test_wake_invocation_bounded.test.ts\",\n    \"tests/contract/test_aun_bootstrap_clean_host.test.ts\",\n    \"tests/contract/test_aun_bootstrap_failure_matrix.test.ts\",\n    \"tests/contract/test_aun_codex_runner.test.ts\",\n    \"tests/contract/test_aun_codex_runner_preflight.test.ts\",\n    \"tests/contract/test_aun_configuration_runtime_diagnostics.test.ts\",\n    \"tests/contract/test_aun_port_collision.test.ts\",\n    \"tests/contract/test_aun_receive_actionable.test.ts\",\n    \"tests/contract/test_aun_start_spawn_argv.test.ts\",\n    \"tests/contract/test_queue_bounded_admission.test.ts\",\n    \"tests/contract/test_queue_bounded_admission_postgres.test.ts\",\n    \"tests/contract/test_queue_bounded_retry.test.ts\",\n    \"tests/contract/test_queue_bounded_use_trace.test.ts\",\n    \"tests/contract/test_routing_v3_stage_a.test.ts\",\n    \"tests/contract/test_seat_runtime_continuity.test.ts\",\n    \"tests/contract/test_session_start_drain.test.ts\",\n    \"tests/contract/test_watchdog.test.ts\",\n    \"tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts\",\n    \"tests/helpers/seat-native-runtime-fixture.ts\",\n    \"tests/migrations/aun-configuration-reconciliation.test.ts\",\n    \"tests/norm-022-runtime-endpoint-lease.test.ts\",\n    \"tests/queue-work.test.ts\",\n    \"tests/run-queue-work-plan.test.ts\",\n    \"tests/runtime-cleanup.test.ts\",\n    \"tests/runtime-current-resolver.test.ts\",\n    \"tests/runtime-heartbeat.test.ts\",\n    \"tests/runtime-inventory.test.ts\",\n    \"tests/runtime-memory-ready-identity.test.ts\",\n    \"tests/runtime-memory-ready-refresher.test.ts\",\n    \"tests/runtime-memory-ready.test.ts\",\n    \"tests/runtime-session-env-bridge.test.ts\",\n    \"tests/seat-context-recovery.test.ts\",\n    \"tests/seat-runtime-continuity.test.ts\",\n    \"tests/shirube-current-overlay-check.test.ts\",\n    \"tests/spec-enforcement/outbound-queue-phase3.test.ts\",\n    \"tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts\",\n    \"tests/spec-enforcement/watchdog-false-positive-guards.test.ts\",\n    \"tests/state-daemon-queue-work-activation-plan.test.ts\",\n    \"tests/state-daemon-queue-work-scheduler.test.ts\",\n    \"tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts\"\n  ],\n  \"repair_paths\": [\n    \"docs/design/aun-bounded-admission.md\",\n    \"scripts/shirube-current-overlay-check.mjs\",\n    \"tests/shirube-current-overlay-check.test.ts\",\n    \"tests/contract/test_queue_bounded_admission.test.ts\",\n    \"tests/contract/test_queue_bounded_admission_postgres.test.ts\",\n    \"tests/contract/test_queue_bounded_retry.test.ts\",\n    \"tests/contract/test_queue_bounded_use_trace.test.ts\",\n    \"tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts\"\n  ],\n  \"implementation_paths\": [\n    \"docs/design/aun-bounded-admission.md\",\n    \"scripts/shirube-current-overlay-check.mjs\",\n    \"tests/shirube-current-overlay-check.test.ts\"\n  ],\n  \"validated_ci_sequence_paths\": [\n    \".github/workflows/pr-checks.yml\",\n    \"docs/design/aun-bounded-admission.md\",\n    \"scripts/shirube-current-overlay-check.mjs\",\n    \"tests/shirube-current-overlay-check.test.ts\"\n  ],\n  \"historical_I21_ref\": {\n    \"url\": \"https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5694821959\",\n    \"sha256\": \"10cb824bb9bdca062a73a0c3ed56131b197b57209f9b0223f6a3c0136d3dfe03\"\n  },\n  \"ci_sequence_independent_ref\": {\n    \"url\": \"/Users/yuji/Developer/codex/control-artifacts/cto-learning/20260907/execution-guide-20260917/ci-review/correction1.json\",\n    \"sha256\": \"33a50419b343bdd7355c1fb938d7c6c10f316772c42626784242c46769e532af\"\n  },\n  \"diagnosis\": \"CI01/03 local correction independently passes; existing I21 permits only4 C16 delta paths and cannot admit workflow correction. Add a separate exact I22 supply, retain old I21 raw body and C16→C17 frozen4 path history; verify C17→eac39 exact4 reviewed CI paths, then eac39→candidate metadata3 only. No runtime/core/package/workflow edits in this binding stage.\",\n  \"productization_condition\": \"Same owner productization condition remains: no product-specific internal coupling added. These existing temporary CI delivery pins are not a product API. Their future move to versioned external control/configuration is a separately recorded productization task, not undertaken here. Literal runtime state/port/provider DB nonpersistence and actual use remain incomplete.\",\n  \"allowed_operations\": [\n    \"Design metadata first; append current I22 raw ref/hash/actor/bounds, exact histories/diff/source/consumer validation and one new API-shaped authority fixture. All original25 fixtures and I21 history immutable; retain missing-current/stale/malformed/duplicate/raw/actor/scope/ancestry/full-index rejection behavior and normal-standing route correction.\",\n    \"One local candidate commit. Focused metadata suite at existing timeout30000 once; one changed-input correction and second focused run only on actual defect, before bound. No runtime full-suite rerun because runtime/test population unchanged; new public full-suite evidence is a distinct pending stage, never inferred.\",\n    \"Run the existing canonical private2 selector once at the final candidate in one owned isolated PostgreSQL fixture using existing pinned companion source and locked existing dependencies; prove675 assertions, actual source hashes, pristine event log and cleanup. No live database, credential copy, package version change or selected-zero success. Read existing accepted private harness first; stop on unknown isolation or unmet dependency.\",\n    \"Return exact current metadata/publication inputs, independent source compatibility and private join for separate checker. Prepare prospective PR body and consumer input but do not publish them in this maker stage.\"\n  ],\n  \"forbidden_operations\": [\n    \"No modifications outside metadata3 or existing CI03 semantics. No weakening quality/performance/sample/full-stage/private/authorization/expiry/identity/negative checks. No transplant of C17 whole-head PASS to new candidate.\",\n    \"No push, PRbody/comments/labels/Ready/merge, manual CI/cancel, external communication, sharedCLI/runtime/launchctl/profile/queue/native/provider/credential effects. Local owned disposable private fixture only.\",\n    \"Do not rewrite old I21 validity or restore expired Sep16 protected window. No new current owner projection. Preserve all old failures, consumed budgets and historical records.\"\n  ],\n  \"bounds\": {\n    \"active_minutes\": 20,\n    \"execution_expires_at\": \"2026-09-17T19:00:00+09:00\",\n    \"expires_at\": \"2026-09-18T18:00:00+09:00\",\n    \"new_candidates\": 1,\n    \"cumulative_candidate_limit\": 20,\n    \"new_full_suite_runs\": 0,\n    \"cumulative_full_suite_limit\": 19,\n    \"new_private2_runs\": 1,\n    \"focused_metadata_runs_max\": 2,\n    \"correction_rounds\": 1,\n    \"consecutive_no_progress_stop\": 3,\n    \"publicCIstarts\": 0,\n    \"pushes\": 0,\n    \"protected_effects\": 0,\n    \"historical_source_accounting\": {\n      \"C17_candidate\": 17,\n      \"CI01_candidate\": 18,\n      \"CI03_candidate\": 19,\n      \"original_C17_full_local_runs_cumulative\": 19,\n      \"CI01_focused\": 2,\n      \"CI03_focused\": 1,\n      \"prior_failures_preserved\": true\n    },\n    \"application_operator_consumed_minutes\": 60.133871,\n    \"application_operator_remaining_minutes\": 29.866129,\n    \"application_checker_consumed_minutes\": 15,\n    \"application_checker_remaining_minutes\": 15,\n    \"application_clock_retained\": \"Old T_start2026-09-16T08:20:28.382Z/cutoff11:10:28.382Z/expiry11:20:28.382Z EXPIRED; this distinct ordinary source task grants no protected renewal\",\n    \"public_stage\": \"Maker stage0. A subsequent CTO publication handoff must cite current ordinary authority, exact new source/consumer, and finite automatic-event budget before any push/body update; no old external budget is presumed renewed.\"\n  },\n  \"evidence_contract\": {\n    \"focus\": \"Exact source/mode/standing route and new I22 positive plus stale/missing/incorrect authority negative; old25 raw fixtures remain identical\",\n    \"runtime\": \"Runtime8/migrations/private inputs/Was unchanged from C17; prove hashes, do not claim new runtime full suite\",\n    \"private\": \"Exactly canonical2 at actual candidate;675 assertions and all cleanup/selected counts; no full runtime retry\",\n    \"public\": \"Not run in this stage; required19/strict seven-field same-candidate public/private join remains pending\"\n  },\n  \"next_action\": {\n    \"owner\": \"/root/ci_sequence_fix\",\n    \"required_function\": \"implementation_executor\",\n    \"action\": \"Implement only I22 three-metadata current-source binding and finite focused/private proof, then freeze candidate for independent audit\",\n    \"delivery\": \"Native return and execution-guide-20260917/source-binding evidence\",\n    \"input_refs\": [\n      {\n        \"url\": \"/Users/yuji/Developer/codex/control-artifacts/cto-learning/20260907/execution-guide-20260917/ci-review/correction1.json\",\n        \"sha256\": \"33a50419b343bdd7355c1fb938d7c6c10f316772c42626784242c46769e532af\"\n      },\n      {\n        \"url\": \"https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544\",\n        \"sha256\": \"59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02\"\n      }\n    ],\n    \"scope\": \"metadata3 local correction and one isolated private2; all public/protected effects0\",\n    \"deliverable\": \"Exact current source candidate, source-supply proof and prepared publication inputs\",\n    \"completion_evidence\": \"Actual head/tree/diff/current I22 fixture/source invariants/private2 cleanup and preserved failures\",\n    \"blocking\": false,\n    \"retry_policy\": \"One original +one changed-input correction within2 focused calls; private once, no full rerun\",\n    \"expiry\": \"2026-09-17T19:00:00+09:00 or20 active minutes, whichever first\",\n    \"escalation\": \"codex-cto consumes concrete findings; no generic owner ACK solely for a normal correction\",\n    \"exhaustion\": \"Stop affected stage, preserve actual evidence and return once\"\n  }\n}\n```\n",
+  "html_url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5711335296",
+  "issue_url": "https://api.github.com/repos/watchout/agent-comms-mcp/issues/940",
+  "user": {
+    "login": "watchout"
+  },
+  "author_association": "OWNER"
+});
 const ciBase="0f772883db6f3b50772d3e4b82ce47795091f0a9";
 const ciOrigin="565583c25963b7dfa9b4445543967d372091b336";
-// Offline source fixture only: CI-01 itself is outside I21; never imply live admission.
+// Historical C17 workflow baseline; current bounded-source fixtures use actual HEAD.
 const ciFixtureHead="9a48756fee1d21c047bbda02666c4fa8bbce6b13";
 function runBoundedGate(mutate:(x:any)=>void=()=>{}) {
   const git=(...a:string[])=>{const r=spawnSync("git",a,{cwd:repoRoot,encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});expect(r.status,r.stderr).toBe(0);return r;};
-  const exact=git("rev-parse",ciFixtureHead).stdout.trim(),tree=git("rev-parse",exact+"^{tree}").stdout.trim();
+  const exact=git("rev-parse","HEAD").stdout.trim(),tree=git("rev-parse",exact+"^{tree}").stdout.trim();
   const files=git("diff","--name-only",ciBase+"..."+exact).stdout.trim().split("\n");
   const diff=git("diff","--binary","--full-index",ciBase+"..."+exact).stdout;
   const digest=(x:string)=>createHash("sha256").update(x).digest("hex");
-  const handoff=ciAuthorityFixtures.find(x=>x.id===5694821959)!,od=ciAuthorityFixtures[3];
+  const handoff=ciAuthorityFixtures.find(x=>x.id===5711335296)!,od=ciAuthorityFixtures[3];
   const fields:any={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:"watchout/agent-comms-mcp",target_pr:963,
     cell_id:"CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001",risk_class:"R4",base_sha:ciBase,origin_head_sha:ciOrigin,
     exact_head_sha:exact,candidate_tree:tree,binary_diff_sha256:digest(diff),handoff_comment_ref:handoff.html_url,
     handoff_body_sha256:digest(handoff.body),owner_decision_ref:od.html_url,owner_decision_body_sha256:digest(od.body),
-    checker_agent:"codex-cto/goal_gap",maker_agent:"codex-cto/application_review",publisher:"watchout",
+    checker_agent:"codex-cto/ci_sequence_plan_gate",maker_agent:"codex-cto/ci_sequence_fix",publisher:"watchout",
     verdict:"PASS_CONSUMER_COMPATIBILITY",restore_success_ref:"sha256:"+"1".repeat(64),restore_reject_ref:"sha256:"+"2".repeat(64),
-    runtime_adapter_ref:"sha256:"+"3".repeat(64),evidence_sha256:"4".repeat(64),issued_at:"2026-09-15T22:00:00Z",expires_at:"2026-09-17T09:00:00Z"};
+    runtime_adapter_ref:"sha256:"+"3".repeat(64),evidence_sha256:"4".repeat(64),issued_at:"2026-09-17T08:27:00Z",expires_at:"2026-09-18T09:00:00Z"};
   const value:any={body:baseBody(fields.cell_id,"R4")+"\nWorkflow Supply: CI_TEST_SUPPLY_ONLY\ncontrol_handoff_comment_ref: "+handoff.html_url
     +"\ncontrol_handoff_body_sha256: "+digest(handoff.body),files,fields,controls:structuredClone(ciAuthorityFixtures),
     repo:"watchout/agent-comms-mcp",pr:963,base:ciBase,head:exact,draft:true,labels:[],commentAuthor:"watchout",association:"OWNER",
-    commentIssue:"https://api.github.com/repos/watchout/agent-comms-mcp/issues/963",commentSuffix:"",copies:1,now:"2026-09-16T00:00:00Z"};
+    commentIssue:"https://api.github.com/repos/watchout/agent-comms-mcp/issues/963",commentSuffix:"",copies:1,now:"2026-09-17T08:30:00Z"};
   mutate(value);
   const consumerBody="<!-- shirube-v3:ci-consumer-verdict -->\n\n\x60\x60\x60yaml\nshirube_consumer_verdict:\n"
     +Object.entries(value.fields).map(([k,v])=>"  "+k+": "+(typeof v==="number"?v:JSON.stringify(v))).join("\n")+value.commentSuffix+"\n\x60\x60\x60";
@@ -462,14 +473,15 @@ describe("bounded PR963 CI supply",()=>{
       ["normalization body drift",x=>x.controls[3].body+="changed"],
       ["normalization actor",x=>x.controls[3].user.login="maker"],
       ["normalization missing",x=>x.controls=x.controls.filter((c:any)=>c.id!==5609700544)],
-      ["current I issue",x=>x.controls.find((c:any)=>c.id===5694821959).issue_url=x.commentIssue],
-      ["current I owner",x=>x.controls.find((c:any)=>c.id===5694821959).author_association="MEMBER"],
-      ["C207-COV-1 current I21 missing with complete I20 and all history retained",x=>{x.controls=x.controls.filter((c:any)=>c.id!==5694821959);expect(x.controls.map((c:any)=>c.id)).toEqual(ciAuthorityFixtures.filter(c=>c.id!==5694821959).map(c=>c.id));expect(x.controls.some((c:any)=>c.id===5688909231)).toBe(true)}],
+      ["current I issue",x=>x.controls.find((c:any)=>c.id===5711335296).issue_url=x.commentIssue],
+      ["current I owner",x=>x.controls.find((c:any)=>c.id===5711335296).author_association="MEMBER"],
+      ["C207-COV-1 current I22 missing with complete I21 and all history retained",x=>{x.controls=x.controls.filter((c:any)=>c.id!==5711335296);expect(x.controls.map((c:any)=>c.id)).toEqual(ciAuthorityFixtures.filter(c=>c.id!==5711335296).map(c=>c.id));expect(x.controls.some((c:any)=>c.id===5688909231)).toBe(true)}],
+      ["historical I21 missing",x=>x.controls=x.controls.filter((c:any)=>c.id!==5694821959)],
       ["historical I20 missing",x=>x.controls=x.controls.filter((c:any)=>c.id!==5688909231)],
-      ["current I duplicate",x=>x.controls.push(x.controls.find((c:any)=>c.id===5694821959))],
-      ["current I raw mutation",x=>x.controls.find((c:any)=>c.id===5694821959).body+="changed"],
-      ["current I marker absent",x=>{const c=x.controls.find((c:any)=>c.id===5694821959);c.body=c.body.replace(/<!--[^>]*-->/,"")}],
-      ["current I actor",x=>x.controls.find((c:any)=>c.id===5694821959).user.login="maker"],
+      ["current I duplicate",x=>x.controls.push(x.controls.find((c:any)=>c.id===5711335296))],
+      ["current I raw mutation",x=>x.controls.find((c:any)=>c.id===5711335296).body+="changed"],
+      ["current I marker absent",x=>{const c=x.controls.find((c:any)=>c.id===5711335296);c.body=c.body.replace(/<!--[^>]*-->/,"")}],
+      ["current I actor",x=>x.controls.find((c:any)=>c.id===5711335296).user.login="maker"],
       ["old I substituted as current",x=>{x.body=x.body.replace(x.fields.handoff_comment_ref,x.controls[1].html_url)}],
       ["raw pin drift",x=>x.body=x.body.replace(x.fields.handoff_body_sha256,"f".repeat(64))],
       ["maker-as-checker",x=>x.fields.checker_agent=x.fields.maker_agent],["previous maker attribution",x=>x.fields.maker_agent="codex-cto/latest_delivery"],["wrong consumer actor",x=>x.commentAuthor="maker"],
@@ -478,7 +490,7 @@ describe("bounded PR963 CI supply",()=>{
       ["consumer duplicate",x=>x.copies=2],["consumer FAIL",x=>x.fields.verdict="FAIL_CONSUMER_COMPATIBILITY"],
       ["wrong tree",x=>x.fields.candidate_tree="f".repeat(40)],["wrong diff",x=>x.fields.binary_diff_sha256="f".repeat(64)],
       ["wrong handoff ref",x=>x.fields.handoff_comment_ref=x.fields.owner_decision_ref],
-      ["expired",x=>x.fields.expires_at="2026-09-09T00:00:00Z"],["future",x=>x.fields.issued_at="2026-09-16T07:00:00Z"],
+      ["expired",x=>x.fields.expires_at="2026-09-09T00:00:00Z"],["future",x=>x.fields.issued_at="2026-09-18T07:00:00Z"],
       ["expiry broadened",x=>x.fields.expires_at="2099-09-11T00:00:00Z"],["ACK-only",x=>x.fields.restore_success_ref="ACK"],
       ["array head",x=>x.fields.exact_head_sha=[x.fields.exact_head_sha]],["nested",x=>x.fields.publisher={name:"watchout"}],
       ["extra key",x=>x.fields.extra="ignored"],["duplicate key",x=>x.commentSuffix="\n  publisher: \"watchout\""],
@@ -491,18 +503,18 @@ describe("bounded PR963 CI supply",()=>{
   });
 });
 
-test("I21 real date boundary, expired Sep15 consumer and previous I20 handoff cannot authorize current supply",()=>{
-  const accepted=runBoundedGate(x=>x.now="2026-09-17T08:59:59.999Z");
+test("I22 real date boundary, historical expired consumer and previous I21 handoff cannot authorize current supply",()=>{
+  const accepted=runBoundedGate(x=>x.now="2026-09-18T08:59:59.999Z");
   expect(accepted.status,accepted.stdout+accepted.stderr).toBe(0);
-  for(const now of ["2026-09-17T09:00:00Z","2026-09-17T09:00:00.001Z"]){
+  for(const now of ["2026-09-18T09:00:00Z","2026-09-18T09:00:00.001Z"]){
     const denied=runBoundedGate(x=>x.now=now);expect(denied.status).not.toBe(0);
     expect(denied.stdout+denied.stderr).toContain("head/base/expiry mismatch");
   }
-  for(const expires of ["2026-09-14T09:00:00Z","2026-09-15T09:00:00Z"]){
-    const oldConsumer=runBoundedGate(x=>x.fields.expires_at=expires);
+  for(const expires of ["2026-09-14T09:00:00Z","2026-09-15T09:00:00Z","2026-09-17T09:00:00Z"]){
+    const oldConsumer=runBoundedGate(x=>{x.fields.expires_at=expires;x.now="2026-09-17T09:00:01Z"});
     expect(oldConsumer.status).not.toBe(0);expect(oldConsumer.stdout+oldConsumer.stderr).toContain("consumer expiry mismatch");
   }
-  for(const previousId of [5660965716,5671021604,5672436570,5688909231]){
+  for(const previousId of [5660965716,5671021604,5672436570,5688909231,5694821959]){
   const oldHandoff=runBoundedGate(x=>{
     const old=x.controls.find((c:any)=>c.id===previousId);
     x.body=x.body.replace(x.fields.handoff_comment_ref,old.html_url)
@@ -510,12 +522,12 @@ test("I21 real date boundary, expired Sep15 consumer and previous I20 handoff ca
   });
   expect(oldHandoff.status).not.toBe(0);expect(oldHandoff.stdout+oldHandoff.stderr).toContain("exact published I required");
   }
-  console.log(JSON.stringify({subcase:"I21-CURRENT-DAY-BOUNDARY",last_valid:1,at_or_after_expiry_rejected:2,old_consumer_rejected:2,old_handoff_rejected:4,product_Date_now_unchanged:true}));
+  console.log(JSON.stringify({subcase:"I22-CURRENT-DAY-BOUNDARY",last_valid:1,at_or_after_expiry_rejected:2,old_consumer_rejected:3,old_handoff_rejected:5,product_Date_now_unchanged:true}));
 });
 
 test("I9 current consumer uses full-index across abbrev7/8 and rejects abbreviated evidence",()=>{
   const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
-  const current=spawnSync("git",["rev-parse",ciFixtureHead],{cwd:repoRoot,encoding:"utf8"});
+  const current=spawnSync("git",["rev-parse","HEAD"],{cwd:repoRoot,encoding:"utf8"});
   expect(current.status).toBe(0);const head=current.stdout.trim();
   const fullDigests:string[]=[];
   for(const abbrev of [7,8]){
@@ -1118,9 +1130,9 @@ describe("CI-01 source admission before protected release", () => {
 
   test("source mode retains expired, invalid, ambiguous source and current-overlay checks", () => {
     const cases: Array<[string, (x: any) => void, string]> = [
-      ["expired source", x => x.now = "2026-09-17T09:00:00Z", "head/base/expiry mismatch"],
+      ["expired source", x => x.now = "2026-09-18T09:00:00Z", "head/base/expiry mismatch"],
       ["expired consumer", x => x.fields.expires_at = "2026-09-15T09:00:00Z", "consumer expiry mismatch"],
-      ["raw source drift", x => x.controls.find((c: any) => c.id === 5694821959).body += "changed", "control raw body digest mismatch"],
+      ["raw source drift", x => x.controls.find((c: any) => c.id === 5711335296).body += "changed", "control raw body digest mismatch"],
       ["duplicate consumer", x => x.copies = 2, "exactly one current-head consumer receipt required"],
       ["missing overlay", x => x.labels = [], "require label shirube-current-overlay"],
       ["misleading release claim", x => x.body += "\nmerge-ready", "must not claim merge-ready"],
@@ -1203,7 +1215,7 @@ describe("CI-01 source admission before protected release", () => {
     expect(restored).toBe(baseline.stdout);
   });
 
-  test("CI-01 workflow delta is not silently added to I21 admission", () => {
+  test("CI-01 workflow delta cannot reuse previous I21 admission", () => {
     const historical = ciAuthorityFixtures.find(x => x.id === 5694821959)!;
     const handoff = JSON.parse(/```json\s*\n([\s\S]*?)^```/m.exec(historical.body)![1]);
     expect(handoff.implementation_paths).not.toContain(".github/workflows/pr-checks.yml");
@@ -1211,10 +1223,12 @@ describe("CI-01 source admission before protected release", () => {
     expect(actual.status).toBe(0);
     if (actual.stdout.trim() !== ciFixtureHead) {
       const refused = runBoundedGate(x => {
-        sourceReady(x); x.head = actual.stdout.trim(); x.body = x.body.replace(ciFixtureHead, x.head);
+        sourceReady(x);
+        x.body = x.body.replace(x.fields.handoff_comment_ref, historical.html_url)
+          .replace(x.fields.handoff_body_sha256, createHash("sha256").update(historical.body).digest("hex"));
       });
       expect(refused.status, refused.stdout + refused.stderr).toBe(1);
-      expect(refused.stdout).toContain("candidate repair outside current I21 scope");
+      expect(refused.stdout).toContain("exact published I required");
     }
   });
 });
