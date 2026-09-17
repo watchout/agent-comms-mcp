@@ -608,3 +608,42 @@ proof is required; current public19 and full JOIN remain pending. No public effe
 merge or actual use is authorized here. Temporary CI delivery pins are not a product
 API; moving them to versioned external configuration is a later productization task.
 Literal runtime state/port/provider DB nonpersistence and actual use remain incomplete.
+
+
+### I24 A09 synchronization marker publication and current supply (2026-09-17)
+
+I24: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5712657386,
+raw SHA256 `50ef93e5ae7329ea0856bbf56e718547d199b071db94dcb24fb9027fe0a0d7c9`.
+Actual 737 public run35208002933 retains 3173PASS/59SKIP/1FAIL. The A09
+new-owner synchronization marker used direct final-path JSON publication, followed
+by concurrent exists/parse. The historical intermediate bytes are unavailable;
+reader interleaving versus writer death cannot be resolved retrospectively.
+
+All A09 generated-child mark calls now reuse the independently tested native
+fixture publisher: write complete same-directory private staging, close and rename.
+Each marker keeps its path, payload and0600 mode. Repeated diagnostic names expose
+an old or new complete JSON object. The parent still parses once. Existence-only
+.go barriers, AB/BA schedules, DB/security assertions,37 workers/1432 assertions,
+global6/main36/exclusive1, workloads and time limits are unchanged. Bounded related
+JSON inspection excludes pre-spawn input and post-exit diagnostics; intentionally
+corrupt negative fixtures remain unchanged. No product/runtime API is added.
+
+I23 remains immutable a39-to737 five-path history, full-index delta
+`133c0efc4d20faf4044e22d40dc22ac5f94cf16d77b536e81a364ff894d62008`,
+head `737567073017263df8706d7774676d1f90ed9fc9`, tree
+`ecc93094a182f271fecdd08e3832e9192fdbb4b2`. All I22/I21/C16/C17/CI4 history
+and original127-path scope remain fixed. After737 only the prior five repair paths
+plus the retry contract are allowed. Original27 authority fixtures remain byte
+identical; append I24 once. Runtime8, migrations, workflow, dependencies and private
+canonical inputs remain fixed.
+
+One new candidate22, one private2/675 and one full-local22; at most2 focused
+commands and1 combined controlled diagnostic invocation, no correction round.
+Fresh owned PG17 and exact current seven-field identity are required. Bounds are
+35active/50wall minutes, September17 21:30JST execution expiry; source/consumer
+expiry remains September18 18:00JST. No historical budget or expiry is renewed.
+Current public19, independent consumer and full JOIN remain pending. The actual
+consumer must satisfy PASS_CONSUMER_COMPATIBILITY and all semantic fields.
+Temporary CI delivery pins are not product APIs; later external configuration and
+literal runtime state/port/provider DB nonpersistence remain separate unfinished
+productization work. No public or protected effect is authorized by this repair.

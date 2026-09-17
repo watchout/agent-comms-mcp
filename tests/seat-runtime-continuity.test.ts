@@ -168,6 +168,18 @@ describe('native fixture report publication', () => {
       expect(observations).toBe(1)
       expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual(payload)
       expect(existsSync(`${report}.pending`)).toBe(false)
+      const replacement = {...payload, content: 'replacement diagnostic marker'}
+      publishNativeFixtureReport(report, replacement, {openSync, closeSync, renameSync, rmSync,
+        writeFileSync(fd, data) {
+          const bytes = String(data)
+          writeSync(fd as number, bytes.slice(0, 8))
+          expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual(payload)
+          expect(() => JSON.parse(readFileSync(`${report}.pending`, 'utf8'))).toThrow()
+          writeSync(fd as number, bytes.slice(8))
+        },
+      })
+      expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual(replacement)
+      expect(existsSync(`${report}.pending`)).toBe(false)
     } finally {rmSync(home, {recursive: true, force: true})}
   })
   test('failed partial write or publication never exposes a complete report', () => {

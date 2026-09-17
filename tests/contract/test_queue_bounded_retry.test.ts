@@ -1,4 +1,5 @@
 import { expect } from 'bun:test'
+import { publishNativeFixtureReport } from '../helpers/seat-native-runtime-fixture'
 import { sanitizeFixtureError, boundedTest, fixture, startNormalTask, fixtureDb, fixtureResult, hostReplySender, candidateRoot, fixtureEvent, settleFixtureWork, settleIndependentFixtureWork, type BoundedFixture } from './test_queue_bounded_admission.test'
 import { admissionBindingFromEnv, admissionStatus, admissionTransition, tryBoundedClaim, deliverBoundedOutbound, authorizeBoundedPost,
   boundedRetryAfter, BoundedReceiptStore, currentBoundedOwner, recoverBoundedReceipt, admissionSha256, type BoundedDiscordRequest } from '../../core/queue-admission'
@@ -62,11 +63,12 @@ async function ownerRecoveryFixture(cut: 'acquired'|'unlinked'|'closed'|'races')
     writeFileSync(script,`
 import { Client } from '${candidateRoot}/node_modules/pg/lib/index.js'
 import { Database,constants as sqliteConstants } from 'bun:sqlite'
-import { existsSync,readFileSync,writeFileSync,lstatSync,renameSync } from 'node:fs'
+import { existsSync,readFileSync,writeFileSync,lstatSync,renameSync,openSync,closeSync,rmSync } from 'node:fs'
 import { BoundedReceiptStore,currentBoundedOwner,deliverBoundedOutbound,recoverBoundedReceipt } from '${candidateRoot}/core/queue-admission.ts'
 const i=JSON.parse(readFileSync(process.argv[2],'utf8')),mode=process.argv[3],tag=process.argv[4]||mode
 const client=new Client({connectionString:i.url,connectionTimeoutMillis:1000});await client.connect()
-const mark=(name,value={})=>writeFileSync(i.directory+'/'+tag+'-'+name+'.json',JSON.stringify({at:Date.now(),pid:process.pid,...value}),{mode:0o600})
+const publishNativeFixtureReport = ${publishNativeFixtureReport.toString()}
+const mark=(name,value={})=>publishNativeFixtureReport(i.directory+'/'+tag+'-'+name+'.json',{at:Date.now(),pid:process.pid,...value})
 
 let clientClosed=false,clientClose:Promise<void>|undefined
 client.on('error',error=>mark('db-error',{code:error.code||null}))
