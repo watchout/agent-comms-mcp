@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'bun:test'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { publishNativeFixtureReport } from './helpers/seat-native-runtime-fixture'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
@@ -141,5 +142,54 @@ describe('SC2 held OS endpoint and exact lease resolution', () => {
       await expect(fetch(bad.endpointUri)).rejects.toThrow()
       expect(await (await fetch(good.endpointUri)).text()).toBe('good')
     } finally {good.server.stop(true);bad.server.stop(true)}
+  })
+})
+
+
+describe('native fixture report publication', () => {
+  test('partial staging bytes are invisible until the actual publisher completes', () => {
+    const home = mkdtempSync(join(tmpdir(), 'native-report-publication-'))
+    const report = join(home, 'native-host.json')
+    const payload = {endpoint: {pid: 123, port: 456}, content: 'complete fixture report'}
+    let observations = 0
+    try {
+      publishNativeFixtureReport(report, payload, {openSync, closeSync, renameSync, rmSync,
+        writeFileSync(fd, data) {
+          const bytes = String(data)
+          expect(existsSync(report)).toBe(false)
+          expect(readFileSync(`${report}.pending`, 'utf8')).toBe('')
+          writeSync(fd as number, bytes.slice(0, 8))
+          expect(existsSync(report)).toBe(false)
+          expect(() => JSON.parse(readFileSync(`${report}.pending`, 'utf8'))).toThrow()
+          observations++
+          writeSync(fd as number, bytes.slice(8))
+        },
+      })
+      expect(observations).toBe(1)
+      expect(JSON.parse(readFileSync(report, 'utf8'))).toEqual(payload)
+      expect(existsSync(`${report}.pending`)).toBe(false)
+    } finally {rmSync(home, {recursive: true, force: true})}
+  })
+  test('failed partial write or publication never exposes a complete report', () => {
+    for (const failure of ['write', 'rename'] as const) {
+      const home = mkdtempSync(join(tmpdir(), 'native-report-failure-'))
+      const report = join(home, 'native-host.json')
+      try {
+        expect(() => publishNativeFixtureReport(report, {value: 'complete'}, {
+          openSync, closeSync, rmSync,
+          writeFileSync(fd, data) {
+            if (failure === 'write') {writeSync(fd as number, '{'); throw new Error('controlled writer failure')}
+            writeFileSync(fd, data)
+          },
+          renameSync(from, to) {
+            expect(existsSync(report)).toBe(false)
+            if (failure === 'rename') throw new Error('controlled publish failure')
+            renameSync(from, to)
+          },
+        })).toThrow(failure === 'write' ? 'controlled writer failure' : 'controlled publish failure')
+        expect(existsSync(report)).toBe(false)
+        expect(existsSync(`${report}.pending`)).toBe(false)
+      } finally {rmSync(home, {recursive: true, force: true})}
+    }
   })
 })

@@ -301,8 +301,8 @@ async function requireBoundedCiSupply() {
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
   const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5711335296`
-    &&digest==="3e58b9990c5bf73f4c12f01b8e84e685deb01c6ecf763e11677e4438d973db6d","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5712041088`
+    &&digest==="360a44222c9299b9178d2b2f9f8682b3f0fa32ea5abb8f3d1ea050f22d253c41","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -383,7 +383,8 @@ async function requireBoundedCiSupply() {
   git("merge-base","--is-ancestor",reviewedCiHead,headSha);
   check(git("rev-parse",`${historicalC17}^{tree}`)==="d5679c1675d324e04f23b0e0b60a216e0f158219",
     "historical C17 tree mismatch");
-  const supplyBody=await load(ref,digest);
+  const supplyBody=await load(`https://github.com/${target}/issues/940#issuecomment-5711335296`,
+    "3e58b9990c5bf73f4c12f01b8e84e685deb01c6ecf763e11677e4438d973db6d");
   const supplyMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I22 -->";
   check(supplyBody.split(supplyMarker).length===2&&[...supplyBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,
     "current I22 marker must occur once");
@@ -427,8 +428,57 @@ async function requireBoundedCiSupply() {
     &&binaryHash(historicalC17,reviewedCiHead)===supply.subject.ci_sequence_delta_sha256
     &&JSON.stringify(git("diff","--no-renames","--name-only",`${historicalC17}...${reviewedCiHead}`).split("\n").filter(Boolean).sort())===JSON.stringify(reviewedPaths),
     "reviewed CI sequence delta mismatch");
-  check(git("diff","--no-renames","--name-only",`${reviewedCiHead}...${headSha}`).split("\n").filter(Boolean)
-    .every(file=>currentMetadata.includes(file)),"candidate repair outside current I22 scope");
+  const historicalI22Head="a39efd0261b1bc06f4744c8825e5d597b339a6bb";
+  git("merge-base","--is-ancestor",reviewedCiHead,historicalI22Head);
+  git("merge-base","--is-ancestor",historicalI22Head,headSha);
+  check(git("rev-parse",`${historicalI22Head}^{tree}`)==="e6cdf688488d93659bc5e69370c2d5097b58a00d"
+    &&binaryHash(reviewedCiHead,historicalI22Head)==="f189561e32f0c200eb2ce35374b92417b7846f962f19d6f27b8ba974de5c26d8"
+    &&JSON.stringify(git("diff","--no-renames","--name-only",`${reviewedCiHead}...${historicalI22Head}`).split("\n").filter(Boolean).sort())===JSON.stringify(currentMetadata),
+    "historical I22 metadata delta mismatch");
+  const currentBody=await load(ref,digest);
+  const currentMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I23 -->";
+  check(currentBody.split(currentMarker).length===2&&[...currentBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,
+    "current I23 marker must occur once");
+  const currentBlocks=[...currentBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(currentBlocks.length===1,"one current I23 JSON block required");
+  const current=JSON.parse(currentBlocks[0][1]);
+  const fixturePaths=["tests/helpers/seat-native-runtime-fixture.ts","tests/seat-runtime-continuity.test.ts"];
+  const currentPaths=[...currentMetadata,...fixturePaths].sort();
+  check(current.schema_version==="shirube-control-handoff/v1"
+    &&current.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260917-I23"
+    &&current.control_source===`${target}#940`
+    &&current.subject.repository===target&&current.subject.pr===963&&current.subject.base===base
+    &&current.subject.current_public_head===historicalI22Head&&current.subject.current_local_head===historicalI22Head
+    &&current.subject.current_local_tree===git("rev-parse",`${historicalI22Head}^{tree}`)
+    &&current.subject.entry_full_index_diff_sha256===binaryHash(base,historicalI22Head)
+    &&current.subject.c2===handoff.subject.c2&&current.subject.seat_continuity===handoff.subject.seat_continuity
+    &&current.subject.was_companion===handoff.subject.was_companion
+    &&current.subject.historical_C17_head===historicalC17&&current.subject.reviewed_ci_head===reviewedCiHead
+    &&current.subject.historical_C17_tree===supply.subject.historical_C17_tree
+    &&current.subject.ci_sequence_delta_sha256===supply.subject.ci_sequence_delta_sha256
+    &&current.subject.historical_I22_metadata_delta_sha256===binaryHash(reviewedCiHead,historicalI22Head)
+    &&current.execution_context.active_function==="implementation_executor"
+    &&current.execution_context.actor_agent_id==="codex-cto/ci_sequence_fix"
+    &&current.execution_context.checker==="/root/ci_sequence_plan_gate"
+    &&current.authority_refs.length===1&&current.authority_refs[0].url===odUrl&&current.authority_refs[0].sha256===odHash
+    &&current.historical_I22_ref.url===`https://github.com/${target}/issues/940#issuecomment-5711335296`
+    &&current.historical_I22_ref.sha256===hash(supplyBody)
+    &&current.historical_I21_ref.url===supply.historical_I21_ref.url&&current.historical_I21_ref.sha256===hash(handoffBody)
+    &&Date.parse(current.bounds.expires_at)===Date.parse(expiry)
+    &&current.bounds.execution_expires_at==="2026-09-17T20:00:00+09:00"
+    &&current.bounds.active_minutes===35&&current.bounds.wall_minutes===50
+    &&current.bounds.new_candidates===1&&current.bounds.cumulative_candidate_limit===21
+    &&current.bounds.new_full_suite_runs===1&&current.bounds.cumulative_full_suite_limit===21
+    &&current.bounds.new_private2_runs===1&&current.bounds.focused_metadata_runs_max===2
+    &&current.bounds.diagnostic_probe_invocations_max===2&&current.bounds.correction_rounds===0
+    &&current.bounds.publicCIstarts===0&&current.bounds.pushes===0&&current.bounds.protected_effects===0
+    &&JSON.stringify([...current.allowed_paths].sort())===JSON.stringify([...handoff.allowed_paths].sort())
+    &&JSON.stringify([...current.historical_repair_paths].sort())===JSON.stringify([...repairs].sort())
+    &&JSON.stringify([...current.repair_paths].sort())===JSON.stringify([...repairs,...fixturePaths].sort())
+    &&JSON.stringify([...current.implementation_paths].sort())===JSON.stringify(currentPaths)
+    &&JSON.stringify([...current.validated_ci_sequence_paths].sort())===JSON.stringify(reviewedPaths),"current I23 supply mismatch");
+  check(git("diff","--no-renames","--name-only",`${historicalI22Head}...${headSha}`).split("\n").filter(Boolean)
+    .every(file=>currentPaths.includes(file)),"candidate repair outside current I23 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)

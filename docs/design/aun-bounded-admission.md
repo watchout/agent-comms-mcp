@@ -569,3 +569,42 @@ cleanup. Public19 and the strict same-candidate private/public join remain pendi
 no C17 whole-head PASS is carried over. Public supply, push/event capacity and
 fresh consumer publication need a subsequent finite handoff. This task grants no
 GitHub write, external CI, merge, runtime, live DB or expired application window.
+
+### I23 native fixture report publication and current source supply (2026-09-17)
+
+I23: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5712041088,
+raw SHA256 `360a44222c9299b9178d2b2f9f8682b3f0fa32ea5abb8f3d1ea050f22d253c41`.
+The actual a39 public run35202908607 failed during fixture setup with JSON EOF;
+3171PASS/59SKIP/1FAIL is retained. Direct creation of the final report followed by
+an existence-only reader exposes incomplete bytes. This mechanism is demonstrable;
+the unavailable CI intermediate bytes cannot distinguish a concurrent read from a
+writer dying during publication. Unique per-seat directories reduce path collision,
+but no historical cause or failure waiver is inferred.
+
+The existing test fixture writes the complete report to a private same-directory
+staging file, closes it and atomically renames it to the final path. The parent
+continues to parse once and fail on malformed data; no parse retry or added delay.
+Failed writes/publish leave no new final report. Regression probes the actual
+shared publisher during partial writes and failure, while the normal contract
+continues to exercise actual native PID/start, endpoint, input, hook and MCP checks.
+This fixture correction adds no product runtime API or internal deployment coupling.
+
+I22 remains authenticated immutable history through a39
+`a39efd0261b1bc06f4744c8825e5d597b339a6bb`, tree
+`e6cdf688488d93659bc5e69370c2d5097b58a00d`, with exact eac39-to-a39 metadata3
+full-index SHA256 `f189561e32f0c200eb2ce35374b92417b7846f962f19d6f27b8ba974de5c26d8`.
+I21/C16/C17 and reviewed C17-to-eac39 CI4 are unchanged. After a39 only this
+specification, checker, metadata tests, existing native fixture helper and existing
+seat-runtime-continuity test may change. The original127 integration paths,
+runtime8, migrations, workflow, private inputs and pinned Was companion are fixed.
+Original26 raw authority fixtures stay byte-identical; append I23 exactly once.
+
+I23 is one new finite ordinary task: candidate21, full-local21 once, private2 once,
+at most2 focused commands and2 controlled diagnostic probes, no correction round,
+35active/50wall minutes, execution expiry September17 20:00JST. Source/consumer
+expiry remains September18 18:00JST. Historical budgets, source windows and expired
+protected application clocks are not renewed. Fresh exact-head private/local/public
+proof is required; current public19 and full JOIN remain pending. No public effect,
+merge or actual use is authorized here. Temporary CI delivery pins are not a product
+API; moving them to versioned external configuration is a later productization task.
+Literal runtime state/port/provider DB nonpersistence and actual use remain incomplete.

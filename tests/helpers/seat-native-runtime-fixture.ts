@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
@@ -35,6 +35,22 @@ async function nativeFixtureSource(): Promise<string> {
   })()
   return preparedWas
 }
+/** A report becomes readable only after its complete bytes have been closed. */
+export function publishNativeFixtureReport(report: string, payload: unknown,
+  io = {openSync, writeFileSync, closeSync, renameSync, rmSync}) {
+  const staging = `${report}.pending`
+  let fd: number | null = io.openSync(staging, 'wx', 0o600)
+  try {
+    io.writeFileSync(fd, JSON.stringify(payload))
+    io.closeSync(fd)
+    fd = null
+    io.renameSync(staging, report)
+  } finally {
+    if (fd !== null) io.closeSync(fd)
+    io.rmSync(staging, {force: true})
+  }
+}
+
 export async function nativeHostFixture(home:string,workspace:string,agent:string,project:string,session:string,mode:'accepted'|'pending'|'absent'='accepted') {
   const was = await nativeFixtureSource()
   const node=execFileSync('which',['node'],{encoding:'utf8'}).trim()
@@ -71,7 +87,8 @@ export async function nativeHostFixture(home:string,workspace:string,agent:strin
     if(!receipt)throw new Error('native receipt missing:'+JSON.stringify({handle,evidence:result.evidence,work:result.native_work_digest}));
   `)
   writeFileSync(host,`
-    import {spawn} from 'node:child_process';import {writeFileSync,existsSync} from 'node:fs';
+    import {spawn} from 'node:child_process';import {openSync,writeFileSync,closeSync,renameSync,rmSync,existsSync} from 'node:fs';
+    const publishNativeFixtureReport = ${publishNativeFixtureReport.toString()};
     import {SqliteStore} from ${JSON.stringify(join(modules,'stores/sqlite-store.js'))};
     import {observeNativeProcess} from ${JSON.stringify(join(modules,'native-context-delivery.js'))};
     const store=new SqliteStore(process.env.AGENT_MEMORY_DB_PATH);await store.initialize();
@@ -88,7 +105,7 @@ export async function nativeHostFixture(home:string,workspace:string,agent:strin
     const ready=${JSON.stringify(join(home,'native-mcp-ready-'))}+connected.pid;
     for(let i=0;!existsSync(ready)&&i<200;i++){if(connected.exitCode!==null)throw new Error('connected native MCP initialization failed');await new Promise(resolve=>setTimeout(resolve,25))}
     if(!existsSync(ready))throw new Error('connected native MCP initialization timeout');
-    writeFileSync(${JSON.stringify(report)},JSON.stringify({endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content}));
+    publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
   `)
   const child=Bun.spawn([node,host],{cwd:workspace,env:{PATH:process.env.PATH!,HOME:home,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
   nativeHosts.push(child)
