@@ -487,3 +487,46 @@ Current I21: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment
 Authenticate I21 plus historical I20. Preserve exact C15-to-C16 three-metadata delta. Current C16 `ef5a34853b56b8ce788a5403a0f8cabb34fc5476`, tree `7fd5f1dcca2766b7deaa8b599328941217145794`, full-index diff `aba59ab64e7f117155ea570b01abe1a78712e74a0bbdc1453535aa2028fde807` permits only retry test plus this document/current overlay checker/metadata fixture (four paths). Integration127 and repair8 are unchanged. Every old authority fixture, raw/identity/ancestry/current consumer negative and actual Date.now remains. Source/consumer expiry remains September17T09:00Z; original d552 phase startsSeptember16T08:55:12.555432Z,20active/25wall, implementation expiry18:20JST, final2minutes cleanup/return. No clock reset.
 
 BaselineF06 once, changed candidate17 once, afterF06 once, metadata-focused once, clean owned full19 once and exact same-candidate private2/675 once; prior F06 consumed33 plus baseline/after/full3 gives36. Preserve all prior FAIL/PASS. Local measurement cannot prove CI margin. Public supply, independent code/current consumer gate and new-head protected authority remain separate; no push/Ready/merge/runtime effect is granted.
+
+
+### CI-01 ordinary validation and protected release sequencing (local candidate)
+
+Ordinary source correction/testing authority remains the published normalization
+[decision](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544)
+(raw SHA256 `59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02`).
+The bounded local [CI-01 handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5711051413)
+(raw SHA256 `2ae94b27c15a60fb61d29141eb65bb275bbfd182920cb4ef479dcfc380b64ad5`)
+corrects sequencing; it grants no release, live CI publication or runtime authority.
+
+The existing checker defaults to full validation. Explicit `--mode source-admission`
+omits only exact-head release-owner/owner-label and merge-method selection checks.
+It retains current-overlay identity for non-draft PRs, exact event/body identity,
+misleading merge-ready rejection, all scope checks, authenticated raw source bodies,
+actual source/consumer expiry, exact tree/full-index/ancestry and exactly one current
+independent consumer. Unknown, duplicate, valueless or ambiguous arguments fail
+closed; source mode with `--required-merge-method` is incompatible. Its success
+explicitly says release authority was not evaluated and must never be used as merge
+approval. Explicit `--mode full` is equivalent to the default.
+
+Layer 0 runs source admission before the pinned native fixture/full suite, then
+runs the original full gate after the full suite and bounded-public-stage check.
+Both steps remain fatal. Missing release approval can therefore leave useful test
+results while Layer 0 remains failed; it cannot produce an auto-merge success.
+The auto-merge job still requires Layer 0 success, original exact-head labels,
+explicit squash selection and its live default-full revalidation. Events,
+permissions, runners, test commands/counts/thresholds and resource bounds remain.
+
+Offline metadata tests bind their source fixture explicitly to immutable C17
+`9a48756fee1d21c047bbda02666c4fa8bbce6b13`, exercise the new checker against that
+historically admitted subject, and preserve every historical raw authority body.
+Positive source-only/missing-release cases, expired/invalid-source negatives,
+full-mode missing/wrong-owner and malformed-argument rejection test behavior.
+Workflow structural checks support these tests but are not GitHub execution proof.
+
+I21 still permits only its exact four-path C16-to-C17 delta and expires at
+September17T09:00Z. This candidate changes the workflow, so it is **not admitted by
+I21**. Publication requires a separately concrete bounded source handoff covering
+the actual new delta and finite public-test capacity, fresh independent exact-head
+binding and source/consumer validity. This design neither invents I22 nor extends
+expiry or resets any consumed operation. Protected application remains separately
+bound to exact approved head, valid operating window and available capacity.

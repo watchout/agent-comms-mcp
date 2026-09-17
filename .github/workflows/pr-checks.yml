@@ -173,13 +173,14 @@ jobs:
             echo "::notice::route:fast-merge — CI green still requires Shirube/owner exact-head controls before merge."
           fi
 
-      - name: Shirube current-overlay gate
+      - name: Shirube source-admission gate
         if: github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git diff --name-only origin/main...HEAD > changed-files.txt
           node scripts/shirube-current-overlay-check.mjs \
+            --mode source-admission \
             --repo "${{ github.repository }}" \
             --event "$GITHUB_EVENT_PATH" \
             --changed-files changed-files.txt
@@ -219,6 +220,17 @@ jobs:
           assert set(observed) == set(required) and len(observed) == len(required), "stage_identity_partition"
           print(json.dumps({"route":route,"required_ids":required,"executed_pass":len(required),"required_failed_or_skipped":0,"junit_sha256":hashlib.sha256(raw).hexdigest(),"other_skipped":sum(any(x.tag=="skipped" for x in c) for c in cases),"scope":"STAGE_PROCEDURE_ONLY","private_status":"VERIFIED_IN_SEPARATE_STAGE" if route=="private" else "PRIVATE_STAGE_REQUIRED"}))
           PY
+
+      - name: Shirube current-overlay gate
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git diff --name-only origin/main...HEAD > changed-files.txt
+          node scripts/shirube-current-overlay-check.mjs \
+            --repo "${{ github.repository }}" \
+            --event "$GITHUB_EVENT_PATH" \
+            --changed-files changed-files.txt
 
       - name: Upload route classification
         if: always() && github.event_name == 'pull_request'

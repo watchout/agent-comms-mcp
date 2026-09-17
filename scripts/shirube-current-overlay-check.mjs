@@ -18,6 +18,8 @@ const STANDING_DECISION_URL = "https://github.com/watchout/agent-comms-mcp/issue
 const CONFORMANCE_CONFIG_PATH = ".shirube/cell-conformance.json";
 
 const args = parseArgs(process.argv.slice(2));
+const mode = args.mode ?? "full";
+const sourceAdmissionOnly = mode === "source-admission";
 const repo = stringArg(args.repo) ?? process.env.GITHUB_REPOSITORY ?? "";
 const eventPath = stringArg(args.event) ?? process.env.GITHUB_EVENT_PATH ?? "";
 const changedFilesPath = stringArg(args["changed-files"]);
@@ -201,7 +203,10 @@ if (pr) {
   if (headSha && pr.draft !== true && !body.includes(headSha)) {
     errors.push(`PR body must include the current exact head SHA ${headSha}.`);
   }
-  if (pr.draft !== true) {
+  if (pr.draft !== true && sourceAdmissionOnly && !labels.has("shirube-current-overlay")) {
+    errors.push("Non-draft PRs require label shirube-current-overlay.");
+  }
+  if (pr.draft !== true && !sourceAdmissionOnly) {
     const waiver = evaluateStandingAuthorization_fromDisk();
     if (waiver.applies) {
       warnings.push(`Exact-head owner decision waived under ${STANDING_DECISION_ID}: ${waiver.reason}`);
@@ -465,7 +470,11 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log("Shirube current-overlay gate passed.");
+if (sourceAdmissionOnly) {
+  console.log("Shirube source-admission gate passed; release authority NOT_EVALUATED.");
+} else {
+  console.log("Shirube current-overlay gate passed.");
+}
 
 async function requireOwnerDecisionArtifact() {
   const comments = await loadIssueComments();
@@ -665,17 +674,23 @@ function nextLink(linkHeader) {
 
 function parseArgs(argv) {
   const parsed = {};
-  for (let index = 0; index < argv.length; index += 1) {
+  const supported = new Set([
+    "repo", "event", "changed-files", "expected-head", "required-merge-method",
+    "comments", "control-comments", "mode",
+  ]);
+  const invalid = (detail) => { throw new Error(`Invalid gate arguments: ${detail}`); };
+  for (let index = 0; index < argv.length; index += 2) {
     const arg = argv[index];
-    if (!arg.startsWith("--")) continue;
+    if (!arg.startsWith("--") || !supported.has(arg.slice(2))) invalid(`unknown argument ${arg}`);
     const key = arg.slice(2);
+    if (Object.hasOwn(parsed, key)) invalid(`duplicate --${key}`);
     const value = argv[index + 1];
-    if (!value || value.startsWith("--")) {
-      parsed[key] = true;
-      continue;
-    }
+    if (!value || value.startsWith("--") || value.trim() !== value) invalid(`value required for --${key}`);
     parsed[key] = value;
-    index += 1;
+  }
+  if (parsed.mode !== undefined && !["full", "source-admission"].includes(parsed.mode)) invalid("unsupported mode");
+  if (parsed.mode === "source-admission" && Object.hasOwn(parsed, "required-merge-method")) {
+    invalid("source-admission cannot require a release merge method");
   }
   return parsed;
 }

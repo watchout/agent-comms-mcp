@@ -405,9 +405,11 @@ const ciAuthorityFixtures=[
 ];
 const ciBase="0f772883db6f3b50772d3e4b82ce47795091f0a9";
 const ciOrigin="565583c25963b7dfa9b4445543967d372091b336";
+// Offline source fixture only: CI-01 itself is outside I21; never imply live admission.
+const ciFixtureHead="9a48756fee1d21c047bbda02666c4fa8bbce6b13";
 function runBoundedGate(mutate:(x:any)=>void=()=>{}) {
   const git=(...a:string[])=>{const r=spawnSync("git",a,{cwd:repoRoot,encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});expect(r.status,r.stderr).toBe(0);return r;};
-  const exact=git("rev-parse","HEAD").stdout.trim(),tree=git("rev-parse",exact+"^{tree}").stdout.trim();
+  const exact=git("rev-parse",ciFixtureHead).stdout.trim(),tree=git("rev-parse",exact+"^{tree}").stdout.trim();
   const files=git("diff","--name-only",ciBase+"..."+exact).stdout.trim().split("\n");
   const diff=git("diff","--binary","--full-index",ciBase+"..."+exact).stdout;
   const digest=(x:string)=>createHash("sha256").update(x).digest("hex");
@@ -437,7 +439,7 @@ function runBoundedGate(mutate:(x:any)=>void=()=>{}) {
     // Test-only host preload fixes the authorization clock, not a product bypass flag.
     return spawnSync("node",["--import","data:text/javascript,"+encodeURIComponent("Date.now=()=>Date.parse("+JSON.stringify(value.now)+")"),
       "scripts/shirube-current-overlay-check.mjs","--repo",value.repo,"--event",event,
-      ...(value.omitChanged?[]:["--changed-files",changed]),"--comments",consumer,"--control-comments",controls],
+      ...(value.omitChanged?[]:["--changed-files",changed]),"--comments",consumer,"--control-comments",controls,...(value.cliArgs??[])],
       {cwd:repoRoot,encoding:"utf8",timeout:15000,env:{...process.env,...(value.gitAbbrev?{GIT_CONFIG_COUNT:"1",GIT_CONFIG_KEY_0:"core.abbrev",GIT_CONFIG_VALUE_0:String(value.gitAbbrev)}:{})}});
   } finally {rmSync(dir,{recursive:true,force:true})}
 }
@@ -513,7 +515,7 @@ test("I21 real date boundary, expired Sep15 consumer and previous I20 handoff ca
 
 test("I9 current consumer uses full-index across abbrev7/8 and rejects abbreviated evidence",()=>{
   const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
-  const current=spawnSync("git",["rev-parse","HEAD"],{cwd:repoRoot,encoding:"utf8"});
+  const current=spawnSync("git",["rev-parse",ciFixtureHead],{cwd:repoRoot,encoding:"utf8"});
   expect(current.status).toBe(0);const head=current.stdout.trim();
   const fullDigests:string[]=[];
   for(const abbrev of [7,8]){
@@ -574,6 +576,8 @@ function runGate(
     requiredMergeMethod?: string;
     eventHeadSha?: string;
     workflowBody?: string;
+    cliArgs?: string[];
+    ownerHeadSha?: string;
     ownerDecisions?: Array<{
       mergeMethod: string;
       supersedesDecisionRef?: string;
@@ -608,7 +612,7 @@ function runGate(
         "  schema_version: shirube-owner-decision/v1",
         "  target_repo: watchout/agent-comms-mcp",
         "  target_pr: 999",
-        `  exact_head_sha: ${eventHeadSha}`,
+        `  exact_head_sha: ${options.ownerHeadSha ?? eventHeadSha}`,
         "  verdict: APPROVED_EXACT_HEAD",
         `  merge_method: ${decision.mergeMethod}`,
         decision.supersedesDecisionRef
@@ -649,6 +653,7 @@ function runGate(
       commentsPath,
       ...(options.expectedHeadSha ? ["--expected-head", options.expectedHeadSha] : []),
       ...(options.requiredMergeMethod ? ["--required-merge-method", options.requiredMergeMethod] : []),
+      ...(options.cliArgs ?? []),
     ], {
       cwd: gateRoot,
       encoding: "utf8",
@@ -1056,3 +1061,129 @@ test("I6 actual workflow collector preserves a repository binary diff above 1 Mi
       workflow_collector_sha256:hash(collector),head,tree,independent_file_hash_equal:true,git_failure_refused_without_subject:true,abbrev7_8_same_subject:true,all_index_ids40:true}));
   }finally{rmSync(dir,{recursive:true,force:true})}
 },30000);
+
+
+describe("CI-01 source admission before protected release", () => {
+  const sourceReady = (x: any) => {
+    x.draft = false;
+    x.labels = ["shirube-current-overlay"];
+    x.body = x.body.replace(headSha, x.head);
+    x.cliArgs = ["--mode", "source-admission"];
+  };
+
+  test("valid bounded source reaches quality validation without release owner or merge selection", () => {
+    const result = runBoundedGate(sourceReady);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('"source_admission":"CI_TEST_SUPPLY_ONLY"');
+    expect(result.stdout).toContain("release authority NOT_EVALUATED");
+    expect(result.stdout).not.toContain("Shirube current-overlay gate passed.");
+    for (const cliArgs of [[], ["--mode", "full"]]) {
+      const full = runBoundedGate(x => { sourceReady(x); x.cliArgs = cliArgs; });
+      expect(full.status, full.stdout + full.stderr).toBe(1);
+      expect(full.stdout).toContain("machine-verifiable shirube_owner_decision");
+      expect(full.stdout).toContain("require label owner-exact-head-approved");
+    }
+  });
+
+  test("source mode retains expired, invalid, ambiguous source and current-overlay checks", () => {
+    const cases: Array<[string, (x: any) => void, string]> = [
+      ["expired source", x => x.now = "2026-09-17T09:00:00Z", "head/base/expiry mismatch"],
+      ["expired consumer", x => x.fields.expires_at = "2026-09-15T09:00:00Z", "consumer expiry mismatch"],
+      ["raw source drift", x => x.controls.find((c: any) => c.id === 5694821959).body += "changed", "control raw body digest mismatch"],
+      ["duplicate consumer", x => x.copies = 2, "exactly one current-head consumer receipt required"],
+      ["missing overlay", x => x.labels = [], "require label shirube-current-overlay"],
+      ["misleading release claim", x => x.body += "\nmerge-ready", "must not claim merge-ready"],
+      ["stale body", x => x.body = x.body.replace(x.head, headSha), "must include the current exact head SHA"],
+      ["wrong tree", x => x.fields.candidate_tree = "f".repeat(40), "consumer candidate_tree mismatch"],
+      ["maker as checker", x => x.fields.checker_agent = x.fields.maker_agent, "consumer checker_agent mismatch"],
+      ["wrong source scope", x => x.files.push("config/unadmitted.json"), "candidate path outside supply"],
+    ];
+    for (const [name, mutate, error] of cases) {
+      const result = runBoundedGate(x => { sourceReady(x); mutate(x); });
+      expect(result.status, name + "\n" + result.stdout + result.stderr).toBe(1);
+      expect(result.stdout, name).toContain(error);
+    }
+  });
+
+  test("full mode still refuses a wrong exact-head owner and accepts the matching owner", () => {
+    const body = baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1");
+    const options = {draft: false, labels: ["owner-exact-head-approved", "shirube-current-overlay", "merge-method:merge"]};
+    for (const cliArgs of [[], ["--mode", "full"]]) {
+      const wrong = runGate(body, ["tests/aun-runtime-v2-claim-plan.test.ts"], {...options, cliArgs, ownerHeadSha: "b".repeat(40)});
+      expect(wrong.status).toBe(1);
+      expect(wrong.stdout).toContain("machine-verifiable shirube_owner_decision");
+      const right = runGate(body, ["tests/aun-runtime-v2-claim-plan.test.ts"], {...options, cliArgs});
+      expect(right.status, right.stdout + right.stderr).toBe(0);
+    }
+  });
+
+  test("unknown, duplicate, missing, ambiguous and release-incompatible flags fail closed", () => {
+    for (const cliArgs of [
+      ["--mode"], ["--mode", ""], ["--mode", "source"], ["--mode", " source-admission"],
+      ["--mode=source-admission"], ["--source-admission"], ["unparsed"],
+      ["--mode", "source-admission", "--mode", "full"],
+      ["--mode", "source-admission", "--mode", "source-admission"],
+      ["--mode", "source-admission", "--required-merge-method", "squash"],
+      ["--repo", "watchout/agent-comms-mcp"],
+    ]) {
+      const result = runGate(baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1"), [], {cliArgs});
+      expect(result.status, JSON.stringify(cliArgs)).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("Invalid gate arguments");
+    }
+  });
+
+  test("source-only checked-head pin remains enforced", () => {
+    const result = runGate(baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1"), [], {
+      cliArgs: ["--mode", "source-admission"], expectedHeadSha: "b".repeat(40),
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("does not match checked head");
+  });
+
+  test("workflow keeps fatal source before quality, full after quality, and unchanged auto-merge", () => {
+    const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+    const step = (name: string) => {
+      const start = workflow.indexOf("      - name: " + name + "\n");
+      expect(start, name).toBeGreaterThan(0);
+      const next = workflow.indexOf("      - name:", start + 1);
+      return {start, text: workflow.slice(start, next < 0 ? undefined : next)};
+    };
+    const source = step("Shirube source-admission gate"), full = step("Shirube current-overlay gate");
+    expect(source.start).toBeLessThan(step("Prepare pinned native Wasurezu fixture").start);
+    expect(source.start).toBeLessThan(step("Run full test suite").start);
+    expect(full.start).toBeGreaterThan(step("Verify bounded public stage (private stage remains required)").start);
+    expect(source.text).toContain("--mode source-admission");
+    expect(full.text).not.toContain("--mode");
+    for (const gate of [source, full]) {
+      expect(gate.text).toContain("if: github.event_name == 'pull_request'");
+      expect(gate.text).not.toMatch(/continue-on-error|\|\| true|always\(\)/);
+    }
+    const baseline = spawnSync("git", ["show", ciFixtureHead + ":.github/workflows/pr-checks.yml"], {cwd: repoRoot, encoding: "utf8"});
+    expect(baseline.status).toBe(0);
+    const auto = (text: string) => text.slice(text.indexOf("  auto-merge:\n"));
+    expect(auto(workflow)).toBe(auto(baseline.stdout));
+    expect(auto(workflow)).toContain("needs.layer0.result == 'success'");
+    expect(auto(workflow)).toContain("--required-merge-method squash");
+    // Removing only the inserted source step and moving the original full gate
+    // back must reproduce every baseline workflow byte (events, permissions,
+    // commands, counts, runner and downstream protected checks included).
+    let restored = workflow.replace(source.text, "").replace(full.text, "");
+    restored = restored.replace("      - name: Prepare pinned native Wasurezu fixture\n", full.text + "      - name: Prepare pinned native Wasurezu fixture\n");
+    expect(restored).toBe(baseline.stdout);
+  });
+
+  test("CI-01 workflow delta is not silently added to I21 admission", () => {
+    const historical = ciAuthorityFixtures.find(x => x.id === 5694821959)!;
+    const handoff = JSON.parse(/```json\s*\n([\s\S]*?)^```/m.exec(historical.body)![1]);
+    expect(handoff.implementation_paths).not.toContain(".github/workflows/pr-checks.yml");
+    const actual = spawnSync("git", ["rev-parse", "HEAD"], {cwd: repoRoot, encoding: "utf8"});
+    expect(actual.status).toBe(0);
+    if (actual.stdout.trim() !== ciFixtureHead) {
+      const refused = runBoundedGate(x => {
+        sourceReady(x); x.head = actual.stdout.trim(); x.body = x.body.replace(ciFixtureHead, x.head);
+      });
+      expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+      expect(refused.stdout).toContain("candidate repair outside current I21 scope");
+    }
+  });
+});
