@@ -1,0 +1,55 @@
+---
+schema_version: shirube-spec-reconciliation-plan/v1
+reconciliation_id: REC-AUN940-I25-A2-CANONICAL-20260917
+status: PENDING_INDEPENDENT_CURRENT_METADATA_REVIEW
+control_source: watchout/agent-comms-mcp#940
+scope_authority_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+existing_graph_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+design_admission_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+  sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+historical_static_scope: "#802 onboarding remains historical; current primary is #940
+  and PR963. No historical owner approval is promoted to current exact-head approval."
+repo_spec_ref: ".shirube/repo-spec.yaml"
+existing_state_scan_ref: ".shirube/existing-state-scan.yaml"
+control_handoff_ref: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+outputs:
+  next_safe_cell:
+  - CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+actions:
+- Project existing owner direction and frozen graph without claiming a new RPS confirmation.
+- Materialize these exact 8 metadata files and 135 total paths; independently accept
+  bytes before candidate freeze.
+- Require same-head source/private/local/public quality and genuine structured checklist/protected
+  reviews.
+- Produce the genuine external subject through the existing trusted workflow in a
+  separately authorized finite publication step.
+- Adjudicate remaining baseline/static report findings only with exact evidence and
+  later owner authority when required; never fabricate PASS.
+open_classifications:
+- kind: ordinary_metadata
+  state: PREPARED_PENDING_INDEPENDENT_ACCEPTANCE
+  items:
+  - Current refs and 135 scope
+  - Same-byte repo/comment canonical
+  - Complete supported public materialization
+- kind: genuine_evidence_pending
+  state: PENDING
+  items:
+  - New-head source/private/local/public quality
+  - Actual structured checklist and protected reviews
+  - Authenticated external subject and current active-work inventory
+  - Independent current RPS mapping
+- kind: specific_later_disposition
+  state: UNAPPROVED
+  items:
+  - RECOVER-004 migration/protected-path detection despite declared recovery scope
+  - Baseline deletion-token and duplicate-block semantics
+  - Any remaining mechanically blocked predicates after genuine required audits
+exception_policy: No exception is approved or inserted. The existing report-only exact-head
+  pilot exception is a possible later owner route only after all genuine required
+  audits and precise remaining findings are supplied.

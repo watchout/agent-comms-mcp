@@ -1,0 +1,826 @@
+---
+schema_version: shirube-v3/control_handoff/v1
+handoff_id: CH-AUN-940-NARROW-USE-CORRECTION-20260917
+artifact_status: CANONICAL_CURRENT_INPUT_PROPOSAL_UNDER_I25_A2_PENDING_INDEPENDENT_METADATA_ACCEPTANCE_AND_NEW_HEAD
+control_source: https://github.com/watchout/agent-comms-mcp/issues/940
+owner_goal_verbatim: 全体の開発高速チームの構築を成立させる
+cell:
+  id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+  cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+  CELL-ID: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+  cell_type: product
+  risk_class: R4
+  goal: 全体の開発高速チームの構築を成立させる
+  non_scope:
+  - Only the 12 exact I25-A2 implementation paths may change from predecessor cf06.
+    The cumulative 135 paths preserve all original 127 product/integration paths plus
+    8 control metadata paths. Product runtime, migrations, workflow execution, packages,
+    locks and private canonical fixtures are unchanged by this metadata correction.
+  - No GitHub write, push, Ready, label, manual CI, merge, owner projection, runtime,
+    profile, queue, shared database, launchctl, new product API, monitor, graph or
+    cell effects are authorized by this canonical audit packet. Genuine external subject
+    production and publication require a separately bounded handoff.
+  - No counter or clock reset; no historical fixture edits, old-head proof transplantation,
+    self-audit, fake owner confirmation, source-metadata spoofing, exception injection
+    or trust/policy changes.
+  allowed_paths:
+  - ".github/workflows/pr-checks.yml"
+  - ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json"
+  - ".shirube/evidence/seat-continuity-machine-evidence.json"
+  - ".shirube/execution-contexts/seat-continuity-20260913.json"
+  - adapters/discord.ts
+  - adapters/outbound-consumer.ts
+  - bin/aun-watchdog.ts
+  - bin/aun.ts
+  - bin/aun/admission.ts
+  - bin/aun/bootstrap-adapter-codex.ts
+  - bin/aun/bootstrap-types.ts
+  - bin/aun/bootstrap.ts
+  - bin/aun/memory-ready.ts
+  - bin/aun/receive.ts
+  - bin/aun/run-queue-work.ts
+  - bin/aun/start.ts
+  - bin/state-daemon.ts
+  - cli/index.ts
+  - core/aun-configuration-candidate.ts
+  - core/aun-configuration-desired-state.ts
+  - core/bot-health.ts
+  - core/bot-lifecycle.ts
+  - core/bot-status-db.ts
+  - core/claim-ttl.ts
+  - core/db/sqlite-adapter.ts
+  - core/inbox-cursor.ts
+  - core/queue-admission.ts
+  - core/queue-work.ts
+  - core/runtime-cleanup.ts
+  - core/runtime-current-resolver.ts
+  - core/runtime-endpoint.ts
+  - core/runtime-heartbeat.ts
+  - core/runtime-inventory.ts
+  - core/runtime-memory-ready-identity.ts
+  - core/runtime-memory-ready-refresher.ts
+  - core/runtime-memory-ready.ts
+  - core/seat-context-recovery.ts
+  - core/seat-runtime-selection.ts
+  - core/startup-safety.ts
+  - core/state-daemon/action-planner.ts
+  - core/state-daemon/index.ts
+  - core/state-daemon/launchagent.ts
+  - core/state-daemon/queue-work-activation-plan.ts
+  - core/state-daemon/stall-detector.ts
+  - core/state-daemon/types.ts
+  - db/migrate-sqlite.ts
+  - db/migrate.ts
+  - db/migrations/2026-09-08-queue-bounded-admission.down.sql
+  - db/migrations/2026-09-08-queue-bounded-admission.up.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+  - docs/SSOT.md
+  - docs/agent-com-message-queue-spec.md
+  - docs/design/aun-bounded-admission.md
+  - docs/operations/aun-bootstrap.md
+  - docs/operations/memory-ready-refresh.md
+  - docs/operations/runtime-health-monitoring.md
+  - docs/shirube/README.md
+  - docs/spec/aun-runtime-supervisor-adapter-contract.md
+  - docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
+  - docs/spec/seat-runtime-continuity.md
+  - scripts/prepare-seat-continuity-test-wasurezu.sh
+  - scripts/restart-bot.sh
+  - scripts/shirube-current-overlay-check.mjs
+  - scripts/state-daemon-launchagent.ts
+  - scripts/sync-mcp-config.sh
+  - scripts/verify-seat-context-continuity.ts
+  - scripts/watchdog.sh
+  - server.ts
+  - tests/aun-bootstrap-claude-adapter.test.ts
+  - tests/aun-bootstrap-codex-adapter.test.ts
+  - tests/aun-bootstrap.test.ts
+  - tests/aun-configuration-candidate.test.ts
+  - tests/aun-configuration-desired-state.test.ts
+  - tests/aun-runtime-v2.test.ts
+  - tests/bot-health.test.ts
+  - tests/cli-sqlite-backend.test.ts
+  - tests/contract/runtime-memory-ready-refresher-pg.test.ts
+  - tests/contract/state-daemon/m2-sweep.test.ts
+  - tests/contract/state-daemon/m3-heartbeat-liveness.test.ts
+  - tests/contract/state-daemon/seed.ts
+  - tests/contract/state-daemon/test_codex_runner_dispatch.test.ts
+  - tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts
+  - tests/contract/state-daemon/test_launchagent_restore.test.ts
+  - tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts
+  - tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts
+  - tests/contract/state-daemon/test_state_action_matrix.test.ts
+  - tests/contract/state-daemon/test_wake_invocation_bounded.test.ts
+  - tests/contract/test_aun_bootstrap_clean_host.test.ts
+  - tests/contract/test_aun_bootstrap_failure_matrix.test.ts
+  - tests/contract/test_aun_codex_runner.test.ts
+  - tests/contract/test_aun_codex_runner_preflight.test.ts
+  - tests/contract/test_aun_configuration_runtime_diagnostics.test.ts
+  - tests/contract/test_aun_port_collision.test.ts
+  - tests/contract/test_aun_receive_actionable.test.ts
+  - tests/contract/test_aun_start_spawn_argv.test.ts
+  - tests/contract/test_queue_bounded_admission.test.ts
+  - tests/contract/test_queue_bounded_admission_postgres.test.ts
+  - tests/contract/test_queue_bounded_retry.test.ts
+  - tests/contract/test_queue_bounded_use_trace.test.ts
+  - tests/contract/test_routing_v3_stage_a.test.ts
+  - tests/contract/test_seat_runtime_continuity.test.ts
+  - tests/contract/test_session_start_drain.test.ts
+  - tests/contract/test_watchdog.test.ts
+  - tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts
+  - tests/helpers/seat-native-runtime-fixture.ts
+  - tests/migrations/aun-configuration-reconciliation.test.ts
+  - tests/norm-022-runtime-endpoint-lease.test.ts
+  - tests/queue-work.test.ts
+  - tests/run-queue-work-plan.test.ts
+  - tests/runtime-cleanup.test.ts
+  - tests/runtime-current-resolver.test.ts
+  - tests/runtime-heartbeat.test.ts
+  - tests/runtime-inventory.test.ts
+  - tests/runtime-memory-ready-identity.test.ts
+  - tests/runtime-memory-ready-refresher.test.ts
+  - tests/runtime-memory-ready.test.ts
+  - tests/runtime-session-env-bridge.test.ts
+  - tests/seat-context-recovery.test.ts
+  - tests/seat-runtime-continuity.test.ts
+  - tests/shirube-current-overlay-check.test.ts
+  - tests/spec-enforcement/outbound-queue-phase3.test.ts
+  - tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts
+  - tests/spec-enforcement/watchdog-false-positive-guards.test.ts
+  - tests/state-daemon-queue-work-activation-plan.test.ts
+  - tests/state-daemon-queue-work-scheduler.test.ts
+  - tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+  - ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/lifecycle-state.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
+  - ".shirube/spec-reconciliation-plan.yaml"
+  forbidden_paths:
+  - package.json
+  - bun.lock
+  - package-lock.json
+  - pnpm-lock.yaml
+  - yarn.lock
+  - ".env*"
+  - secrets/**
+  - config/launchd/**
+  - ".shirube/runtime/**"
+  - scripts/lib/cell-conformance.mjs
+  - scripts/detect-breaking-changes.sh
+  - ".github/workflows/cell-conformance.yml"
+  - ".github/workflows/shirube-external-gate-subject-request.yml"
+  - AGENTS.md
+  stop_conditions:
+  - Actual subject, predecessor, base, final diff or scope mismatches published authority.
+  - Any path outside cumulative 135 or outside 12 current implementation paths, or
+    any forbidden path changes.
+  - Missing independent current quality, source audit, checklist, required protected
+    review or authenticated external subject prevents the corresponding transition.
+  - Frozen graph absent or active-audit overlap unknown prevents final audit acceptance.
+  - Any fake evidence, stale head substitution, self-audit PASS or synthesized owner
+    authority.
+  - Earliest applicable finite bound or expiry reached.
+  acceptance_criteria:
+  - Same existing cell, R4, frozen graph D/DG/I/IG/LIVE and USE01 through USE09; no
+    new cell, denominator or product-design expansion.
+  - All 135 cumulative changed paths inside authenticated I25 plus A1/A2 scope; current
+    predecessor delta restricted to the 12 exact paths, with no forbidden changes.
+  - Current final head private 2, local 17 (including local public-domain 15), and public CI 19 (workflow 15 plus four PG16 cases; required distinct 21 = private 2 plus public CI 19) product quality
+    pass with zero global failures; actual seven-field stage records join. Historical
+    cf06 quality is not new-head evidence. The separate full owner gate remains pending
+    until a genuine exact-head owner decision and must pass before merge.
+  - Genuine same-head independent structured audit, authenticated external subject,
+    graph/active-work check and technical-owner plus CTO protected reviews complete
+    before owner decision request.
+  - No operational or team-readiness claim. Exact-head merge/application authority,
+    applied normal use, recovery and full USE01 through USE09 acceptance remain separate.
+repository:
+  name: watchout/agent-comms-mcp
+  pr: 963
+  base_sha: 0f772883db6f3b50772d3e4b82ce47795091f0a9
+  predecessor_head_sha: cf06d07480d6300683a11e5064530e96f16d280d
+  predecessor_tree_sha: 17af4acbb8ed68da4256b4f9b144f15de6cbdf33
+  candidate_rule: One I25/A1/A2 candidate from pinned cf06 predecessor, 12 exact current
+    paths and 135 cumulative paths. Final head/tree/diff are observed externally after
+    commit, never self-embedded or imported from predecessor.
+phase: independent_audit_preparation
+lifecycle_state: BLOCKED_PENDING_CURRENT_CANONICAL_AUDIT_INPUTS
+mode: rapid-lite
+profile: hotel-lite
+flow: full_operational
+formal_audit_required: true
+handoff_ready_for_implementation: false
+execution_context:
+  from:
+    agent_id: codex-cto
+    active_function: orchestration_controller
+  to:
+    agent_id: codex-cto/ci_sequence_plan_gate
+    active_function: evidence_audit_gate
+  maker_history:
+  - codex-cto/ci_sequence_fix
+  - codex-cto/recovery_path_author
+  separation: Author does not perform independent audit or generate accepted verdicts
+owner:
+  role: orchestration_controller
+  actor: codex-cto
+next_role: evidence_audit_gate
+implementation_actor: codex-cto/ci_sequence_fix
+framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/940
+premise_ref: ".shirube/repo-spec.yaml"
+premise_confirmation_ref:
+owner_direction_ref: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+source_authority_refs:
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544
+  sha256: 59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+  sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+  sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+ci_supply_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+  sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+allowed_paths:
+- ".github/workflows/pr-checks.yml"
+- ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json"
+- ".shirube/evidence/seat-continuity-machine-evidence.json"
+- ".shirube/execution-contexts/seat-continuity-20260913.json"
+- adapters/discord.ts
+- adapters/outbound-consumer.ts
+- bin/aun-watchdog.ts
+- bin/aun.ts
+- bin/aun/admission.ts
+- bin/aun/bootstrap-adapter-codex.ts
+- bin/aun/bootstrap-types.ts
+- bin/aun/bootstrap.ts
+- bin/aun/memory-ready.ts
+- bin/aun/receive.ts
+- bin/aun/run-queue-work.ts
+- bin/aun/start.ts
+- bin/state-daemon.ts
+- cli/index.ts
+- core/aun-configuration-candidate.ts
+- core/aun-configuration-desired-state.ts
+- core/bot-health.ts
+- core/bot-lifecycle.ts
+- core/bot-status-db.ts
+- core/claim-ttl.ts
+- core/db/sqlite-adapter.ts
+- core/inbox-cursor.ts
+- core/queue-admission.ts
+- core/queue-work.ts
+- core/runtime-cleanup.ts
+- core/runtime-current-resolver.ts
+- core/runtime-endpoint.ts
+- core/runtime-heartbeat.ts
+- core/runtime-inventory.ts
+- core/runtime-memory-ready-identity.ts
+- core/runtime-memory-ready-refresher.ts
+- core/runtime-memory-ready.ts
+- core/seat-context-recovery.ts
+- core/seat-runtime-selection.ts
+- core/startup-safety.ts
+- core/state-daemon/action-planner.ts
+- core/state-daemon/index.ts
+- core/state-daemon/launchagent.ts
+- core/state-daemon/queue-work-activation-plan.ts
+- core/state-daemon/stall-detector.ts
+- core/state-daemon/types.ts
+- db/migrate-sqlite.ts
+- db/migrate.ts
+- db/migrations/2026-09-08-queue-bounded-admission.down.sql
+- db/migrations/2026-09-08-queue-bounded-admission.up.sql
+- db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+- db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+- docs/SSOT.md
+- docs/agent-com-message-queue-spec.md
+- docs/design/aun-bounded-admission.md
+- docs/operations/aun-bootstrap.md
+- docs/operations/memory-ready-refresh.md
+- docs/operations/runtime-health-monitoring.md
+- docs/shirube/README.md
+- docs/spec/aun-runtime-supervisor-adapter-contract.md
+- docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
+- docs/spec/seat-runtime-continuity.md
+- scripts/prepare-seat-continuity-test-wasurezu.sh
+- scripts/restart-bot.sh
+- scripts/shirube-current-overlay-check.mjs
+- scripts/state-daemon-launchagent.ts
+- scripts/sync-mcp-config.sh
+- scripts/verify-seat-context-continuity.ts
+- scripts/watchdog.sh
+- server.ts
+- tests/aun-bootstrap-claude-adapter.test.ts
+- tests/aun-bootstrap-codex-adapter.test.ts
+- tests/aun-bootstrap.test.ts
+- tests/aun-configuration-candidate.test.ts
+- tests/aun-configuration-desired-state.test.ts
+- tests/aun-runtime-v2.test.ts
+- tests/bot-health.test.ts
+- tests/cli-sqlite-backend.test.ts
+- tests/contract/runtime-memory-ready-refresher-pg.test.ts
+- tests/contract/state-daemon/m2-sweep.test.ts
+- tests/contract/state-daemon/m3-heartbeat-liveness.test.ts
+- tests/contract/state-daemon/seed.ts
+- tests/contract/state-daemon/test_codex_runner_dispatch.test.ts
+- tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts
+- tests/contract/state-daemon/test_launchagent_restore.test.ts
+- tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts
+- tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts
+- tests/contract/state-daemon/test_state_action_matrix.test.ts
+- tests/contract/state-daemon/test_wake_invocation_bounded.test.ts
+- tests/contract/test_aun_bootstrap_clean_host.test.ts
+- tests/contract/test_aun_bootstrap_failure_matrix.test.ts
+- tests/contract/test_aun_codex_runner.test.ts
+- tests/contract/test_aun_codex_runner_preflight.test.ts
+- tests/contract/test_aun_configuration_runtime_diagnostics.test.ts
+- tests/contract/test_aun_port_collision.test.ts
+- tests/contract/test_aun_receive_actionable.test.ts
+- tests/contract/test_aun_start_spawn_argv.test.ts
+- tests/contract/test_queue_bounded_admission.test.ts
+- tests/contract/test_queue_bounded_admission_postgres.test.ts
+- tests/contract/test_queue_bounded_retry.test.ts
+- tests/contract/test_queue_bounded_use_trace.test.ts
+- tests/contract/test_routing_v3_stage_a.test.ts
+- tests/contract/test_seat_runtime_continuity.test.ts
+- tests/contract/test_session_start_drain.test.ts
+- tests/contract/test_watchdog.test.ts
+- tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts
+- tests/helpers/seat-native-runtime-fixture.ts
+- tests/migrations/aun-configuration-reconciliation.test.ts
+- tests/norm-022-runtime-endpoint-lease.test.ts
+- tests/queue-work.test.ts
+- tests/run-queue-work-plan.test.ts
+- tests/runtime-cleanup.test.ts
+- tests/runtime-current-resolver.test.ts
+- tests/runtime-heartbeat.test.ts
+- tests/runtime-inventory.test.ts
+- tests/runtime-memory-ready-identity.test.ts
+- tests/runtime-memory-ready-refresher.test.ts
+- tests/runtime-memory-ready.test.ts
+- tests/runtime-session-env-bridge.test.ts
+- tests/seat-context-recovery.test.ts
+- tests/seat-runtime-continuity.test.ts
+- tests/shirube-current-overlay-check.test.ts
+- tests/spec-enforcement/outbound-queue-phase3.test.ts
+- tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts
+- tests/spec-enforcement/watchdog-false-positive-guards.test.ts
+- tests/state-daemon-queue-work-activation-plan.test.ts
+- tests/state-daemon-queue-work-scheduler.test.ts
+- tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+- ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+- ".shirube/execution-context.yaml"
+- ".shirube/adoption-intake.yaml"
+- ".shirube/existing-state-scan.yaml"
+- ".shirube/lifecycle-state.yaml"
+- ".shirube/repo-spec.yaml"
+- ".shirube/source-mirrors/control-issue.yaml"
+- ".shirube/spec-reconciliation-plan.yaml"
+forbidden_paths:
+- package.json
+- bun.lock
+- package-lock.json
+- pnpm-lock.yaml
+- yarn.lock
+- ".env*"
+- secrets/**
+- config/launchd/**
+- ".shirube/runtime/**"
+- scripts/lib/cell-conformance.mjs
+- scripts/detect-breaking-changes.sh
+- ".github/workflows/cell-conformance.yml"
+- ".github/workflows/shirube-external-gate-subject-request.yml"
+- AGENTS.md
+forbidden_operations:
+- Only the 12 exact I25-A2 implementation paths may change from predecessor cf06.
+  The cumulative 135 paths preserve all original 127 product/integration paths plus
+  8 control metadata paths. Product runtime, migrations, workflow execution, packages,
+  locks and private canonical fixtures are unchanged by this metadata correction.
+- No GitHub write, push, Ready, label, manual CI, merge, owner projection, runtime,
+  profile, queue, shared database, launchctl, new product API, monitor, graph or cell
+  effects are authorized by this canonical audit packet. Genuine external subject
+  production and publication require a separately bounded handoff.
+- No counter or clock reset; no historical fixture edits, old-head proof transplantation,
+  self-audit, fake owner confirmation, source-metadata spoofing, exception injection
+  or trust/policy changes.
+stop_conditions:
+- Actual subject, predecessor, base, final diff or scope mismatches published authority.
+- Any path outside cumulative 135 or outside 12 current implementation paths, or any
+  forbidden path changes.
+- Missing independent current quality, source audit, checklist, required protected
+  review or authenticated external subject prevents the corresponding transition.
+- Frozen graph absent or active-audit overlap unknown prevents final audit acceptance.
+- Any fake evidence, stale head substitution, self-audit PASS or synthesized owner
+  authority.
+- Earliest applicable finite bound or expiry reached.
+required_checks:
+- Final same-head private 2/local 17 (including local public-domain 15)/public CI 19 (workflow 15 plus four PG16 cases; required distinct 21 = private 2 plus public CI 19) product quality with zero
+  global failures; separate full owner gate required before merge under the unchanged
+  contract
+- Trusted canonical resolver and report plus genuine independent full audit
+- Original full gate, standing authorization and exact-head owner conditions unchanged
+required_evidence:
+- PR_head_SHA
+- changed_files
+- validation_commands
+- validation_results
+- audit_checklist_report
+- owner_decision
+- control_state_completeness_report
+acceptance:
+- Same existing cell, R4, frozen graph D/DG/I/IG/LIVE and USE01 through USE09; no
+  new cell, denominator or product-design expansion.
+- All 135 cumulative changed paths inside authenticated I25 plus A1/A2 scope; current
+  predecessor delta restricted to the 12 exact paths, with no forbidden changes.
+- Current final head private 2, local 17 (including local public-domain 15), and public CI 19 (workflow 15 plus four PG16 cases; required distinct 21 = private 2 plus public CI 19) product quality pass
+  with zero global failures; actual seven-field stage records join. Historical cf06
+  quality is not new-head evidence. The separate full owner gate remains pending until
+  a genuine exact-head owner decision and must pass before merge.
+- Genuine same-head independent structured audit, authenticated external subject,
+  graph/active-work check and technical-owner plus CTO protected reviews complete
+  before owner decision request.
+- No operational or team-readiness claim. Exact-head merge/application authority,
+  applied normal use, recovery and full USE01 through USE09 acceptance remain separate.
+acceptance_criteria:
+- Same existing cell, R4, frozen graph D/DG/I/IG/LIVE and USE01 through USE09; no
+  new cell, denominator or product-design expansion.
+- All 135 cumulative changed paths inside authenticated I25 plus A1/A2 scope; current
+  predecessor delta restricted to the 12 exact paths, with no forbidden changes.
+- Current final head private 2, local 17 (including local public-domain 15), and public CI 19 (workflow 15 plus four PG16 cases; required distinct 21 = private 2 plus public CI 19) product quality pass
+  with zero global failures; actual seven-field stage records join. Historical cf06
+  quality is not new-head evidence. The separate full owner gate remains pending until
+  a genuine exact-head owner decision and must pass before merge.
+- Genuine same-head independent structured audit, authenticated external subject,
+  graph/active-work check and technical-owner plus CTO protected reviews complete
+  before owner decision request.
+- No operational or team-readiness claim. Exact-head merge/application authority,
+  applied normal use, recovery and full USE01 through USE09 acceptance remain separate.
+validation:
+  required_commands:
+  - Current I25/A1/A2 same-head private, local full and public required commands under
+    unchanged quality contract
+  required_evidence:
+  - PR_head_SHA
+  - changed_files
+  - validation_commands
+  - validation_results
+  - audit_checklist_report
+  - owner_decision
+  - control_state_completeness_report
+  evidence_contract: These are trusted runtime evidence keys, not prose strings masquerading
+    as refs. Same-head source/private/local/public seven-field proof and authenticated
+    external subject remain mandatory in evidence_requirements, acceptance and the
+    full independent checklist. Generated report validation concerns collection only
+    and never proves product tests.
+protected_surfaces:
+- runtime
+- api
+- database
+- migrations
+- active workflows
+- required checks
+- permissions
+rps_scope:
+  shirube_owns:
+  - Control-source/cell/handoff/evidence/independent review/owner decision ordering
+  shirube_does_not_own:
+  - Task runtime engine implementation responsibility
+  - Treating metadata or quality as live application authority
+owner_decision:
+  required_before_merge: true
+  exact_head_sha:
+  decision_ref:
+  status: NOT_REQUESTABLE_UNTIL_GENUINE_AUDIT_AND_PROTECTED_REVIEW_COMPLETE
+post_merge:
+  required_when_done_claimed: true
+  current_claim: false
+flow_safety:
+  active_work: []
+  cells:
+  - cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+    state: BLOCKED_PENDING_POLICY_RECONCILIATION
+  active_work_inventory_status: UNKNOWN_NOT_ASSERTED_EMPTY
+  frozen_graph_ref: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  note: Existing frozen graph and phase order preserved. Genuine current active-audit
+    inventory and authenticated external subject must be supplied at final audit;
+    [] is UNKNOWN, not evidence of no overlap.
+expires_at: '2026-09-18T09:00:00Z'
+next_action:
+  owner_agent: codex-cto
+  owner_function: orchestration_controller
+  action: After independent metadata acceptance and final source, supply genuine same-head
+    quality, structured audit, authenticated external subject and required protected
+    reviews using separately bounded handoffs; then evaluate exact-head owner request.
+  handoff_method: Exact published canonical comment after independent acceptance;
+    native handoff with immutable evidence
+  input_refs:
+  - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+  - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+  - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+  - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  - https://github.com/watchout/agent-comms-mcp/pull/963
+  scope: Existing cell, unchanged frozen acceptance, all 135 cumulative paths and
+    exact 12 current delta paths. No runtime effects.
+  deliverable: Current exact-head independent audit package with all unresolved policy
+    findings explicit
+  completion_evidence: Same-head actual receipts, authenticated external subject,
+    genuine checklist and protected reviews, complete scope proof; no author-generated
+    verdict
+  blocking: true
+  stop_reason: required_evidence_pending
+  blocking_scope: Only final independent audit acceptance is blocked by genuine missing
+    current evidence; current bounded metadata assembly/source work continues under
+    I25-A2.
+scope_provenance:
+  historical_product_integration_paths: 127
+  original_paths_preserved:
+  - ".github/workflows/pr-checks.yml"
+  - ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json"
+  - ".shirube/evidence/seat-continuity-machine-evidence.json"
+  - ".shirube/execution-contexts/seat-continuity-20260913.json"
+  - adapters/discord.ts
+  - adapters/outbound-consumer.ts
+  - bin/aun-watchdog.ts
+  - bin/aun.ts
+  - bin/aun/admission.ts
+  - bin/aun/bootstrap-adapter-codex.ts
+  - bin/aun/bootstrap-types.ts
+  - bin/aun/bootstrap.ts
+  - bin/aun/memory-ready.ts
+  - bin/aun/receive.ts
+  - bin/aun/run-queue-work.ts
+  - bin/aun/start.ts
+  - bin/state-daemon.ts
+  - cli/index.ts
+  - core/aun-configuration-candidate.ts
+  - core/aun-configuration-desired-state.ts
+  - core/bot-health.ts
+  - core/bot-lifecycle.ts
+  - core/bot-status-db.ts
+  - core/claim-ttl.ts
+  - core/db/sqlite-adapter.ts
+  - core/inbox-cursor.ts
+  - core/queue-admission.ts
+  - core/queue-work.ts
+  - core/runtime-cleanup.ts
+  - core/runtime-current-resolver.ts
+  - core/runtime-endpoint.ts
+  - core/runtime-heartbeat.ts
+  - core/runtime-inventory.ts
+  - core/runtime-memory-ready-identity.ts
+  - core/runtime-memory-ready-refresher.ts
+  - core/runtime-memory-ready.ts
+  - core/seat-context-recovery.ts
+  - core/seat-runtime-selection.ts
+  - core/startup-safety.ts
+  - core/state-daemon/action-planner.ts
+  - core/state-daemon/index.ts
+  - core/state-daemon/launchagent.ts
+  - core/state-daemon/queue-work-activation-plan.ts
+  - core/state-daemon/stall-detector.ts
+  - core/state-daemon/types.ts
+  - db/migrate-sqlite.ts
+  - db/migrate.ts
+  - db/migrations/2026-09-08-queue-bounded-admission.down.sql
+  - db/migrations/2026-09-08-queue-bounded-admission.up.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+  - docs/SSOT.md
+  - docs/agent-com-message-queue-spec.md
+  - docs/design/aun-bounded-admission.md
+  - docs/operations/aun-bootstrap.md
+  - docs/operations/memory-ready-refresh.md
+  - docs/operations/runtime-health-monitoring.md
+  - docs/shirube/README.md
+  - docs/spec/aun-runtime-supervisor-adapter-contract.md
+  - docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
+  - docs/spec/seat-runtime-continuity.md
+  - scripts/prepare-seat-continuity-test-wasurezu.sh
+  - scripts/restart-bot.sh
+  - scripts/shirube-current-overlay-check.mjs
+  - scripts/state-daemon-launchagent.ts
+  - scripts/sync-mcp-config.sh
+  - scripts/verify-seat-context-continuity.ts
+  - scripts/watchdog.sh
+  - server.ts
+  - tests/aun-bootstrap-claude-adapter.test.ts
+  - tests/aun-bootstrap-codex-adapter.test.ts
+  - tests/aun-bootstrap.test.ts
+  - tests/aun-configuration-candidate.test.ts
+  - tests/aun-configuration-desired-state.test.ts
+  - tests/aun-runtime-v2.test.ts
+  - tests/bot-health.test.ts
+  - tests/cli-sqlite-backend.test.ts
+  - tests/contract/runtime-memory-ready-refresher-pg.test.ts
+  - tests/contract/state-daemon/m2-sweep.test.ts
+  - tests/contract/state-daemon/m3-heartbeat-liveness.test.ts
+  - tests/contract/state-daemon/seed.ts
+  - tests/contract/state-daemon/test_codex_runner_dispatch.test.ts
+  - tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts
+  - tests/contract/state-daemon/test_launchagent_restore.test.ts
+  - tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts
+  - tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts
+  - tests/contract/state-daemon/test_state_action_matrix.test.ts
+  - tests/contract/state-daemon/test_wake_invocation_bounded.test.ts
+  - tests/contract/test_aun_bootstrap_clean_host.test.ts
+  - tests/contract/test_aun_bootstrap_failure_matrix.test.ts
+  - tests/contract/test_aun_codex_runner.test.ts
+  - tests/contract/test_aun_codex_runner_preflight.test.ts
+  - tests/contract/test_aun_configuration_runtime_diagnostics.test.ts
+  - tests/contract/test_aun_port_collision.test.ts
+  - tests/contract/test_aun_receive_actionable.test.ts
+  - tests/contract/test_aun_start_spawn_argv.test.ts
+  - tests/contract/test_queue_bounded_admission.test.ts
+  - tests/contract/test_queue_bounded_admission_postgres.test.ts
+  - tests/contract/test_queue_bounded_retry.test.ts
+  - tests/contract/test_queue_bounded_use_trace.test.ts
+  - tests/contract/test_routing_v3_stage_a.test.ts
+  - tests/contract/test_seat_runtime_continuity.test.ts
+  - tests/contract/test_session_start_drain.test.ts
+  - tests/contract/test_watchdog.test.ts
+  - tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts
+  - tests/helpers/seat-native-runtime-fixture.ts
+  - tests/migrations/aun-configuration-reconciliation.test.ts
+  - tests/norm-022-runtime-endpoint-lease.test.ts
+  - tests/queue-work.test.ts
+  - tests/run-queue-work-plan.test.ts
+  - tests/runtime-cleanup.test.ts
+  - tests/runtime-current-resolver.test.ts
+  - tests/runtime-heartbeat.test.ts
+  - tests/runtime-inventory.test.ts
+  - tests/runtime-memory-ready-identity.test.ts
+  - tests/runtime-memory-ready-refresher.test.ts
+  - tests/runtime-memory-ready.test.ts
+  - tests/runtime-session-env-bridge.test.ts
+  - tests/seat-context-recovery.test.ts
+  - tests/seat-runtime-continuity.test.ts
+  - tests/shirube-current-overlay-check.test.ts
+  - tests/spec-enforcement/outbound-queue-phase3.test.ts
+  - tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts
+  - tests/spec-enforcement/watchdog-false-positive-guards.test.ts
+  - tests/state-daemon-queue-work-activation-plan.test.ts
+  - tests/state-daemon-queue-work-scheduler.test.ts
+  - tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+  canonical_metadata_path: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  support_metadata_paths:
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/lifecycle-state.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
+  - ".shirube/spec-reconciliation-plan.yaml"
+  proposed_total_changed_paths: 135
+  current_implementation_paths: 12
+  existing_scope_authority:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+    sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+  scope_amendments:
+  - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+    sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
+  - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+  scope_sha_rule: A1/A2 independently admit exact paths. No self hash or future head
+    is embedded. Producer and comment resolver hash identical canonical raw YAML after
+    source freeze.
+existing_graph_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+existing_graph_amendment:
+  control_source: watchout/agent-comms-mcp#940
+  cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+  cell_goal: Supply tested AUN common admission/retry controls and existing Shirube
+    acceptance inputs needed to make unchanged USE01..09 reachable.
+  risk_class: R4
+  phases:
+  - id: D
+    function: control_artifact_author
+    deliverable: one narrow DesignPack/v2 delta + exact implementation supply
+    allowed_now: true
+  - id: DG
+    function: evidence_audit_gate
+    deliverable: independent exact design gate
+    allowed_now: true
+  - id: I
+    function: implementation_executor
+    deliverable: exact scoped code/docs/tests candidate
+    condition: DG PASS and explicit implementation handoff
+  - id: IG
+    function: evidence_audit_gate
+    deliverable: independent code/test acceptance and exact-head application proposal
+    condition: candidate supplied
+  - id: LIVE
+    function: runtime_recovery_executor
+    deliverable: applied real use under all9 frozen predicates
+    allowed_now: false
+    condition: later exact-head merge/application authority and operational admission
+  generation_disposition: Owner has ruled on the gen2 scope escalation by approving
+    narrow capability correction. Author/gate limit2 applies to this new correction
+    design. Prior operational gen2 remains NO-GO; no unchanged gen3 resubmission.
+  no_new_root_goal: true
+current_implementation_paths:
+- docs/design/aun-bounded-admission.md
+- scripts/shirube-current-overlay-check.mjs
+- tests/shirube-current-overlay-check.test.ts
+- docs/shirube/README.md
+- ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+- ".shirube/execution-context.yaml"
+- ".shirube/adoption-intake.yaml"
+- ".shirube/existing-state-scan.yaml"
+- ".shirube/lifecycle-state.yaml"
+- ".shirube/repo-spec.yaml"
+- ".shirube/source-mirrors/control-issue.yaml"
+- ".shirube/spec-reconciliation-plan.yaml"
+protected_surface_meanings:
+  required checks: Current overlay/source-admission policy checker and active CI workflow;
+    mandatory source/full owner gates remain intact
+  permissions: Existing admission/controller/executor/runtime privilege boundaries;
+    no permission weakening
+evidence_requirements:
+- Exact current head/base/tree/diff/test/design seven-field private/local/public evidence
+- Original 127 historical product/integration paths plus canonical 1 and support 7,
+  all 135 paths with immutable published I25/A1/A2 authority
+- Real independent structured checklist answers and machine receipts for current head
+- Real independently authenticated external gate subject and control-input digest
+- Current graph freeze/handoff and active-work duplicate audit check
+- Required protected review before owner exact-head approval; owner approval before
+  merge
+durable_existing_evidence_refs:
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+  sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600600067
+  sha256: a73638ab595370177bca7f08b7898dc2c11dbcaa3a0172d31481dc45093c76bf
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544
+  sha256: 59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+  sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+  sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+trusted_runtime_source_ref: watchout/agent-comms-mcp@0f772883db6f3b50772d3e4b82ce47795091f0a9
+metadata_refs:
+  execution_context_ref: ".shirube/execution-context.yaml"
+  adoption_plan_ref: ".shirube/adoption-intake.yaml"
+  existing_state_ref: ".shirube/existing-state-scan.yaml"
+  lifecycle_state_ref: ".shirube/lifecycle-state.yaml"
+  repo_spec_ref: ".shirube/repo-spec.yaml"
+  source_mirror_ref: ".shirube/source-mirrors/control-issue.yaml"
+  spec_reconciliation_ref: ".shirube/spec-reconciliation-plan.yaml"
+source_status:
+  predecessor: cf06d07480d6300683a11e5064530e96f16d280d
+  final_candidate: PENDING_EXTERNAL_OBSERVATION
+  source_audit: PENDING_NEW_HEAD
+  private_quality: PENDING_NEW_HEAD
+  local_quality: PENDING_NEW_HEAD
+  public_quality: NOT_RUN_FOR_NEW_HEAD
+  independent_metadata_acceptance: PENDING
+  owner_ready: false
+design_admission:
+  gate_result_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+    sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+  gate_result_id: GR-CTO-940-GEN5-INDEPENDENT-DESIGN-20260909-001
+  verdict: PASS
+  verdict_scope: Previously published independent generation-5 design and initial
+    fixture supply only; not current implementation, metadata, quality or runtime
+    acceptance
+  design_sha256: 7dbaa3b040a1cb23b0312ad04d06975f2b9ed4796718ab85365988b266f30364
+  implementation_handoff_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600600067
+    sha256: a73638ab595370177bca7f08b7898dc2c11dbcaa3a0172d31481dc45093c76bf
+  current_metadata_classification: Ordinary faithful projection under I25-A2, independently
+    review current bytes; no new design freeze is asserted.
+budget_binding:
+  implementation:
+    original_start: '2026-09-17T11:37:30Z'
+    total_active_minutes: 60
+    total_wall_minutes: 75
+    expires_at: '2026-09-17T22:00:00+09:00'
+    source_expires_at: '2026-09-18T18:00:00+09:00'
+    amendment_ref:
+      url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+      sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+    consumption: All consumption retained; no reset. One same candidate 23, private
+      1, local full 23, focused maximum 2, canonical probe 1; authorization read from
+      published handoff, not this mirror.
+  author:
+    elapsed_minutes: 20
+    start: '2026-09-17T11:57:47Z'
+    deadline: '2026-09-17T12:17:47Z'
+  metadata_checker:
+    elapsed_minutes: 12
+    start_rule: On final exact receipt/manifest only; prior preplan is historical
+      consumed work.

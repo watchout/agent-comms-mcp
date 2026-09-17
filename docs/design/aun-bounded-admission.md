@@ -647,3 +647,101 @@ consumer must satisfy PASS_CONSUMER_COMPATIBILITY and all semantic fields.
 Temporary CI delivery pins are not product APIs; later external configuration and
 literal runtime state/port/provider DB nonpersistence remain separate unfinished
 productization work. No public or protected effect is authorized by this repair.
+
+
+### I25 separate CI supply authority from canonical workflow handoff (2026-09-17)
+
+I25: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956,
+raw SHA256 `eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8`.
+The trusted workflow resolves `control_handoff_comment_ref` as a canonical
+`shirube-v3/control_handoff/v1` YAML handoff. I24 CI supply is a distinct
+`shirube-control-handoff/v1` JSON contract. Binding both to the same PR field
+made genuine canonical materialization impossible despite passing source quality.
+
+For the existing fixed Cell and CI_TEST_SUPPLY_ONLY route, the source checker now
+requires exactly one anchored `ci_supply_handoff_comment_ref` and
+`ci_supply_handoff_body_sha256`, authenticated to I25. Missing, duplicate,
+indented, mismatched, or legacy-only CI fields fail closed. There is no fallback
+to the canonical fields. Standard `control_handoff_comment_ref` and
+`control_handoff_body_sha256` remain available to the genuine whole-PR canonical
+workflow, whose resolver, structured audit, protected review and owner checks
+remain separate required evidence. Passing the source stage neither authenticates
+a canonical handoff nor grants workflow readiness, public execution or release.
+The existing compatibility consumer retains its exact schema and handoff fields,
+which bind the CI supply authority, not the canonical workflow handoff.
+
+I24 remains immutable history at cf06d07480d6300683a11e5064530e96f16d280d,
+tree17af4acbb8ed68da4256b4f9b144f15de6cbdf33, full-index737-to-cf06 delta
+`88237eea0c12a66ea83819e9b7d98e80441c43ba9345c7a8475d5937015e0b68`.
+Only design, checker and its existing test may change after cf06. Original28
+raw API fixtures are immutable; append I25 once as29. Prior127-path authority,
+C16/C17/CI4/I22/I23/I24 history, identity, expiry, consumer and full owner gates
+remain intact. Workflows, product runtime, migrations, fixtures and private
+canonical sources remain unchanged. Current cf06 public3174PASS/59SKIP/0FAIL
+is historical evidence and cannot substitute quality proof for the new head.
+
+One candidate23, one private2 invocation and one localfull23, at most2 focused
+metadata invocations and1 genuine canonical-route probe are allowed. Bounds are
+35active/50wall minutes, execution September17 22:00JST; source expiry stays
+September18 18:00JST. No protected clock or old budget is renewed. No public
+mutation is authorized. Any downstream canonical, audit or trusted-base Cell
+projection deficit remains explicit before a separate publication decision.
+Temporary CI delivery pins remain internal control configuration, not a new
+product API; their future versioned externalization and literal runtime state,
+port and provider DB nonpersistence remain unfinished productization work.
+
+
+I25-A1: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510,
+raw SHA256 `7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be`.
+This explicit amendment extends the initial three-path I25 implementation to five:
+add the directly contradictory `docs/shirube/README.md` guidance correction and
+`.shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml`.
+The trusted external-subject producer requires an actual repository-relative
+non-symlink file at the target head. Copy only independently accepted canonical
+author bytes to that exact path; no runtime, producer or trust-policy change.
+The historical127-path set is unchanged. Add exactly this one new canonical
+control path, so the actual cumulative diff must equal128 paths, with no excluded
+product or protected paths. I25 remains immutable fixture29; authenticate A1 as
+fixture30 using exact OWNER/watchout publication, raw digest, original I25 binding,
+cf06 predecessor, same cell, exact five-path and127-plus-one scope semantics.
+The public CI supply fields continue to pin I25; A1 is additional authenticated
+scope. Its canonical handoff, genuine independent audit, external producer proof
+and inherited protected7 review obligations cannot be replaced by parser success.
+All I25 clocks, counts, original owner gates and productization limits remain.
+
+
+I25-A2: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431,
+raw SHA256 `2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4`.
+The complete trusted public route additionally needs seven repository metadata
+projections: `.shirube/execution-context.yaml`, `.shirube/adoption-intake.yaml`,
+`.shirube/existing-state-scan.yaml`, `.shirube/lifecycle-state.yaml`,
+`.shirube/repo-spec.yaml`, `.shirube/source-mirrors/control-issue.yaml`, and
+`.shirube/spec-reconciliation-plan.yaml`. Original127 plus canonical1 plus these7
+is an explicit135-path cumulative subject; the same candidate changes exactly12
+paths after cf06. No path is hidden, removed from measurement or treated as waived.
+Only independently accepted canonical/support bytes may be copied. References are
+supported repository-relative inputs; no invented audit, owner approval or external
+producer artifact is included. Existing product design, graph/cell, roles, risk,
+trust, thresholds and owner gates remain unchanged.
+
+I25#29 and A1#30 remain immutable along with original28. Append and authenticate
+A2#31, including I25/A1 pins, predecessor, exact path/resource scope and identities.
+CI supply continues to pin I25. The explicit new allocation adds25active/25wall
+minutes for these demonstrated dependencies: total60active/75wall from the original
+2026-09-17T11:37:30Z start. All consumed time remains; absolute22:00JST execution
+expiry and18:00JST next-day source expiry remain unchanged. Candidate23, private1,
+full23, at most2 focused and1 canonical probe are unchanged allocations, not retries.
+
+
+Current source checks distinguish present scalar bindings from historical nested
+onboarding. The repo source-of-truth policy points to#940 with mirror/LLM authority
+false and owner confirmation required. Execution uses current_product_audit_preparation,
+primary#940/PR963 and implementation_executor, retaining repository relations,
+legacy dev/lead permission classes and the common contract. Lifecycle requests
+GATE_REVIEW_REQUIRED with BLOCKED_PENDING_CURRENT_AUDIT and mandatory exact owner
+decision. Historical#802/CH001 remains history and cannot satisfy current bindings.
+The source gate checks uniquely scoped generated scalar fields; trusted runtime
+normalization/reporting still validates complete YAML and canonical workflow
+semantics. No new YAML dialect or audit/owner authority is introduced. Isolated
+actual-gate regressions restore each prior adoption-only current file and require
+rejection, while preserving CH001 bytes and ordinary standing/full-owner routes.

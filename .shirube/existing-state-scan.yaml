@@ -1,26 +1,313 @@
+---
 schema_version: shirube-existing-state-scan/v1
-scan_id: EXISTING-STATE-AGENT-COMMS-MCP-001
-repo: watchout/agent-comms-mcp
-observed_at: 2026-06-25T02:00:01Z
-source_control_ref: watchout/agent-comms-mcp#802
-source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
-classification:
-  current_status: PARTIAL_SHIRUBE_PILOT
-  target_status_after_merge: RAPID_LITE_REPORT_ONLY
-  disposition: retrofit_accelerate
+observed_at: '2026-09-17T12:08:25.888274+00:00'
+reference_head: cf06d07480d6300683a11e5064530e96f16d280d
 specs:
-  - path: https://github.com/watchout/agent-comms-mcp/issues/802
-    status: mirrored_control_source
-    authority: control_source_snapshot
+- path: docs/design/aun-bounded-admission.md
+  status: existing_generation_5_design_and_append_only_implementation_history
+  independent_design_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+    sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+- path: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  status: published_owner_graph_direction
+  raw_body_sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
 implementation:
-  - path: runtime/product code
-    status: not_scanned_by_renderer
+- path: ".github/workflows/pr-checks.yml"
+  status: historical_127_cumulative_predecessor_change
+- path: ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json"
+  status: historical_127_cumulative_predecessor_change
+- path: ".shirube/evidence/seat-continuity-machine-evidence.json"
+  status: historical_127_cumulative_predecessor_change
+- path: ".shirube/execution-contexts/seat-continuity-20260913.json"
+  status: historical_127_cumulative_predecessor_change
+- path: adapters/discord.ts
+  status: historical_127_cumulative_predecessor_change
+- path: adapters/outbound-consumer.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun-watchdog.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/admission.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/bootstrap-adapter-codex.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/bootstrap-types.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/bootstrap.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/memory-ready.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/receive.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/run-queue-work.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/aun/start.ts
+  status: historical_127_cumulative_predecessor_change
+- path: bin/state-daemon.ts
+  status: historical_127_cumulative_predecessor_change
+- path: cli/index.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/aun-configuration-candidate.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/aun-configuration-desired-state.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/bot-health.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/bot-lifecycle.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/bot-status-db.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/claim-ttl.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/db/sqlite-adapter.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/inbox-cursor.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/queue-admission.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/queue-work.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-cleanup.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-current-resolver.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-endpoint.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-heartbeat.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-inventory.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-memory-ready-identity.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-memory-ready-refresher.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/runtime-memory-ready.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/seat-context-recovery.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/seat-runtime-selection.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/startup-safety.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/action-planner.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/index.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/launchagent.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/queue-work-activation-plan.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/stall-detector.ts
+  status: historical_127_cumulative_predecessor_change
+- path: core/state-daemon/types.ts
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrate-sqlite.ts
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrate.ts
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrations/2026-09-08-queue-bounded-admission.down.sql
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrations/2026-09-08-queue-bounded-admission.up.sql
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+  status: historical_127_cumulative_predecessor_change
+- path: db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+  status: historical_127_cumulative_predecessor_change
+- path: docs/SSOT.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/agent-com-message-queue-spec.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/design/aun-bounded-admission.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/operations/aun-bootstrap.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/operations/memory-ready-refresh.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/operations/runtime-health-monitoring.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/shirube/README.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/spec/aun-runtime-supervisor-adapter-contract.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
+  status: historical_127_cumulative_predecessor_change
+- path: docs/spec/seat-runtime-continuity.md
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/prepare-seat-continuity-test-wasurezu.sh
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/restart-bot.sh
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/shirube-current-overlay-check.mjs
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/state-daemon-launchagent.ts
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/sync-mcp-config.sh
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/verify-seat-context-continuity.ts
+  status: historical_127_cumulative_predecessor_change
+- path: scripts/watchdog.sh
+  status: historical_127_cumulative_predecessor_change
+- path: server.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-bootstrap-claude-adapter.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-bootstrap-codex-adapter.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-bootstrap.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-configuration-candidate.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-configuration-desired-state.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/aun-runtime-v2.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/bot-health.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/cli-sqlite-backend.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/runtime-memory-ready-refresher-pg.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/m2-sweep.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/m3-heartbeat-liveness.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/seed.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_codex_runner_dispatch.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_launchagent_restore.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_state_action_matrix.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/state-daemon/test_wake_invocation_bounded.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_bootstrap_clean_host.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_bootstrap_failure_matrix.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_codex_runner.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_codex_runner_preflight.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_configuration_runtime_diagnostics.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_port_collision.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_receive_actionable.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_aun_start_spawn_argv.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_queue_bounded_admission.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_queue_bounded_admission_postgres.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_queue_bounded_retry.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_queue_bounded_use_trace.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_routing_v3_stage_a.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_seat_runtime_continuity.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_session_start_drain.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/contract/test_watchdog.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/helpers/seat-native-runtime-fixture.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/migrations/aun-configuration-reconciliation.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/norm-022-runtime-endpoint-lease.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/queue-work.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/run-queue-work-plan.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-cleanup.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-current-resolver.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-heartbeat.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-inventory.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-memory-ready-identity.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-memory-ready-refresher.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-memory-ready.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/runtime-session-env-bridge.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/seat-context-recovery.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/seat-runtime-continuity.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/shirube-current-overlay-check.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/spec-enforcement/outbound-queue-phase3.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/spec-enforcement/watchdog-false-positive-guards.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/state-daemon-queue-work-activation-plan.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/state-daemon-queue-work-scheduler.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+  status: historical_127_cumulative_predecessor_change
+- path: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/execution-context.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/adoption-intake.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/existing-state-scan.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/lifecycle-state.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/repo-spec.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/source-mirrors/control-issue.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
+- path: ".shirube/spec-reconciliation-plan.yaml"
+  status: prospective_I25_A2_metadata_pending_independent_acceptance
 tests:
-  - path: repository tests
-    status: not_scanned_by_renderer
+- path: https://github.com/watchout/agent-comms-mcp/actions/runs/35212427856
+  status: historical_cf06_public_quality_only_not_new_head
+- path: https://github.com/watchout/agent-comms-mcp/pull/963
+  status: new_head_private_local_public_required_NOT_RUN
+known_drift:
+- 'Historical #802 overlay-only metadata did not describe cumulative #940 product
+  scope; this ordinary metadata projection remains pending independent acceptance.'
+unsafe_changes:
+- ".github/workflows/pr-checks.yml"
+- db/migrations/2026-09-08-queue-bounded-admission.down.sql
+- db/migrations/2026-09-08-queue-bounded-admission.up.sql
+- db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+- db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+- tests/migrations/aun-configuration-reconciliation.test.ts
 legacy_sources: []
-known_drift: []
-unsafe_changes: []
 llm_truth_claims: []
 unknowns:
-  - Runtime/API/DB/package/deploy surfaces require owner-specific scan before product work.
+- Final I25/A1/A2 head/tree/diff and new-head quality receipts
+- Current active audit inventory and duplicate check
+- Current independent metadata/structured checklist/protected reviews and RPS mapping
+  disposition
+scan_id: EXISTING-STATE-AUN940-I25-A2-20260917
+repo: watchout/agent-comms-mcp
+source_control_ref: watchout/agent-comms-mcp#940
+source_mirror_ref: ".shirube/source-mirrors/control-issue.yaml"
+classification:
+  disposition: retrofit_recover
+  status: PROSPECTIVE_METADATA_WITH_REFERENCE_PREDECESSOR_SOURCE

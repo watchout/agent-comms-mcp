@@ -84,25 +84,29 @@ requireEqual("target repo", repo, "watchout/agent-comms-mcp");
 for (const artifact of requiredArtifacts) requireExisting(artifact);
 for (const artifact of obsoleteArtifacts) requireAbsent(artifact);
 
-requireText(".shirube/repo-spec.yaml", [
-  "schema_version: shirube-repo-spec/v1",
-  'repo: "watchout/agent-comms-mcp"',
-  'primary_control_source: "watchout/agent-comms-mcp#802"',
-  "mirror_is_truth: false",
-  "llm_final_authority: false",
-  "owner_confirmation_required: true",
-  ".github/workflows/shirube-rapid-lite-gates-report.yml",
-]);
-
-requireText(".shirube/execution-context.yaml", [
-  "schema_version: shirube-execution-context/v1",
-  "mode: rapid_lite_overlay_adoption",
-  "repo: watchout/agent-comms-mcp",
-  "relation: primary",
-  "relation: framework_support",
-  "relation: same_repo_control_source",
-  "llm_final_authority_forbidden: true",
-]);
+// Current metadata is distinct from nested historical onboarding. These narrow
+// generated scalar checks do not replace the trusted full YAML/runtime gates.
+requireCurrentScalars(".shirube/repo-spec.yaml", "", {
+  schema_version: "shirube-repo-spec/v1", repo: "watchout/agent-comms-mcp",
+});
+requireCurrentScalars(".shirube/repo-spec.yaml", "source_of_truth_policy", {
+  primary_control_source: "watchout/agent-comms-mcp#940", mirror_is_truth: false,
+  llm_final_authority: false, owner_confirmation_required: true,
+});
+requireText(".shirube/repo-spec.yaml", [".github/workflows/shirube-rapid-lite-gates-report.yml"]);
+requireCurrentScalars(".shirube/execution-context.yaml", "", {
+  schema_version: "shirube-execution-context/v1", mode: "current_product_audit_preparation",
+  canonical_active_function: "implementation_executor",
+});
+requireCurrentScalars(".shirube/execution-context.yaml", "primary", {
+  repo: "watchout/agent-comms-mcp", work_order: "watchout/agent-comms-mcp#940", pr: "watchout/agent-comms-mcp#963",
+});
+requireCurrentScalars(".shirube/execution-context.yaml", "common_contract", {
+  primary_repo_required: true, work_order_required: true, active_role_required: true,
+  exact_head_required_for_merge_ready: true, owner_decision_required_for_merge_ready: true,
+  llm_final_authority_forbidden: true, support_repo_as_target_forbidden: true, control_repo_as_target_forbidden: true,
+});
+requireText(".shirube/execution-context.yaml", ["relation: primary", "relation: framework_support", "relation: same_repo_control_source"]);
 
 requireText(".shirube/control-handoffs/CH-001.yaml", [
   "schema_version: shirube-control-handoff/rapid-lite/v1",
@@ -126,13 +130,11 @@ requireText(".shirube/enforcement-policy.yaml", [
   "runtime/API/DB/package/deploy behavior",
 ]);
 
-requireText(".shirube/lifecycle-state.yaml", [
-  "schema_version: shirube-lifecycle-state/rapid-lite/v1",
-  "mode: rapid-lite",
-  "profile: hotel-lite",
-  "current_phase: HANDOFF_READY",
-  "owner_must_not_merge_until_exact_head_decision: true",
-]);
+requireCurrentScalars(".shirube/lifecycle-state.yaml", "", {
+  schema_version: "shirube-lifecycle-state/rapid-lite/v1", mode: "rapid-lite", profile: "hotel-lite",
+  current_phase: "GATE_REVIEW_REQUIRED", observed_gate_state: "BLOCKED_PENDING_CURRENT_AUDIT",
+  owner_must_not_merge_until_exact_head_decision: true,
+});
 
 const rapidLiteWorkflowPath = ".github/workflows/shirube-rapid-lite-gates-report.yml";
 requireText(rapidLiteWorkflowPath, [
@@ -299,10 +301,10 @@ async function requireBoundedCiSupply() {
   check(metadata("Workflow Supply")==="CI_TEST_SUPPLY_ONLY","wrong workflow scope");
   check(changedFilesPath&&existsSync(changedFilesPath)&&changedFiles.length>0,"changed-files input required");
   check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
-  const ref=metadata("control_handoff_comment_ref"), digest=metadata("control_handoff_body_sha256");
+  const ref=metadata("ci_supply_handoff_comment_ref"), digest=metadata("ci_supply_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
-  check(ref===`https://github.com/${target}/issues/940#issuecomment-5712657386`
-    &&digest==="50ef93e5ae7329ea0856bbf56e718547d199b071db94dcb24fb9027fe0a0d7c9","exact published I required");
+  check(ref===`https://github.com/${target}/issues/940#issuecomment-5713693956`
+    &&digest==="eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8","exact published I required");
   const fixturePath=stringArg(args["control-comments"]);
   const fixture=fixturePath?readJsonIfPresent(fixturePath):null;
   if(fixturePath)check(Array.isArray(fixture),"control-comments must be API-shaped array");
@@ -317,6 +319,65 @@ async function requireBoundedCiSupply() {
     return comment.body;
   };
   requireCiOwnerDecision(await load(odUrl,odHash),"OD-CTO-APPROVAL-NORMALIZATION-20260910-001",true);
+  const canonicalPath=".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml";
+  const amendmentPaths=["docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs",
+    "tests/shirube-current-overlay-check.test.ts","docs/shirube/README.md",canonicalPath].sort();
+  const amendmentBody=await load(`https://github.com/${target}/issues/940#issuecomment-5713769510`,
+    "7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be");
+  const amendmentBlocks=[...amendmentBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(amendmentBlocks.length===1,"one I25-A1 amendment JSON block required");
+  const amendment=JSON.parse(amendmentBlocks[0][1]);
+  check(amendment.schema_version==="shirube-control-handoff-amendment/v1"
+    &&amendment.amendment_id==="CH-CTO-AUN-POC-INTEGRATION-20260917-I25-A1"
+    &&amendment.control_source===`${target}#940`&&amendment.cell_id===cell
+    &&amendment.original_handoff_ref.url===ref&&amendment.original_handoff_ref.sha256===digest
+    &&amendment.source_predecessor==="cf06d07480d6300683a11e5064530e96f16d280d"
+    &&amendment.authority_refs.length===2&&amendment.authority_refs[0].url===odUrl&&amendment.authority_refs[0].sha256===odHash
+    &&amendment.authority_refs[1].url===`https://github.com/${target}/issues/940#issuecomment-5576498516`
+    &&amendment.authority_refs[1].sha256==="a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1"
+    &&amendment.execution_context.maker==="codex-cto/ci_sequence_fix"
+    &&amendment.execution_context.canonical_author==="codex-cto/recovery_path_author"
+    &&amendment.execution_context.checker==="codex-cto/ci_sequence_plan_gate"
+    &&amendment.execution_context.controller==="codex-cto"&&amendment.execution_context.maker_history_retained===true
+    &&amendment.cumulative_scope.historical_paths===127&&amendment.cumulative_scope.additional_exact_path===canonicalPath
+    &&amendment.cumulative_scope.new_total_changed_paths===128&&amendment.cumulative_scope.readme_already_within127===true
+    &&amendment.cumulative_scope.all_existing_product_runtime_paths_unchanged===true
+    &&JSON.stringify([...amendment.implementation_paths].sort())===JSON.stringify(amendmentPaths),"I25-A1 authenticated scope mismatch");
+  const supportPaths=[".shirube/execution-context.yaml",".shirube/adoption-intake.yaml",
+    ".shirube/existing-state-scan.yaml",".shirube/lifecycle-state.yaml",".shirube/repo-spec.yaml",
+    ".shirube/source-mirrors/control-issue.yaml",".shirube/spec-reconciliation-plan.yaml"].sort();
+  const currentImplementationPaths=[...amendmentPaths,...supportPaths].sort();
+  const finalAmendmentBody=await load(`https://github.com/${target}/issues/940#issuecomment-5713927431`,
+    "2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4");
+  const finalAmendmentBlocks=[...finalAmendmentBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(finalAmendmentBlocks.length===1,"one I25-A2 amendment JSON block required");
+  const finalAmendment=JSON.parse(finalAmendmentBlocks[0][1]);
+  check(finalAmendment.schema_version==="shirube-control-handoff-amendment/v1"
+    &&finalAmendment.amendment_id==="CH-CTO-AUN-POC-INTEGRATION-20260917-I25-A2"
+    &&finalAmendment.control_source===`${target}#940`&&finalAmendment.cell_id===cell
+    &&finalAmendment.authority_ref.url===odUrl&&finalAmendment.authority_ref.sha256===odHash
+    &&finalAmendment.I25_ref.url===ref&&finalAmendment.I25_ref.sha256===digest
+    &&finalAmendment.A1_ref.url===`https://github.com/${target}/issues/940#issuecomment-5713769510`
+    &&finalAmendment.A1_ref.sha256===hash(amendmentBody)
+    &&finalAmendment.source_predecessor===amendment.source_predecessor
+    &&JSON.stringify([...finalAmendment.implementation_paths].sort())===JSON.stringify(currentImplementationPaths)
+    &&JSON.stringify([...finalAmendment.support_metadata_paths].sort())===JSON.stringify(supportPaths)
+    &&JSON.stringify([...finalAmendment.cumulative_scope.support_paths].sort())===JSON.stringify(supportPaths)
+    &&finalAmendment.cumulative_scope.original_history_paths===127
+    &&finalAmendment.cumulative_scope.canonical_metadata_path===canonicalPath
+    &&finalAmendment.cumulative_scope.actual_total_paths===135&&finalAmendment.cumulative_scope.implementation_total_paths===12
+    &&finalAmendment.cumulative_scope.all_actual_diff_paths_must_be_counted===true
+    &&finalAmendment.cumulative_scope.existing_product_runtime_paths_unchanged===true
+    &&finalAmendment.maker.executor==="/root/ci_sequence_fix"&&finalAmendment.maker.function==="implementation_executor"
+    &&finalAmendment.maker.bounds.original_start==="2026-09-17T11:37:30Z"
+    &&finalAmendment.maker.bounds.prior_active_limit_minutes===35&&finalAmendment.maker.bounds.additional_active_minutes===25
+    &&finalAmendment.maker.bounds.total_active_limit_minutes===60&&finalAmendment.maker.bounds.prior_wall_limit_minutes===50
+    &&finalAmendment.maker.bounds.additional_wall_minutes===25&&finalAmendment.maker.bounds.total_wall_limit_minutes===75
+    &&finalAmendment.maker.bounds.execution_expires_at==="2026-09-17T22:00:00+09:00"
+    &&Date.parse(finalAmendment.maker.bounds.source_expires_at)===Date.parse(expiry)
+    &&finalAmendment.author.executor==="/root/recovery_path_author"&&finalAmendment.author.function==="control_artifact_author"
+    &&finalAmendment.checker.executor==="/root/ci_sequence_plan_gate"&&finalAmendment.checker.function==="evidence_audit_gate",
+    "I25-A2 authenticated scope/resource mismatch");
   // I20 remains authenticated history, with its exact metadata-only delta.
   const historicalI20Body=await load(`https://github.com/${target}/issues/940#issuecomment-5688909231`,
     "3b0d39b5c7a96201220154adc5a16b4f24b86e8831348b8bbf41aeacf001bbaa");
@@ -355,7 +416,11 @@ async function requireBoundedCiSupply() {
     &&handoff.authority_refs.length===1&&handoff.authority_refs[0].url===odUrl
     &&handoff.authority_refs[0].sha256===odHash
     &&handoff.allowed_paths.length===127&&new Set(handoff.allowed_paths).size===127,"current integration supply mismatch");
-  check(changedFiles.every(file=>handoff.allowed_paths.includes(file))
+  const historicalA1Paths=[...handoff.allowed_paths,canonicalPath].sort();
+  check(historicalA1Paths.length===128&&new Set(historicalA1Paths).size===128,"I25-A1 cumulative path set mismatch");
+  const admittedPaths=[...historicalA1Paths,...supportPaths].sort();
+  check(admittedPaths.length===135&&new Set(admittedPaths).size===135,"I25-A2 cumulative path set mismatch");
+  check(changedFiles.every(file=>admittedPaths.includes(file))
     &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
   const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();
   const historicalC15="2730cb38e87eee4ca31cc15d496ef49effc25a2d";
@@ -489,7 +554,9 @@ async function requireBoundedCiSupply() {
     &&JSON.stringify(git("diff","--no-renames","--name-only",`${historicalI22Head}...${historicalI23Head}`).split("\n").filter(Boolean).sort())
       ===JSON.stringify([...currentMetadata,"tests/helpers/seat-native-runtime-fixture.ts","tests/seat-runtime-continuity.test.ts"].sort()),
     "historical I23 fixture delta mismatch");
-  const currentBody=await load(ref,digest);
+  let historicalI24Body;
+  {
+  const currentBody=await load(`https://github.com/${target}/issues/940#issuecomment-5712657386`,"50ef93e5ae7329ea0856bbf56e718547d199b071db94dcb24fb9027fe0a0d7c9");
   const currentMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I24 -->";
   check(currentBody.split(currentMarker).length===2&&[...currentBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,
     "current I24 marker must occur once");
@@ -534,12 +601,71 @@ async function requireBoundedCiSupply() {
     &&JSON.stringify([...current.repair_paths].sort())===JSON.stringify([...repairs,...fixturePaths].sort())
     &&JSON.stringify([...current.implementation_paths].sort())===JSON.stringify(currentPaths)
     &&JSON.stringify([...current.validated_ci_sequence_paths].sort())===JSON.stringify(reviewedPaths),"current I24 supply mismatch");
-  check(git("diff","--no-renames","--name-only",`${historicalI23Head}...${headSha}`).split("\n").filter(Boolean)
-    .every(file=>currentPaths.includes(file)),"candidate repair outside current I24 scope");
+  historicalI24Body=currentBody;
+  }
+  const historicalI24Head="cf06d07480d6300683a11e5064530e96f16d280d";
+  git("merge-base","--is-ancestor",historicalI23Head,historicalI24Head);
+  git("merge-base","--is-ancestor",historicalI24Head,headSha);
+  check(git("rev-parse",`${historicalI24Head}^{tree}`)==="17af4acbb8ed68da4256b4f9b144f15de6cbdf33"
+    &&binaryHash(historicalI23Head,historicalI24Head)==="88237eea0c12a66ea83819e9b7d98e80441c43ba9345c7a8475d5937015e0b68"
+    &&JSON.stringify(git("diff","--no-renames","--name-only",`${historicalI23Head}...${historicalI24Head}`).split("\n").filter(Boolean).sort())
+      ===JSON.stringify([...currentMetadata,"tests/seat-runtime-continuity.test.ts","tests/contract/test_queue_bounded_retry.test.ts"].sort()),
+    "historical I24 marker delta mismatch");
+  const currentBody=await load(ref,digest);
+  const currentMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-POC-INTEGRATION-20260917-I25 -->";
+  check(currentBody.split(currentMarker).length===2&&[...currentBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,
+    "current I25 marker must occur once");
+  const currentBlocks=[...currentBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(currentBlocks.length===1,"one current I25 JSON block required");
+  const current=JSON.parse(currentBlocks[0][1]);
+  const fixturePaths=["tests/helpers/seat-native-runtime-fixture.ts","tests/seat-runtime-continuity.test.ts"];
+  const currentPaths=currentMetadata;
+  check(current.schema_version==="shirube-control-handoff/v1"
+    &&current.handoff_id==="CH-CTO-AUN-POC-INTEGRATION-20260917-I25"
+    &&current.control_source===`${target}#940`
+    &&current.subject.repository===target&&current.subject.pr===963&&current.subject.base===base
+    &&current.subject.current_public_head===historicalI24Head&&current.subject.current_local_head===historicalI24Head
+    &&current.subject.current_local_tree===git("rev-parse",`${historicalI24Head}^{tree}`)
+    &&current.subject.entry_full_index_diff_sha256===binaryHash(base,historicalI24Head)
+    &&current.subject.c2===handoff.subject.c2&&current.subject.seat_continuity===handoff.subject.seat_continuity
+    &&current.subject.was_companion===handoff.subject.was_companion
+    &&current.subject.historical_C17_head===historicalC17&&current.subject.reviewed_ci_head===reviewedCiHead
+    &&current.subject.historical_C17_tree===supply.subject.historical_C17_tree
+    &&current.subject.ci_sequence_delta_sha256===supply.subject.ci_sequence_delta_sha256
+    &&current.subject.historical_I22_metadata_delta_sha256===binaryHash(reviewedCiHead,historicalI22Head)
+    &&current.subject.historical_I23_delta_sha256===binaryHash(historicalI22Head,historicalI23Head)
+    &&current.historical_I23_ref.url===`https://github.com/${target}/issues/940#issuecomment-5712041088`
+    &&current.historical_I23_ref.sha256===hash(historicalI23Body)
+    &&current.subject.historical_I24_delta_sha256===binaryHash(historicalI23Head,historicalI24Head)
+    &&current.historical_I24_ref.url===`https://github.com/${target}/issues/940#issuecomment-5712657386`
+    &&current.historical_I24_ref.sha256===hash(historicalI24Body)
+    &&current.execution_context.active_function==="implementation_executor"
+    &&current.execution_context.actor_agent_id==="codex-cto/ci_sequence_fix"
+    &&current.execution_context.checker==="/root/ci_sequence_plan_gate"
+    &&current.authority_refs.length===1&&current.authority_refs[0].url===odUrl&&current.authority_refs[0].sha256===odHash
+    &&current.historical_I22_ref.url===`https://github.com/${target}/issues/940#issuecomment-5711335296`
+    &&current.historical_I22_ref.sha256===hash(supplyBody)
+    &&current.historical_I21_ref.url===supply.historical_I21_ref.url&&current.historical_I21_ref.sha256===hash(handoffBody)
+    &&Date.parse(current.bounds.expires_at)===Date.parse(expiry)
+    &&current.bounds.execution_expires_at==="2026-09-17T22:00:00+09:00"
+    &&current.bounds.active_minutes===35&&current.bounds.wall_minutes===50
+    &&current.bounds.new_candidates===1&&current.bounds.cumulative_candidate_limit===23
+    &&current.bounds.new_full_suite_runs===1&&current.bounds.cumulative_full_suite_limit===23
+    &&current.bounds.new_private2_runs===1&&current.bounds.focused_metadata_runs_max===2
+    &&current.bounds.diagnostic_probe_invocations_max===1&&current.bounds.correction_rounds===0
+    &&current.bounds.publicCIstarts===0&&current.bounds.pushes===0&&current.bounds.protected_effects===0
+    &&JSON.stringify([...current.allowed_paths].sort())===JSON.stringify([...handoff.allowed_paths].sort())
+    &&JSON.stringify([...current.historical_repair_paths].sort())===JSON.stringify([...repairs,...fixturePaths].sort())
+    &&JSON.stringify([...current.repair_paths].sort())===JSON.stringify([...repairs,...fixturePaths].sort())
+    &&JSON.stringify([...current.implementation_paths].sort())===JSON.stringify(currentPaths)
+    &&JSON.stringify([...current.validated_ci_sequence_paths].sort())===JSON.stringify(reviewedPaths),"current I25 supply mismatch");
+  check(git("diff","--no-renames","--name-only",`${historicalI24Head}...${headSha}`).split("\n").filter(Boolean)
+    .every(file=>currentImplementationPaths.includes(file)),"candidate repair outside current I25-A2 scope");
   const tree=git("rev-parse",`${headSha}^{tree}`);
   const actualPaths=git("diff","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean).sort();
   check(git("diff","--no-renames","--name-only",`${base}...${headSha}`).split("\n").filter(Boolean)
-    .every(file=>handoff.allowed_paths.includes(file)),"candidate deletion/rename outside supply");
+    .every(file=>admittedPaths.includes(file)),"candidate deletion/rename outside supply");
+  check(JSON.stringify(actualPaths)===JSON.stringify(admittedPaths),"I25-A2 actual135 cumulative paths required");
   check(JSON.stringify(actualPaths)===JSON.stringify([...changedFiles].sort()),"changed-files mismatch with actual candidate");
   const diff=hash(execFileSync("git",["diff","--binary","--full-index",`${base}...${headSha}`],{timeout:15000,maxBuffer:16*1024*1024}));
   const expected={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:target,target_pr:963,cell_id:cell,risk_class:"R4",
@@ -896,6 +1022,35 @@ function requireExisting(filePath) {
 function requireAbsent(filePath) {
   if (existsSync(filePath)) {
     errors.push(`Obsolete Shirube full-adoption artifact must be removed: ${filePath}`);
+  }
+}
+
+// Validate only direct scalar fields of a unique generated mapping. Historical
+// nested fields, comments, duplicate sections/keys, aliases and quoted booleans
+// cannot substitute for these current bindings. Complete YAML remains runtime-owned.
+function requireCurrentScalars(filePath, section, expected) {
+  const text = readText(filePath);
+  if (!text) { errors.push(`Required file is missing or empty: ${filePath}`); return; }
+  const lines = text.split(/\r?\n/);
+  let selected = lines, indent = "";
+  if (section) {
+    const sectionKey = new RegExp(`^(?:${section}|"${section}"|'${section}'):`);
+    const starts = lines.map((line,index) => sectionKey.test(line) ? index : -1).filter(index => index >= 0);
+    if (starts.length !== 1 || lines[starts[0]] !== `${section}:`) { errors.push(`${filePath} requires one current ${section} mapping.`); return; }
+    const start = starts[0] + 1;
+    let end = start;
+    while (end < lines.length && (!lines[end].trim() || /^\s/.test(lines[end]))) end++;
+    selected = lines.slice(start,end); indent = "  ";
+  }
+  for (const [key,value] of Object.entries(expected)) {
+    const prefix = `${indent}${key}:`;
+    const keyPattern = new RegExp(`^${indent}(?:${key}|"${key}"|'${key}'):`);
+    const matches = selected.filter(line => keyPattern.test(line));
+    const literals = typeof value === "string"
+      ? [value, JSON.stringify(value), `'${value.replaceAll("'", "''")}'`] : [String(value)];
+    if (matches.length !== 1 || !matches[0].startsWith(prefix + " ") || !literals.includes(matches[0].slice(prefix.length).trim())) {
+      errors.push(`${filePath} requires unique current ${section ? section + "." : ""}${key}: ${JSON.stringify(value)}.`);
+    }
   }
 }
 
