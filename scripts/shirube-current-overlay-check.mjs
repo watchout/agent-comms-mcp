@@ -501,11 +501,57 @@ async function requireBoundedCiSupply() {
   check(changedFiles.every(file=>admittedPaths.includes(file))
     &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
   const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();
-  // One direct immutable successor, no implicit permission for a later repair.
-  check(git("rev-list","--parents","-n","1",headSha)===`${headSha} ${windowPredecessor}`,
-    "I26 exact predecessor required");
+  // Authenticate the immutable I26 history separately from this explicit repair.
+  const repairPredecessor="d982dc2c0284a633b2b1f82d6780b3f77b8e0dd1";
+  check(git("rev-list","--parents","-n","1",repairPredecessor)===`${repairPredecessor} ${windowPredecessor}`
+    &&git("rev-parse",`${repairPredecessor}^{tree}`)==="d759272b9f94b81b55654c63c4cad328d6659605",
+    "I26 historical predecessor/tree mismatch");
+  check(JSON.stringify(git("diff","--no-renames","--name-only",`${windowPredecessor}...${repairPredecessor}`)
+    .split("\n").filter(Boolean).sort())===JSON.stringify(windowPaths),"I26-A2 historical seven-path delta required");
+  let currentConsumerRef=windowRef,currentConsumerDigest=windowDigest;
+  if(headSha!==repairPredecessor){
+    check(git("rev-list","--parents","-n","1",headSha)===`${headSha} ${repairPredecessor}`,
+      "I26 exact predecessor required; I26-A3 requires direct d982 child");
+    const correctionRef=metadata("ci_supply_correction_amendment_ref"),correctionDigest=metadata("ci_supply_correction_amendment_sha256");
+    check(correctionRef===`https://github.com/${target}/issues/940#issuecomment-5727595761`
+      &&correctionDigest==="52d917d96e51c72bd043bfa18e9de25ef43f9e7e40c0467775561532d183e0c2","exact published I26-A3 required");
+    const correctionBody=await load(correctionRef,correctionDigest);
+    const marker="<!-- shirube-v3:control-handoff-amendment:CH-CTO-AUN-C23-CI-SUBJECT-CORRECTION-20260918-I26-A3 -->";
+    check(correctionBody.split(marker).length===2
+      &&[...correctionBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"one I26-A3 marker required");
+    const blocks=[...correctionBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+    check(blocks.length===1,"one I26-A3 JSON block required");
+    const correction=JSON.parse(blocks[0][1]);
+    const correctionPaths=["scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts",
+      "docs/design/aun-bounded-admission.md","docs/shirube/README.md"].sort();
+    check(correction.schema_version==="shirube-control-handoff-amendment/v1"
+      &&correction.amendment_id==="CH-CTO-AUN-C23-CI-SUBJECT-CORRECTION-20260918-I26-A3"
+      &&correction.control_source===`${target}#940`
+      &&correction.authority_ref.url===odUrl&&correction.authority_ref.sha256===odHash
+      &&correction.I26_ref.url===windowRef&&correction.I26_ref.sha256===windowDigest
+      &&correction.I26_A1_ref.url===roleRef&&correction.I26_A1_ref.sha256===roleDigest
+      &&correction.I26_A2_ref.url===projectionRef&&correction.I26_A2_ref.sha256===projectionDigest
+      &&correction.subject.repo===target&&correction.subject.pr===963&&correction.subject.cell_id===cell
+      &&correction.subject.base===base&&correction.subject.repair_predecessor===repairPredecessor
+      &&correction.subject.repair_predecessor_tree==="d759272b9f94b81b55654c63c4cad328d6659605"
+      &&correction.subject.original_I26_predecessor===windowPredecessor
+      &&correction.executor===window.executor&&correction.checker===consumerRoles.checker_executor
+      &&correction.active_function==="implementation_executor"
+      &&JSON.stringify([...correction.allowed_paths].sort())===JSON.stringify(correctionPaths)
+      &&correction.cumulative_allowed_paths===135&&correction.original_fa94_to_d982_paths===7
+      &&correction.effective_source_expires_at===effectiveExpiry
+      &&correction.historical_refs_expiries_and_consumed_attempts_preserved===true
+      &&correction.owner_runtime_authority_granted===false
+      &&correction.issued_not_before==="2026-09-18T08:50:50.099777+00:00"&&Date.parse(correction.issued_not_before)<=now
+      &&JSON.stringify(correction.bounds)===JSON.stringify({"seconds_from_actual_start":2100,"focused_direct_processes":1,"focused_merge_shape_processes":1,"changed_input_focused_retry":1,"full_suite_processes":1,"private_contract_processes":1,"local_commits":1,"unpublished_test_or_fixture_correction_amend":1,"owned_merge_shape_fixture":1,"public_effects":0,"shared_runtime_effects":0,"new_agents":0}),"I26-A3 authenticated scope/bounds mismatch");
+    check(JSON.stringify(git("diff","--no-renames","--name-only",`${repairPredecessor}...${headSha}`)
+      .split("\n").filter(Boolean).sort())===JSON.stringify(correctionPaths),"I26-A3 exact four-path delta required");
+    const correctionRows=git("diff","--raw","--no-abbrev","--no-renames",`${repairPredecessor}...${headSha}`).split("\n");
+    check(correctionRows.length===4&&correctionRows.every(isRegularFileModification),"I26-A3 four regular-file modifications required");
+    currentConsumerRef=correctionRef;currentConsumerDigest=correctionDigest;
+  }
   check(JSON.stringify(git("diff","--no-renames","--name-only",`${windowPredecessor}...${headSha}`)
-    .split("\n").filter(Boolean).sort())===JSON.stringify(windowPaths),"I26-A2 exact seven-path delta required");
+    .split("\n").filter(Boolean).sort())===JSON.stringify(windowPaths),"I26-A2 cumulative seven-path delta required");
   const historicalC15="2730cb38e87eee4ca31cc15d496ef49effc25a2d";
   const historicalMetadata=["docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts"];
   git("merge-base","--is-ancestor",historicalC15,currentC16);
@@ -753,7 +799,7 @@ async function requireBoundedCiSupply() {
   const diff=hash(execFileSync("git",["diff","--binary","--full-index",`${base}...${headSha}`],{timeout:15000,maxBuffer:16*1024*1024}));
   const expected={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:target,target_pr:963,cell_id:cell,risk_class:"R4",
     base_sha:base,origin_head_sha:origin,exact_head_sha:headSha,candidate_tree:tree,binary_diff_sha256:diff,
-    handoff_comment_ref:windowRef,handoff_body_sha256:windowDigest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
+    handoff_comment_ref:currentConsumerRef,handoff_body_sha256:currentConsumerDigest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
     checker_agent:consumerRoles.checker_agent,maker_agent:consumerRoles.maker_agent,publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
   let found=0;
   for(const comment of await loadIssueComments(true)){
@@ -1204,4 +1250,9 @@ function escapeRegExp(value) {
 
 function matchesAny(filePath, patterns) {
   return patterns.some((pattern) => pattern.test(filePath));
+}
+
+// Validate actual git raw modes/status without abbreviating source objects.
+function isRegularFileModification(row) {
+  return /^:100644 100644 [0-9a-f]{40} [0-9a-f]{40} M\t[^\t\n]+$/.test(row);
 }

@@ -800,3 +800,25 @@ I25 maker, 12-path delta and authority as history. Original135 cumulative scope,
 ordinary permission classes, quality checks, exact source and owner gates remain.
 The two pending projection descriptions above are the observed pre-A2 deficit,
 resolved only by these authorized current projections and independent acceptance.
+
+
+### I26-A3: candidate and tested checkout subjects (2026-09-18)
+
+Published amendment https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5727595761
+(raw SHA256 `52d917d96e51c72bd043bfa18e9de25ef43f9e7e40c0467775561532d183e0c2`)
+authenticates one direct successor of exact `d982dc2c0284a633b2b1f82d6780b3f77b8e0dd1`
+with only the gate, its test, this design document and Shirube README changed.
+The original fa94→d982 seven-path history and cumulative135 paths remain fixed.
+PR metadata adds unique `ci_supply_correction_amendment_ref` and
+`ci_supply_correction_amendment_sha256`; the existing24-field current consumer
+binds its handoff reference/digest to A3, retaining authenticated I26/A1/A2 history.
+The effective source cap remains 2026-09-18T13:15:00Z; owner/runtime authority is not granted.
+
+Fixtures resolve candidate from the actual PR event and tested commit from HEAD.
+CI missing/malformed/wrong-repository events fail closed; no HEAD fallback is allowed.
+Local direct checkout and an owned offline merge fixture are separate observations.
+A merge checkout must have ordered parents [base,candidate] and the candidate tree.
+Neither synthetic event nor fixture consumer is published authority. Historical raw34
+control fixtures are retained byte-for-byte and the authenticated A3 is appended.
+Direct and merge focused checks and one final merge-form full/private execution
+retain original quality thresholds, failure history, counters and owner boundaries.
