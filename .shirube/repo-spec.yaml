@@ -11,7 +11,8 @@ scope:
 - 'Existing #940 frozen corrective cell and independently admitted generation-5 design,
   plus authenticated later same-cell amendments.'
 - All 127 historical integration paths plus 8 faithful current control metadata paths,
-  135 cumulative; current I25-A2 delta is exactly 12 paths.
+  135 cumulative; historical I25-A2 delta is exactly 12 paths, while the current
+  I26/A1/A2 successor delta is exactly 7 paths.
 non_goals:
 - No runtime application, queue activation, live database/profile/schema change or
   merge authority through metadata.
@@ -246,21 +247,16 @@ agent_permission_boundary:
   approval_required_mcp_tools: []
   forbidden_mcp_tools: []
   current_delta_allowed_paths:
-  - docs/design/aun-bounded-admission.md
   - scripts/shirube-current-overlay-check.mjs
   - tests/shirube-current-overlay-check.test.ts
+  - docs/design/aun-bounded-admission.md
   - docs/shirube/README.md
-  - ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
-  - ".shirube/execution-context.yaml"
-  - ".shirube/adoption-intake.yaml"
-  - ".shirube/existing-state-scan.yaml"
-  - ".shirube/lifecycle-state.yaml"
-  - ".shirube/repo-spec.yaml"
-  - ".shirube/source-mirrors/control-issue.yaml"
-  - ".shirube/spec-reconciliation-plan.yaml"
+  - .shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml
+  - .shirube/execution-context.yaml
+  - .shirube/repo-spec.yaml
   authority_ref:
-    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
-    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940
+    sha256: 05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85
 historical_adoption:
   purpose: 'Adopt Shirube Rapid/Lite as a report-only control-plane overlay for AgentCommsMcp
     while keeping product runtime, API, DB, package, deploy, required checks, branch
@@ -322,3 +318,21 @@ historical_adoption:
     approval_required_mcp_tools: []
     forbidden_mcp_tools: []
   status: HISTORICAL_802_OVERLAY_ONLY_NO_CURRENT_AUTHORITY
+
+historical_I25_scope:
+  delta_allowed_paths:
+  - docs/design/aun-bounded-admission.md
+  - scripts/shirube-current-overlay-check.mjs
+  - tests/shirube-current-overlay-check.test.ts
+  - docs/shirube/README.md
+  - ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/lifecycle-state.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
+  - ".shirube/spec-reconciliation-plan.yaml"
+  authority_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4

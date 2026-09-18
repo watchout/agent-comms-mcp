@@ -282,7 +282,10 @@ async function requireBoundedCiSupply() {
   const odUrl=`https://github.com/${target}/issues/940#issuecomment-5609700544`;
   const currentC16="ef5a34853b56b8ce788a5403a0f8cabb34fc5476";
   const odHash="59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02";
+  // Immutable I22/I23/I24/I25/A2 historical validity; never the I26 effective cap.
   const expiry="2026-09-18T09:00:00Z", now=Date.now();
+  const effectiveExpiry="2026-09-18T13:15:00Z";
+  const windowPredecessor="fa94d6727c453f44b6d0a8949dc09fc2914c5d05";
   const historicalExpiry="2026-09-17T09:00:00Z";
   const historicalC17="9a48756fee1d21c047bbda02666c4fa8bbce6b13";
   const reviewedCiHead="eac39beb49da9b00a1bc9bf0cf988006b08caad1";
@@ -300,7 +303,7 @@ async function requireBoundedCiSupply() {
   check(!body.includes("CELL-MCP-SHIRUBE-RAPID-LITE-PILOT-001"),"adoption-cell contamination");
   check(metadata("Workflow Supply")==="CI_TEST_SUPPLY_ONLY","wrong workflow scope");
   check(changedFilesPath&&existsSync(changedFilesPath)&&changedFiles.length>0,"changed-files input required");
-  check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(expiry),"head/base/expiry mismatch");
+  check(sha40(headSha)&&pr.base?.sha===base&&now<Date.parse(effectiveExpiry),"head/base/expiry mismatch");
   const ref=metadata("ci_supply_handoff_comment_ref"), digest=metadata("ci_supply_handoff_body_sha256");
   check(/^https:\/\/github\.com\/watchout\/agent-comms-mcp\/issues\/940#issuecomment-[1-9][0-9]*$/.test(ref)&&sha64(digest),"handoff pin invalid");
   check(ref===`https://github.com/${target}/issues/940#issuecomment-5713693956`
@@ -322,6 +325,81 @@ async function requireBoundedCiSupply() {
   const canonicalPath=".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml";
   const amendmentPaths=["docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs",
     "tests/shirube-current-overlay-check.test.ts","docs/shirube/README.md",canonicalPath].sort();
+  const windowRef=metadata("ci_supply_window_amendment_ref"), windowDigest=metadata("ci_supply_window_amendment_sha256");
+  check(windowRef===`https://github.com/${target}/issues/940#issuecomment-5726524883`
+    &&windowDigest==="2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12","exact published I26 required");
+  const windowBody=await load(windowRef,windowDigest);
+  const windowMarker="<!-- shirube-v3:control-handoff:CH-CTO-AUN-C23-FINITE-WINDOW-20260918-I26 -->";
+  check(windowBody.split(windowMarker).length===2
+    &&[...windowBody.matchAll(/<!--\s*shirube-v3:control-handoff[^>]*-->/g)].length===1,"one I26 marker required");
+  const windowBlocks=[...windowBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(windowBlocks.length===1,"one I26 JSON block required");
+  const window=JSON.parse(windowBlocks[0][1]);
+  check(window.schema_version==="shirube-v3/control_handoff/v1"
+    &&window.handoff_id==="CH-CTO-AUN-C23-FINITE-WINDOW-20260918-I26"
+    &&window.control_source===`${target}#940`&&window.cell_id===cell
+    &&window.authority_ref.url===odUrl&&window.authority_ref.sha256===odHash
+    &&window.source_predecessor===windowPredecessor&&window.source_base===base
+    &&window.executor==="/root/ci_sequence_plan_gate"&&window.active_function==="implementation_executor"
+    &&window.allowed_paths.length===6
+    &&JSON.stringify(window.allowed_paths.slice(0,5).sort())===JSON.stringify(amendmentPaths)
+    &&window.allowed_paths[5]==="/Users/yuji/Developer/codex/control-artifacts/github-work-review-20260918/work-instruction-5726145495/source-window-correction/**"
+    &&window.source_effective_amendment.historical_I25_expiry===expiry
+    &&window.source_effective_amendment.effective_source_expires_at===effectiveExpiry
+    &&window.source_effective_amendment.applies_to==="Only successor of exactfa94, same repo/PR963/cell/base and existing135path scope with this exact5path delta. CI source/consumer applicability only, never owner/runtime authority."
+    &&window.source_effective_amendment.historical_refs_and_expiries_immutable===true
+    &&window.source_effective_amendment.owner_approval_granted===false
+    &&window.source_effective_amendment.current_head_and_quality_unverified===true
+    &&window.bounds.seconds===1500&&window.bounds.focused_test_processes===2
+    &&window.bounds.type_check_processes===1&&window.bounds.local_commits===1
+    &&window.bounds.public_effects===0&&window.bounds.runtime_effects===0
+    &&Date.parse(window.bounds.started_at)<=now,"I26 authenticated scope/bounds mismatch");
+  const roleRef=`https://github.com/${target}/issues/940#issuecomment-5726556100`;
+  const roleDigest="20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a";
+  const roleBody=await load(roleRef,roleDigest);
+  const roleBlocks=[...roleBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(roleBlocks.length===1,"one I26-A1 role JSON block required");
+  const roles=JSON.parse(roleBlocks[0][1]), consumerRoles=roles.current_source_consumer;
+  check(roles.schema_version==="shirube-control-handoff-amendment/v1"
+    &&roles.amendment_id==="CH-CTO-AUN-C23-FINITE-WINDOW-20260918-I26-A1"
+    &&roles.control_source===`${target}#940`&&roles.cell_id===cell
+    &&roles.I26_ref.url===windowRef&&roles.I26_ref.sha256===windowDigest
+    &&roles.authority_ref.url===odUrl&&roles.authority_ref.sha256===odHash
+    &&consumerRoles.maker_executor===window.executor&&consumerRoles.maker_agent==="codex-cto/ci_sequence_plan_gate"
+    &&consumerRoles.maker_function==="implementation_executor"
+    &&consumerRoles.checker_executor==="/root/recovery_path_author"&&consumerRoles.checker_agent==="codex-cto/recovery_path_author"
+    &&consumerRoles.checker_function==="evidence_audit_gate"&&consumerRoles.publisher==="watchout"
+    &&consumerRoles.checker_agent!==consumerRoles.maker_agent&&consumerRoles.verdict_now==="NOT_ISSUED"
+    &&consumerRoles.source_implementation_acceptance_required===true
+    &&roles.effective_source_expires_at===effectiveExpiry&&roles.bounds_change===false
+    &&roles.historical_identity_checks_unchanged===true,"I26 current independent role binding mismatch");
+  const projectionRef=`https://github.com/${target}/issues/940#issuecomment-5726585940`;
+  const projectionDigest="05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85";
+  const projectionBody=await load(projectionRef,projectionDigest);
+  const projectionBlocks=[...projectionBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
+  check(projectionBlocks.length===1,"one I26-A2 JSON block required");
+  const projection=JSON.parse(projectionBlocks[0][1]);
+  const windowSupportPaths=[".shirube/execution-context.yaml",".shirube/repo-spec.yaml"].sort();
+  const windowPaths=[...amendmentPaths,...windowSupportPaths].sort();
+  check(projection.schema_version==="shirube-control-handoff-amendment/v1"
+    &&projection.amendment_id==="CH-CTO-AUN-C23-FINITE-WINDOW-20260918-I26-A2"
+    &&projection.control_source===`${target}#940`&&projection.cell_id===cell
+    &&projection.authority_ref.url===odUrl&&projection.authority_ref.sha256===odHash
+    &&projection.I26_ref.url===windowRef&&projection.I26_ref.sha256===windowDigest
+    &&projection.A1_ref.url===roleRef&&projection.A1_ref.sha256===roleDigest
+    &&projection.source_predecessor===windowPredecessor
+    &&JSON.stringify([...projection.additional_paths].sort())===JSON.stringify(windowSupportPaths)
+    &&JSON.stringify([...projection.current_delta_allowed_paths].sort())===JSON.stringify(windowPaths)
+    &&projection.cumulative_scope.actual_total_paths===135
+    &&projection.cumulative_scope.current_successor_delta_paths===7
+    &&projection.cumulative_scope.unchanged_original_runtime_product_paths===true
+    &&projection.maker.executor===window.executor&&projection.maker.function==="implementation_executor"
+    &&projection.checker.executor===consumerRoles.checker_executor&&projection.checker.function==="evidence_audit_gate"
+    &&projection.effective_source_expires_at===effectiveExpiry&&projection.bounds_change===false,
+    "I26-A2 current projection scope mismatch");
+  requireCurrentScalars(".shirube/execution-context.yaml","",{implementation_actor:consumerRoles.maker_agent});
+  requireCurrentScalars(".shirube/execution-context.yaml","current_source_amendment_ref",{url:windowRef,sha256:windowDigest});
+  requireCurrentScalars(".shirube/execution-context.yaml","current_source_checker_ref",{url:roleRef,sha256:roleDigest});
   const amendmentBody=await load(`https://github.com/${target}/issues/940#issuecomment-5713769510`,
     "7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be");
   const amendmentBlocks=[...amendmentBody.matchAll(/^```json\s*\n([\s\S]*?)^```\s*$/gm)];
@@ -423,6 +501,11 @@ async function requireBoundedCiSupply() {
   check(changedFiles.every(file=>admittedPaths.includes(file))
     &&changedFiles.filter(file=>file.startsWith(".github/workflows/")).every(file=>file===".github/workflows/pr-checks.yml"),"candidate path outside supply");
   const git=(...argv)=>execFileSync("git",argv,{encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024}).trim();
+  // One direct immutable successor, no implicit permission for a later repair.
+  check(git("rev-list","--parents","-n","1",headSha)===`${headSha} ${windowPredecessor}`,
+    "I26 exact predecessor required");
+  check(JSON.stringify(git("diff","--no-renames","--name-only",`${windowPredecessor}...${headSha}`)
+    .split("\n").filter(Boolean).sort())===JSON.stringify(windowPaths),"I26-A2 exact seven-path delta required");
   const historicalC15="2730cb38e87eee4ca31cc15d496ef49effc25a2d";
   const historicalMetadata=["docs/design/aun-bounded-admission.md","scripts/shirube-current-overlay-check.mjs","tests/shirube-current-overlay-check.test.ts"];
   git("merge-base","--is-ancestor",historicalC15,currentC16);
@@ -670,8 +753,8 @@ async function requireBoundedCiSupply() {
   const diff=hash(execFileSync("git",["diff","--binary","--full-index",`${base}...${headSha}`],{timeout:15000,maxBuffer:16*1024*1024}));
   const expected={schema_version:"shirube-ci-consumer-verdict/v1",target_repo:target,target_pr:963,cell_id:cell,risk_class:"R4",
     base_sha:base,origin_head_sha:origin,exact_head_sha:headSha,candidate_tree:tree,binary_diff_sha256:diff,
-    handoff_comment_ref:ref,handoff_body_sha256:digest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
-    checker_agent:"codex-cto/ci_sequence_plan_gate",maker_agent:"codex-cto/ci_sequence_fix",publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
+    handoff_comment_ref:windowRef,handoff_body_sha256:windowDigest,owner_decision_ref:odUrl,owner_decision_body_sha256:odHash,
+    checker_agent:consumerRoles.checker_agent,maker_agent:consumerRoles.maker_agent,publisher:"watchout",verdict:"PASS_CONSUMER_COMPATIBILITY"};
   let found=0;
   for(const comment of await loadIssueComments(true)){
     const text=String(comment?.body??"");
@@ -693,7 +776,7 @@ async function requireBoundedCiSupply() {
     for(const key of ["restore_success_ref","restore_reject_ref","runtime_adapter_ref"])
       check(/^(?:sha256:[0-9a-f]{64}|https:\/\/github\.com\/[^\s]+#issuecomment-[1-9][0-9]*)$/.test(fields[key]),`immutable ${key} required`);
     for(const key of ["issued_at","expires_at"])check(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(fields[key])&&Number.isFinite(Date.parse(fields[key])),`UTC ${key} required`);
-    check(Date.parse(fields.issued_at)<=now&&now<Date.parse(fields.expires_at)&&Date.parse(fields.expires_at)<=Date.parse(expiry),"consumer expiry mismatch");
+    check(Date.parse(fields.issued_at)<=now&&now<Date.parse(fields.expires_at)&&Date.parse(fields.expires_at)<=Date.parse(effectiveExpiry),"consumer expiry mismatch");
     found++;
   }
   check(found===1,`exactly one current-head consumer receipt required; found ${found}`);

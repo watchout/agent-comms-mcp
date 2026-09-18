@@ -43,13 +43,23 @@ Original127 integration paths and all earlier source/budget history remain fixed
 A1 adds exactly one canonical handoff metadata file; A2 adds exactly seven
 current support metadata files, giving135 actual changed paths. C2 `8d38f3bd6a99a2f4615949dd747d708f8b6943d6`, seat-continuity
 `81be7f051f85973bb9533e87d3258825082ad158` and Was companion
-`e49abc24838227776dc01be111aeb035ec7c9aad` remain pinned. Source expiry stays
-`2026-09-18T09:00:00Z`. The only admitted workflow path is
+`e49abc24838227776dc01be111aeb035ec7c9aad` remain pinned. Historical I25 source expiry stays
+`2026-09-18T09:00:00Z`. The strict fa94 successor additionally authenticates
+[I26](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726524883),
+raw SHA256 `2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12`,
+for the finite effective cap `2026-09-18T13:15:00Z`. Exactly five files may change
+in original I26; [I26-A2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940),
+raw SHA256 `05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85`,
+adds exactly the existing execution-context and repo-spec projections, so the actual
+fa94 successor must change exactly7 paths. Every historical raw pin, old5/12-path
+meaning and135 cumulative paths remain enforced. The only admitted workflow path is
 `.github/workflows/pr-checks.yml`; this correction does not edit workflows.
 
 The PR body uniquely binds CELL-ID, Risk Tier, Workflow Supply,
 `ci_supply_handoff_comment_ref` and raw `ci_supply_handoff_body_sha256` to I25.
-Missing or duplicate CI fields fail closed, with no fallback to canonical fields.
+Unique `ci_supply_window_amendment_ref` and `ci_supply_window_amendment_sha256`
+additionally pin I26. Missing or duplicate CI fields fail closed, with no fallback
+to canonical fields. The current consumer handoff fields bind I26, not old I25.
 Standard `control_handoff_comment_ref` and `control_handoff_body_sha256` identify
 the distinct genuine whole-PR canonical workflow handoff. Source admission does
 not establish that handoff's validity or any audit/release readiness. The trusted
@@ -59,8 +69,14 @@ no hand-invented source metadata or external artifact is sufficient.
 The source checker authenticates actual OWNER/watchout issue940 publications,
 raw bytes, unchanged donor/history bindings, and the actual candidate135 paths,
 tree and full-index binary diff. A current-head compatibility receipt from
-`codex-cto/ci_sequence_plan_gate`, separate from maker `codex-cto/ci_sequence_fix`,
-remains mandatory. It binds actual restore/adapter evidence, CI supply I25 and
+`codex-cto/recovery_path_author`, separate from current maker
+`codex-cto/ci_sequence_plan_gate`, remains mandatory under
+[I26-A1](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726556100),
+raw SHA256 `20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a`.
+Historical maker/checker identities remain immutable. This checker only reviews
+the new delta and binds unchanged evidence through its original independent
+acceptance; runtime checker is separately unbound. The consumer binds actual
+restore/adapter evidence, CI supply I26 and
 normalization OD. It is not a full structured audit. Stale, missing, duplicate,
 malformed, foreign or conflicting records block.
 
@@ -70,7 +86,7 @@ has19 required cases; private2 remains separate. Current genuine canonical/full
 audit/external-subject and protected review obligations remain pending until
 actually verified; report-only reports do not waive them. The base-only Cell scope
 projection is separate from historical127 plus the eight explicitly admitted metadata paths.
-I25/A1/A2 authorize no push, GitHub body edit, remote CI, Ready, merge or live effect.
+I25/A1/A2 and I26/I26-A1 authorize no push, GitHub body edit, remote CI, Ready, merge or live effect.
 A separately bounded publication is required. Full non-draft owner decision and
 merge-method checks remain fatal. Green quality does not establish applied use.
 

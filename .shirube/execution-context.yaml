@@ -72,7 +72,7 @@ common_contract:
   support_repo_as_target_forbidden: true
   control_repo_as_target_forbidden: true
 canonical_active_function: implementation_executor
-implementation_actor: codex-cto/ci_sequence_fix
+implementation_actor: codex-cto/ci_sequence_plan_gate
 claims:
   merge_ready: false
   audit_pass: false
@@ -87,9 +87,22 @@ current_control:
   cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
   canonical_handoff_ref: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
   scope_authority_ref:
-    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
-    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940
+    sha256: 05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85
   final_candidate_pending: true
   role_compatibility: dev is the unchanged legacy repository implementation permission
     class; canonical handoff separately binds maker, author and independent checker.
     No audit or owner authority granted.
+
+historical_I25_execution_binding:
+  implementation_actor: codex-cto/ci_sequence_fix
+  scope_authority_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+  status: Immutable prior actor and scope history; not the current I26 binding.
+current_source_amendment_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726524883
+  sha256: 2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12
+current_source_checker_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726556100
+  sha256: 20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a

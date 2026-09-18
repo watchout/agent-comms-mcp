@@ -745,3 +745,58 @@ normalization/reporting still validates complete YAML and canonical workflow
 semantics. No new YAML dialect or audit/owner authority is introduced. Isolated
 actual-gate regressions restore each prior adoption-only current file and require
 rejection, while preserving CH001 bytes and ordinary standing/full-owner routes.
+
+
+## I26 — authenticated finite source-window successor (2026-09-18)
+
+Published implementation handoff:
+https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726524883,
+raw SHA256 `2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12`.
+The exact fa94d6727c453f44b6d0a8949dc09fc2914c5d05 predecessor and its
+I22/I23/I24/I25/A1/A2 publications remain historical inputs with their unchanged
+raw hashes, identities, consumed budgets and 2026-09-18T09:00:00Z source expiry.
+The new authenticated amendment permits source/consumer applicability only until
+2026-09-18T13:15:00Z for a strict successor of fa94, same PR963/cell/base,
+exactly the five declared files and all135 cumulative paths. A missing, duplicate,
+forged, foreign, expired or wrong-scope amendment fails closed. No global rewrite
+of historical expiry assertions or old publication is permitted.
+
+The PR retains its I25 ci_supply_handoff fields and additionally supplies unique
+ci_supply_window_amendment_ref and ci_supply_window_amendment_sha256 fields.
+The source gate authenticates the exact published amendment, standing delegation,
+predecessor, complete five-path delta, and actual immutable Git head/tree/diff.
+A current independent consumer binds the effective I26 authority and real new
+head, and must expire no later than its new finite cap. Historical consumers
+cannot admit a successor. New effective validity is not runtime authority and
+does not waive canonical, private2/local17/public19, full-owner or same-seven-field
+JOIN requirements. Current canonical bytes need a genuine new producer artifact.
+
+This author is now the source maker and cannot serve as its independent checker.
+Historical actor evidence remains unchanged; a separately published current role
+binding must authenticate the distinct checker before consumer acceptance.
+Only the checker, its test, this design addendum, Shirube README and existing
+canonical handoff may change. Product runtime8, workflows, migrations and
+package/lock files remain unchanged. The conditional18:30<=T0<19:00 JST proposal
+retains180 minutes, qa2/WIP1 and one shared F recovery; it is not an owner grant.
+
+I26 current actor supplement:
+https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726556100,
+raw SHA256 `20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a`.
+Current source maker is codex-cto/ci_sequence_plan_gate; independent delta checker
+is codex-cto/recovery_path_author. Preserve the checker's historical C23 author
+history and reuse old evidence by unchanged-byte mapping and its nonmaker
+acceptance, never self-reaudit. Runtime checker remains unbound. The unchanged
+execution-context actor and repo-spec current-delta wording are a known pending
+support projection; this five-path source candidate does not certify full current
+formal materialization.
+
+I26-A2 current projection correction:
+https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940,
+raw SHA256 `05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85`.
+Authenticate this additional amendment before extending the current delta to seven:
+add only .shirube/execution-context.yaml and .shirube/repo-spec.yaml to the original
+I26 five. Correct their current actor/ref and seven-path scope while retaining old
+I25 maker, 12-path delta and authority as history. Original135 cumulative scope,
+ordinary permission classes, quality checks, exact source and owner gates remain.
+The two pending projection descriptions above are the observed pre-A2 deficit,
+resolved only by these authorized current projections and independent acceptance.

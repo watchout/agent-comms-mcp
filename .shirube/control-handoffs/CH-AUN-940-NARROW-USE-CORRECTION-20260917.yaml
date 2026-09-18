@@ -1,7 +1,7 @@
 ---
 schema_version: shirube-v3/control_handoff/v1
 handoff_id: CH-AUN-940-NARROW-USE-CORRECTION-20260917
-artifact_status: CANONICAL_CURRENT_INPUT_PROPOSAL_UNDER_I25_A2_PENDING_INDEPENDENT_METADATA_ACCEPTANCE_AND_NEW_HEAD
+artifact_status: CANONICAL_I26_SOURCE_WINDOW_PROPOSAL_PENDING_CURRENT_INDEPENDENT_ACCEPTANCE_AND_NEW_HEAD
 control_source: https://github.com/watchout/agent-comms-mcp/issues/940
 owner_goal_verbatim: 全体の開発高速チームの構築を成立させる
 cell:
@@ -12,7 +12,7 @@ cell:
   risk_class: R4
   goal: 全体の開発高速チームの構築を成立させる
   non_scope:
-  - Only the 12 exact I25-A2 implementation paths may change from predecessor cf06.
+  - Only the 7 exact I26/A1/A2 implementation paths may change from predecessor fa94.
     The cumulative 135 paths preserve all original 127 product/integration paths plus
     8 control metadata paths. Product runtime, migrations, workflow execution, packages,
     locks and private canonical fixtures are unchanged by this metadata correction.
@@ -176,7 +176,7 @@ cell:
   - AGENTS.md
   stop_conditions:
   - Actual subject, predecessor, base, final diff or scope mismatches published authority.
-  - Any path outside cumulative 135 or outside 12 current implementation paths, or
+  - Any path outside cumulative 135 or outside 7 current implementation paths, or
     any forbidden path changes.
   - Missing independent current quality, source audit, checklist, required protected
     review or authenticated external subject prevents the corresponding transition.
@@ -202,9 +202,9 @@ repository:
   name: watchout/agent-comms-mcp
   pr: 963
   base_sha: 0f772883db6f3b50772d3e4b82ce47795091f0a9
-  predecessor_head_sha: cf06d07480d6300683a11e5064530e96f16d280d
-  predecessor_tree_sha: 17af4acbb8ed68da4256b4f9b144f15de6cbdf33
-  candidate_rule: One I25/A1/A2 candidate from pinned cf06 predecessor, 12 exact current
+  predecessor_head_sha: fa94d6727c453f44b6d0a8949dc09fc2914c5d05
+  predecessor_tree_sha: 14cf6319c7e316dc5854c24d92e759c735f5e6b2
+  candidate_rule: One I26/A1/A2 candidate from pinned fa94 predecessor, 7 exact current
     paths and 135 cumulative paths. Final head/tree/diff are observed externally after
     commit, never self-embedded or imported from predecessor.
 phase: independent_audit_preparation
@@ -219,17 +219,19 @@ execution_context:
     agent_id: codex-cto
     active_function: orchestration_controller
   to:
-    agent_id: codex-cto/ci_sequence_plan_gate
+    agent_id: codex-cto/recovery_path_author
     active_function: evidence_audit_gate
   maker_history:
   - codex-cto/ci_sequence_fix
   - codex-cto/recovery_path_author
+  - codex-cto/ci_sequence_plan_gate
+  current_review_scope: I26 delta only; historical C23 author is not re-auditing old authored control.
   separation: Author does not perform independent audit or generate accepted verdicts
 owner:
   role: orchestration_controller
   actor: codex-cto
 next_role: evidence_audit_gate
-implementation_actor: codex-cto/ci_sequence_fix
+implementation_actor: codex-cto/ci_sequence_plan_gate
 framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
 repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/940
 premise_ref: ".shirube/repo-spec.yaml"
@@ -246,6 +248,12 @@ source_authority_refs:
   sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
 - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
   sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726524883
+  sha256: 2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726556100
+  sha256: 20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940
+  sha256: 05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85
 ci_supply_ref:
   url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
   sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
@@ -401,7 +409,7 @@ forbidden_paths:
 - ".github/workflows/shirube-external-gate-subject-request.yml"
 - AGENTS.md
 forbidden_operations:
-- Only the 12 exact I25-A2 implementation paths may change from predecessor cf06.
+- Only the 7 exact I26/A1/A2 implementation paths may change from predecessor fa94.
   The cumulative 135 paths preserve all original 127 product/integration paths plus
   8 control metadata paths. Product runtime, migrations, workflow execution, packages,
   locks and private canonical fixtures are unchanged by this metadata correction.
@@ -414,7 +422,7 @@ forbidden_operations:
   or trust/policy changes.
 stop_conditions:
 - Actual subject, predecessor, base, final diff or scope mismatches published authority.
-- Any path outside cumulative 135 or outside 12 current implementation paths, or any
+- Any path outside cumulative 135 or outside 7 current implementation paths, or any
   forbidden path changes.
 - Missing independent current quality, source audit, checklist, required protected
   review or authenticated external subject prevents the corresponding transition.
@@ -466,7 +474,7 @@ acceptance_criteria:
   applied normal use, recovery and full USE01 through USE09 acceptance remain separate.
 validation:
   required_commands:
-  - Current I25/A1/A2 same-head private, local full and public required commands under
+  - Current I26 same-head private, local full and public required commands under
     unchanged quality contract
   required_evidence:
   - PR_head_SHA
@@ -513,7 +521,7 @@ flow_safety:
   note: Existing frozen graph and phase order preserved. Genuine current active-audit
     inventory and authenticated external subject must be supplied at final audit;
     [] is UNKNOWN, not evidence of no overlap.
-expires_at: '2026-09-18T09:00:00Z'
+expires_at: '2026-09-18T13:15:00Z'
 next_action:
   owner_agent: codex-cto
   owner_function: orchestration_controller
@@ -801,7 +809,7 @@ design_admission:
   implementation_handoff_ref:
     url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600600067
     sha256: a73638ab595370177bca7f08b7898dc2c11dbcaa3a0172d31481dc45093c76bf
-  current_metadata_classification: Ordinary faithful projection under I25-A2, independently
+  current_metadata_classification: Ordinary finite I26 successor projection, independently
     review current bytes; no new design freeze is asserted.
 budget_binding:
   implementation:
@@ -824,3 +832,33 @@ budget_binding:
     elapsed_minutes: 12
     start_rule: On final exact receipt/manifest only; prior preplan is historical
       consumed work.
+current_source_window_amendment:
+  ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726524883
+    sha256: 2977acc9b8ad46867a11eb1f52748ad1570764d2ae76ce3477d236f464915c12
+  role_binding_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726556100
+    sha256: 20b3f667f32ae28f8d66acfeb6743583f7e38b6ebe2a17a12c777fec8fce803a
+  historical_source_expires_at: '2026-09-18T09:00:00Z'
+  effective_source_expires_at: '2026-09-18T13:15:00Z'
+  historical_budget_binding: Existing budget_binding records I25/A2 consumed history; it is not this maker's live clock.
+  current_execution_expires_at: '2026-09-18T07:37:01.828705+00:00'
+  source_maker: codex-cto/ci_sequence_plan_gate
+  independent_delta_checker: codex-cto/recovery_path_author
+  runtime_checker: UNBOUND
+  historical_control_authorship_preserved: true
+  owner_approval_granted: false
+  current_source_quality: UNVERIFIED
+  current_canonical_producer: NOT_RUN
+  actual_scope_paths: 135
+  original_I26_delta_paths: 5
+  current_delta_paths: 7
+  runtime_trial_wall_minutes: 180
+  qa_tasks_max: 2
+  max_inflight: 1
+  shared_F_restore_max: 1
+  conditional_window_only: '2026-09-18 JST 18:30 <= T0 < 19:00; actual T0+180 minutes, all completion before22:00. Fresh owner decision and preflight required.'
+  projection_amendment_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940
+    sha256: 05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85
+  current_support_projection: I26-A2 corrects execution-context actor/ref and repo-spec current seven-path declaration; independent current formal acceptance remains pending.
