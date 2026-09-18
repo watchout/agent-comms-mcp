@@ -44,7 +44,7 @@ sync_mcp_config() {
       console.error('[sync-mcp] ${session}: .mcp.json owner=' + owner + ' does not match ${agent_id}/${session}; skipping');
       process.exit(0);
     }
-    const ac = cfg.mcpServers?.['agent-comms'];
+    const ac = cfg.mcpServers?.['aun'] ?? cfg.mcpServers?.['agent-comms'];
     if (!ac) {
       console.error('[sync-mcp] ${session}: no agent-comms section in .mcp.json, skipping');
       process.exit(1);
@@ -77,7 +77,8 @@ sync_mcp_config() {
 
     if (env.AGENT_ID !== '$agent_id') { env.AGENT_ID = '$agent_id'; changed = true; }
     if (env.AGENT_COM_EXPECTED_AGENT_ID !== '$agent_id') { env.AGENT_COM_EXPECTED_AGENT_ID = '$agent_id'; changed = true; }
-    if (env.WEBHOOK_PORT !== '$port') { env.WEBHOOK_PORT = '$port'; changed = true; }
+    if (env.WEBHOOK_PORT !== '0') { env.WEBHOOK_PORT = '0'; changed = true; }
+    if (env.AUN_WEBHOOK_PORT !== undefined) { delete env.AUN_WEBHOOK_PORT; changed = true; }
     // The heartbeat resolves its session name from AGENT_COM_RUNTIME_SESSION first and
     // from TMUX_PANE second. Without this key the MCP server inherits TMUX_PANE from the
     // pane it was launched in and records a pane identifier such as %1008 as the session

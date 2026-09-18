@@ -3,8 +3,23 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createDbAdapter } from '../../core/db'
+import { admissionBindingFromEnv } from '../../core/queue-admission'
+
+/** Host-only transport/writeback credentials never enter a bounded worker.
+ * This is credential containment, not proof of an OS/tool sandbox. That
+ * independent loaded-tool admission remains required before real use. */
+export function boundedWorkerEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!admissionBindingFromEnv(env)) return env
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !(
+    /^(?:DATABASE_URL|PGHOST|PGPORT|PGUSER|PGPASSWORD|PGPASSFILE|PGSERVICE|PGSERVICEFILE|PGDATABASE)$/.test(key)
+    || /(?:DATABASE_URL|SQLITE_PATH|GITHUB_TOKEN_FILE|MEDIATED_POSTING_(?:COMMAND|ARGS_JSON))$/.test(key)
+    || ['GH_TOKEN','GITHUB_TOKEN','GH_ENTERPRISE_TOKEN','GITHUB_ENTERPRISE_TOKEN'].includes(key)
+    || /^(?:DISCORD_(?:BOT_)?TOKEN|AGENT_COMMS_(?:SECRET|AUTH_TOKEN)|SLACK_(?:BOT|APP)_TOKEN)$/.test(key)
+  )))
+}
 import {
   QUEUE_WORK_RESULT_VERSION,
+  resolveQueueWorkCodexPermissions,
   finalizeDoneQueueWork,
   queueWorkResultLooksValid,
   runReceivedQueueWork,
@@ -105,6 +120,7 @@ export function buildRunQueueWorkPlan(opts: RunQueueWorkOptions = {}): RunQueueW
 }
 
 class EchoRuntimeAdapter implements LlmRuntimeAdapter {
+  readonly execution_timeout_ms = 1000
   runtime_id = 'echo'
   capabilities = {
     input: 'stdin_prompt',
@@ -589,9 +605,7 @@ export function buildCodexExecQueueWorkCommand(input: {
     env: input.env,
   })
   const schemaPath = configuration.schemaPath
-  const sandbox = input.env.AUN_QUEUE_WORK_CODEX_SANDBOX
-    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX
-    ?? 'read-only'
+  const permissions = resolveQueueWorkCodexPermissions(input.env)
   const command = input.env.AUN_QUEUE_WORK_CODEX_EXECUTABLE
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE
     ?? 'codex'
@@ -600,15 +614,16 @@ export function buildCodexExecQueueWorkCommand(input: {
     '--json',
     '--output-schema', schemaPath,
     '--output-last-message', input.outputLastMessagePath,
-    '--sandbox', sandbox,
+    ...(permissions.permissionsProfile
+      ? ['-c', `default_permissions=${JSON.stringify(permissions.permissionsProfile)}`]
+      : ['--sandbox', permissions.sandbox!]),
     '--cd', input.cwd,
     // Runtime workspaces are DB-authorized agent roots and need not be Git
     // repositories. The immutable subject, read-only sandbox, and queue fence
     // remain separate authority boundaries.
     '--skip-git-repo-check',
   ]
-  const profile = input.env.AUN_QUEUE_WORK_CODEX_PROFILE
-    ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE
+  const profile = permissions.profile
   if (profile) args.push('--profile', profile)
   const model = input.env.AUN_QUEUE_WORK_CODEX_MODEL
     ?? input.env.STATE_DAEMON_QUEUE_WORK_CODEX_MODEL
@@ -632,6 +647,7 @@ export function buildCodexExecQueueWorkCommand(input: {
 }
 
 class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
+  get execution_timeout_ms() { return Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000',10) }
   runtime_id = 'codex-exec'
   capabilities = {
     input: 'stdin_context',
@@ -662,7 +678,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
       })
       const child = await execFileAsync(plan.command, plan.args, {
         cwd: this.cwd,
-        env: this.env,
+        env: boundedWorkerEnvironment(this.env),
         input: plan.stdin,
         timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
         maxBuffer: 1024 * 1024 * 20,
@@ -786,6 +802,7 @@ export function classifyQueueWorkRuntimeExecFailure(input: {
 }
 
 export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
+  get execution_timeout_ms() { return Number.parseInt(this.env.AUN_QUEUE_WORK_CLAUDE_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? this.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS ?? this.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS ?? '600000',10) }
   runtime_id = 'claude-code'
   capabilities = {
     input: 'stdin_context',
@@ -812,7 +829,7 @@ export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
     })
     const child = await execFileAsync(plan.command, plan.args, {
       cwd: this.cwd,
-      env: this.env,
+      env: boundedWorkerEnvironment(this.env),
       input: plan.stdin,
       timeout: Number.parseInt(
         this.env.AUN_QUEUE_WORK_CLAUDE_TIMEOUT_MS
@@ -861,6 +878,7 @@ class FailClosedRuntimePreferenceAdapter implements LlmRuntimeAdapter {
 }
 
 class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
+  get execution_timeout_ms() { return Number.parseInt(this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000',10) }
   runtime_id = 'command-json'
   capabilities = {
     input: 'stdin_prompt',
@@ -882,7 +900,7 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
     const child = await execFileAsync(this.command, this.args, {
       cwd: this.cwd,
-      env: this.env,
+      env: boundedWorkerEnvironment(this.env),
       input: JSON.stringify(envelope) + '\n',
       timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
       maxBuffer: 1024 * 1024 * 20,
@@ -920,7 +938,7 @@ const QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES = Object.freeze({
   'claude-code': (plan, env) => new ClaudeCodeRuntimeAdapter(plan.runtime_cwd, plan.repoRoot, env),
 } satisfies Record<QueueWorkRuntimeEngineId, QueueWorkRuntimeAdapterFactory>)
 
-function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
+export function createRuntimeAdapter(plan: RunQueueWorkPlan, env: NodeJS.ProcessEnv): LlmRuntimeAdapter {
   if (plan.runtime === 'echo') return new EchoRuntimeAdapter()
   if (Object.prototype.hasOwnProperty.call(QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES, plan.runtime)) {
     return QUEUE_WORK_RUNTIME_ADAPTER_FACTORIES[plan.runtime as QueueWorkRuntimeEngineId](plan, env)
@@ -1138,7 +1156,11 @@ export function createWritebackSender(plan: RunQueueWorkPlan, env: NodeJS.Proces
 
 export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQueueWorkCliResult> {
   const env = opts.env ?? process.env
+  const admission = admissionBindingFromEnv(env)
+  if (admission && env.AGENT_COM_DB === 'sqlite') throw new Error('ADMISSION_STORAGE_UNSUPPORTED')
   const plan = buildRunQueueWorkPlan(opts)
+  if (admission && (plan.runtime !== admission.runtimeId || plan.expected_claim_source !== 'bounded-admission'
+    || plan.invocation_source !== 'bounded-admission')) throw new Error('ADMISSION_RUNNER_BINDING_MISMATCH')
   if (opts.dryRun) return { ok: true, dry_run: true, plan }
   if (!plan.queue_id && !plan.agent_id) {
     return {
@@ -1192,6 +1214,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
       queueId: plan.queue_id ?? undefined,
       agentId: plan.agent_id ?? undefined,
       adapter,
+      githubWritebackMode: plan.github_writeback_mode === 'mediated' ? 'mediated' : 'none',
       invocationSource: plan.invocation_source ?? undefined,
       expectedClaimSource: plan.expected_claim_source ?? undefined,
       claimFence: opts.claimFence,

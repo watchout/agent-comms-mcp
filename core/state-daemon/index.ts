@@ -1,3 +1,4 @@
+import { observeSeatProvider, resolveSeatProvider } from '../seat-runtime-selection'
 /**
  * StateDaemon — queue-state-driven dispatch supervisor (Issue #323, spec v0.6).
  *
@@ -74,6 +75,7 @@ import {
   type RuntimeInvocationProfile,
 } from './host-runtime-invocation'
 import { WakePool } from './wake-pool'
+import { unboundedQueuePredicate, admissionInstalled, admissionForAgent, readAdmissionBinding, admissionTransition } from '../queue-admission'
 import { defaultConfigPort } from '../ports/config-port'
 import {
   createDefaultStallDetector,
@@ -140,8 +142,8 @@ function isCodexRunnerRuntime(runtime: string | null): boolean {
   return runtime !== null && CODEX_RUNNER_RUNTIMES.has(runtime)
 }
 
-function effectiveRuntime(agent: AgentRow): string | null {
-  return agent.runtime_engine_preference?.trim() || agent.runtime?.trim() || null
+function effectiveRuntime(agent: AgentRow & {observed_runtime_provider?:string|null}): string | null {
+  return agent.observed_runtime_provider ?? null
 }
 
 function isInactiveAgentStatus(status: string | null | undefined): boolean {
@@ -225,7 +227,7 @@ export function automaticProcessingInputsFromAgent(
     enrolled: agent !== null,
     enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
     runtimeReady: agent !== null
-      && Boolean(effectiveRuntime(agent as AgentRow))
+      && Boolean(agent.runtime?.trim())
       && Boolean(agent.status?.trim())
       && !isInactiveAgentStatus(agent.status ?? null),
     channelMember,
@@ -295,7 +297,10 @@ export class StateDaemon {
   private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
-  constructor(deps: StateDaemonDeps) {
+  private readonly providerObserver: typeof observeSeatProvider
+
+  constructor(deps: StateDaemonDeps & {providerObserver?: typeof observeSeatProvider}) {
+    this.providerObserver = deps.providerObserver ?? observeSeatProvider
     this.db = deps.db
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
@@ -535,6 +540,21 @@ export class StateDaemon {
     const t0 = this.clock.now().getTime()
     const result: SweepResult = {
       scanned: 0, rewoken: 0, reclaimed: 0, abandonReset: 0, permanentlyFailed: 0, durationMs: 0, budgetWarn: false,
+    }
+
+    if (this.config.admissionBinding) {
+      const admissionDb={query:<T=any>(sql:string,params?:any[])=>this.dbQuery<T>(sql,params)}
+      const state=await readAdmissionBinding(admissionDb,this.config.admissionBinding)
+      if (['PREPARED','ENABLED'].includes(state.policy.status)) {
+        const expired=Date.parse(state.policy.expires_at)<=this.clock.now().getTime()
+        const uncertain=state.tasks.some(t=>['INVOKING','FINALIZING','RESULT_SAVED'].includes(t.stage)
+          && !this.inflightQueueWorkIds.has(String(t.queue_id)))
+        const expiredClaims=await this.dbQuery<{id:string}>(`SELECT id FROM message_queue WHERE id=ANY($1::bigint[])
+          AND status IN ('received','in_progress') AND claim_expires_at<=clock_timestamp()`,[state.tasks.map(t=>t.queue_id)])
+        if (expired || uncertain || expiredClaims.rows.some(r=>!this.inflightQueueWorkIds.has(String(r.id)))) {
+          await admissionTransition(admissionDb,state,'failure',{reason:expired?'ADMISSION_EXPIRED':'RESERVED_ATTEMPT_WITHOUT_OWNED_WORKER'})
+        }
+      }
     }
 
     if (this.shirubeD1AutoReceive && this.shirubeD1AutoReceive.recoverDone !== false) {
@@ -830,6 +850,7 @@ export class StateDaemon {
             WHERE status = 'replied'
               AND replied_at IS NOT NULL
               AND replied_at < now() - ($1 || ' seconds')::interval
+              AND ${unboundedQueuePredicate('agent_id','postgres')}
               ${scopeClause}
             ORDER BY replied_at ASC
             LIMIT $2
@@ -858,6 +879,7 @@ export class StateDaemon {
         WHERE mq.status IN ('received', 'in_progress')
           AND mq.claim_expires_at > $1::timestamptz
           AND mq.payload NOT LIKE '%"runner_error"%'
+          AND ${unboundedQueuePredicate('mq.agent_id','postgres')}
           AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
           AND mq.claimed_by = mq.agent_id
           AND mq.claimed_at IS NOT NULL
@@ -916,6 +938,14 @@ export class StateDaemon {
     return { refreshed: rowCount, skipped }
   }
 
+  private async observedAgent<T extends AgentRow>(agent:T|null,now:Date):Promise<(T & {observed_runtime_provider:string|null})|null> {
+    if(!agent) return null
+    const selected=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)},
+      {agentId:agent.agent_id,now,observe:this.providerObserver})
+    return {...agent,observed_runtime_provider:selected.ok?selected.provider:null,
+      ...(selected.observation?{tmux_session:selected.observation.session_name,last_seen_at:new Date(selected.observation.observed_at)}:{})}
+  }
+
   // ── Bot liveness (§5.4 / R7 / 補強 #5) ─────────────────────────────────────
 
   async checkBotLiveness(): Promise<LivenessResult> {
@@ -927,7 +957,8 @@ export class StateDaemon {
     const { rows } = await this.dbQuery<AgentRow>(sql, params)
     const result: LivenessResult = { checked: 0, restarted: 0, escalated: 0 }
     const now = this.clock.now().getTime()
-    for (const bot of rows) {
+    for (const storedBot of rows) {
+      const bot=(await this.observedAgent(storedBot,this.clock.now()))!
       if (isInactiveAgentStatus(bot.status)) {
         this.metrics.inc('state_daemon_bot_liveness_skipped_total', { status: bot.status ?? 'unknown' })
         continue
@@ -965,6 +996,32 @@ export class StateDaemon {
     if (this.isQueueWorkResidueExcluded(row)) {
       this.metrics.inc('state_daemon_queue_work_actions_total', { result: 'queue_work_residue_excluded', path: 'wake' })
       return false
+    }
+    const admissionDb = { query: <T = any>(sql: string,params?: any[]) => this.dbQuery<T>(sql,params) }
+    if (await admissionInstalled(admissionDb,'postgres')) {
+      const protectedState = await admissionForAgent(admissionDb,row.agent_id)
+      if (protectedState) {
+        try {
+          const binding=this.config.admissionBinding
+          if (!binding || !this.queueWorkScheduler?.runPending) return false
+          const state=await readAdmissionBinding(admissionDb,binding,row.agent_id)
+          const task=state.tasks.find(t=>String(t.queue_id)===String(row.id))
+          if (!task || state.policy.status!=='ENABLED') return false
+          if (this.inflightQueueWorkIds.has(String(row.id))) return false
+          if (Date.parse(state.policy.expires_at)<=Date.now()
+            || ['INVOKING','FINALIZING','RESULT_SAVED'].includes(task.stage)) {
+            // A surviving reservation with no locally owned worker is unknown,
+            // not resumable. This only seals deny/one notice; never kills or
+            // clears the old claim. Current in-flight workers were excluded.
+            await admissionTransition(admissionDb,state,'failure',{reason:'RESERVED_ATTEMPT_WITHOUT_OWNED_WORKER'})
+            return false
+          }
+          if (task.stage!=='ENROLLED' || !['pending','received'].includes(row.status)) return false
+        } catch(error) {
+          this.recordDbError(error)
+          return false
+        }
+      }
     }
     const automaticProcessing = await this.checkAutomaticProcessingEligibility(row)
     if (!automaticProcessing.ok) {
@@ -1099,7 +1156,7 @@ export class StateDaemon {
     const ctx: BotContext = {
       now,
       row: row as unknown as BotContext['row'],
-      agent: (rows[0] ?? null) as unknown as BotContext['agent'],
+      agent: await this.observedAgent(rows[0] ?? null,now),
       tmuxPaneTail: null,
       // cycle 2 Fix 3: thresholds read from env at each gate evaluation
       // (no module-level cache) so that an operator-level override via
@@ -1123,7 +1180,7 @@ export class StateDaemon {
          FROM agents WHERE agent_id=$1`,
       [row.agent_id],
     )
-    const bot = rows[0]
+    const bot = await this.observedAgent(rows[0] ?? null,now)
     const defaultRuntime = defaultConfigPort.getDefaultRuntime()
     if (bot && row.status === 'pending') {
       const surface = classifyQueueSurface({
@@ -1203,21 +1260,24 @@ export class StateDaemon {
   // ── State transition helpers (§4.3) ────────────────────────────────────────
 
   private async reclaimRow(row: QueueRow): Promise<void> {
-    await this.dbQuery(
+    const changed = await this.dbQuery(
       `UPDATE message_queue
           SET status='pending',
               claim_expires_at=NULL,
               claimed_by=NULL,
               claimed_at=NULL
-        WHERE id=$1`,
+        WHERE id=$1 AND ${unboundedQueuePredicate('agent_id', 'postgres')}`,
       [row.id],
     )
+    if (changed.rowCount === 0) return
     this.metrics.inc('state_daemon_wake_actions_total', { result: 'reclaimed' })
     // After reclaim, observe the pending row without prompt injection.
     await this.runWakeIfNotSuppressed({ ...row, status: 'pending', last_wake_attempt_at: null })
   }
 
   private async recoverQueueWorkRunnerErrorRow(row: QueueRow): Promise<'reclaimed' | 'failed' | 'skipped'> {
+    const protectedRow = await this.dbQuery<{ allowed: boolean }>(`SELECT ${unboundedQueuePredicate('agent_id', 'postgres')} AS allowed FROM message_queue WHERE id=$1`, [row.id])
+    if (protectedRow.rows[0]?.allowed === false) return 'skipped'
     const automaticProcessing = await this.checkAutomaticProcessingEligibility(row)
     if (!automaticProcessing.ok) {
       this.recordAutomaticProcessingBlocked(row, automaticProcessing)
@@ -1745,12 +1805,15 @@ export class StateDaemon {
 
   private isQueueWorkSchedulerClaim(row: QueueRow): boolean {
     const payload = parseQueuePayload(row.payload)
+    if (this.config.admissionBinding && payload.receive_claim?.source === 'bounded-admission') {
+      return payload.receive_claim?.policy_id === this.config.admissionBinding.policyId
+    }
     return payload.receive_claim?.source === QUEUE_WORK_SCHEDULER_SOURCE
   }
 
   private queueWorkFenceConfigured(): boolean {
     return !!(
-      this.config.queueWorkFenceQueueIds?.length
+      this.config.admissionBinding || this.config.queueWorkFenceQueueIds?.length
       || this.config.queueWorkFenceMessageIds?.length
       || this.config.queueWorkFenceCreatedAfter
     )
@@ -1791,8 +1854,22 @@ export class StateDaemon {
   }
 
   private queueWorkFenceClause(params: unknown[], alias: string): string {
-    if (!this.queueWorkFenceConfigured()) return ''
-    let sql = ''
+    let sql = this.config.admissionBinding ? '' : ` AND ${unboundedQueuePredicate(`${alias}.agent_id`,'postgres')}`
+    if (!this.queueWorkFenceConfigured()) return sql
+    if (this.config.admissionBinding) {
+      const binding = this.config.admissionBinding
+      params.push(binding.policyId,binding.configDigest,binding.sourceSha,binding.cohortDigest)
+      const offset = params.length - 3
+      // Public status function returns only the exact admitted policy; no ledger
+      // grants to a worker. SQL core rechecks/locks before every actual effect.
+      sql += ` AND EXISTS(SELECT 1 FROM jsonb_array_elements(public.aun_admission_status($${offset})->'tasks') ba_task
+        WHERE ba_task->>'queue_id'=${alias}.id::text
+          AND public.aun_admission_status($${offset})->'policy'->>'config_digest'=$${offset+1}
+          AND public.aun_admission_status($${offset})->'policy'->'config'->>'source_sha'=$${offset+2}
+          AND public.aun_admission_status($${offset})->'policy'->'config'->>'cohort_digest'=$${offset+3}
+          AND public.aun_admission_status($${offset})->'policy'->>'status'='ENABLED'
+          AND (public.aun_admission_status($${offset})->'policy'->>'expires_at')::timestamptz>clock_timestamp())`
+    }
     const queueIds = this.config.queueWorkFenceQueueIds
     if (queueIds?.length) {
       params.push(queueIds)
@@ -1942,6 +2019,18 @@ export class StateDaemon {
     }
 
     const now = this.clock.now()
+    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, observe:this.providerObserver})
+    if (!providerSelection.ok) {
+      this.metrics.inc('state_daemon_wake_actions_total', {result: providerSelection.code})
+      return false
+    }
+    const explicitProfile = this.config.hostRuntimeInvocationProfile
+    if (explicitProfile && explicitProfile.runtime !== providerSelection.provider) {
+      this.metrics.inc('state_daemon_wake_actions_total', {result:'host_runtime_profile_provider_mismatch'})
+      await this.alert.alert(`host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: RUNTIME_PROFILE_PROVIDER_MISMATCH`)
+      return false
+    }
+
     const reserved = await this.dbQuery(
       `UPDATE agents
           SET last_wake_attempt_at=$1
@@ -2053,13 +2142,10 @@ export class StateDaemon {
       autoFinalReply,
       payload: row.payload,
     }
-    // Per-agent adapter selection: if the agent has a runtime_engine_preference
-    // that maps to a known LLM (claude-code, codex), use the per-agent profile.
-    // This allows auditor/devauditor (claude-code) and codex-* bots to each get
-    // the correct headless invocation without global config changes.
-    const agentAdapter = selectAgentAdapter(agent?.runtime_engine_preference)
+    // Explicit invocation policy retains its sandbox, cwd and directory scope.
+    const agentAdapter = selectAgentAdapter(providerSelection.provider)
     const effectiveProfile: RuntimeInvocationProfile | undefined =
-      agentAdapter.profile ?? this.config.hostRuntimeInvocationProfile
+      explicitProfile ?? agentAdapter.profile ?? undefined
     const hostAdapterEnabled =
       this.config.hostRuntimeAdapterEnabled || agentAdapter.kind === 'claude-code'
     const hostSelection = selectHostRuntimeAdapter({
@@ -2238,7 +2324,8 @@ export class StateDaemon {
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status IN ('received', 'in_progress')
-          AND mq.claim_expires_at < $1::timestamptz`
+          AND mq.claim_expires_at < $1::timestamptz
+          AND ${unboundedQueuePredicate('mq.agent_id', 'postgres')}`
     const params: unknown[] = [this.clock.now(), this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
@@ -2255,7 +2342,8 @@ export class StateDaemon {
          FROM message_queue mq
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status='in_progress'
-          AND mq.payload LIKE '%"runner_error"%'`
+          AND mq.payload LIKE '%"runner_error"%'
+          AND ${unboundedQueuePredicate('mq.agent_id', 'postgres')}`
     const params: unknown[] = [this.config.batchLimit]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')
@@ -2285,7 +2373,8 @@ export class StateDaemon {
                 WHEN (mq.payload::jsonb #>> '{finalizer_error,attempts}') ~ '^[0-9]+$'
                   THEN (mq.payload::jsonb #>> '{finalizer_error,attempts}')::int
                 ELSE 0
-              END < 3`
+              END < 3
+          AND ${unboundedQueuePredicate('mq.agent_id', 'postgres')}`
     const params: unknown[] = [this.config.batchLimit, QUEUE_WORK_SCHEDULER_SOURCE]
     sql += this.agentScopeClause(params, 'mq.agent_id')
     sql += this.queueWorkFenceClause(params, 'mq')

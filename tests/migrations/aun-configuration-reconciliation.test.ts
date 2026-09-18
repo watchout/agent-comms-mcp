@@ -20,6 +20,8 @@ const upPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-configu
 const downPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-configuration-reconciliation.down.sql')
 const up = readFileSync(upPath, 'utf8')
 const down = readFileSync(downPath, 'utf8')
+const diagnosticsUp = readFileSync(join(import.meta.dir, '../../db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql'), 'utf8')
+const diagnosticsDown = readFileSync(join(import.meta.dir, '../../db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql'), 'utf8')
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 const receiptSecret = 'fixture-restart-receipt-hmac-secret'
 
@@ -122,13 +124,14 @@ describe('AUN configuration reconciliation migration', () => {
       expect(migrated.exitCode).toBe(0)
       db = new PgAdapter(databaseUrl)
       await db.execute(up)
+      await db.execute(diagnosticsUp)
       const firstSchemaDigest = await configurationSchemaSnapshot(db)
 
       await db.execute(
         `INSERT INTO agents (
            agent_id, display_name, agent_type, runtime, profile_enabled,
-           runtime_engine_preference, home_directory, channel_port
-         ) VALUES ('acm887-incomplete', 'Incomplete fixture', 'bot', 'TUI', true, 'codex', '/tmp/incomplete', 8899)`,
+           runtime_engine_preference, home_directory, channel_port, desired_control_refs
+         ) VALUES ('acm887-incomplete', 'Incomplete fixture', 'bot', 'TUI', true, 'codex', '/tmp/incomplete', 8899, '[1]'::jsonb)`,
       )
       const incomplete = await db.queryOne<any>(
         `SELECT desired_revision, desired_digest FROM agents WHERE agent_id = 'acm887-incomplete'`,
@@ -162,8 +165,8 @@ describe('AUN configuration reconciliation migration', () => {
       await db.execute(`UPDATE agents SET channel_port = 8802 WHERE agent_id = $1`, ['acm887-fixture'])
       const second = await db.queryOne<any>('SELECT * FROM agents WHERE agent_id = $1', ['acm887-fixture'])
       const secondDesired = normalizeDesiredStateRow(second)
-      expect(secondDesired.desiredRevision - firstDesired.desiredRevision).toBe(1)
-      expect(secondDesired.desiredDigest).not.toBe(firstDesired.desiredDigest)
+      expect(secondDesired.desiredRevision).toBe(firstDesired.desiredRevision)
+      expect(secondDesired.desiredDigest).toBe(firstDesired.desiredDigest)
       const secondEvents = await db.queryOne<{ count: string }>(
         `SELECT count(*)::text AS count FROM aun_configuration_desired_outbox
           WHERE agent_id = $1 AND desired_revision = $2 AND desired_digest = $3`,
@@ -472,14 +475,16 @@ describe('AUN configuration reconciliation migration', () => {
       await expect(db.execute(down)).rejects.toThrow('refusing to drop nonempty AUN configuration reconciliation evidence')
       await db.execute(`DELETE FROM aun_configuration_restart_requests WHERE agent_id = $1`, ['acm887-fixture'])
       await db.execute(`DELETE FROM aun_configuration_observed_state WHERE host_id = $1 AND agent_id = $2`, ['fixture-host', 'acm887-fixture'])
-      await db.execute(`DELETE FROM aun_configuration_desired_outbox WHERE agent_id = $1`, ['acm887-fixture'])
+      await db.execute(`DELETE FROM aun_configuration_desired_outbox WHERE agent_id IN ($1, $2, $3, $4)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto', 'other-agent'])
       await releaseControlPlaneLease(db, {
         leaseId: lease.lease.lease_id, fencingToken: lease.lease.fencing_token,
         holderAgentId: 'acm887-fixture', holderRuntimeInstanceId: null,
       })
       await db.execute(`DELETE FROM agents WHERE agent_id IN ($1, $2, $3, $4)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto', 'other-agent'])
+      await db.execute(diagnosticsDown)
       await db.execute(down)
       await db.execute(up)
+      await db.execute(diagnosticsUp)
       expect(await configurationSchemaSnapshot(db)).toEqual(firstSchemaDigest)
     } finally {
       if (priorAuthSecret === undefined) delete process.env.AGENT_COMMS_SECRET

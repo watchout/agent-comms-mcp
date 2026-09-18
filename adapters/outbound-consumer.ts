@@ -43,6 +43,8 @@
  * cycle with server.ts (which owns the `pg` Client).
  */
 import { discordClients } from './discord-client'
+import { Client } from 'pg'
+import { admissionBindingFromEnv, boundedOutboundEffect, deliverBoundedOutbound, isBoundedOutbound, selectBoundedOutbound, unboundedOutboundPredicate } from '../core/queue-admission'
 import { isDiscord40062RateLimit, isDuplicateNonceError } from '../core/outbound-delivery'
 import {
   readProviderEffectsControl,
@@ -249,6 +251,8 @@ type ClaimedOutboundRow = {
   id: string | number
   attempts: number
   max_attempts: number
+  delivery_diagnostics?: unknown
+  claimed_at?: string
 }
 
 async function recordOutboundDeliveryFailure(
@@ -256,6 +260,10 @@ async function recordOutboundDeliveryFailure(
   row: ClaimedOutboundRow,
   deliveryError: string,
 ): Promise<void> {
+  if (isBoundedOutbound(row)) {
+    await boundedOutboundEffect(client, row, 'halt', { reason: deliveryError })
+    return
+  }
   const transient = isTransientDeliveryError(deliveryError)
   const exhausted = row.attempts >= row.max_attempts
 
@@ -440,6 +448,12 @@ async function releaseProviderEffectsFencedClaim(
   priorAttestation: string,
   lastError = `provider_effects_fenced:${control.reason}:${control.epoch ?? 'none'}`,
 ): Promise<void> {
+  const current = await client.query('SELECT id,delivery_diagnostics,claimed_at::text FROM outbound_queue WHERE id=$1', [rowId])
+  if (isBoundedOutbound(current.rows[0])) {
+    await boundedOutboundEffect(client, current.rows[0], 'halt', { reason: lastError })
+    logProviderEffectsFence('send', control, priorAttestation)
+    return
+  }
   await client.query(
     `UPDATE outbound_queue
         SET status = 'pending',
@@ -496,6 +510,33 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
     // FOR UPDATE SKIP LOCKED + single-statement UPDATE removes the race
     // that allowed multiple consumers to observe the same 'pending' row
     // between select and send (2026-04-12 duplicate-post incident).
+    const bounded = await selectBoundedOutbound(client, AGENT_ID)
+    if (bounded) {
+      // Do not let the generic timeout, fallback, retry or receipt catch own a
+      // bounded delivery. Its durable per-delivery lock outlives every tick.
+      clearTimeout(guardTimeout)
+      const adapter = discordClients.get(AGENT_ID)
+      const binding = admissionBindingFromEnv(process.env)
+      if (!adapter || !binding || !process.env.DATABASE_URL) return
+      const dedicated = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 1000 })
+      dedicated.on('error',()=>{})
+      try {
+        await dedicated.connect()
+        const result=await deliverBoundedOutbound({db:dedicated,row:bounded,binding,adapter:{
+          prepareBoundedRequest:row=>adapter.prepareBoundedRequest(row),
+          sendBoundedRequest:async(request,permit)=>{
+            const current=readControl()
+            const attestation=refreshConsumerAttestation(current,refreshAttestation)
+            if (!attestation.ok || !current.allowsProviderEffects || current.attestation!==providerEffectsAtClaim.attestation) {
+              throw new Error('ADMISSION_PROVIDER_EFFECTS_FENCED')
+            }
+            return adapter.sendBoundedRequest(request,permit)
+          },
+        }})
+        process.stderr.write(`agent-comms: bounded outbound id=${bounded.id} status=${result.status} reservations=${result.reserved} observed_wire=${result.observed_wire_calls}\n`)
+      } finally { await dedicated.end().catch(()=>{}) }
+      return
+    }
     const claimed = await client.query(
       `UPDATE outbound_queue
           SET status = 'claimed', attempts = attempts + 1, claimed_at = now()
@@ -504,6 +545,7 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
            WHERE status = 'pending'
              AND COALESCE(consumer_agent_id, agent_id) = $1
              AND (next_retry_at IS NULL OR next_retry_at <= now())
+             AND ${unboundedOutboundPredicate('outbound_queue', process.env.AGENT_COM_DB === 'sqlite' ? 'sqlite' : 'postgres')}
              ${fenceSql}
            ORDER BY created_at ASC
            LIMIT 1
@@ -526,6 +568,10 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
     // limited safeguard for the edge case where a row is manually moved
     // back to 'pending' after mark-sent. See spec §3.3 / §7.4.
     if (row.discord_message_id) {
+      if (isBoundedOutbound(row)) {
+        await boundedOutboundEffect(client, row, 'halt', { reason: 'ADMISSION_UNEXPECTED_PREEXISTING_PROVIDER_RECEIPT' })
+        return
+      }
       await client.query(
         `UPDATE outbound_queue SET status = 'sent', sent_at = COALESCE(sent_at, now()) WHERE id = $1`,
         [row.id],
@@ -542,6 +588,10 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
     // another consumer doesn't silently re-post under the wrong identity.
     const clientForAgent = discordClients.get(AGENT_ID)
     if (!clientForAgent) {
+      if (isBoundedOutbound(row)) {
+        await recordOutboundDeliveryFailure(client, row, 'no_discord_client_for_agent')
+        return
+      }
       await client.query(
         `UPDATE outbound_queue SET status = 'failed', last_error = $1 WHERE id = $2`,
         ['no_discord_client_for_agent', row.id],
@@ -626,6 +676,7 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
       // Forbidden (F-5): status='sent' without a non-null provider message
       // ID. No numeric or textual nonce error bypasses this evidence gate.
       if (discordMessageId === null) {
+        if (isBoundedOutbound(row)) await boundedOutboundEffect(client, row, 'halt', { reason: 'PROVIDER_RECEIPT_MISSING' })
         process.stderr.write(
           `agent-comms: outbound stage 1 refused — discord_message_id null (id=${row.id}, attempts=${row.attempts}/${row.max_attempts}); row stays claimed for orphan reclaim\n`,
         )
@@ -636,7 +687,8 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
       // No BEGIN/COMMIT. On success the row is durably 'sent' and will
       // not be re-claimed even if stage 2 throws.
       try {
-        await client.query(
+        if (isBoundedOutbound(row)) await boundedOutboundEffect(client, row, 'sent', { provider_message_id: discordMessageId })
+        else await client.query(
           `UPDATE outbound_queue SET status = 'sent', sent_at = now(), discord_message_id = $1 WHERE id = $2`,
           [discordMessageId, row.id],
         )
@@ -659,7 +711,8 @@ export async function consumeOneOutboundRow(options: ConsumeOneOutboundRowOption
       // twice.
       if (discordMessageId !== null && row.message_id) {
         try {
-          await client.query(
+          if (isBoundedOutbound(row)) await boundedOutboundEffect(client, row, 'backfill', { provider_message_id: discordMessageId })
+          else await client.query(
             `UPDATE agent_messages
                 SET discord_message_id = $1
               WHERE id = $2::uuid
@@ -730,6 +783,7 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
           AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts < max_attempts
+          AND ${unboundedOutboundPredicate('outbound_queue', process.env.AGENT_COM_DB === 'sqlite' ? 'sqlite' : 'postgres')}
           ${fenceSql}
         RETURNING id, attempts`,
       reclaimParams,
@@ -752,6 +806,7 @@ export async function reclaimOrphanOutboundRows(): Promise<void> {
           AND COALESCE(consumer_agent_id, agent_id) = $1
           AND claimed_at < now() - ($2::int || ' seconds')::interval
           AND attempts >= max_attempts
+          AND ${unboundedOutboundPredicate('outbound_queue', process.env.AGENT_COM_DB === 'sqlite' ? 'sqlite' : 'postgres')}
           ${fenceSql}
         RETURNING id, attempts, max_attempts`,
       reclaimParams,

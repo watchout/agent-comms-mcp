@@ -460,7 +460,7 @@ describe('NORM-022 frozen runtime endpoint lease fixtures', () => {
   test('tmux_diagnostics_only_for_tmux_supervisor', () => {
     let tmuxChecked = false
     const result = checkBotHealth(
-      { supervisorType: 'stdio', session: null, port: null },
+      { supervisorType: 'stdio', session: null, port: 19022, processId: 1234 },
       botHealthDeps({
         hasSession: () => {
           tmuxChecked = true
@@ -471,6 +471,7 @@ describe('NORM-022 frozen runtime endpoint lease fixtures', () => {
 
     expect(result.status).toBe('healthy')
     expect(result.details).toContain('tmux diagnostics skipped')
+    expect(checkBotHealth({supervisorType:'stdio',session:null,port:null},botHealthDeps()).status).toBe('initializing')
     expect(tmuxChecked).toBe(false)
   })
 

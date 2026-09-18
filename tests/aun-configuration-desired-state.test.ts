@@ -53,6 +53,14 @@ describe('AUN configuration desired-state canonical contract', () => {
     expect(canonicalConfigurationJson({ z: 1, a: 2 })).toBe('{"a":2,"z":1}')
   })
 
+  test('runtime-only provider, port and path changes leave the stable desired digest unchanged',()=>{
+    const first=desired()
+    const moved=desired({runtimeEnginePreference:'',canonicalHome:'',canonicalWorkspace:'',channelPort:0,
+      ordinaryProjection:{...first.ordinaryProjection,provider_repo_root:'/new/source',provider_config_root:'/new/home',daemon_checkout:'/new/daemon'}})
+    expect(moved.desiredDigest).toBe(first.desiredDigest)
+    expect(desired({profileEnabled:false}).desiredDigest).not.toBe(first.desiredDigest)
+  })
+
   test('rejects raw secret material while allowing secret references', () => {
     expect(() => desired({ providerTokenSourceRef: 'ghp_abcdefghijklmnopqrstuvwxyz123456' })).toThrow('RAW_SECRET_FORBIDDEN')
     expect(() => desired({
@@ -83,7 +91,7 @@ describe('AUN configuration desired-state canonical contract', () => {
     expect(normalized).toEqual(fixture)
     expect(() => normalizeDesiredStateRow({
       ...{
-        agent_id: fixture.agentId, profile_enabled: true, runtime_engine_preference: 'claude',
+        agent_id: fixture.agentId, profile_enabled: false, runtime_engine_preference: 'claude',
         canonical_workspace: fixture.canonicalWorkspace, canonical_home: fixture.canonicalHome,
         channel_port: fixture.channelPort, supervisor_identity: fixture.supervisorIdentity,
         expected_provider_identity_ref: fixture.expectedProviderIdentityRef,

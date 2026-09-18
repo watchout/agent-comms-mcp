@@ -1521,6 +1521,10 @@ async function migrate() {
     } catch {}
   }
 
+  // Additive opt-in library only. No recipient guard or policy is installed by
+  // migrate; dedicated owner-admitted PREPARE supplies first deny separately.
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-08-queue-bounded-admission.up.sql'), 'utf8'))
+
   console.log('Migration complete.')
   await client.end()
 }

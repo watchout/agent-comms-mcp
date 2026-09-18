@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import type { DbAdapter } from '../db'
+import { readAdmissionBinding, type AdmissionBinding } from '../queue-admission'
 import {
   detectQueueWorkHandoffContract,
+  resolveQueueWorkCodexPermissions,
   type QueueWorkHandoffContract,
   type QueueWorkWritebackMode,
 } from '../queue-work'
@@ -16,11 +18,15 @@ import {
 export type QueueWorkActivationRuntime = 'codex-exec' | 'echo' | 'command-json'
 
 export interface QueueWorkActivationPlanOptions {
+  admission?: AdmissionBinding | null
   agentId?: string | null
   queueId?: string | null
   commit?: string | null
   runtime?: string | null
   queueWorkCommand?: string | null
+  codexProfile?: string | null
+  codexPermissionsProfile?: string | null
+  codexExecutable?: string | null
   residuePolicyFile?: string | null
   githubWritebackMode?: string | null
   mediatedPostingCommand?: string | null
@@ -377,10 +383,16 @@ function buildActivationEnv(
     STATE_DAEMON_AGENT_ALLOWLIST: candidate.agent_id,
     STATE_DAEMON_QUEUE_WORK_RUNTIME: runtime,
     STATE_DAEMON_QUEUE_WORK_FINALIZE: '1',
-    STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS: candidate.queue_id,
   }
-  if (candidate.message_id) env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = candidate.message_id
-  if (candidate.created_at) env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = candidate.created_at
+  if (options.admission) {
+    const a=options.admission
+    Object.assign(env,{ AUN_ADMISSION_POLICY_ID:a.policyId,AUN_ADMISSION_CONFIG_DIGEST:a.configDigest,
+      AUN_ADMISSION_SOURCE_SHA:a.sourceSha,AUN_ADMISSION_COHORT_DIGEST:a.cohortDigest,AUN_ADMISSION_RUNTIME_ID:a.runtimeId })
+  } else {
+    env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS=candidate.queue_id
+    if (candidate.message_id) env.STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS = candidate.message_id
+    if (candidate.created_at) env.STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER = candidate.created_at
+  }
   if (residuePolicyFile) env.STATE_DAEMON_QUEUE_WORK_RESIDUE_POLICY_FILE = residuePolicyFile
   if (options.recoverExpiredSchedulerClaim) {
     env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM = '1'
@@ -388,7 +400,7 @@ function buildActivationEnv(
   if (options.resumeDoneFinalization) {
     env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION = '1'
   }
-  if (candidate.status === 'pending' && !options.recoverExpiredSchedulerClaim && !options.resumeDoneFinalization) {
+  if (!options.admission && candidate.status === 'pending' && !options.recoverExpiredSchedulerClaim && !options.resumeDoneFinalization) {
     env.STATE_DAEMON_QUEUE_WORK_DEFER_NEWER_PENDING = '1'
   }
   env.STATE_DAEMON_QUEUE_WORK_HANDOFF_CONTRACT = handoffContract.kind
@@ -404,7 +416,10 @@ function buildActivationEnv(
   if (githubTokenFile) env.STATE_DAEMON_GITHUB_TOKEN_FILE = githubTokenFile
   if (runtime === 'codex-exec') {
     env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA = DEFAULT_CODEX_OUTPUT_SCHEMA
-    env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
+    if (options.codexProfile != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_PROFILE = options.codexProfile
+    if (options.codexPermissionsProfile != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE = options.codexPermissionsProfile
+    if (options.codexExecutable != null) env.STATE_DAEMON_QUEUE_WORK_CODEX_EXECUTABLE = options.codexExecutable
+    if (options.codexPermissionsProfile == null) env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX = 'read-only'
   }
   if (runtime === 'command-json' && queueWorkCommand) {
     env.STATE_DAEMON_QUEUE_WORK_COMMAND = queueWorkCommand
@@ -430,9 +445,12 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
     '--queue-work-runtime',
     env.STATE_DAEMON_QUEUE_WORK_RUNTIME,
     '--queue-work-finalize',
-    '--queue-work-fence-queue-ids',
-    env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS,
   ]
+  if (env.AUN_ADMISSION_POLICY_ID) {
+    for (const [flag,key] of [['policy-id','POLICY_ID'],['config-digest','CONFIG_DIGEST'],['source-sha','SOURCE_SHA'],['cohort-digest','COHORT_DIGEST'],['runtime-id','RUNTIME_ID']]) {
+      command.push(`--admission-${flag}`,env[`AUN_ADMISSION_${key}`])
+    }
+  } else command.push('--queue-work-fence-queue-ids',env.STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS)
   const canaryOverlayEnv = Object.fromEntries(
     CANARY_OVERLAY_OPTION_ENV
       .map(([, envKey]) => [envKey, env[envKey]] as const)
@@ -464,6 +482,14 @@ function buildRestoreCommand(env: Record<string, string>, commit: string, execut
   }
   if (env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX) {
     command.push('--queue-work-codex-sandbox', env.STATE_DAEMON_QUEUE_WORK_CODEX_SANDBOX)
+  }
+  for (const [suffix, flag] of [
+    ['EXECUTABLE', '--queue-work-codex-executable'],
+    ['PROFILE', '--queue-work-codex-profile'],
+    ['PERMISSIONS_PROFILE', '--queue-work-codex-permissions-profile'],
+  ]) {
+    const value = env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+    if (value !== undefined) command.push(flag, value)
   }
   if (env.STATE_DAEMON_QUEUE_WORK_COMMAND) {
     command.push('--queue-work-command', env.STATE_DAEMON_QUEUE_WORK_COMMAND)
@@ -543,7 +569,7 @@ export async function buildQueueWorkActivationPlan(
   const planningNow = (options.now ?? (() => new Date()))()
   const generatedAt = planningNow.toISOString()
   const agentId = normalizeText(options.agentId ?? null)
-  const queueId = normalizeText(options.queueId ?? null)
+  let queueId = normalizeText(options.queueId ?? null)
   const commit = normalizeText(options.commit ?? null)
   const runtime = normalizeText(options.runtime ?? null) ?? 'codex-exec'
   const queueWorkCommand = normalizeText(options.queueWorkCommand ?? null)
@@ -560,6 +586,16 @@ export async function buildQueueWorkActivationPlan(
     summary: null,
   }
 
+  if (runtime === 'codex-exec') {
+    try {
+      resolveQueueWorkCodexPermissions({
+        ...(options.codexProfile != null ? { AUN_QUEUE_WORK_CODEX_PROFILE: options.codexProfile } : {}),
+        ...(options.codexPermissionsProfile != null ? { AUN_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE: options.codexPermissionsProfile } : {}),
+      })
+    } catch {
+      blockers.push({ code: 'queue_work_codex_permissions_selection_invalid', message: 'Codex permissions selection requires an unambiguous valid config/permissions profile pair.' })
+    }
+  }
   if (!agentId) {
     blockers.push({ code: 'agent_id_required', message: 'Queue-work activation planning requires --agent-id.' })
   }
@@ -625,6 +661,19 @@ export async function buildQueueWorkActivationPlan(
     })
   }
   if (blockers.length > 0 || !agentId || !commit) return emptyReport(options, blockers)
+  if (options.admission) {
+    try {
+      if (options.recoverExpiredSchedulerClaim || options.resumeDoneFinalization || commit !== options.admission.sourceSha
+        || runtime !== options.admission.runtimeId) throw new Error('ADMISSION_ACTIVATION_CONFIG_MISMATCH')
+      const state=await readAdmissionBinding(db,options.admission,agentId)
+      const enrolled=state.tasks.find(t=>t.stage==='ENROLLED' && (!queueId || String(t.queue_id)===queueId))
+      if (!enrolled || !['PREPARED','ENABLED'].includes(state.policy.status)) throw new Error('ADMISSION_NO_ENROLLED_TASK')
+      queueId=String(enrolled.queue_id)
+    } catch(error) {
+      blockers.push({code:'bounded_admission_readback_failed',message:error instanceof Error ? error.message : 'ADMISSION_READBACK_FAILED'})
+      return emptyReport(options,blockers)
+    }
+  }
 
   let candidate: QueueWorkActivationCandidate | null = null
   let candidatePayload: string | null = null

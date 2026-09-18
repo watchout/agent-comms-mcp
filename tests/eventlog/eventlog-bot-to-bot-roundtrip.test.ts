@@ -15,7 +15,7 @@
 //     once, causation traceable — at speed, not just in single-shot tests
 
 import { describe, test, expect } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
@@ -33,6 +33,28 @@ import { runSeatWorkerOnce, type TurnRuntime } from '../../core/eventlog/worker'
 function p95(samples: number[]): number {
   const s = [...samples].sort((a, b) => a - b)
   return s[Math.min(s.length - 1, Math.floor(s.length * 0.95))]
+}
+
+function observeSqliteFixture(db: SqliteAdapter) {
+  const costs={query:{calls:0,milliseconds:0},execute:{calls:0,milliseconds:0},transaction:{calls:0,milliseconds:0}}
+  let enabled=false
+  for(const operation of ['query','execute','transaction'] as const){
+    const original=db[operation].bind(db)
+    ;(db as any)[operation]=async(...args:any[])=>{
+      if(!enabled)return (original as any)(...args)
+      const started=performance.now()
+      try{return await (original as any)(...args)}
+      finally{costs[operation].calls++;costs[operation].milliseconds+=performance.now()-started}
+    }
+  }
+  return {costs,start:()=>{enabled=true},stop:()=>{enabled=false}}
+}
+
+async function closeSqliteFixture(db:SqliteAdapter,dir:string,failed:boolean,originalError:unknown) {
+  const errors:unknown[]=[]
+  try{await db.close()}catch(error){errors.push(error)}
+  try{rmSync(dir,{recursive:true,force:true})}catch(error){errors.push(error)}
+  if(errors.length)throw new AggregateError([...(failed?[originalError]:[]),...errors],'EVENTLOG_FIXTURE_CLEANUP_FAILED')
 }
 
 /** Delivers B's outbound reply as A's inbound — the Discord seam, minus Discord. */
@@ -63,10 +85,30 @@ class LoopbackTransport implements OutboxTransport {
 }
 
 describe('bot↔bot round-trip with zero Discord', () => {
+  test('owned SQLite failure cleanup preserves the original failure and removes its files',async()=>{
+    const dir=mkdtempSync(join(tmpdir(),'eventlog-b2b-cleanup-'))
+    const db=new SqliteAdapter(join(dir,'cleanup.db'))
+    const original=new Error('owned fixture injected body failure')
+    let caught:unknown
+    try{
+      try{await ensureEventLogSchema(db);throw original}
+      finally{await closeSqliteFixture(db,dir,true,original)}
+    }catch(error){caught=error}
+    expect(caught).toBe(original)
+    expect(existsSync(dir)).toBe(false)
+    await expect(db.query('SELECT 1')).rejects.toThrow()
+  })
   test('50-round ping-pong: full conversation cycle, measured, exactly-once', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'eventlog-b2b-'))
     const db = new SqliteAdapter(join(dir, 'b2b.db'))
+    const sql=observeSqliteFixture(db)
+    const roundTimes: number[] = []
+    const roundPhases:Array<{b_worker_ms:number;first_outbox_ms:number;a_worker_ms:number;second_outbox_ms:number}> = []
+    let failed=false,originalError:unknown,sqliteSettings:unknown
+    try {
     await ensureEventLogSchema(db)
+    sqliteSettings={journal_mode:await db.query('PRAGMA journal_mode'),synchronous:await db.query('PRAGMA synchronous'),
+      wal_autocheckpoint:await db.query('PRAGMA wal_autocheckpoint'),busy_timeout:await db.query('PRAGMA busy_timeout')}
 
     const ROUNDS = 50
     let pongs = 0
@@ -100,20 +142,27 @@ describe('bot↔bot round-trip with zero Discord', () => {
       payload: { content: 'ping', author_id: 'bot-a', channel_id: 'chan-ab' },
     })
 
-    const roundTimes: number[] = []
+    sql.start()
     const started = performance.now()
     let guard = 0
     for (;;) {
       const t0 = performance.now()
       const b = await runSeatWorkerOnce(db, { seatId: 'bot-b', seatInstanceId: 'wb', runtime: botB, maxTurns: 5 })
+      const afterB=performance.now()
       await dispatchOutboxOnce(db, transport, { dispatcherId: 'loop', dispatcherInstanceId: 'd1' })
+      const afterFirstOutbox=performance.now()
       const a = await runSeatWorkerOnce(db, { seatId: 'bot-a', seatInstanceId: 'wa', runtime: botA, maxTurns: 5 })
+      const afterA=performance.now()
       await dispatchOutboxOnce(db, transport, { dispatcherId: 'loop', dispatcherInstanceId: 'd1' })
+      const afterSecondOutbox=performance.now()
       if (b.claimed + a.claimed > 0) roundTimes.push(performance.now() - t0)
+      if(b.claimed+a.claimed>0)roundPhases.push({b_worker_ms:afterB-t0,first_outbox_ms:afterFirstOutbox-afterB,
+        a_worker_ms:afterA-afterFirstOutbox,second_outbox_ms:afterSecondOutbox-afterA})
       if (pongs >= ROUNDS && (await openTurnCount(db)) === 0 && (await pendingDeliveries(db)).length === 0) break
       if (++guard > ROUNDS * 4) throw new Error(`did not converge: pongs=${pongs}`)
     }
     const totalMs = performance.now() - started
+    sql.stop()
 
     // exactly-once at speed
     const dup = await db.query<{ n: number }>(
@@ -143,13 +192,20 @@ describe('bot↔bot round-trip with zero Discord', () => {
     expect(rtP95).toBeLessThan(100)
     expect(totalMs).toBeLessThan(15_000)
 
-    await db.close()
-    rmSync(dir, { recursive: true, force: true })
+    }catch(error){failed=true;originalError=error;throw error}
+    finally{
+      sql.stop()
+      try{console.log('EVENTLOG_B2B_DIAGNOSTICS '+JSON.stringify({round_times_ms:roundTimes,round_phases:roundPhases,sql:sql.costs,sqlite_settings:sqliteSettings,
+        measurement:'Original performance.now sample/total windows and p95 formula retained. Diagnostic Promise/clock bookkeeping remains inside measured work; its independent overhead is not subtracted or established. Transaction timings include nested SQL and must not be added to SQL totals.'}))}
+      finally{await closeSqliteFixture(db,dir,failed,originalError)}
+    }
   }, 60_000)
 
   test('burst: 100 inbound messages drain end-to-end with integrity', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'eventlog-b2b-burst-'))
     const db = new SqliteAdapter(join(dir, 'burst.db'))
+    let failed=false,originalError:unknown
+    try {
     await ensureEventLogSchema(db)
 
     const N = 100
@@ -189,7 +245,7 @@ describe('bot↔bot round-trip with zero Discord', () => {
     )
     expect(drainMs).toBeLessThan(20_000)
 
-    await db.close()
-    rmSync(dir, { recursive: true, force: true })
+    }catch(error){failed=true;originalError=error;throw error}
+    finally{await closeSqliteFixture(db,dir,failed,originalError)}
   }, 60_000)
 })

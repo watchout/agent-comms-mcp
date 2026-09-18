@@ -6,6 +6,7 @@ import {
 } from './destructive-migration-gate'
 
 export function migrateSqlite(dbPath?: string): void {
+  if (process.env.AUN_ADMISSION_POLICY_ID) throw new Error('ADMISSION_STORAGE_UNSUPPORTED')
   console.log(destructiveGateLogLine())
   const path = dbPath ?? process.env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
   const db = new Database(path, { create: true })

@@ -21,7 +21,10 @@
 // `core/queue-ttl.ts`: shares the bot's PG pool + lifecycle, no
 // separate cron / DB extension, no SPOF beyond the bot itself.
 
+import { unboundedQueuePredicate } from './queue-admission'
+
 export interface ClaimTtlDb {
+  dialect?: 'sqlite' | 'postgres'
   query<T = Record<string, unknown>>(
     text: string,
     params?: unknown[],
@@ -95,6 +98,7 @@ export async function sweepExpiredClaims(
          AND claimed_by NOT IN (${placeholders})
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
+         AND ${unboundedQueuePredicate('agent_id', db.dialect)}
       RETURNING id`,
       [...opts.selfAgentIds],
     )
@@ -117,6 +121,7 @@ export async function sweepExpiredClaims(
          AND claimed_by <> $1
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
+         AND ${unboundedQueuePredicate('agent_id', db.dialect)}
        RETURNING id`,
       [opts.selfAgentId],
     )
@@ -137,6 +142,7 @@ export async function sweepExpiredClaims(
        AND claimed_by IS NOT NULL
        AND claim_expires_at IS NOT NULL
        AND claim_expires_at < now()
+       AND ${unboundedQueuePredicate('agent_id', db.dialect)}
      RETURNING id`,
     [],
   )

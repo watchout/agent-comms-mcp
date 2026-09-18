@@ -58,6 +58,17 @@ async function seedSeat(agentId: string, status: 'idle' | 'busy' = 'idle'): Prom
 }
 
 describe('memory-ready fleet refresher', () => {
+  test('default liveness refresh cannot manufacture a recovery receipt', async () => {
+    await seedSeat('no-recovery')
+    const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
+      now, policy,
+      resolveProject: async (_db, agentId) => ({ agent_id: agentId, project: agentId, workspace_path: null, source: 'agent_metadata_override' }),
+    })
+    expect(report.ok).toBe(false)
+    expect(report.seats[0].status).toBe('failed')
+    expect(report.seats[0].details.error).toContain('MEMORY_CONTEXT_RECOVERY_REQUIRED')
+    expect(await db.query('SELECT * FROM runtime_memory_ready_evidence')).toHaveLength(0)
+  })
   test('returns N/N terminal results and isolates one seat failure', async () => {
     await seedSeat('alpha', 'idle')
     await seedSeat('bravo', 'busy')
@@ -98,7 +109,7 @@ describe('memory-ready fleet refresher', () => {
     expect(report.discord_visible_sends).toBe(0)
   })
 
-  test('dry-run records every unresolved seat instead of silently omitting it', async () => {
+  test('dry-run retains legacy profile mismatch diagnostics without making them runtime authority', async () => {
     await seedSeat('healthy')
     await seedSeat('broken')
     await db.execute(`UPDATE agent_runtime_instances SET session_name='wrong' WHERE agent_id='broken'`)
@@ -121,11 +132,10 @@ describe('memory-ready fleet refresher', () => {
       expect.objectContaining({ agent_id: 'healthy', status: 'dry_run_ready' }),
       expect.objectContaining({
         agent_id: 'broken',
-        status: 'failed',
-        reason: 'REGISTRATION_PROFILE_MISMATCH',
+        status: 'dry_run_ready',
+        reason: 'DRY_RUN_READY',
         runtime_instance_id: 'runtime-broken',
         details: expect.objectContaining({
-          repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
           registration_profile_mismatch: expect.objectContaining({
             current: true,
             handling: 'WARN_ONLY_CURRENT_FALLBACK',
