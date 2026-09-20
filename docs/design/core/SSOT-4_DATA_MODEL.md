@@ -1,5 +1,10 @@
 # SSOT-4: Data Model - agent-comms-mcp
 
+> 2026-09-20 / [#966](https://github.com/watchout/agent-comms-mcp/issues/966):
+> [AUN先行の種類付き保護情報設計](../typed-protected-data-v1.md)を追加。
+> agent_messages / message_queue / outbound_queue / event_logと読取・配送を保護対象とする。
+> 以下は現行互換動作の記述。変更後の型付き記号・暗号化保存・認可付き復号は設計段階で、未適用。
+
 > v0.1.0 コア層リファクタ対応版（2026-04-06）
 > ADR-037: プラットフォーム非依存コア層設計に基づく
 
