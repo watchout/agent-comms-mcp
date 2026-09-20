@@ -1,0 +1,31 @@
+{
+  "command": [
+    "/workspace/scratch/69ece23ae64f/aun-tools/node_modules/.bin/bun",
+    "test",
+    "--timeout",
+    "30000",
+    "--test-name-pattern",
+    "^(?!.*migration trigger is installed on the dev DB)",
+    "tests/queue-work.test.ts",
+    "tests/run-queue-work-plan.test.ts",
+    "tests/state-daemon-queue-work-concurrency.test.ts",
+    "tests/state-daemon-self-liveness.test.ts",
+    "tests/state-daemon-queue-work-scheduler.test.ts",
+    "tests/aun-runtime-v2.test.ts",
+    "tests/contract/state-daemon/m4-entry-smoke.test.ts"
+  ],
+  "started_at": "2026-09-20T20:17:27.223738+00:00",
+  "finished_at": "2026-09-20T20:17:29.658247+00:00",
+  "exit_code": 0,
+  "log_sha256": "5dbda8770aa90e29091f5a5aaac85f4b2e7be8b54685639a35e549bd362a227a",
+  "files": [
+    "tests/queue-work.test.ts",
+    "tests/run-queue-work-plan.test.ts",
+    "tests/state-daemon-queue-work-concurrency.test.ts",
+    "tests/state-daemon-self-liveness.test.ts",
+    "tests/state-daemon-queue-work-scheduler.test.ts",
+    "tests/aun-runtime-v2.test.ts",
+    "tests/contract/state-daemon/m4-entry-smoke.test.ts"
+  ],
+  "excluded": "Live dev DB trigger assertion; PostgreSQL bounded admission contract was not rerun without an isolated stage."
+}

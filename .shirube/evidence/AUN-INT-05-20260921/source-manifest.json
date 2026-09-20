@@ -1,0 +1,49 @@
+{
+  "base": "56b5228396ec79b352da92ffc8a3f334e59b017c",
+  "e7": "c6177186e02b9dc3c171a7973aede7d48b7799d4",
+  "paths": {
+    "bin/aun/run-queue-work.ts": {
+      "git_blob": "c304c54cea82ad35168fe97e51eeb5295993416a",
+      "sha256": "f0684414d857f2b17c5e314d1ed0e21196c70119b1fa9418075ff94e9130381a"
+    },
+    "bin/aun/runtime-v2.ts": {
+      "git_blob": "390a8ca9c80cb587a0d9df59e1b920e4fd587f7f",
+      "sha256": "9d868b957bffcbfc486e982151aa2f4795c2877ec1e1fac907f5cbc32008a309"
+    },
+    "bin/state-daemon.ts": {
+      "git_blob": "816d7bc5de622fd0132f69e7d1b7e4725eec299c",
+      "sha256": "1774a2f24a09347417367630c51ae82b252814434ee51e7dc1d2239f068cfa3e"
+    },
+    "core/queue-work-timeout.ts": {
+      "git_blob": "4e7a0f0cc0e262e319e50059116b0938320230fe",
+      "sha256": "a4c1b505a6bb179ba02bb28fae5f0ff4b7c7dcdb9ab8a2a71bf3b4a328e316a8"
+    },
+    "core/state-daemon/index.ts": {
+      "git_blob": "b2d41e00d83a3a8fa6d75155666ba5e13b732c7f",
+      "sha256": "9589e75a3b74f4cfb58ba924d1d8f9efd1683e25d5ed9c3cbca874ea7efa5f09"
+    },
+    "core/state-daemon/types.ts": {
+      "git_blob": "06b4534bad38bcaeebff85fdef00f2754f2d8146",
+      "sha256": "419c9cdfe0f163ee2ee7a6d3ff0cfcf729eceff255367dc25620c1dddd7e2d1a"
+    },
+    "docs/agent-com-message-queue-spec.md": {
+      "git_blob": "d8730af86df117e2aa7319e7e3cd1545acc51b1f",
+      "sha256": "86507f2eda13539588edb8f33eb437a904702c0f31651b8c1413cf8cc4c129fd"
+    },
+    "tests/queue-work.test.ts": {
+      "git_blob": "c742c9293f40e1daa83117fdd15715de50e1cc23",
+      "sha256": "42ab2444fc7488c555f23f6fc5ba064b79a1dc093a78d33b8a753fd4d1fe10dc"
+    },
+    "tests/state-daemon-queue-work-concurrency.test.ts": {
+      "git_blob": "85d26940314a1e997f73cda5208c4675cff9e083",
+      "sha256": "e7cfd1e1558021563756c3bc773a3fe6b866135e816cdf2207f027f7462a02c3"
+    },
+    "tests/state-daemon-self-liveness.test.ts": {
+      "git_blob": "b416c88f85b0dd762c4fd137abb3900da5dea7f4",
+      "sha256": "fc572ce92add25746e800a70398cb292a86887b4162885a6d795cbebd93ea34e"
+    }
+  },
+  "allowed_scope": true,
+  "conflicts": 0,
+  "diff_check_exit": 0
+}
