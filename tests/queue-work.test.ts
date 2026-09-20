@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { resolveEngineTimeoutMs, resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import {
   QueueWorkAdapterInvocationError,
   QUEUE_WORK_RESULT_VERSION,
@@ -13,9 +14,13 @@ import {
   type QueueWorkWritebackSender,
 } from '../core/queue-work'
 import {
+  CommandJsonRuntimeAdapter,
   classifyQueueWorkRuntimeExecFailure,
   parseCodexJsonlQueueWorkFallback,
 } from '../bin/aun/run-queue-work'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const capabilities = {
   input: 'stdin_prompt',
@@ -1539,5 +1544,186 @@ describe('finalizeDoneQueueWork', () => {
     ])
     expect(db.row.status).toBe('done')
     expect(db.row.replied_with).toBeUndefined()
+  })
+})
+
+
+describe('queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1)', () => {
+  test('AUN per-engine override reaches both the child and the slot budget with the same value', () => {
+    const env = { AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000' } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(2_400_000) // child
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(2_400_000) // daemon
+    // the audit's cycle-3 probe scenario: daemon can no longer believe 600s
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs)
+      .toBe(resolveEngineTimeoutMs(env, 'codex'))
+  })
+
+  test('STATE per-engine/generic overrides match between child and slot budget', () => {
+    const env = {
+      STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS: '1800000',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '900000',
+    } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env, 'claude')).toBe(1_800_000)
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(900_000) // generic fallback
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(1_800_000)
+  })
+
+  test('conflicting overrides: slot budget never undercuts the largest legitimate child budget', () => {
+    const env = {
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000',
+      STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS: '3000000',
+      AUN_QUEUE_WORK_TIMEOUT_MS: '600000',
+    } as NodeJS.ProcessEnv
+    const r = resolveQueueWorkTimeouts(env)
+    expect(r.maxLegitimateRunnerTimeoutMs).toBe(3_000_000)
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'codex'))
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'claude'))
+    expect(r.maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(resolveEngineTimeoutMs(env, 'generic'))
+  })
+
+  test('canonical precedence: engine-specific beats generic; AUN beats STATE within each tier', () => {
+    const env = {
+      STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS: '1200000',
+      AUN_QUEUE_WORK_TIMEOUT_MS: '900000',
+    } as NodeJS.ProcessEnv
+    // engine-specific STATE beats generic AUN (the old Claude path inverted this)
+    expect(resolveEngineTimeoutMs(env, 'codex')).toBe(1_200_000)
+    const env2 = {
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '2400000',
+      STATE_DAEMON_QUEUE_WORK_CODEX_TIMEOUT_MS: '1200000',
+    } as NodeJS.ProcessEnv
+    expect(resolveEngineTimeoutMs(env2, 'codex')).toBe(2_400_000)
+  })
+
+  test('malformed or non-positive timeouts are typed errors for both sides, never silent defaults', () => {
+    for (const bad of ['abc', '0', '-1', '1.5', '', 'NaN', 'Infinity', '1e3']) {
+      const env = { AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: bad } as NodeJS.ProcessEnv
+      const r = resolveQueueWorkTimeouts(env)
+      expect(r.errors.length).toBe(1) // daemon startup joins these into fail-closed validation
+      expect(r.errors[0]).toContain('AUN_QUEUE_WORK_CODEX_TIMEOUT_MS')
+      expect(() => resolveEngineTimeoutMs(env, 'codex')).toThrow('QUEUE_WORK_TIMEOUT_CONFIG_INVALID')
+    }
+    expect(resolveQueueWorkTimeouts({} as NodeJS.ProcessEnv).maxLegitimateRunnerTimeoutMs).toBe(600_000) // unset => documented default
+  })
+})
+
+
+describe('command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1)', () => {
+  const envelope = {
+    schema_version: 'queue_work_envelope_v1',
+    queue_id: '958',
+    message_id: null,
+    agent_id: 'qa',
+    channel: null,
+    thread_id: null,
+    requester: null,
+    content: 'cycle-4 seam probe',
+    reply_contract: { required: false, reply_to: null, mention: null },
+    runtime_contract: { do_not_call_next: true, do_not_call_inbox: true, return_schema: QUEUE_WORK_RESULT_VERSION },
+    handoff_contract: {
+      kind: 'plain_queue_work',
+      github_backed: false,
+      required_writebacks: [],
+      posting_mode: 'none',
+      detected_from: [],
+    },
+  } as unknown as QueueWorkEnvelope
+
+  test('STATE generic timeout reaches the command-json child and equals the daemon slot budget', () => {
+    // cycle-4 probe: STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS=2400000 must not leave the custom child at 600000
+    const env = { STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000' } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(2_400_000)
+    expect(adapter.execution_timeout_ms).toBe(resolveEngineTimeoutMs(env, 'generic'))
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(adapter.execution_timeout_ms)
+  })
+
+  test('AUN generic beats STATE generic; engine-specific overrides never leak into the custom child but still raise the slot budget', () => {
+    const env = {
+      AUN_QUEUE_WORK_TIMEOUT_MS: '900000',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000',
+      AUN_QUEUE_WORK_CODEX_TIMEOUT_MS: '3000000',
+    } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(900_000)
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBe(3_000_000)
+    expect(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs).toBeGreaterThanOrEqual(adapter.execution_timeout_ms)
+  })
+
+  test('unset generic timeout resolves to the documented default 600000 for the custom child', () => {
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; echo {}'], process.cwd(), {} as NodeJS.ProcessEnv)
+    expect(adapter.execution_timeout_ms).toBe(600_000)
+  })
+
+  test('malformed STATE or AUN generic timeout is a typed QUEUE_WORK_TIMEOUT_CONFIG_INVALID failure before any child spawns', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-cmdjson-seam-'))
+    try {
+      const marker = join(dir, 'spawned')
+      for (const env of [
+        { STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: 'abc' },
+        { AUN_QUEUE_WORK_TIMEOUT_MS: '0' },
+        { AUN_QUEUE_WORK_TIMEOUT_MS: '1.5', STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000' },
+      ] as NodeJS.ProcessEnv[]) {
+        expect(() => new CommandJsonRuntimeAdapter('/bin/sh', ['-c', `touch ${marker}; cat >/dev/null; echo {}`], process.cwd(), env))
+          .toThrow('QUEUE_WORK_TIMEOUT_CONFIG_INVALID')
+      }
+      expect(existsSync(marker)).toBe(false) // no child ever ran against an unvalidated budget
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the resolved generic budget is the value actually enforced on the spawned child', async () => {
+    const env = { AUN_QUEUE_WORK_TIMEOUT_MS: '200' } as NodeJS.ProcessEnv
+    const adapter = new CommandJsonRuntimeAdapter('/bin/sh', ['-c', 'cat >/dev/null; sleep 5; echo {}'], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(200)
+    const startedAt = Date.now()
+    await expect(adapter.invoke(envelope)).rejects.toThrow('runtime command failed')
+    expect(Date.now() - startedAt).toBeLessThan(4_000) // killed by the resolver budget, not by the 5s sleep
+  })
+
+  test('bounded worker keeps the shared timeout and admission binding without receiving host credentials', async () => {
+    const protectedKeys = ['DATABASE_URL', 'PGPASSWORD', 'GITHUB_TOKEN', 'DISCORD_BOT_TOKEN', 'AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND']
+    const env = {
+      AUN_ADMISSION_POLICY_ID: 'integration-fixture',
+      AUN_ADMISSION_CONFIG_DIGEST: 'a'.repeat(64),
+      AUN_ADMISSION_SOURCE_SHA: 'b'.repeat(40),
+      AUN_ADMISSION_COHORT_DIGEST: 'c'.repeat(64),
+      AUN_ADMISSION_RUNTIME_ID: 'command-json',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000',
+      ...Object.fromEntries(protectedKeys.map((key) => [key, 'fixture-only-never-use'])),
+    }
+    const script = `
+      await Bun.stdin.text()
+      const result = ${JSON.stringify(okResult({ reply: null, next_action: 'close' }))}
+      result.summary = JSON.stringify({
+        protectedKeysPresent: ${JSON.stringify(protectedKeys)}.filter((key) => Object.hasOwn(process.env, key)),
+        policy: process.env.AUN_ADMISSION_POLICY_ID,
+        timeout: process.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS,
+      })
+      process.stdout.write(JSON.stringify(result))
+    `
+    const adapter = new CommandJsonRuntimeAdapter(process.execPath, ['-e', script], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(2_400_000)
+    expect(adapter.execution_timeout_ms).toBe(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs)
+    const result = await adapter.invoke(envelope)
+    expect(result.ok).toBe(true)
+    expect(JSON.parse(result.summary)).toEqual({ protectedKeysPresent: [], policy: 'integration-fixture', timeout: '2400000' })
+  })
+
+  test('valid timeout does not let a malformed admission binding spawn a child', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-e7-admission-'))
+    try {
+      const marker = join(dir, 'spawned')
+      const adapter = new CommandJsonRuntimeAdapter(process.execPath,
+        ['-e', `await Bun.write(${JSON.stringify(marker)}, 'spawned')`], process.cwd(), {
+          AUN_ADMISSION_POLICY_ID: 'incomplete-fixture',
+          STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '1000',
+        })
+      await expect(adapter.invoke(envelope)).rejects.toThrow('ADMISSION_LOADED_CONFIG_INVALID')
+      expect(existsSync(marker)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
