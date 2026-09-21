@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,10 +29,10 @@ async function withHolder(run: (x: any) => Promise<void>) {
   } finally { await host.close(); await adapter.close(); rmSync(dir,{recursive:true,force:true}) }
 }
 
-async function assertNoPhysicalCopies(x: any) {
+async function assertNoPhysicalCopies(x: any, expectedConnectors: any[] = []) {
   const row = await x.adapter.queryOne('SELECT * FROM agent_runtime_instances WHERE runtime_instance_id=$1',[x.host.runtimeId])
   for (const key of ['runtime_engine','session_name','process_id','port','endpoint_uri','host_id','checkout_path','status','started_at','last_seen_at']) expect(row[key]).toBeNull()
-  expect(await x.adapter.query('SELECT * FROM connector_instances')).toEqual([])
+  expect(await x.adapter.query('SELECT * FROM connector_instances')).toEqual(expectedConnectors)
   const lease = await x.adapter.queryOne('SELECT * FROM control_plane_leases')
   expect(lease.holder_runtime_instance_id).toBe(x.host.runtimeId)
   expect(JSON.stringify(lease.metadata)).not.toContain(x.host.dir)
@@ -63,13 +64,17 @@ describe('runtime heartbeat logical authority', () => {
   })
   test('does not attach existing connector rows without connector evidence', async () => {
     await withHolder(async x => {
+      await x.adapter.execute(`INSERT INTO connector_instances(connector_instance_id,agent_id,provider,connector_uri,status)
+        VALUES($1,$2,'discord','discord://fixture-existing','registered')`,[randomUUID(),x.host.agentId])
+      const before=await x.adapter.query('SELECT * FROM connector_instances')
+      expect(before).toHaveLength(1)
       const result=await heartbeatRuntimeInstance(x.db,x.input)
       expect(result.connector_rows_upserted).toBe(0)
       expect(result.connector_rows_updated).toBe(0)
       expect(result.endpoint_lease_id).toBeTruthy()
       const lease=await x.adapter.queryOne('SELECT * FROM control_plane_leases')
       expect(lease.holder_connector_instance_id).toBeNull()
-      await assertNoPhysicalCopies(x)
+      await assertNoPhysicalCopies(x,before)
     })
   })
   test('renews an existing runtime endpoint lease using the process-held receipt', async () => {
