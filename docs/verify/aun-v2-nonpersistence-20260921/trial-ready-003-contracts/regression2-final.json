@@ -1,0 +1,21 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/runtime-memory-ready.test.ts",
+    "tests/seat-context-recovery.test.ts",
+    "tests/aun-configuration-desired-state.test.ts",
+    "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts",
+    "tests/contract/test_aun_configuration_restart_gate.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "9804212b79858df9153376f5b77c39aa6392a53422e37980570642229a013ad8",
+  "source_head": "4a69acd4351f99738389882a58644800a682d176",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "started_at": "2026-09-21T12:08:49.828305+00:00",
+  "ended_at": "2026-09-21T12:08:52.405870+00:00",
+  "exit_code": 0,
+  "log_sha256": "a9149753a3208e5bf10c3e415fd16d5936e63a757137300c465369fbbba0bf2e"
+}

@@ -1,0 +1,26 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_df2f916f5ec14108abfcc4454a9fff70","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"NP11-command-failure","command":"/Users/yuji/.bun/bin/bun","args":["cli/index.ts","agent","profile","get","boot-6d3a7961-0e43-42f4-8ca7-b79321a25cd6"],"stdout":"","stderr":"Error [AGENT_NOT_FOUND]: boot-6d3a7961-0e43-42f4-8ca7-b79321a25cd6\n"}
+{"case":"NP11-command-failure","command":"/Users/yuji/.bun/bin/bun","args":["cli/index.ts","agent","profile","set","boot-6d3a7961-0e43-42f4-8ca7-b79321a25cd6","--runtime","TUI","--runtime-engine","codex","--home-directory","/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-server-Im2DtC","--tmux-session","isolated-session","--enabled","true","--execute"],"stdout":"","stderr":"1573 | }\n1574 | \n1575 | function assertLogicalProfileInput(input: BotProfileInput): void {\n1576 |   if ([input.runtime, input.homeDirectory, input.channelPort, input.tmuxSession,\n1577 |     input.runtimeEnginePreference].some(value => value !== undefined)) {\n1578 |     throw new Error('PROFILE_PHYSICAL_OBSERVATION_FORBIDDEN')\n                     ^\nerror: PROFILE_PHYSICAL_OBSERVATION_FORBIDDEN\n      at assertLogicalProfileInput (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:1578:15)\n      at agentProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:2203:7)\n\nBun v1.3.11 (macOS arm64)\n"}
+{"case":"NP11-command-failure","command":"/Users/yuji/.bun/bin/bun","args":["cli/index.ts","agent","profile","get","boot-6d3a7961-0e43-42f4-8ca7-b79321a25cd6"],"stdout":"","stderr":"Error [AGENT_NOT_FOUND]: boot-6d3a7961-0e43-42f4-8ca7-b79321a25cd6\n"}
+33 |     }
+34 |     const ports=bootstrapInternal.createDefaultPorts({run,env,home:dir,repoRoot})
+35 |     const context={runId:`bootstrap-${randomUUID()}`,agentId:agent,requestedRuntime:'codex',resolvedRuntime:'codex',repoRoot,workspaceRoot:dir,
+36 |       repoHead,env,dryRun:false,priorState:{mutations:[],terminal_status:null}} as unknown as BootstrapStageContext
+37 |     const b3=await ports.ensureAgentProfile(context)
+38 |     expect(b3.ok,JSON.stringify(b3)).toBe(true)
+                                          ^
+error: {"ok":false,"reasonCodes":["NO_GO_PROFILE_CONFLICT"],"evidenceRefs":["profile-post-command-readback:84f6fa09facfe98a3f547c114022b09ea2820e3af32b3c74c737f316562c8d98"],"readbackDigest":"4173fe75856a510810fb673d510128063b913ff8946df7a3ab4b26dde9676dfa"}
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:38:38)
+(fail) NP11/AC-CFG-3 compatible B3 profile → managed start → fresh READY/idempotent READY → restart and claim recovery with no physical writes [546.72ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [622.00ms]

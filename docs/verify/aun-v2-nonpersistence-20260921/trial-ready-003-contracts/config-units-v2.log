@@ -1,0 +1,66 @@
+bun test v1.3.11 (af24e281)
+
+tests/aun-configuration-reconciler.test.ts:
+(pass) AUN configuration reconciler > applies one unprotected candidate and requires exact native readback before READY [2.03ms]
+(pass) AUN configuration reconciler > an equal second run performs zero mutations and still fresh-readbacks [0.08ms]
+(pass) AUN configuration reconciler > discards a stale candidate before any apply [0.20ms]
+(pass) AUN configuration reconciler > lease loss inside a successful adapter call rejects the effect before commit [0.40ms]
+(pass) AUN configuration reconciler > lease loss inside a partial adapter call cannot commit or invoke stale rollback [0.16ms]
+(pass) AUN configuration reconciler > never closes an outbox event when the stale observed receipt is fence-rejected [0.30ms]
+(pass) AUN configuration reconciler > a failed candidate render stays undelivered and does not reject the sweep [0.33ms]
+(pass) AUN configuration reconciler > partial apply and rollback failure fail closed with no automatic retry [0.23ms]
+(pass) AUN configuration reconciler > coalesces concurrent same-key work into one apply [0.20ms]
+(pass) AUN configuration reconciler > heartbeats an in-flight reconciliation at the sealed 15-second target [0.43ms]
+
+tests/aun-configuration-candidate.test.ts:
+(pass) AUN immutable configuration candidate > default generated bridge requests OS port zero despite an old desired profile port [0.44ms]
+(pass) AUN immutable configuration candidate > generated command executes the verified source entry inside the observed seat workspace [11.04ms]
+(pass) AUN immutable configuration candidate > ordinary projection without fresh runtime facts cannot fall back to desired preference [0.08ms]
+(pass) AUN immutable configuration candidate > renders twice to byte-identical envelopes and digests [0.32ms]
+(pass) AUN immutable configuration candidate > rejects a mixed DB endpoint before any adapter effect [0.08ms]
+(pass) AUN immutable configuration candidate > rejects release/control drift and raw secrets [0.10ms]
+(pass) AUN immutable configuration candidate > binds the runtime supervisor to the exact LaunchAgent label
+(pass) AUN immutable configuration candidate > binds provider and runtime enablement to DB enrollment state [0.13ms]
+(pass) AUN immutable configuration candidate > projects every governed provider identity field into the immutable provider contract [0.25ms]
+(pass) AUN immutable configuration candidate > ordinary restore command deterministically carries the DB reconciler startup flag [34.13ms]
+
+tests/contract/test_aun_configuration_db_outage.test.ts:
+(pass) DB outage keeps last-known-good and cannot mutate or claim READY [0.39ms]
+
+tests/contract/test_aun_configuration_restart_gate.test.ts:
+(pass) restart-required reconciliation emits approval request and performs zero restart [0.24ms]
+(pass) revision drift during native readback creates no restart request [0.10ms]
+(pass) a durable exact CTO claim permits one fake restart and exact terminal readback [0.24ms]
+(pass) rejected, expired, superseded, or drifted durable restart claims perform zero effects [0.24ms]
+(pass) an ineligible exact maintenance-lease holder cannot claim or restart [0.23ms]
+(pass) lease loss after durable claim records failure and performs zero restart [0.15ms]
+(pass) terminal ACK loss cannot claim or restart the same request twice [0.15ms]
+
+tests/contract/test_aun_configuration_projection_readback.test.ts:
+(pass) manual projection tamper is detected and never back-propagates to DB desired state [1.19ms]
+(pass) launchctl native readback extracts only the exact candidate environment keys [0.16ms]
+(pass) runtime native readback requires the exact active primary workspace projection [1.26ms]
+(pass) disabled provider readback requires exact native get and list absence [0.21ms]
+(pass) codex and claude native readback reject a stale opaque provider identity reference [0.03ms]
+(pass) native release readback requires exact commit, tree, and a clean checkout [0.13ms]
+
+tests/contract/test_aun_configuration_notification_loss.test.ts:
+(pass) lost notification is recovered by the bounded sweep within the sealed deadline [0.32ms]
+
+tests/contract/test_aun_configuration_concurrent_revision.test.ts:
+(pass) an older concurrent revision cannot apply and the latest applies at most once [0.57ms]
+
+tests/contract/test_aun_configuration_endpoint_rebind.test.ts:
+(pass) DB endpoint rebind is one exact candidate and uses the protected restart gate [0.26ms]
+
+tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts:
+(pass) V2-native S0 cutover and zero-effect fences > native execution leaves V1 and provider surfaces at exact zero delta [15.70ms]
+(pass) V2-native S0 cutover and zero-effect fences > daemon and supervisor remain default-off/read-only and fail on drift [4.33ms]
+(pass) V2-native S0 cutover and zero-effect fences > canonical selector freezes every enabled non-human agent with one exact ready runtime [6.21ms]
+(pass) V2-native S0 cutover and zero-effect fences > LLM selector uses fresh provider and checkout with NULL physical anchors, never historical preference [73.28ms]
+(pass) V2-native S0 cutover and zero-effect fences > provider or V1 escape literals fail before the first event [5.28ms]
+
+ 42 pass
+ 0 fail
+ 159 expect() calls
+Ran 42 tests across 9 files. [260.00ms]

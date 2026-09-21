@@ -1,0 +1,17 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_s0_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_89f0b909191e47c78d264b7608d18103","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-1","selected":2,"build_mismatch_denied":1,"physical_reads":0,"provider_invocations":0}
+(pass) AC-S0-1 native selection uses logical build + lease + real socket; physical history is never queried [844.41ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_12aaac7665d940a2aa434f4d3fc6ef1f","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-2","admitted":1,"expire_denied":1,"fence_denied":1,"replacement_denied":1,"denied_dispatches":0,"provider_invocations":0}
+(pass) AC-S0-2 expire, changed fence and actual replacement deny S0 dispatch with no history fallback [603.98ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_b3b6796b994643c9807d6fee9047179b","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-3","provider_free_positive":1,"missing_marker_denied":1,"provider_names_generated":0,"provider_invocations":0}
+(pass) AC-S0-3 plain Bun needs no provider identity; missing logical marker never invents one [507.47ms]
+
+ 3 pass
+ 0 fail
+ 21 expect() calls
+Ran 3 tests across 1 file. [1.99s]
