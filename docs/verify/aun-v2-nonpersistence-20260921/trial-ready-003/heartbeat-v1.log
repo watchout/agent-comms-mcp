@@ -1,0 +1,28 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-heartbeat.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-KHySPc/test.db
+(pass) runtime heartbeat logical authority > acquires a logical runtime and lease without copying connector observations [1243.63ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-hefEgY/test.db
+(pass) runtime heartbeat logical authority > does not attach existing connector rows without connector evidence [1171.33ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-p0BA6X/test.db
+(pass) runtime heartbeat logical authority > renews an existing runtime endpoint lease using the process-held receipt [1594.90ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-BLafrO/test.db
+(pass) runtime heartbeat logical authority > expired runtime endpoint cannot be resurrected by its delayed heartbeat [1500.66ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-lXJKPW/test.db
+(pass) runtime heartbeat logical authority > uses logical workspace membership while the current holder supplies its path [1186.07ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-K5f7ay/test.db
+(pass) runtime heartbeat logical authority > registers an exact MCP holder without PWD or TMUX metadata and refuses an unrelated path [1236.26ms]
+(pass) runtime heartbeat logical authority > infers session name and port from runtime environment [0.15ms]
+(pass) runtime heartbeat logical authority > derives stable local workspace identity from checkout path [0.30ms]
+
+ 8 pass
+ 0 fail
+ 133 expect() calls
+Ran 8 tests across 1 file. [7.95s]

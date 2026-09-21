@@ -1,0 +1,210 @@
+bun test v1.3.11 (af24e281)
+
+tests/agent-status-lifecycle.test.ts:
+20 |       },
+21 |     }
+22 | 
+23 |     await heartbeatAgentStatus(db, 'aun')
+24 | 
+25 |     expect(calls).toHaveLength(1)
+                       ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/agent-status-lifecycle.test.ts:25:19)
+(fail) agent status lifecycle > heartbeat revives clobbered inactive status without overwriting active states [0.36ms]
+43 |       agentId: 'aun',
+44 |       runtimeInstanceId: 'short-lived-runtime',
+45 |     })
+46 | 
+47 |     expect(marked).toBe(false)
+48 |     expect(calls).toHaveLength(1)
+                       ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 1
+Received length: 0
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/agent-status-lifecycle.test.ts:48:19)
+(fail) agent status lifecycle > shutdown only marks offline when no other fresh running runtime exists [0.02ms]
+66 |     await markAgentOfflineIfNoOtherLiveRuntime(db, {
+67 |       agentId: 'aun',
+68 |       runtimeInstanceId: 'runtime-a',
+69 |     })
+70 | 
+71 |     expect(calls[0].sql).toContain('UPDATE agent_runtime_instances')
+                      ^
+TypeError: undefined is not an object (evaluating 'calls[0].sql')
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/agent-status-lifecycle.test.ts:71:18)
+(fail) agent status lifecycle > runtime stop helper and unregisterAgent guard live-runtime offline writes
+
+tests/inbox-cursor-db-persist.test.ts:
+agent-comms: startup self-reclaim — 2 orphaned claims rolled back to 'pending' for test-bot
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 1 — reclaimSelfOrphanedClaims rolls own read claims back to pending [14.44ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 2 — reclaimSelfOrphanedClaims leaves other agents alone [3.84ms]
+agent-comms: periodic self-reclaim — 1 expired claims for test-bot → 'pending'
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 3 — startSelfReclaimSweeper reclaims only expired claims [126.88ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 4 — agents.inbox_cursor_{at,id} round-trips through DB [4.53ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 5 — pending rows are NOT reclaimed (predicate guards status=read) [3.92ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for test-bot
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 6 — reclaim is idempotent (second invocation reclaims 0) [2.89ms]
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /tmp/inbox-cursor-migrate-48149-1789985184909-8umkx2vtnx6.db
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 4 — SQLite migration executes and adds inbox_cursor columns [35.40ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 8 — next cursor advance writes composite (at, id) from agent_messages [3.59ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 9 — next cursor advance is no-op when agent_messages row is missing [2.85ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 7 — server.ts wires startup self-reclaim + periodic sweeper, paired migration files exist [2.88ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 10 — startup order: reclaim awaited before claim-ttl sweeper [3.16ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for me
+373 |     )
+374 |     await reclaimSelfOrphanedClaims(pgWrap(db), 'me')
+375 |     const after = await db.query<{ status: string; status_detail: string | null }>(
+376 |       `SELECT status, status_detail FROM agents WHERE agent_id = 'me'`,
+377 |     )
+378 |     expect(after[0].status).toBe('idle')
+                                  ^
+error: expect(received).toBe(expected)
+
+Expected: "idle"
+Received: "busy"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/inbox-cursor-db-persist.test.ts:378:29)
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 11 — reclaim updates agents.status to idle when no claims remain [4.20ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for me
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 12 — reclaim leaves agents.status busy when other claim remains [3.33ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 13 — persistInboxCursorToDb is monotonic (older write is no-op) [2.92ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 14 — reclaimSelfOrphanedClaims throws on DB error (fail-closed) [3.61ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 16 — inbox → next → inbox sequence does not replay (cache + DB stay in sync) [8.61ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 17 — startup DB unavailable throws (fail-closed) [3.94ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 18 — persistInboxCursorToDb cache invariant: DB write success implies stored cursor matches input [3.01ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 19 — persistInboxCursorToDb throws when DB query throws (cache untouched) [4.02ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 20 — persistInboxCursorToDb returns updated:false when monotonic guard rejects [3.30ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 21 — fetchNewMessages does not pre-emptively assign inboxCursor (source pin) [3.07ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 22 — loadInboxCursorFromDb throws on DB SELECT error (no swallow) [3.64ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 23 — load wrapper throws on tryGetDb null (fail-closed contract) [3.40ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 24 — persist wrapper throws on tryGetDb null (fail-closed contract) [3.05ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 25 — load Core null (row absent) → wrapper latches with cursor null [3.06ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 26 — db/migrate.ts PG canonical schema declares inbox_cursor columns [2.61ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 27 — fetchNewMessages throws on tryGetDb null (no silent empty return) [2.45ms]
+814 |     try {
+815 |       await reclaimSelfOrphanedClaims(partialDb, 'me')
+816 |     } catch (err) {
+817 |       caught = err as Error
+818 |     }
+819 |     expect(caught).not.toBeNull()
+                             ^
+error: expect(received).not.toBeNull()
+
+Received: null
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/inbox-cursor-db-persist.test.ts:819:24)
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 28 — syncAgentStatusFromClaims errors propagate through reclaimSelfOrphanedClaims [2.54ms]
+agent-comms: periodic self-reclaim FAILED for me: simulated periodic self-reclaim failure
+agent-comms: periodic self-reclaim FAILED for me: simulated periodic self-reclaim failure
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 29 — startSelfReclaimSweeper invokes onError on query failure (fail-closed) [86.19ms]
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 30 — startClaimTtlSweeper invokes onError on query failure (fail-closed) [86.65ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 31 — per-agent cursor isolation across two bots (no cross-contamination) [5.27ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 32 — multi-bot recovery wiring + claim-TTL selfAgentIds protects every hosted bot [5.37ms]
+1014 |          FROM agents
+1015 |         WHERE agent_id IN ('expired-only', 'still-busy')
+1016 |         ORDER BY agent_id`,
+1017 |     )
+1018 |     const agentById = Object.fromEntries(agents.map((agent) => [agent.agent_id, agent]))
+1019 |     expect(agentById['expired-only'].status).toBe('idle')
+                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "idle"
+Received: "busy"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/inbox-cursor-db-persist.test.ts:1019:46)
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 33 — shared claim-TTL sweep clears claim metadata and resyncs agents.status [4.53ms]
+
+tests/inbox-cursor.test.ts:
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 1. UUID v4 lex ordering is not time-monotonic (concrete pair)
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 2. first call with no cursor — no cursor predicate in WHERE, returns rows + advances cursor [0.26ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 3. subsequent call emits row-value comparison predicate with (created_at, id) [0.10ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 4. #179 regression guard — new row with lex-smaller UUID + later created_at is NOT dropped [0.05ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 5. empty result preserves cursor (no advance, no skip on retry) [0.08ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 6. same-ms created_at — UUID tiebreaker advances past the larger-id row (mock-level ms case) [0.06ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 7. ORDER BY created_at ASC, id ASC is in the SELECT (monotonic delivery) [0.06ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 8. cursor advance handles ISO string created_at (DB driver returning text) [0.04ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 9. SELECT adds created_at::text AS created_at_text (cycle 3 µs-precision companion) [0.02ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 10. cursor prefers created_at_text over JS Date (µs-precision preserved) [0.07ms]
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: relation "agent_messages" does not exist
+     length: 113,
+   severity: "ERROR",
+     detail: undefined,
+       hint: undefined,
+   position: "13",
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: undefined,
+      table: undefined,
+   dataType: undefined,
+ constraint: undefined,
+       file: "parse_relation.c",
+    routine: "parserOpenTable",
+       code: "42P01"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) fetchNewMessages — DB integration (Issue #179) > composite cursor does not drop a lex-smaller UUID inserted later [11.49ms]
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: relation "agent_messages" does not exist
+     length: 113,
+   severity: "ERROR",
+     detail: undefined,
+       hint: undefined,
+   position: "13",
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: undefined,
+      table: undefined,
+   dataType: undefined,
+ constraint: undefined,
+       file: "parse_relation.c",
+    routine: "parserOpenTable",
+       code: "42P01"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) fetchNewMessages — DB integration (Issue #179) > µs-precision round-trip — insert→fetch1→fetch2 empty (cycle 3 regression guard) [1.95ms]
+
+tests/contract/test_runtime_nonpersist_profile.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_3ebd82f274f34e28a90a73cf52bbf812","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 postgres ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [793.51ms]
+(pass) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [589.83ms]
+
+8 tests failed:
+(fail) agent status lifecycle > heartbeat revives clobbered inactive status without overwriting active states [0.36ms]
+(fail) agent status lifecycle > shutdown only marks offline when no other fresh running runtime exists [0.02ms]
+(fail) agent status lifecycle > runtime stop helper and unregisterAgent guard live-runtime offline writes
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 11 — reclaim updates agents.status to idle when no claims remain [4.20ms]
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 28 — syncAgentStatusFromClaims errors propagate through reclaimSelfOrphanedClaims [2.54ms]
+(fail) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 33 — shared claim-TTL sweep clears claim metadata and resyncs agents.status [4.53ms]
+(fail) fetchNewMessages — DB integration (Issue #179) > composite cursor does not drop a lex-smaller UUID inserted later [11.49ms]
+(fail) fetchNewMessages — DB integration (Issue #179) > µs-precision round-trip — insert→fetch1→fetch2 empty (cycle 3 regression guard) [1.95ms]
+
+ 42 pass
+ 8 fail
+ 178 expect() calls
+Ran 50 tests across 4 files. [1.88s]

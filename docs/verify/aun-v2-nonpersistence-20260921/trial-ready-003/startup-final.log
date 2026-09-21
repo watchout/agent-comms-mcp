@@ -1,0 +1,63 @@
+bun test v1.3.11 (af24e281)
+
+tests/startup-safety.test.ts:
+(pass) startup safety contract > blocks the Codex 0.139 invalid-transport override [1.04ms]
+(pass) startup safety contract > extracts command-level Codex startup identity [0.02ms]
+(pass) startup safety contract > blocks AGENT_ID / AGENT_COM_EXPECTED_AGENT_ID mismatch [0.02ms]
+(pass) startup safety contract > blocks command identity drift from DB profile identity [0.02ms]
+(pass) startup safety contract > blocks stale managed checkout launchers while allowing current checkout [0.08ms]
+(pass) startup safety contract > blocks unapproved launcher root when explicit approved roots are supplied [0.06ms]
+(pass) startup safety contract > port checks distinguish same-agent, different-agent, orphan, and unknown owner [0.11ms]
+(pass) startup safety contract > blocks tmux session already bound to another agent [0.03ms]
+(pass) startup safety contract > blocks unconditional Enter on normal Codex start screen [0.03ms]
+
+tests/aun-bootstrap.test.ts:
+(pass) aun bootstrap B0-B8 state machine > F1 canonical provider identity collapses 100 object-key permutations without raw config persistence [5.96ms]
+(pass) aun bootstrap B0-B8 state machine > F2 every semantic provider tuple change produces a distinct canonical identity [0.17ms]
+(pass) aun bootstrap B0-B8 state machine > successful malformed provider JSON fails closed before any stage mutation [0.20ms]
+(pass) aun bootstrap B0-B8 state machine > clean-host Codex root is canonical HOME/.codex and caller CODEX_HOME is evidence-only [0.40ms]
+(pass) aun bootstrap B0-B8 state machine > B5-COEXIST-001 preserves ordinary active rows and creates a bootstrap receipt [0.18ms]
+(pass) aun bootstrap B0-B8 state machine > B5-COEXIST-002 reuses exactly one compatible bootstrap receipt beside ordinary rows [0.09ms]
+(pass) aun bootstrap B0-B8 state machine > B5-FAIL-CLOSED-001 rejects one incompatible bootstrap receipt before mutation [0.07ms]
+(pass) aun bootstrap B0-B8 state machine > B5-FAIL-CLOSED-002 rejects multiple bootstrap receipts even when both match [0.03ms]
+(pass) aun bootstrap B0-B8 state machine > genuine Wasurezu MCP protocol rejects missing/error/wrong-project/fabricated/timeout receipts [130.26ms]
+(pass) aun bootstrap B0-B8 state machine > timed-out child is SIGKILLed and cannot perform a later write before runner resolves [5058.39ms]
+(pass) aun bootstrap B0-B8 state machine > auto runtime selects actual provider over stale preference and rejects real provider conflicts [0.38ms]
+(pass) aun bootstrap B0-B8 state machine > returns READY only after every deterministic stage passes [10.90ms]
+(pass) aun bootstrap B0-B8 state machine > dry-run plans B0-B8 without persisting a run journal [0.87ms]
+(pass) aun bootstrap B0-B8 state machine > a failed memory predicate is terminal NO_GO and instructs a new run, never resume [2.35ms]
+(pass) aun bootstrap B0-B8 state machine > a failed run cannot re-enter stages under --resume [1.26ms]
+(pass) aun bootstrap B0-B8 state machine > terminal failed-run rejection precedes changed external input probes [1.34ms]
+(pass) aun bootstrap B0-B8 state machine > failed mutating stage is journaled and rolled back before the per-agent lock is released [2.63ms]
+(pass) aun bootstrap B0-B8 state machine > B3 and B4 recovery admissions are durable before the protected effect boundary and block resume re-entry [3.50ms]
+(pass) aun bootstrap B0-B8 state machine > F11 forced B5, B6, B7, and B8 failures restore downstream then B4 and ordered B3 mutations [7.42ms]
+(pass) aun bootstrap B0-B8 state machine > B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release [26.70ms]
+(pass) aun bootstrap B0-B8 state machine > unresolved stage-deadline mutation is durably recovery-required before lock release [13.57ms]
+(pass) aun bootstrap B0-B8 state machine > rollback executes only recorded mutations in reverse order [1.36ms]
+(pass) aun bootstrap B0-B8 state machine > same-agent concurrent run fails closed with NO_GO_BOOTSTRAP_BUSY [0.78ms]
+
+tests/state-daemon-queue-work-concurrency.test.ts:
+(pass) queue-work concurrency bound (E7) > runners over the bound are deferred with a visible metric, not invoked [0.56ms]
+(pass) queue-work concurrency bound (E7) > a completed runner frees a slot for the next sweep [2.89ms]
+(pass) queue-work concurrency bound (E7) > per-agent dedup still applies inside the bound (same agent is busy-deferred, not double-run) [0.09ms]
+(pass) queue-work concurrency bound (E7) > deferral does not touch the row or consume attempts (scheduler untouched rows stay schedulable) [0.09ms]
+(pass) queue-work concurrency bound (E7) > F1: all-slots-hung with eligible pending strikes and exits — deferral metrics are not progress [0.43ms]
+(pass) queue-work concurrency bound (E7) > F1: three healthy long-running runners within the child budget never false-strike [0.31ms]
+(pass) queue-work concurrency bound (E7) > F1: deferral metric is outside the D2 progress family [0.06ms]
+(pass) queue-work concurrency bound (E7) > F3: D1 dispatch obeys the same global bound (generic first, D1 deferred) [0.19ms]
+(pass) queue-work concurrency bound (E7) > F3: D1 first consumes generic capacity (reverse order) and keys never collide [0.16ms]
+(pass) queue-work concurrency bound (E7) > F4/F5: production dispatch seam returns acted=false on deferral, row and DB untouched; slot release invokes once [1.60ms]
+(pass) queue-work concurrency bound (E7) > F4: received/done deferrals also report non-invoked results [0.11ms]
+(pass) queue-work concurrency bound (E7) > F5: production sweepStale — repeated deferral leaves the DB row untouched, rewoken=0; release invokes exactly once [7.67ms]
+
+tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts:
+(pass) V2-native S0 cutover and zero-effect fences > native execution leaves V1 and provider surfaces at exact zero delta [13.63ms]
+(pass) V2-native S0 cutover and zero-effect fences > daemon and supervisor remain default-off/read-only and fail on drift [4.59ms]
+(pass) V2-native S0 cutover and zero-effect fences > canonical selector freezes every enabled non-human agent with one exact ready runtime [6.31ms]
+(pass) V2-native S0 cutover and zero-effect fences > LLM selector uses fresh provider and checkout with NULL physical anchors, never historical preference [69.50ms]
+(pass) V2-native S0 cutover and zero-effect fences > provider or V1 escape literals fail before the first event [3.86ms]
+
+ 49 pass
+ 0 fail
+ 449 expect() calls
+Ran 49 tests across 4 files. [5.47s]

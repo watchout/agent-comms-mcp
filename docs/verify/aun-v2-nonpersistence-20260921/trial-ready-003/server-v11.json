@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "711828e1857cea26e4513d3d582a2f1044fc5c6c7b9bb223f29df78b8d6410db",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "73203b3f8cb7d2d09bb18d39d2572c6186800b09a033a51eff48c93f3012a3a3",
+  "started_at": "2026-09-21T10:03:01.137206+00:00",
+  "ended_at": "2026-09-21T10:03:04.551903+00:00",
+  "exit_code": 0,
+  "log_sha256": "64a7861d4ed0575a814fd742fb464e13ce5f88ca23be4cc302cafad9410528fb"
+}

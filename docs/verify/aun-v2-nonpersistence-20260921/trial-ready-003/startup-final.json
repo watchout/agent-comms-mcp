@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/startup-safety.test.ts",
+    "tests/aun-bootstrap.test.ts",
+    "tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts",
+    "tests/state-daemon-queue-work-concurrency.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "40e6712842bfac470d0b82f78046e8c3599dec3f98f405800aaecb5d3b04fa24",
+  "source_head": "592d00654145d0c3db1295c82dacd6ecb5841655",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "started_at": "2026-09-21T10:26:39.963757+00:00",
+  "ended_at": "2026-09-21T10:26:45.441645+00:00",
+  "exit_code": 0,
+  "log_sha256": "71f578f1dbd6f2d5985e71e79536782b4303aaf54642b50fe0243b1e81a34700"
+}
