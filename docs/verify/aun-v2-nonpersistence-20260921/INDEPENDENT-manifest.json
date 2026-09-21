@@ -27,34 +27,6 @@
       "missing_source_snapshot_entries": [],
       "binding_limit": null
     },
-    "regression1-final": {
-      "metadata_ref": "independent/regression1-final.json",
-      "source_ref": "independent/regression1-final.sources.json",
-      "raw_log_ref": "independent/regression1-final.log",
-      "log_sha256": "ab69c1b01626d61455f4ceed4c67f1f1e13b882e379c5a2a73995d916b8c799b",
-      "pass": 85,
-      "fail": 57,
-      "assertions": 419,
-      "recorded_input_mismatches": [],
-      "missing_source_snapshot_entries": [
-        "core/process-start-time.ts"
-      ],
-      "binding_limit": "The two primary regression snapshots predate inclusion of the untracked process-start helper; its exact candidate hash and passing integrated test are separately bound. Do not describe these old snapshots as complete source manifests."
-    },
-    "regression2-final": {
-      "metadata_ref": "independent/regression2-final.json",
-      "source_ref": "independent/regression2-final.sources.json",
-      "raw_log_ref": "independent/regression2-final.log",
-      "log_sha256": "7b3f8740269c6c978cbdc56d2ad2216a4f2d0ebd63612f70fbfba467345c14fb",
-      "pass": 33,
-      "fail": 26,
-      "assertions": 130,
-      "recorded_input_mismatches": [],
-      "missing_source_snapshot_entries": [
-        "core/process-start-time.ts"
-      ],
-      "binding_limit": "The two primary regression snapshots predate inclusion of the untracked process-start helper; its exact candidate hash and passing integrated test are separately bound. Do not describe these old snapshots as complete source manifests."
-    },
     "startup-concurrency-corrected": {
       "metadata_ref": "independent/startup-concurrency-corrected.json",
       "source_ref": "independent/startup-concurrency-corrected.sources.json",
@@ -75,6 +47,30 @@
       "pass": 28,
       "fail": 0,
       "assertions": 262,
+      "recorded_input_mismatches": [],
+      "missing_source_snapshot_entries": [],
+      "binding_limit": null
+    },
+    "regression1-candidate": {
+      "metadata_ref": "independent/regression1-candidate.json",
+      "source_ref": "independent/regression1-candidate.sources.json",
+      "raw_log_ref": "independent/regression1-candidate.log",
+      "log_sha256": "2ecd880a2c1a4b669ca4c1cd54f045fc13f9e7b8e11511d0ecc9e5b5862dc3df",
+      "pass": 85,
+      "fail": 57,
+      "assertions": 419,
+      "recorded_input_mismatches": [],
+      "missing_source_snapshot_entries": [],
+      "binding_limit": null
+    },
+    "regression2-candidate": {
+      "metadata_ref": "independent/regression2-candidate.json",
+      "source_ref": "independent/regression2-candidate.sources.json",
+      "raw_log_ref": "independent/regression2-candidate.log",
+      "log_sha256": "20aca6757ed2334722f0591167c43841b7770e708ed772594320a36263a44516",
+      "pass": 33,
+      "fail": 26,
+      "assertions": 130,
       "recorded_input_mismatches": [],
       "missing_source_snapshot_entries": [],
       "binding_limit": null
@@ -818,6 +814,10 @@
     "independent/durable-db.json": "c523eea0ecf3a8f88c580561252a4d2a3a7708f897f21384fd40d4d1bd80ee3f",
     "independent/durable-db.log": "b19c74f7a37cebdaae399c41d58f7226684784c12caa2b3cd8cf1fba9503bf40",
     "independent/durable-db.sources.json": "c92f5868159f19fe2b3167d532e88858dde336a0fc6dc08ea4e7b74fd3de0e13",
+    "independent/fixture-restart01.log": "fb690b57105017ecaecf13f187e79b1e8e63cfc7d60d70959262401e1a5815fe",
+    "independent/fixture-restart02.log": "66afd0411ccc09366e99fdd99b85f21899c8d2d064f5835126859618802153ad",
+    "independent/fixture-stop-final.json": "2d89430ff1c70a4344575cd4c86cb7895393b3024df6f24eaf1647127eaa9413",
+    "independent/fixture-stop-final.log": "ca19178a35ab4153b75b494963b66ce8243e1b94c173107c87b44d09db23652d",
     "independent/fixture-stop.json": "a8e12f14b55fa51ff044952eb701786cb3e6133566c123a8a9771300748309c0",
     "independent/fixture-stop.log": "ca19178a35ab4153b75b494963b66ce8243e1b94c173107c87b44d09db23652d",
     "independent/fixture.json": "548aa4787dbb0e9f3b78b6109358512be3e864ffefe38190e393e15e9508b32a",
@@ -842,12 +842,18 @@
     "independent/native-original-binding.json": "547040cf90e5d58084f29b22182cadec248c2ce42a96d0db235790c74f83a9ac",
     "independent/regression-authority.json": "d958e58c4695c3804dc30219001b988981714545b97a9aea12f9c7fddb052894",
     "independent/regression-authority.log": "ae0fb10968360bf1cd8e915ed93fc1d41e512ce65b0033b8dbe8d966b861e539",
+    "independent/regression1-candidate.json": "af66bf92f7d3a154d540b9d21111734fef3884b84383283ecd6db961c121e509",
+    "independent/regression1-candidate.log": "2ecd880a2c1a4b669ca4c1cd54f045fc13f9e7b8e11511d0ecc9e5b5862dc3df",
+    "independent/regression1-candidate.sources.json": "fc6ac9fff5ca64aa8f1cef85604f597894dc11e5c782ade84384284f36c0a3a6",
     "independent/regression1-current.json": "2b8880532cfba266853f86f3fad2fe4cc25d715c30f52e0ab094922f3cdd168e",
     "independent/regression1-current.log": "ef8743929832b1a09079a7b0c634e029f9cedd5bd328dc68283c191646dfdad9",
     "independent/regression1-current.sources.json": "2ddb1cbb7ea2db01ea0470c3b10f00a5a945c7a8538d7ce3639bb682a5c6d84e",
     "independent/regression1-final.json": "95b26ea4694c09b79d6783c26edabe9c4e4395ee5e55a7d5bc39b938a066b991",
     "independent/regression1-final.log": "ab69c1b01626d61455f4ceed4c67f1f1e13b882e379c5a2a73995d916b8c799b",
     "independent/regression1-final.sources.json": "9f8cb2d4c3728135916f0130392b643daec96065739c0bfb55f20c1176adbcc8",
+    "independent/regression2-candidate.json": "5141bd20f3c978266b81703b8a205672b13d763ec3d864f7d90cef62f8ed8e3a",
+    "independent/regression2-candidate.log": "20aca6757ed2334722f0591167c43841b7770e708ed772594320a36263a44516",
+    "independent/regression2-candidate.sources.json": "fc6ac9fff5ca64aa8f1cef85604f597894dc11e5c782ade84384284f36c0a3a6",
     "independent/regression2-current.json": "35465d0f468dd159198679fecb565f0cb506ed9a2c986d897eac2ec09730799c",
     "independent/regression2-current.log": "e5ea8ffd6aa9c364239059bef017a4b24cb0604e2a5489bf1f00815d6bdf52b3",
     "independent/regression2-current.sources.json": "2ddb1cbb7ea2db01ea0470c3b10f00a5a945c7a8538d7ce3639bb682a5c6d84e",
@@ -863,7 +869,7 @@
     "independent/startup-concurrency-final.sources.json": "9f8cb2d4c3728135916f0130392b643daec96065739c0bfb55f20c1176adbcc8",
     "independent/syntax.json": "8aa1d5b5b9f3cebae82c694f0513023fa101cceddd3613a51b182860f9af7b12",
     "independent/syntax.log": "dabb0c85724c553880ae073eb0a4492addcc1ca83a316de3ef76533c268c45c9",
-    "INDEPENDENT-RETURN.md": "3ff4f69f54df657d55885ac037a92e28dd54fc4fcafce7c80eb92bc2183c453e"
+    "INDEPENDENT-RETURN.md": "54449ff3aac2d84a865d2ac4df653c61938108699affc927be17c6ba1f60612a"
   },
   "new_subagents": 0,
   "protected_live_effects": 0,
