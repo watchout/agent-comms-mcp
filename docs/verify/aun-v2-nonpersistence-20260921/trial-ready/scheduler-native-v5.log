@@ -1,0 +1,11 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_be44a966a6a844cb8f8a01d89113af79","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4283.53ms]
+
+ 1 pass
+ 0 fail
+ 16 expect() calls
+Ran 1 test across 1 file. [4.36s]
