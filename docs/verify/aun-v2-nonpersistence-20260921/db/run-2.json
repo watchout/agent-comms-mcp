@@ -1,0 +1,19 @@
+{
+  "run": 2,
+  "changed_input": "fixture URL parser correction; explicit owned Unix socket unchanged",
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T13:55:35.991338+09:00",
+  "finished_at": "2026-09-21T13:55:37.271277+09:00",
+  "duration_seconds": 1.28,
+  "exit_code": 1,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "working_diff_sha256": "28ce228c9bb4019c32d71e7e0856912854582c8f53b94271e888e9c2e6c26095",
+  "stdout_sha256": "7bdcbaab114760297da309534831afc79ffd0d334b5de54dd512e08fd7c9d6b5",
+  "stderr_sha256": "37d00755f6972c525f9f500ca343f69bff148f3d93305128b81bf27f7038ce65"
+}
