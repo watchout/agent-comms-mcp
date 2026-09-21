@@ -1,0 +1,23 @@
+bun test v1.3.11 (af24e281)
+
+tests/seat-context-recovery.test.ts:
+(pass) seat context recovery > binds exact target last without modifying the configured transport [0.13ms]
+(pass) seat context recovery > prepares semantic context without issuing a consumption receipt [1.79ms]
+(pass) seat context recovery > requires exact host input acknowledgement and never transfers a prior runtime receipt [0.53ms]
+(pass) seat context recovery > rejects foreign seat before any host output [0.34ms]
+(pass) seat context recovery > rejects foreign project before any host output [0.02ms]
+(pass) seat context recovery > rejects foreign provider before any host output [0.03ms]
+(pass) seat context recovery > rejects project-substring recovery, missing next action and untrusted instruction promotion [0.07ms]
+(pass) seat context recovery > times out missing memory without ready or consumption [5.76ms]
+(pass) native context receipt lookup > maps stored native proof to exact fresh runtime without re-reading or writing context [0.58ms]
+(pass) native context receipt lookup > rejects unavailable, foreign, reused PID, session and attempt evidence [0.17ms]
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-xJ28sm/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [3642.46ms]
+
+ 11 pass
+ 0 fail
+ 65 expect() calls
+Ran 11 tests across 2 files. [3.72s]

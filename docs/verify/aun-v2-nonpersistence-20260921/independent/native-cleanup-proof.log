@@ -1,0 +1,84 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-RgsTDP/aun.db
+112 |     publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
+113 |   `)
+114 |   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+115 |   nativeHosts.push(child)
+116 |   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+117 |   if(!existsSync(report))throw new Error('native fixture startup timeout: '+readFileSync(join(home,'native-host.err'),'utf8'))
+                                         ^
+error: native fixture startup timeout: dyld[8224]: Library not loaded: /opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib
+  Referenced from: <08C01B68-B4C2-3C65-9E3F-168E88B062B7> /opt/homebrew/Cellar/node/25.6.1_1/bin/node
+  Reason: tried: '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file)
+
+      at nativeHostFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/seat-native-runtime-fixture.ts:117:36)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:20:25)
+(fail) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [10389.68ms]
+112 |     publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
+113 |   `)
+114 |   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+115 |   nativeHosts.push(child)
+116 |   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+117 |   if(!existsSync(report))throw new Error('native fixture startup timeout: '+readFileSync(join(home,'native-host.err'),'utf8'))
+                                         ^
+error: native fixture startup timeout: dyld[8388]: Library not loaded: /opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib
+  Referenced from: <08C01B68-B4C2-3C65-9E3F-168E88B062B7> /opt/homebrew/Cellar/node/25.6.1_1/bin/node
+  Reason: tried: '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file)
+
+      at nativeHostFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/seat-native-runtime-fixture.ts:117:36)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:82:23)
+(fail) NP07 real native absent original cannot produce a receipt [10344.55ms]
+112 |     publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
+113 |   `)
+114 |   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+115 |   nativeHosts.push(child)
+116 |   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+117 |   if(!existsSync(report))throw new Error('native fixture startup timeout: '+readFileSync(join(home,'native-host.err'),'utf8'))
+                                         ^
+error: native fixture startup timeout: dyld[8807]: Library not loaded: /opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib
+  Referenced from: <08C01B68-B4C2-3C65-9E3F-168E88B062B7> /opt/homebrew/Cellar/node/25.6.1_1/bin/node
+  Reason: tried: '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/opt/simdjson/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file), '/opt/homebrew/Cellar/simdjson/4.6.11/lib/libsimdjson.30.dylib' (no such file)
+
+      at nativeHostFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/seat-native-runtime-fixture.ts:117:36)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:82:23)
+(fail) NP07 real native pending original cannot produce a receipt [10329.12ms]
+
+tests/contract/test_runtime_nonpersist_authority.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_715f583a040f44c8ab3360c4195d3d5b","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease [2827.96ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_2343f615819b4acbabe81fcb6a032a08","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP03 lease-write failure rolls back the new logical anchor; only the owned socket remains [1488.69ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_f4c4b98551684958aba6e013539c9c6c","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 fence replacement during observation and holder change after SQL both deny endpoint resolution [1698.70ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_3c6ba6e7f5b74381a921607151f1ceb4","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 SQL-time expiry advances during a transaction and delayed renewal has no effect [1868.05ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.28ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.10ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof [0.10ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.28ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.38ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.23ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1122.16ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [911.93ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.10ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [2.06ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.31ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.10ms]
+
+tests/contract/test_runtime_nonpersist_cleanup.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_7813c36644da4539a8812c1edc239a31","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/08 cleanup denies unknown work, changed PID start, active lease and DB failure before any kill [1778.94ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_03059877f5424d969ce19171f4e3f8c0","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/08 cleanup plan binds process start; expired holder stops exactly once without physical persistence [1799.86ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_46b0b83914984ae191adbb04ac946614","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP08 orphan kill-only and observation timeout never authorize an unbound process [1095.35ms]
+
+ 19 pass
+ 3 fail
+ 97 expect() calls
+Ran 22 tests across 4 files. [45.76s]
