@@ -24,6 +24,12 @@ at baseline `9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`; current source/tests are
 in progress and NP12 application remains unperformed. Neither design adoption nor
 this source branch grants live migration, merge, release, restart or queue effects.
 
+The independent executor's [current handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755777052)
+(body SHA256 `8b135ba67e36071b94c834e02f5b78e9d7c8b298936163c155b33af520c778a4`)
+replaces the former Work-only maker restriction. Current implementation details
+and remaining coverage are recorded in the dependent continuity spec and its
+verification packet; local fixture success is not TRIAL_READY.
+
 After applicable design disposition and cutover, previous physical-runtime
 persistence/DB liveness clauses in this document and dependent specs describe
 legacy behavior only; they cannot authorize physical snapshots or fallback to

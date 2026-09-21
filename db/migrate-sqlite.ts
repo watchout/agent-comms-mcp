@@ -1091,6 +1091,7 @@ export const runtimeObservationGuardContract = {
     }
   },
   "runtime_memory_ready_evidence": {
+    "values": {"source": "identifier", "failure_reason": "identifier", "evidence_log_id": "identifier", "checkout_commit_sha": "sha1"},
     "physical": [
       "session_name",
       "port",
@@ -1347,6 +1348,13 @@ export function applyRuntimeObservationNonpersistenceSqlite(db: Database): void 
         for(const [column,spec] of Object.entries(contract.json))if(exists(table,column)) {
           const strict=jsonViolation(column,'NEW',old,spec)
           bad.push(table==='control_plane_leases' && column==='metadata' ? `(CASE WHEN NEW.lease_scope_type='runtime_instance' AND NEW.lease_purpose='worker' THEN ${strict} ELSE ${jsonViolation(column,'NEW',old,'logical')} END)` : strict)
+        }
+        for(const [column,kind] of Object.entries(contract.values??{})) if(exists(table,column)) {
+          const value=`NEW.${ident(column)}`
+          const valid=kind==='sha1'
+            ? `(length(${value})=40 AND ${value} NOT GLOB '*[^0-9a-f]*')`
+            : `(length(${value}) BETWEEN 1 AND 200 AND substr(${value},1,1) GLOB '[A-Za-z0-9]' AND ${value} NOT GLOB '*[^A-Za-z0-9_.:-]*')`
+          bad.push(`(${value} IS NOT NULL ${op==='UPDATE'?`AND ${value} IS NOT OLD.${ident(column)}`:''} AND (typeof(${value})<>'text' OR NOT ${valid}))`)
         }
         for(const [event,shapes] of Object.entries(contract.events??{}) as Array<[string,any]>) {
           for(const [column,spec] of Object.entries(shapes))if(exists(table,column))bad.push(`(NEW.event_type=${quote(event)} AND ${jsonViolation(column,'NEW',old,spec)})`)

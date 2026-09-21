@@ -15,7 +15,7 @@ function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!
 export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
  const root=process.env.AUN_NP_FIXTURE_ROOT
  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
- if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+ if(!root||!raw||!/^\/private\/tmp\/aun-(?:np-db|independent-pg)-[A-Za-z0-9_-]+$/.test(realpathSync(root)))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
  const url=new URL(raw)
  if(url.username!=='fixture'||url.password||url.hostname!=='localhost'||realpathSync(url.searchParams.get('host')??'')!==join(realpathSync(root),'socket'))throw Error('PRIVATE_SOCKET_FIXTURE_ONLY')
  const name='np_'+randomUUID().replaceAll('-','')

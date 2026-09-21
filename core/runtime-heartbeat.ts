@@ -1,3 +1,4 @@
+import { authorityAcquiredAfterStart } from './process-start-time'
 import { durableRuntimeMetadata } from './runtime-durable-data'
 import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
@@ -67,6 +68,7 @@ export type RuntimeHeartbeatResult = {
   connector_rows_updated: number
   connector_rows_upserted: number
   endpoint_lease_id: string | null
+  endpoint_lease_fencing_token: number
   endpoint_lease_expires_at: string | Date | null
   endpoint_lease_heartbeat_at: string | Date | null
   memory_ready_identity: RuntimeMemoryReadyIdentityReconcileResult | null
@@ -74,6 +76,8 @@ export type RuntimeHeartbeatResult = {
 }
 
 export type RuntimeHeartbeatOptions = {
+  /** Logical authority receipt retained only by the process that acquired it. */
+  lease?: { leaseId: string; fencingToken: number }
   inspect?: HostRuntimeInspector
   reconcileMemoryReadyIdentity?: typeof reconcileRuntimeMemoryReadyIdentity
 }
@@ -92,6 +96,7 @@ type RuntimeConnectorHeartbeatResult = {
 }
 
 type EndpointLeaseHeartbeatResult = {
+  fencingToken: number
   leaseId: string
   expiresAt: string | Date | null
   heartbeatAt: string | Date | null
@@ -244,9 +249,11 @@ async function heartbeatRuntimeEndpointLease(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
   holderConnectorInstanceId: string | null,
+  expectedLease?: RuntimeHeartbeatOptions['lease'],
+  processStartedAt?: string,
 ): Promise<EndpointLeaseHeartbeatResult | null> {
   const ttlMs = runtimeEndpointLeaseTtlMs()
-  const clock = await db.query('SELECT CURRENT_TIMESTAMP AS database_now')
+  const clock = await db.query('SELECT clock_timestamp() AS database_now')
   const now = new Date(clock.rows[0]?.database_now)
   if (!Number.isFinite(now.getTime())) throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
   const heartbeatAt = dbTimestamp(now)
@@ -254,7 +261,7 @@ async function heartbeatRuntimeEndpointLease(
   const metadata = JSON.stringify(durableRuntimeMetadata())
 
   const current = await db.query(
-    `SELECT lease_id, fencing_token, expires_at, holder_agent_id, holder_runtime_instance_id, metadata
+    `SELECT lease_id, fencing_token, expires_at, acquired_at, holder_agent_id, holder_runtime_instance_id, metadata
        FROM control_plane_leases
       WHERE lease_scope_type = 'runtime_instance'
         AND lease_scope_id = $1
@@ -265,6 +272,11 @@ async function heartbeatRuntimeEndpointLease(
     [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE],
   )
   const active = current.rows[0]
+  if (expectedLease) {
+    if (!active || String(active.lease_id) !== expectedLease.leaseId
+      || Number(active.fencing_token) !== expectedLease.fencingToken) throw new Error('RUNTIME_ENDPOINT_FENCE_CHANGED')
+    if(!processStartedAt || !authorityAcquiredAfterStart(active.acquired_at,processStartedAt))throw new Error('RUNTIME_ENDPOINT_INCARNATION_CHANGED')
+  } else if (active) throw new Error('RUNTIME_UUID_ALREADY_REGISTERED')
 
   if (active && ((active.holder_agent_id && active.holder_agent_id !== input.agentId)
     || (active.holder_runtime_instance_id && String(active.holder_runtime_instance_id) !== input.runtimeInstanceId))) {
@@ -286,8 +298,8 @@ async function heartbeatRuntimeEndpointLease(
           AND holder_agent_id = $3
           AND holder_runtime_instance_id = $4
           AND status = 'active'
-          AND expires_at > CURRENT_TIMESTAMP
-          AND $7 > CURRENT_TIMESTAMP
+          AND expires_at > clock_timestamp()
+          AND $7 > clock_timestamp()
         RETURNING lease_id, heartbeat_at, expires_at`,
       [
         active.lease_id,
@@ -302,7 +314,7 @@ async function heartbeatRuntimeEndpointLease(
     )
     const row = updated.rows[0]
     return row
-      ? { leaseId: String(row.lease_id), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
+      ? { leaseId: String(row.lease_id), fencingToken: Number(active.fencing_token), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
       : null
   }
 
@@ -315,7 +327,7 @@ async function heartbeatRuntimeEndpointLease(
           AND lease_scope_id = $1
           AND lease_purpose = $2
           AND status = 'active'
-          AND expires_at <= CURRENT_TIMESTAMP`,
+          AND expires_at <= clock_timestamp()`,
       [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE, heartbeatAt],
     )
     throw new Error('RUNTIME_ENDPOINT_LEASE_EXPIRED')
@@ -356,7 +368,7 @@ async function heartbeatRuntimeEndpointLease(
   )
   const row = inserted.rows[0]
   return row
-    ? { leaseId: String(row.lease_id), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
+    ? { leaseId: String(row.lease_id), fencingToken, expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
     : null
 }
 
@@ -443,39 +455,47 @@ export async function heartbeatRuntimeInstance(
   const workspaceId=binding.rows[0]?.workspace_id ?? input.workspaceId ?? null
   const confirm=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
   if(confirm.reasonCode!=='OBSERVED' || confirm.observations.length!==1 || !sameHostRuntime(held[0],confirm.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
-  const runtime=await db.query(`INSERT INTO agent_runtime_instances
-    (runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
-    VALUES ($1,$2,$3,$4,NULL,NULL,NULL,$5::jsonb)
-    ON CONFLICT (runtime_instance_id) DO UPDATE SET runtime_instance_id = EXCLUDED.runtime_instance_id
-    WHERE agent_runtime_instances.agent_id = EXCLUDED.agent_id
-      AND agent_runtime_instances.runtime_kind = EXCLUDED.runtime_kind
-    RETURNING runtime_instance_id,agent_id`,
-    [input.runtimeInstanceId,input.agentId,workspaceId,input.runtimeKind ?? 'local_process',JSON.stringify(durableRuntimeMetadata(input.metadata))])
-  if(!runtime.rows[0]) throw new Error('RUNTIME_INSTANCE_HOLDER_MISMATCH')
+  await db.query('BEGIN')
+  let endpointLease: EndpointLeaseHeartbeatResult | null = null
+  try {
+    const runtime=options.lease
+      ? await db.query(`SELECT runtime_instance_id,agent_id FROM agent_runtime_instances
+          WHERE runtime_instance_id=$1 AND agent_id=$2 AND runtime_kind=$3`,
+          [input.runtimeInstanceId,input.agentId,input.runtimeKind ?? 'local_process'])
+      : await db.query(`INSERT INTO agent_runtime_instances
+          (runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
+          VALUES ($1,$2,$3,$4,NULL,NULL,NULL,$5::jsonb)
+          ON CONFLICT (runtime_instance_id) DO NOTHING
+          RETURNING runtime_instance_id,agent_id`,
+          [input.runtimeInstanceId,input.agentId,workspaceId,input.runtimeKind ?? 'local_process',JSON.stringify(durableRuntimeMetadata(input.metadata))])
+    if(runtime.rows.length!==1) throw new Error(options.lease ? 'RUNTIME_INSTANCE_HOLDER_MISMATCH' : 'RUNTIME_UUID_ALREADY_REGISTERED')
 
-  const memoryReadyIdentity = null
-  const connectorRowsUpserted = {rowCount:0,connectorInstanceId:null}
   const preLease=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
   if(preLease.reasonCode!=='OBSERVED' || preLease.observations.length!==1 || !sameHostRuntime(held[0],preLease.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
-  const endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null)
+  endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null,options.lease,held[0].process_started_at)
   if(!endpointLease) throw new Error('RUNTIME_ENDPOINT_LEASE_UNCONFIRMED')
+  await db.query('COMMIT')
+  } catch (error) {
+    await db.query('ROLLBACK').catch(()=>{})
+    throw error
+  }
 
   const after=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
   if(after.reasonCode!=='OBSERVED' || after.observations.length!==1 || !sameHostRuntime(held[0],after.observations[0])) throw new Error('RUNTIME_POST_COMMIT_HOLDER_CHANGED')
-  const row = runtime.rows[0]
   return {
     ok: true,
-    runtime_instance_id: String(row?.runtime_instance_id ?? effectiveInput.runtimeInstanceId),
-    agent_id: String(row?.agent_id ?? effectiveInput.agentId),
+    runtime_instance_id: input.runtimeInstanceId,
+    agent_id: input.agentId,
     workspace_id: workspaceId,
     status: 'observed',
     last_seen_at: held[0].observed_at,
     connector_rows_updated: 0,
-    connector_rows_upserted: connectorRowsUpserted.rowCount,
+    connector_rows_upserted: 0,
     endpoint_lease_id: endpointLease?.leaseId ?? null,
+    endpoint_lease_fencing_token: endpointLease!.fencingToken,
     endpoint_lease_expires_at: endpointLease?.expiresAt ?? null,
     endpoint_lease_heartbeat_at: endpointLease?.heartbeatAt ?? null,
-    memory_ready_identity: memoryReadyIdentity,
+    memory_ready_identity: null,
     registration_metadata_provenance: registration.provenance,
   }
 }

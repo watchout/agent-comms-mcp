@@ -1,3 +1,4 @@
+import { readDarwinProcessStart } from './process-start-time'
 import { execFileSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { hostname } from 'node:os'
@@ -21,10 +22,12 @@ export type HostRuntimeIo = {
   monotonic(): number
   wall(): number
   host(): string
+  processStart?: (pid:number)=>string
 }
 const io: HostRuntimeIo = {
   run: (command, args, timeout) => execFileSync(command, args, {encoding:'utf8', timeout, maxBuffer:16*1024*1024,
     stdio:['ignore','pipe','ignore'], env:{PATH:process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin',LANG:'C',TZ:'UTC',LC_ALL:'C'}}),
+  processStart: process.platform==='darwin'?readDarwinProcessStart:undefined,
   canonical: realpathSync, monotonic: () => performance.now(), wall: Date.now, host: hostname,
 }
 function field(command: string, key: string): string | null {
@@ -61,7 +64,8 @@ export function createHostRuntimeObserver(adapter: HostRuntimeIo = io): HostRunt
         if(field(env,'AGENT_COM_EXPECTED_AGENT_ID')!==input.agentId) return fail('SEAT_IDENTITY_MISMATCH')
         const declared=field(env,'AGENT_COM_WORKSPACE'), session=field(env,'AGENT_COM_RUNTIME_SESSION')
         if(!declared || !session) return fail('RUNTIME_IDENTITY_INCOMPLETE')
-        const before=start(run('ps',['-p',String(candidate.pid),'-o','lstart=']))
+        const processStart=()=>adapter.processStart?.(candidate.pid) ?? start(run('ps',['-p',String(candidate.pid),'-o','lstart=']))
+        const before=processStart()
         const cwd=run('lsof',['-a','-p',String(candidate.pid),'-d','cwd','-Fn']).split('\n').find(l=>l.startsWith('n'))?.slice(1)
         if(!cwd || adapter.canonical(cwd)!==adapter.canonical(declared)
           || (input.logicalWorkspace && adapter.canonical(cwd)!==adapter.canonical(input.logicalWorkspace))) return fail('WORKSPACE_MISMATCH')
@@ -79,7 +83,7 @@ export function createHostRuntimeObserver(adapter: HostRuntimeIo = io): HostRunt
           .split('\n').filter(l=>l.startsWith('n')).map(l=>l.slice(1))
         const ports=[...new Set(listeners.map(v=>/^127\.0\.0\.1:(\d+)$/.exec(v)?.[1]).filter(Boolean).map(Number))]
         if(ports.length!==1 || listeners.some(v=>!/^127\.0\.0\.1:\d+$/.test(v))) return fail('SOCKET_OWNER_AMBIGUOUS')
-        if(start(run('ps',['-p',String(candidate.pid),'-o','lstart=']))!==before
+        if(processStart()!==before
           || start(run('ps',['-p',String(process.pid),'-o','lstart=']))!==providerStart
           || run('ps',['eww','-p',String(candidate.pid),'-o','command='])!==env) return fail('PROCESS_IDENTITY_CHANGED')
         const observed=adapter.wall(); if(observed<wall || adapter.monotonic()>=deadline) return fail('HOST_OBSERVATION_DEADLINE')

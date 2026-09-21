@@ -1,4 +1,5 @@
-import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
+import { authorityAcquiredAfterStart } from './process-start-time'
+import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { realpathSync, statSync } from 'node:fs'
@@ -29,6 +30,7 @@ export type SeatProviderSelection = {
   provider: SeatProvider | null
   code: 'SELECTED_LIVE' | 'SELECTED_INTENT' | 'SELECTED_HISTORY' | 'PROVIDER_MISSING' | 'PROVIDER_AMBIGUOUS' | 'PROVIDER_UNSUPPORTED'
   observation: SeatProviderObservation | null
+  authority?: {leaseId:string;fencingToken:number}
 }
 export function normalizeSeatProvider(value: unknown): SeatProvider | null {
   const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -169,8 +171,8 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
   const unavailable = (): SeatProviderSelection => ({ok:false,provider:null,observation:null,code:'PROVIDER_MISSING'})
   // DB contributes logical identity/authority only. A DB failure never becomes a cold launch.
   const authoritySql=`SELECT r.runtime_instance_id, r.agent_id, r.runtime_kind,
-      l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token,
-      CASE WHEN l.status = 'active' AND l.expires_at > CURRENT_TIMESTAMP THEN 1 ELSE 0 END AS authority_live
+      l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token, l.lease_id, l.acquired_at,
+      CASE WHEN l.status = 'active' AND l.expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
       FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
       ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
         AND l.lease_purpose = 'worker' AND l.status = 'active'
@@ -185,7 +187,8 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
     const matches=anchors.filter(row=>String(row.runtime_instance_id)===observation.runtime_instance_id
       && row.agent_id===input.agentId && row.holder_agent_id===input.agentId
       && String(row.holder_runtime_instance_id)===observation.runtime_instance_id
-      && Number(row.authority_live)===1 && Number(row.fencing_token)>0)
+      && Number(row.authority_live)===1 && Number(row.fencing_token)>0
+      && authorityAcquiredAfterStart(row.acquired_at,observation.process_started_at))
     if(matches.length!==1) return unavailable()
     live.push(observation)
   }
@@ -195,10 +198,17 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
       const before=anchors.find(row=>String(row.runtime_instance_id)===o.runtime_instance_id)
       if(after.filter((row:any)=>String(row.runtime_instance_id)===o.runtime_instance_id && row.agent_id===input.agentId
         && row.holder_agent_id===input.agentId && String(row.holder_runtime_instance_id)===o.runtime_instance_id
-        && Number(row.authority_live)===1 && Number(row.fencing_token)===Number(before?.fencing_token)).length!==1) return unavailable()
+        && Number(row.authority_live)===1 && String(row.lease_id)===String(before?.lease_id)
+        && Number(row.fencing_token)===Number(before?.fencing_token)).length!==1) return unavailable()
     }
   }catch{return unavailable()}
-  return selectSeatProvider({...input,live,history:[],allowHistory:false,now:new Date()})
+  const final=(input.inspect ?? inspectHostRuntime)({agentId:input.agentId,expectedHost:input.hostId})
+  if(final.reasonCode!==observed.reasonCode || final.observations.length!==observed.observations.length
+    || observed.observations.some(o=>!final.observations.some(next=>sameHostRuntime(o,next)))) return unavailable()
+  const selected=selectSeatProvider({...input,live,history:[],allowHistory:false,now:new Date()})
+  if(!selected.ok || !selected.observation)return selected
+  const grant=anchors.find(row=>String(row.runtime_instance_id)===selected.observation!.runtime_instance_id)
+  return {...selected,authority:{leaseId:String(grant.lease_id),fencingToken:Number(grant.fencing_token)}}
 }
 
 /** Verify the target host's connected memory child, not a repaired private lookup child. */

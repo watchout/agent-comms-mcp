@@ -530,7 +530,16 @@ export async function recordRuntimeMemoryReadyEvidence(
   db: RuntimeMemoryReadyDb,
   input: RuntimeMemoryReadyEvidenceInput,
 ): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
-  const metadata = JSON.stringify(durableMemoryMetadata(input.metadata))
+  // Machine-generated identifiers/reason codes cannot carry an observation or
+  // arbitrary exception text under an otherwise permitted column name.
+  for(const [key,value] of Object.entries({source:input.source,failure_reason:input.failure_reason,evidence_log_id:input.evidence_log_id})) {
+    if(value!=null && (typeof value!=='string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value))) throw new Error(`MEMORY_DURABLE_FIELD_INVALID:${key}`)
+  }
+  if(input.checkout_commit_sha!=null && !/^[0-9a-f]{40}$/.test(input.checkout_commit_sha))throw new Error('MEMORY_DURABLE_FIELD_INVALID:checkout_commit_sha')
+  const projected=durableMemoryMetadata(input.metadata)
+  const proof=projected.seat_context_proof as Record<string,string>|undefined
+  if(proof && (proof.agent_id!==input.agent_id || proof.project!==input.project || proof.runtime_instance_id!==input.runtime_instance_id))throw new Error('MEMORY_LOGICAL_PROOF_BINDING_MISMATCH')
+  const metadata=JSON.stringify(projected)
   const completedAt = normalizeDateIso(input.completed_at) ?? input.completed_at
   const validUntil = normalizeDateIso(input.valid_until) ?? input.valid_until
   const rows = await queryRows<{ id: string | number }>(
@@ -857,6 +866,17 @@ export async function evaluateRuntimeMemoryReadyGate(
     }
   } catch { return fail(withEvidence, 'endpoint_unavailable', { code: 'RUNTIME_ENDPOINT_READ_FAILED' }) }
 
+  // Native transport and OS reads can outlast evidence validity. Re-read the
+  // same logical proof at database wall time immediately before admission.
+  try {
+    const final=await queryRows<EvidenceRow>(db,`SELECT id,result_status,metadata,completed_at,valid_until
+      FROM runtime_memory_ready_evidence WHERE id=$1 AND agent_id=$2 AND project=$3
+        AND runtime_instance_id=$4 AND valid_until > clock_timestamp()`,
+      [evidence.id,input.agent_id,input.project,currentRuntime.runtime_instance_id])
+    if(final.length!==1)return fail(withEvidence,'expired')
+    if(final[0].result_status!==evidence.result_status || dateMs(final[0].completed_at)!==completedMs
+      || seatContextDigest(parseObject(final[0].metadata))!==seatContextDigest(parseObject(evidence.metadata)))return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_LOGICAL_PROOF_CHANGED'})
+  } catch {return fail(withEvidence,'read_error',{code:'MEMORY_FINAL_AUTHORITY_UNAVAILABLE'})}
   return pass(
     withEvidence,
     evidence.result_status === 'bypassed' ? 'bypassed' : 'ready',

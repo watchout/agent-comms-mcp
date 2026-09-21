@@ -11,6 +11,15 @@ idempotent, rollback-capable, and fail-closed. It does not enable Shirube D1, re
 the D1 kill switch, add a protected target, or perform an external-effect
 smoke.
 
+The adopted v2 non-persistence boundary is specified in
+[seat runtime continuity](../spec/seat-runtime-continuity.md). B5 uses the fresh
+endpoint's session/port and current provider ancestry, and records only logical
+sealed/ordinary native proof. The current candidate has isolated B5 evidence;
+whole B0–B8 readiness remains incomplete. Configuration's physical host-scoped
+observed/restart records are still denied by the new DB guard; an independently
+defined logical deployment scope is required before that path can be completed.
+An observed hostname or its hash is not that authority.
+
 ## Commands
 
 Plan without changing provider configuration, the database, an agent profile,

@@ -107,9 +107,9 @@ import {
   formatChannelRegistrationReconcileText,
 } from '../core/channel-registration-reconcile'
 import { getAgentDiscordUiId, getDiscordUiBindingForAgent } from '../core/ui-bindings'
+import { resolveRuntimeEndpoint } from '../core/runtime-endpoint'
 import {
   deterministicWorkspaceId,
-  heartbeatRuntimeInstance,
   inferRuntimeSessionName,
   inferWorkspaceName,
   parseRuntimePort,
@@ -5804,69 +5804,27 @@ async function status(args: string[]) {
   }
 }
 
-/**
- * `agent-com heartbeat [--agent-id <id>]` — update agents.last_seen_at + disconnected→idle (v1.0.2 §4.5 / §6.5).
- */
+/** Observe the active holder. Only the owning server renews its acquired lease. */
 async function heartbeat(args: string[]) {
   const agentId = resolveAgentId(args, 'heartbeat')
   const { flags } = parseArgs(args)
-  const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID ?? null
-  const checkoutEvidence = collectGitCheckoutEvidence(process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd())
-  const discordToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
-  const discordTokenFingerprint = discordToken.trim()
-    ? createHash('sha256').update(discordToken.trim()).digest('hex')
-    : null
+  const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID
   const db = await getDb()
   try {
-    // ARC codex audit (PR#139): spec requires disconnected→idle recovery on heartbeat.
-    await db.query(
-      `UPDATE agents SET last_seen_at = now(),
-       status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-    const runtime = runtimeInstanceId
-      ? await heartbeatRuntimeInstance(db as any, {
-          runtimeInstanceId,
-          agentId,
-          runtimeEngine: flags['runtime-engine'] ?? process.env.AGENT_COM_RUNTIME_ENGINE ?? process.env.AGENT_COM_RUNTIME ?? 'unknown',
-          runtimeKind: flags['runtime-kind'] ?? process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
-          sessionName: flags['session-name'] ?? inferRuntimeSessionName(),
-          processId: process.env.AGENT_COM_RUNTIME_PROCESS_ID ? Number.parseInt(process.env.AGENT_COM_RUNTIME_PROCESS_ID, 10) : null,
-          port: parseRuntimePort(),
-          checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
-          commitSha: process.env.AGENT_COM_COMMIT_SHA ?? null,
-          endpointUri: process.env.AGENT_COM_ENDPOINT_URI ?? null,
-          connectorProvider: discordTokenFingerprint ? 'discord' : null,
-          connectorUri: discordTokenFingerprint ? `discord://agents/${agentId}` : null,
-          connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
-          connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
-          metadata: { source: 'agent-com heartbeat', ...gitCheckoutMetadata(checkoutEvidence) },
-          connectorMetadata: discordTokenFingerprint
-            ? {
-                token_fingerprint: discordTokenFingerprint,
-                token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
-              }
-            : undefined,
-        })
-      : null
+    const result=await resolveRuntimeEndpoint(db,{agentId,runtimeInstanceId})
+    if(!result.ok || !result.endpoint) throw new Error(result.code)
     process.stdout.write(JSON.stringify({
-      ok: true,
-      agent_id: agentId,
-      last_seen_at: new Date().toISOString(),
-      runtime_instance_id: runtime?.runtime_instance_id ?? null,
-      runtime_workspace_id: runtime?.workspace_id ?? null,
-      runtime_connector_rows_upserted: runtime?.connector_rows_upserted ?? 0,
-      runtime_connector_rows_updated: runtime?.connector_rows_updated ?? 0,
-    }) + '\n')
-  } finally {
-    await db.end()
-  }
+      ok:true,agent_id:agentId,observed_at:result.endpoint.lastSeenAt,
+      runtime_instance_id:result.endpoint.runtimeInstanceId,
+      endpoint_lease_id:result.endpoint.leaseId,
+      endpoint_lease_fencing_token:result.endpoint.fencingToken,
+    })+'\n')
+  } finally { await db.end() }
 }
 
 /**
  * `agent-com daemon` — long-running polling driver for MCP-unsupported envs
- * (v1.0.2 §6.5). Runs heartbeat + poll loop, prints pending messages to
+ * (v1.0.2 §6.5). Observes holder authority and polls pending messages to
  * stdout when they arrive. Designed for tmux sessions where the operator
  * reads stdout and manually calls `next`.
  *
@@ -5881,21 +5839,10 @@ async function daemon(args: string[]) {
   console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms`)
   console.error(`[daemon] Press Ctrl+C to stop`)
 
-  // Heartbeat timer
+  // A polling CLI does not own the server's lease and cannot renew it.
   setInterval(async () => {
-    const db = await getDb()
-    try {
-      await db.query(
-        `UPDATE agents SET last_seen_at = now(),
-         status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-         WHERE agent_id = $1`,
-        [agentId],
-      )
-    } catch (err) {
-      console.error(`[daemon] heartbeat error: ${err}`)
-    } finally {
-      await db.end()
-    }
+    try { await heartbeat(['--agent-id',agentId]) }
+    catch (err) { console.error(`[daemon] holder observation error: ${err}`) }
   }, heartbeatInterval)
 
   // Poll timer

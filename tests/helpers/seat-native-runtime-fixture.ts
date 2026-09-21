@@ -133,8 +133,8 @@ export async function registerNativeFixtureRuntime(db:PgAdapter|SqliteAdapter,fi
   await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at,metadata)
     VALUES($1,$2,'local_process',NULL,NULL,NULL,$3) ON CONFLICT(runtime_instance_id) DO NOTHING`,
     [id,agent,JSON.stringify(durableRuntimeMetadata({source_commit:'a'.repeat(40)}))])
-  await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at,metadata)
-    VALUES($1,'runtime_instance',$1,'worker',$2,$1,1,'active',$3,$4) ON CONFLICT(lease_id) DO NOTHING`,
+  await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at,metadata)
+    VALUES($1,'runtime_instance',$1,'worker',$2,$1,1,'active',clock_timestamp(),$3,$4) ON CONFLICT(lease_id) DO NOTHING`,
     [id,agent,new Date(Date.now()+1800000).toISOString(),JSON.stringify(durableRuntimeMetadata())])
 
 }

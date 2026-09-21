@@ -1,5 +1,5 @@
-import type { HostRuntimeInspector } from '../core/host-runtime-observer'
 #!/usr/bin/env bun
+import type { HostRuntimeInspector } from '../core/host-runtime-observer'
 import { resolveSeatProvider } from '../core/seat-runtime-selection'
 /**
  * state-daemon entry point (Issue #323 spec v0.6 §5.3 / §6).

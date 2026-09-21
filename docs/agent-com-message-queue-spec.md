@@ -436,7 +436,7 @@ agent-com status --agent-id cto
 
 ### 4.5 agent-com heartbeat
 
-生存報告。daemon 内の setInterval で自動実行（§5.3）。CLIコマンドとしても手動実行可能。
+採択済みv2非保存方式では、現在のOS観測とlogical leaseを照合する読取りコマンド。`agents.last_seen_at/status`は更新せず、別プロセスのleaseも更新しない。lease更新は取得したserver自身が行う。旧§5.3の物理heartbeat列更新はlegacy動作。
 
 ```bash
 agent-com heartbeat --agent-id codex-auditor
@@ -446,7 +446,10 @@ agent-com heartbeat --agent-id codex-auditor
 {
   "ok": true,
   "agent_id": "codex-auditor",
-  "last_seen_at": "2026-04-08T15:00:00Z"
+  "observed_at": "2026-09-21T06:00:00Z",
+  "runtime_instance_id": "10000000-0000-4000-8000-000000000001",
+  "endpoint_lease_id": "20000000-0000-4000-8000-000000000002",
+  "endpoint_lease_fencing_token": 1
 }
 ```
 
@@ -997,7 +1000,6 @@ async function notifySenderOfDeliveryStatus(
     await db.insertQueue(senderId, null, JSON.stringify({
       author_id: "system",
       content: `⏳ ${targetId} はタスク処理中` +
-        (target.status_detail ? `（${target.status_detail}）` : "") +
         (elapsed ? `、${elapsed}秒経過` : "") +
         `。キューに入りました（待ち${pending}件）。処理完了後に配信されます。`,
       message_type: "system_info",

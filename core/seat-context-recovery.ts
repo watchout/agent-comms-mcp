@@ -326,7 +326,8 @@ export async function readNativeSeatContextReceipt(input: SeatContextRecoveryInp
         runtime_instance_id: input.runtimeInstanceId, target_runtime: input.targetRuntime, pack_id: native.pack_ref,
         response_digest: seatContextDigest(native), work_digest: native.work_sha256, invocation_digest: native.input_sha256,
         transport_binding_digest: seatContextDigest({ command: transport.command, args: transport.args, agent_id: input.agentId, project: input.project }),
-        completed_at: new Date().toISOString(), native_delivery: native,
+        // Completion belongs to the original delivery, not this later read.
+        completed_at: new Date(native.delivered_at).toISOString(), native_delivery: native,
         consumption: { runtime_instance_id: input.runtimeInstanceId, invocation_digest: native.input_sha256, consumer: 'native-session-start:stored-pipe-receipt' },
       }
     })(), new Promise<never>((_, reject) => { timer = setTimeout(() => { void close(); reject(new SeatContextRecoveryError('MEMORY_RECOVERY_TIMEOUT')) }, Math.min(input.timeoutMs ?? 10_000, 30_000)) })])

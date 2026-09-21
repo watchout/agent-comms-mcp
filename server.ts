@@ -334,7 +334,14 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
   return resolvedDiscordBotToken
 }
 
-async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+let runtimeLeaseReceipt: {leaseId:string;fencingToken:number} | undefined
+let runtimeHeartbeatPending: Promise<void> | null = null
+function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  // Concurrent lifecycle callbacks share one acquisition/renewal operation.
+  if(!runtimeHeartbeatPending) runtimeHeartbeatPending=performRuntimeHeartbeat(client).finally(()=>{runtimeHeartbeatPending=null})
+  return runtimeHeartbeatPending
+}
+async function performRuntimeHeartbeat(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
   if (RUNTIME_HEARTBEAT_DISABLED) return
 
   await ensureDiscordBotToken(client)
@@ -346,7 +353,12 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
   const hasDiscordConnectorEvidence = Boolean(
     discordTokenFingerprint && runtimeSessionName && runtimePort > 0,
   )
-  const heartbeat = await bridgeEndpoint.publish(() => heartbeatRuntimeInstance(client, {
+  // BEGIN/COMMIT must not encompass unrelated operations on the server's
+  // shared connection. This connection belongs only to this authority change.
+  const authorityClient=new Client({connectionString:config.database_url,connectionTimeoutMillis:3000,statement_timeout:5000,query_timeout:10000})
+  try {
+  await authorityClient.connect()
+  const heartbeat = await bridgeEndpoint.publish(() => heartbeatRuntimeInstance(authorityClient, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
     runtimeEngine: config.agent.runtime,
@@ -375,8 +387,10 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
           token_source: resolvedDiscordBotTokenSource,
         }
       : undefined,
-  }))
+  }, {lease:runtimeLeaseReceipt}))
   if (!heartbeat.endpoint_lease_id) { bridgeEndpoint.server.stop(true); throw new Error('RUNTIME_ENDPOINT_LEASE_MISSING') }
+  runtimeLeaseReceipt={leaseId:heartbeat.endpoint_lease_id,fencingToken:heartbeat.endpoint_lease_fencing_token}
+  } finally {await authorityClient.end().catch(()=>{})}
 }
 
 // --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
@@ -1252,7 +1266,7 @@ async function registerAgent(): Promise<void> {
     const c = await tryGetDb()
     if (c) {
       await heartbeatAgentStatus(c, AGENT_ID).catch(() => {})
-      await heartbeatRuntimeEvidence(c)
+      await heartbeatRuntimeEvidence(c).catch(()=>{process.stderr.write('agent-comms: runtime authority renewal unavailable\n')})
     }
   }, 5 * 60 * 1000)
 
@@ -1310,7 +1324,7 @@ async function unregisterAgent(): Promise<void> {
   stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
-    await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid})
+    await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid, lease:runtimeLeaseReceipt})
     const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
       agentId: AGENT_ID,
       runtimeInstanceId: RUNTIME_INSTANCE_ID,

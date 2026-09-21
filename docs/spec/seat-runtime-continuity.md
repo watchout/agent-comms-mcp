@@ -178,6 +178,36 @@ logical namespace. New anchors and lease acquisition use the existing atomic,
 fenced path after socket bind. UUID publication before exec is identity supply,
 not lease acquisition or permission to process work.
 
+The acquisition and renewal boundary now uses an explicit process-held logical
+receipt (`lease_id`, `fencing_token`). A new process inserts its UUID anchor and
+acquires the lease in one transaction; an existing UUID is not an upsert target.
+Only the acquiring server renews/releases that receipt. Its transaction uses a
+dedicated connection and concurrent lifecycle callbacks share one in-flight
+operation. The standalone `agent-com heartbeat` command observes current
+endpoint authority; it does not renew another process's lease or update profile
+liveness columns. All expiry conditions use advancing database wall time, not
+PostgreSQL's transaction-start `CURRENT_TIMESTAMP`.
+
+On 64-bit macOS, the MCP process start is read afresh with `proc_pidinfo`, including
+microseconds; `ps lstart` seconds alone cannot distinguish a same-second UUID
+replay. Missing kernel evidence denies observation. A grant rounded to
+milliseconds cannot establish ownership of a later sub-millisecond start.
+Other platforms' existing process-start observation precision remains an
+unaccepted coverage gap; the macOS fixture is not a portability certificate.
+
+Cleanup's transient plan binds the entire observed holder identity (excluding the
+sampling timestamp). Before an effect it checks the same holder, zero active or
+unknown work, and zero active endpoint leases. It terminates only that process;
+logical anchors/history remain. Unproven tmux-session/orphan ownership produces
+no effect. Audit stores logical action kinds and IDs only.
+
+Native readiness preserves the original delivery's completion timestamp. It
+re-reads native input and then rechecks the exact logical evidence at database
+wall time before admission. The logical proof serializer validates identity,
+UUID, pack reference, digests and completion time; machine source/reason/log IDs
+cannot carry a raw exception or path. Operator-authored reason text and every
+existing bypass scope constraint remain unchanged.
+
 A new versioned migration must reconcile both database schemas and guarded
 serializers. Existing source schemas already allow most physical columns NULL,
 but `runtime_engine`/`status` defaults and SQLite `started_at NOT NULL DEFAULT`
@@ -209,7 +239,7 @@ All readers and writers change in the same compatible release:
 | `bin/aun/bootstrap.ts`, `bin/aun/start.ts`, `bin/aun/run-queue-work.ts`, `scripts/restart-bot.sh`, `scripts/sync-mcp-config.sh` | Supply pre-exec UUID/explicit intent at existing launch boundaries; all callers share observer/selector; no local fixed seat/path/port contract | NP04/05/06 |
 | `db/migrate.ts`, `db/migrate-sqlite.ts`, new versioned migrations; every affected DB serializer | Logical anchors and optional physical fields, FK-preserving cutover, positive durable allowlists, legacy/mixed-writer guards | NP01/02/10/11 |
 
-The table is implemented under the exact 2026-09-21 handoff above, with the DB and bootstrap work split into named isolated branches. It does not imply that all paths or assertions are complete. The final evidence matrix records code coverage, actual test results and gaps separately. Current claim authority remains necessary even when host observation
+The table is being implemented by the independent `codex-aun` executor under [handoff 5755777052](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755777052) (body SHA256 `8b135ba67e36071b94c834e02f5b78e9d7c8b298936163c155b33af520c778a4`). The former subagents stopped; no additional bootstrap commit is pending. It does not imply that all paths or assertions are complete. The final evidence matrix records code coverage, actual test results and gaps separately. Current claim authority remains necessary even when host observation
 succeeds. Renewal is scoped to exact work/holder/fence and fresh same-holder proof,
 never a bulk inference from `agents.status`; observing a replacement does not
 renew, clear or inherit its predecessor's claim. E7 shared slots, deferral metrics,

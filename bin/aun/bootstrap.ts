@@ -620,8 +620,9 @@ async function withBootstrapDb<T>(
 ): Promise<T> {
   const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
   const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
+  if(postgres && !env.DATABASE_URL?.trim())throw new Error('BOOTSTRAP_DATABASE_URL_REQUIRED')
   const db: DbAdapter = postgres
-    ? new PgAdapter(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp')
+    ? new PgAdapter(env.DATABASE_URL)
     : new SqliteAdapter(env.AGENT_COM_SQLITE_PATH, options.readonly ? { readonly: true, create: false } : {})
   try {
     return await fn(db)
@@ -681,6 +682,7 @@ async function resolveProviderRootAuthority(input: {
   repoRoot: string
   run?: BootstrapAdapterCommandRunner
   observeProvider?: typeof observeSeatProvider
+  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
 }): Promise<{
   ok: true
   authority: ProviderRootAuthority | null
@@ -979,7 +981,7 @@ function expectedRuntimeReceiptTuple(
   env: Record<string, string>,
   profile: any,
 ): RuntimeReceiptTuple | null {
-  const sessionName = String(env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session || '').trim()
+  const sessionName = String(env.AUN_BOOTSTRAP_RUNTIME_SESSION || env.AUN_BOOTSTRAP_TMUX_SESSION || '').trim()
   const port = Number(env.AUN_BOOTSTRAP_ACTUAL_PORT)
   const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
   const runtime = context.resolvedRuntime
@@ -1015,7 +1017,8 @@ type RuntimeReceiptDecision = {
 async function observedBootstrapRuntimeRows(db:DbAdapter,agentId:string):Promise<any[]> {
   const anchors=await db.query<any>(`SELECT runtime_instance_id,agent_id,runtime_kind,metadata FROM agent_runtime_instances WHERE agent_id=$1`,[agentId])
   const fresh=inspectHostRuntime({agentId})
-  if(fresh.reasonCode!=='OBSERVED')return []
+  if(fresh.reasonCode==='NO_LIVE_RUNTIME')return []
+  if(fresh.reasonCode!=='OBSERVED')throw new Error('BOOTSTRAP_RUNTIME_OBSERVATION_UNAVAILABLE')
   const rows:any[]=[]
   for(const anchor of anchors) {
     const metadata=parseJsonRecord(anchor.metadata)
@@ -2101,9 +2104,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     let failureDiscriminator = 'runtime_receipt_input_invalid'
     try {
       const profile = await profileGet(context.agentId)
-      const sessionName = env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session
       const endpoint = await withBootstrapDb(env, db => resolveRuntimeEndpoint(db, {agentId:context.agentId}), {readonly:true})
-      const port = endpoint.endpoint?.port ?? 0
+      if(!endpoint.ok || !endpoint.endpoint)throw new Error('BOOTSTRAP_RUNTIME_ENDPOINT_UNAVAILABLE')
+      const sessionName=endpoint.endpoint.sessionName
+      if(env.AUN_BOOTSTRAP_TMUX_SESSION && env.AUN_BOOTSTRAP_TMUX_SESSION!==sessionName)throw new Error('BOOTSTRAP_RUNTIME_SESSION_MISMATCH')
+      if(sessionName)env.AUN_BOOTSTRAP_RUNTIME_SESSION=sessionName
+      const port = endpoint.endpoint.port
       if (port) env.AUN_BOOTSTRAP_ACTUAL_PORT = String(port)
       const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
       if (!profile || !sessionName || !Number.isInteger(port) || port <= 0
@@ -2239,7 +2245,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
         const recorded = await recordRuntimeMemoryReadyEvidence(db as any, evidence)
         await recordVerifiedNativeRuntimeMemoryReady(db as any,{agentId:context.agentId,project,
-          runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,receipt:ordinaryReceipt,observeProvider:options.observeProvider})
+          runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,receipt:ordinaryReceipt,observeProvider:options.observeProvider,readNativeProof:options.readNativeProof})
         const storedEvidence = await db.queryOne<any>(
           'SELECT valid_until FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
           [recorded.evidence_id, runtime.id],
@@ -2250,6 +2256,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             agent_id: context.agentId,
             expected_agent_id: context.agentId,
             project,
+            readNativeProof:options.readNativeProof,
           },
           { runtimeInstanceId: runtime.id, evidenceId: recorded.evidence_id },
           runtimeTuple,

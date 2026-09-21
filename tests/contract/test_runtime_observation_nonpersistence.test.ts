@@ -14,7 +14,7 @@ function observation(overrides:Partial<HostRuntimeObservation>={}):HostRuntimeOb
   observed_at:new Date().toISOString(),source:'process_ancestry',verified:true,...overrides}}
 const inspect=()=>({reasonCode:'OBSERVED',observations:[observation()]})
 function authority(overrides:Record<string,unknown>={}) {return {runtime_instance_id:id,agent_id:'seat',runtime_kind:'local_process',
-  holder_agent_id:'seat',holder_runtime_instance_id:id,authority_live:1,lease_id:'lease',fencing_token:1,...overrides}}
+  holder_agent_id:'seat',holder_runtime_instance_id:id,authority_live:1,lease_id:'lease',fencing_token:1,acquired_at:new Date().toISOString(),...overrides}}
 describe('NP implementation: observation and durable boundaries',()=>{
   test('NP05: a tempting same-seat history never supplies cold intent',()=>{
     const history=[observation()]
@@ -32,6 +32,14 @@ describe('NP implementation: observation and durable boundaries',()=>{
     expect(memory).toEqual({schema_version:'aun-runtime-nonpersistence/v1',seat_context_proof:{agent_id:'seat',project:'project',runtime_instance_id:id,
       pack_id:'restart_pack:seat:project:1',work_digest:'b'.repeat(64),invocation_digest:'c'.repeat(64),completed_at:'2026-09-21T00:00:00Z'}})
     expect(input.seat_context_receipt.native_delivery.port).toBe(32100)
+  })
+  test('NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof',()=>{
+    const good={agent_id:'seat',project:'project',runtime_instance_id:id,pack_id:'restart_pack:seat:project:1',work_digest:'a'.repeat(64),invocation_digest:'b'.repeat(64),completed_at:'2026-09-21T00:00:00Z'}
+    for(const key of ['work_digest','invocation_digest','runtime_instance_id','pack_id','completed_at']) {
+      expect(()=>durableMemoryMetadata({seat_context_receipt:{...good,[key]:'/observed/process/path'}})).toThrow('MEMORY_LOGICAL_PROOF_INVALID')
+    }
+    expect(()=>durableRuntimeMetadata({source_commit:'/observed/process/path'})).toThrow('RUNTIME_LOGICAL_METADATA_INVALID')
+    expect(()=>durableRuntimeMetadata({mcp_runtime_instance_id:'-'.repeat(36)})).toThrow('RUNTIME_LOGICAL_METADATA_INVALID')
   })
   test('NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields',async()=>{
     const calls:string[]=[]
@@ -54,7 +62,7 @@ describe('NP implementation: observation and durable boundaries',()=>{
   test('NP01: actual heartbeat SQL and parameters contain only anchor and authority data',async()=>{
     const calls:Array<{sql:string;params:unknown[]}>=[]
     const db={async query(sql:string,params:unknown[]=[]){calls.push({sql,params})
-      if(sql.includes('CURRENT_TIMESTAMP AS database_now')) return {rows:[{database_now:new Date().toISOString()}]}
+      if(sql.includes('clock_timestamp() AS database_now')) return {rows:[{database_now:new Date().toISOString()}]}
       if(sql.includes('FROM agents'))return {rows:[{org_id:'default',metadata:{}}]}
       if(sql.includes('INSERT INTO agent_runtime_instances'))return {rows:[{runtime_instance_id:id,agent_id:'seat'}]}
       if(sql.includes('MAX(fencing_token)'))return {rows:[{max_token:0}]}

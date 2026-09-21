@@ -1,3 +1,5 @@
+import { type HostRuntimeInspector, type HostRuntimeObservation } from './host-runtime-observer'
+import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './git-checkout-evidence'
 import { resolveSeatProvider, selectObservedProvider } from './seat-runtime-selection'
 import type { DbAdapter } from './db'
 import {
@@ -53,6 +55,7 @@ import type { V2NativeMeshFrozenAgentV1 } from './eventlog/v2-native-ingress'
 type RuntimeFreshness = 'fresh' | 'stale' | 'missing_heartbeat' | 'stopped' | 'unknown'
 
 type RuntimeInventoryOptions = {
+  inspect?: HostRuntimeInspector
   staleMinutes?: number
   expectedCommit?: string | null
   approvedCheckoutRoots?: string[] | null
@@ -531,6 +534,7 @@ function runtimeWarningsForDrift(
 }
 
 function blockerFromWarning(agentId: string, warning: string): string | null {
+  if (warning === 'runtime_observation_unavailable') return `${agentId}:runtime_observation_unavailable`
   if (warning === 'runtime_stale') return `${agentId}:runtime_stale`
   if (warning === 'runtime_commit_missing') return `${agentId}:runtime_commit_missing`
   if (warning === 'runtime_commit_mismatch') return `${agentId}:runtime_commit_mismatch`
@@ -574,13 +578,27 @@ export async function buildRuntimeInventoryReport(
   // read-only operator report; deterministic correctness matters more than
   // parallel query speed.
   const agentRows = await queryAgentRows(db)
-  const runtimeRows = await db.query(
-    `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
-            host_id, session_name, process_id, port, checkout_path, commit_sha,
-            endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
-       FROM agent_runtime_instances
-      ORDER BY agent_id, started_at DESC`,
-  )
+  const anchors=await db.query<any>(`SELECT runtime_instance_id,agent_id,workspace_id,runtime_kind,metadata
+    FROM agent_runtime_instances ORDER BY agent_id,runtime_instance_id`)
+  const runtimeRows:any[]=[]
+  const observationFailures=new Map<string,string>()
+  for(const agent of agentRows) {
+    if(agent.agent_type==='human')continue
+    const selected=await resolveSeatProvider(db,{agentId:String(agent.agent_id),inspect:options.inspect})
+    const observed=selected.observation as HostRuntimeObservation|null
+    const owned=observed?anchors.filter(row=>String(row.runtime_instance_id)===observed.runtime_instance_id && row.agent_id===agent.agent_id):[]
+    if(!selected.ok || !observed || owned.length!==1) {
+      observationFailures.set(String(agent.agent_id),'runtime_observation_unavailable')
+      continue
+    }
+    // Checkout diagnostics are request-local. Never use this reader's ambient
+    // commit or copy git/process observations into the durable anchor.
+    const checkout=collectGitCheckoutEvidence(observed.workspace,{})
+    runtimeRows.push({...owned[0],runtime_engine:observed.provider,host_id:observed.host_id,session_name:observed.session_name,
+      process_id:observed.process_id,port:observed.port,checkout_path:observed.workspace,commit_sha:checkout.commit_sha,
+      endpoint_uri:observed.endpoint_uri,status:'active',started_at:observed.process_started_at,stopped_at:null,
+      last_seen_at:observed.observed_at,metadata:gitCheckoutMetadata(checkout)})
+  }
   const connectorRows = await db.query(
     `SELECT connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri,
             status, trust_status, created_at, updated_at, last_seen_at, disabled_at
@@ -647,10 +665,11 @@ export async function buildRuntimeInventoryReport(
       approvedCheckoutRoots,
     })
     const warnings = runtimeWarningsForDrift(latest, freshness, checkoutDrift)
+    if(observationFailures.has(agentId))warnings.push(observationFailures.get(agentId)!)
     return {
       agent_id: agentId,
-      agent_status: String(row.status ?? ''),
-      declared_runtime: String(row.runtime ?? ''),
+      agent_status: latest?'observed':'unknown',
+      declared_runtime: normalizeString(latest?.runtime_engine) ?? '',
       runtime_instance_count: runtimes.length,
       latest_runtime_instance_id: latest ? String(latest.runtime_instance_id) : null,
       runtime_status: normalizeString(latest?.status),
@@ -698,7 +717,7 @@ export async function buildRuntimeInventoryReport(
       runtime_instance_id: runtimeId,
       runtime_freshness: freshness,
       active_binding_count: activeBindingCountByConnector.get(String(row.connector_instance_id)) ?? 0,
-      last_seen_at: timestampString(row.last_seen_at),
+      last_seen_at: timestampString(runtime?.last_seen_at),
       warnings,
     }
   })
@@ -786,7 +805,7 @@ export async function buildRuntimeInventoryReport(
     generated_at: new Date(nowMs).toISOString(),
     policy: {
       db_is_source_of_truth: true,
-      runtime_identity: 'agent_id is logical identity; runtime_instance_id is concrete process/session evidence',
+      runtime_identity: 'DB supplies logical seat/UUID/authority; physical runtime fields are fresh host observations',
       final_design_guardrail: 'read-only inventory; do not infer trust from local path, tmux name, or Discord identity',
     },
     options: {

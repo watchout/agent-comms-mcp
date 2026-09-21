@@ -5,6 +5,8 @@ function adaptSql(sql: string): string {
   let s = sql
   // ->> → json_extract (must run before $n replacement to avoid collision)
   s = s.replace(/(\w+)->>'\s*(\w+)'/g, (_, col, key) => `json_extract(${col}, '$.${key}')`)
+  s = s.replace(/([\w.$]+)\s*(<=|>=|<|>)\s*clock_timestamp\(\)/gi, (_m, value, op) => `julianday(${value}) ${op} julianday('now')`)
+  s = s.replace(/\bclock_timestamp\(\)/gi, "strftime('%Y-%m-%dT%H:%M:%fZ','now')")
   s = s.replace(/\bNOW\(\)/gi, "datetime('now')")
   s = s.replace(/\bTIMESTAMPTZ\b/gi, 'TEXT')
   s = s.replace(/\bJSONB\b/gi, 'TEXT')

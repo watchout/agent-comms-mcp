@@ -904,12 +904,12 @@ export class StateDaemon {
     const params:unknown[]=[this.config.activeClaimMaxAgeSec,inflightQueueWorkIds]
     let select=`SELECT mq.id,mq.agent_id,mq.claimed_at::text AS claimed_at,mq.claimed_runtime_instance_id
       FROM message_queue mq WHERE mq.status IN ('received','in_progress')
-       AND mq.claim_expires_at > CURRENT_TIMESTAMP AND mq.claimed_by=mq.agent_id AND mq.claimed_at IS NOT NULL
+       AND mq.claim_expires_at > clock_timestamp() AND mq.claimed_by=mq.agent_id AND mq.claimed_at IS NOT NULL
        AND mq.claimed_runtime_instance_id IS NOT NULL
        AND mq.payload NOT LIKE '%"runner_error"%'
        AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
        AND ${unboundedQueuePredicate('mq.agent_id','postgres')}
-       AND (mq.claimed_at >= CURRENT_TIMESTAMP - ($1 || ' seconds')::interval OR mq.id=ANY($2::bigint[]))
+       AND (mq.claimed_at >= clock_timestamp() - ($1 || ' seconds')::interval OR mq.id=ANY($2::bigint[]))
        AND EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=mq.agent_id AND a.profile_enabled IS TRUE AND a.disabled_at IS NULL)
        AND EXISTS (SELECT 1 FROM agent_messages am JOIN channels c ON c.id=am.channel_id
          WHERE am.id::text=mq.message_id AND mq.agent_id=ANY(c.members))`
@@ -920,14 +920,17 @@ export class StateDaemon {
       const observed=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
       if(!observed.observation || observed.observation.runtime_instance_id!==String(claim.claimed_runtime_instance_id)) {skipped++;continue}
       const verified=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
-      if(!verified.observation || !sameHostRuntime(observed.observation as HostRuntimeObservation,verified.observation as HostRuntimeObservation)) {skipped++;continue}
-      const result=await this.dbQuery(`UPDATE message_queue SET claim_expires_at=CURRENT_TIMESTAMP+($1 || ' seconds')::interval,
-        last_heartbeat_at=CURRENT_TIMESTAMP WHERE id=$2 AND agent_id=$3 AND claimed_by=$3 AND claimed_at=$4
-        AND claimed_runtime_instance_id=$5 AND status IN ('received','in_progress') AND claim_expires_at>CURRENT_TIMESTAMP
+      if(!observed.authority || !verified.authority || observed.authority.leaseId!==verified.authority.leaseId
+        || observed.authority.fencingToken!==verified.authority.fencingToken
+        || !verified.observation || !sameHostRuntime(observed.observation as HostRuntimeObservation,verified.observation as HostRuntimeObservation)) {skipped++;continue}
+      const result=await this.dbQuery(`UPDATE message_queue SET claim_expires_at=clock_timestamp()+($1 || ' seconds')::interval,
+        last_heartbeat_at=clock_timestamp() WHERE id=$2 AND agent_id=$3 AND claimed_by=$3 AND claimed_at=$4
+        AND claimed_runtime_instance_id=$5 AND status IN ('received','in_progress') AND claim_expires_at>clock_timestamp()
         AND EXISTS (SELECT 1 FROM control_plane_leases l WHERE l.lease_scope_type='runtime_instance'
           AND l.lease_scope_id=$5::text AND l.lease_purpose='worker' AND l.holder_agent_id=$3
-          AND l.holder_runtime_instance_id=$5 AND l.status='active' AND l.expires_at>CURRENT_TIMESTAMP)`,
-        [this.config.claimTtlSec,claim.id,claim.agent_id,claim.claimed_at,claim.claimed_runtime_instance_id])
+          AND l.holder_runtime_instance_id=$5 AND l.status='active' AND l.expires_at>clock_timestamp()
+          AND l.lease_id=$6 AND l.fencing_token=$7) RETURNING id`,
+        [this.config.claimTtlSec,claim.id,claim.agent_id,claim.claimed_at,claim.claimed_runtime_instance_id,verified.authority.leaseId,verified.authority.fencingToken])
       refreshed+=result.rowCount
       if(!result.rowCount)skipped++
     }
@@ -2187,7 +2190,9 @@ export class StateDaemon {
       return false
     }
     const finalProvider=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)}, {agentId:row.agent_id,inspect:this.runtimeInspector})
-    if(!providerSelection.observation || !finalProvider.observation || !sameHostRuntime(
+    if(!providerSelection.authority || !finalProvider.authority || providerSelection.authority.leaseId!==finalProvider.authority.leaseId
+      || providerSelection.authority.fencingToken!==finalProvider.authority.fencingToken
+      || !providerSelection.observation || !finalProvider.observation || !sameHostRuntime(
       providerSelection.observation as HostRuntimeObservation,finalProvider.observation as HostRuntimeObservation)) {
       this.metrics.inc('state_daemon_wake_actions_total',{result:'runtime_changed_before_invocation'})
       return false

@@ -37,6 +37,8 @@ function withProviderAuthority(
 const environment = {
   AGENT_ID: 'codex-probe',
   AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe',
+  AGENT_COM_WORKSPACE: '/workspace',
+  AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
   DATABASE_URL: 'postgresql:///probe',
   AGENT_COM_PG_NOTIFY: 'false',
   AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
@@ -406,6 +408,7 @@ describe('aun bootstrap Codex adapter', () => {
         name: 'aun', enabled: true,
         transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: {
           AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
+          AGENT_COM_WORKSPACE: '/workspace', AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
           AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
         } },
       })
@@ -566,6 +569,7 @@ describe('aun bootstrap Codex adapter', () => {
       const tupleDigest = state.bootstrapDigest(tuple)
       const environment = {
         AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
+        AGENT_COM_WORKSPACE: '/workspace', AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
         AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
       }
       const exactGet = JSON.stringify({
@@ -786,6 +790,8 @@ describe('aun bootstrap Codex adapter', () => {
     ['wrong-command', (value: any) => ({ ...value, transport: { ...value.transport, command: '/wrong/bun' } })],
     ['wrong-argv', (value: any) => ({ ...value, transport: { ...value.transport, args: ['server.ts'] } })],
     ['wrong-agent', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_ID: 'wrong' } } })],
+    ['wrong-workspace', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_COM_WORKSPACE: '/foreign' } } })],
+    ['wrong-session', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_COM_RUNTIME_SESSION: 'foreign' } } })],
     ['wrong-database', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, DATABASE_URL: 'postgresql:///wrong' } } })],
     ['wrong-port', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AUN_WEBHOOK_PORT: '1' } } })],
     ['wrong-repo', (value: any) => ({ ...value, transport: { ...value.transport, args: ['run', '--cwd', '/wrong', 'server.ts'] } })],
