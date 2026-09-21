@@ -1,3 +1,4 @@
+import { unitRuntimeAuthority, unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -220,12 +221,10 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     // Keep the production resolver and ancestry/identity parser. Only its OS snapshot
     // dependency is supplied here; no CLI process, native receipt, or provider API runs.
     providerSpy = spyOn(seatSelection, 'resolveSeatProvider').mockImplementation((db, input) =>
-      resolveProvider(db, { ...input, observe: (target) => seatSelection.observeSeatProvider({
-        ...target, providerStartedAt: '2026-07-25T23:00:00Z', processes: [
-          { pid: target.processId, ppid: 4200, command: `bun server.ts AGENT_ID=${target.agentId === 'dev-001' ? observedAgent : target.agentId}` },
-          { pid: 4200, ppid: 1, command: observedProvider },
-        ],
-      }) }),
+      resolveProvider(db, { ...input, inspect: target => ({reasonCode:'OBSERVED', observations:[unitRuntimeObservation(target.agentId, {
+        agent_id:target.agentId==='dev-001'?observedAgent:target.agentId,
+        provider:observedProvider as 'codex'|'claude', workspace:`/work/${target.agentId}`,
+      })]}) }),
     )
   })
   afterEach(() => providerSpy.mockRestore())
@@ -263,23 +262,16 @@ describe('ordinary all-agent manifest candidate inventory', () => {
         if (/FROM channels c/.test(sql)) return []
         if (/FROM agent_workspace_bindings/.test(sql)) {
           if (agentId === 'dev-001') {
-            return [{ workspace_id: 'workspace-dev-001', local_path: '/work/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
+            return [{ workspace_id: 'workspace-dev-001', local_path: '/legacy/ignored/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
           }
           if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
-            return [{ workspace_id: 'workspace-contest-dev', local_path: '/work/contest-dev', repo_url: 'https://github.com/watchout/contest.git' }]
+            return [{ workspace_id: 'workspace-contest-dev', local_path: '/legacy/ignored/contest-dev', repo_url: 'https://github.com/watchout/contest.git' }]
           }
           return []
         }
         if (/FROM agent_runtime_instances/.test(sql)) {
-          if (agentId === 'dev-001') {
-            return [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', agent_id: agentId,
-              host_id: hostname(), process_id: 4201, session_name: 'discord-dev-001', checkout_path: '/work/dev-001',
-              runtime_engine: 'TUI', status: 'active', stopped_at: null, last_seen_at: now }]
-          }
-          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
-            return [{ runtime_instance_id: 'runtime-contest', workspace_id: 'workspace-contest-dev', agent_id: agentId,
-              host_id: hostname(), process_id: 4202, session_name: 'discord-contest-dev', checkout_path: '/work/contest-dev',
-              runtime_engine: 'TUI', status: 'active', stopped_at: null, last_seen_at: now }]
+          if (agentId==='dev-001' || (includeProductionNameCollisionSeat && agentId==='contest-dev')) {
+            return [{...unitRuntimeAuthority(agentId),workspace_id:`workspace-${agentId}`}]
           }
           return []
         }
@@ -317,6 +309,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
       agent_id: 'dev-001',
       target_repository: 'watchout/agent-comms-mcp',
       workspace_id: 'workspace-dev-001',
+      workspace_path: '/work/dev-001',
       runtime_engine: 'codex-exec',
       runtime_profile_ref: 'agent-profile://dev-001/revision/7',
       provider_identity_ref: 'discord-identity://dev-001/identity-1',

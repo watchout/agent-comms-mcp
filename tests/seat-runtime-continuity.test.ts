@@ -1,3 +1,5 @@
+import { unitRuntimeAuthority, unitRuntimeId, unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
+import type { HostRuntimeInspector } from '../core/host-runtime-observer'
 import { describe, test, expect } from 'bun:test'
 import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { publishNativeFixtureReport } from './helpers/seat-native-runtime-fixture'
@@ -15,20 +17,25 @@ function observation(overrides: Partial<SeatProviderObservation> = {}): SeatProv
     observed_at:NOW.toISOString(),source:'process_ancestry',verified:true,...overrides}
 }
 describe('SC1 stable seat provider selection', () => {
-  test('P01 actual target ancestry selects either provider despite opposite legacy preference', async () => {
+  test('P01 target ancestry snapshots select either provider despite opposite legacy preference', async () => {
     for (const provider of ['codex','claude'] as const) {
       let writes = 0
       const db = {async query(sql: string) {
         if (!sql.startsWith('SELECT')) writes++
-        return [{runtime_instance_id:'runtime',agent_id:'seat',host_id:'test-host',process_id:200,
-          session_name:'new-session',checkout_path:'/new-host/repo',status:'running',last_seen_at:NOW.toISOString(),
-          runtime_engine_preference:provider === 'codex' ? 'claude-code' : 'codex',metadata:{}}]
+        return [{...unitRuntimeAuthority('seat'), runtime_engine_preference: provider === 'codex' ? 'claude-code' : 'codex'}]
       }}
-      const result = await resolveSeatProvider(db,{agentId:'seat',hostId:'test-host',now:NOW,
-        observe: input => observeSeatProvider({...input,providerStartedAt:'fixture-start',processes:[
-          {pid:100,ppid:1,command:`/bin/${provider}`},{pid:200,ppid:100,command:'bun server.ts AGENT_ID=seat'},
-          {pid:300,ppid:1,command:`/bin/${provider === 'codex' ? 'claude' : 'codex'}`},
-        ]})})
+      const inspect: HostRuntimeInspector = () => {
+        const physical = unitRuntimeObservation('seat', {process_id: 200})
+        const observed = observeSeatProvider({agentId:'seat', runtimeInstanceId:physical.runtime_instance_id,
+          processId:200, sessionName:physical.session_name, workspace:physical.workspace,
+          hostId:physical.host_id, providerStartedAt:physical.provider_started_at, processes:[
+            {pid:100,ppid:1,command:`/bin/${provider}`},{pid:200,ppid:100,command:'bun server.ts AGENT_ID=seat'},
+            {pid:300,ppid:1,command:`/bin/${provider === 'codex' ? 'claude' : 'codex'}`},
+          ]})
+        expect(observed).not.toBeNull()
+        return {reasonCode:'OBSERVED', observations: [{...physical,...observed!}]}
+      }
+      const result = await resolveSeatProvider(db,{agentId:'seat',inspect})
       expect(result.provider).toBe(provider)
       expect(result.code).toBe('SELECTED_LIVE')
       expect(writes).toBe(0)
@@ -76,9 +83,9 @@ describe('SC1 stable seat provider selection', () => {
     }
     expect(selectSeatProvider({agentId:'seat',live:[observation()],intent:'claude',now:NOW}).code).toBe('PROVIDER_AMBIGUOUS')
   })
-  test('P03 cold intent or qualified history; stale/profile-only/ambiguous history cannot launch', () => {
+  test('P03 cold launch requires explicit intent; qualified/stale/profile-only/ambiguous history cannot launch', () => {
     expect(selectSeatProvider({agentId:'seat',intent:'claude',now:NOW}).code).toBe('SELECTED_INTENT')
-    expect(selectSeatProvider({agentId:'seat',history:[observation()],allowHistory:true,now:NOW}).provider).toBe('codex')
+    expect(selectSeatProvider({agentId:'seat',history:[observation()],allowHistory:true,now:NOW}).provider).toBeNull()
     for (const history of [[{runtime_engine_preference:'codex'}],[observation({observed_at:'2026-08-01T00:00:00Z'})],
       [observation(),observation({provider:'claude',runtime_instance_id:'other'})]]) {
       expect(selectSeatProvider({agentId:'seat',history,allowHistory:true,now:NOW}).ok).toBe(false)
@@ -97,47 +104,67 @@ describe('SC2 held OS endpoint and exact lease resolution', () => {
     const dir=mkdtempSync(join(tmpdir(),'seat-endpoint-')), path=join(dir,'fixture.db')
     migrateSqlite(path)
     const db=new SqliteAdapter(path)
-    const listeners = await Promise.all(['one','two'].map(async id => bindRuntimeEndpoint({fetch:()=>Response.json({runtime:id})})))
-    async function publish(index:number,id:string,agent:string) {
-      return listeners[index].publish(async(port,uri)=>{
-        await db.execute(`INSERT OR IGNORE INTO agents(agent_id,display_name,agent_type,runtime,status,channel_port) VALUES($1,$1,'dev','TUI','idle',8812)`,[agent])
-        await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,host_id,process_id,port,endpoint_uri,status,last_seen_at)
-          VALUES($1,$2,'TUI','local_process','test-host',$3,$4,$5,'running',$6)`,[id,agent,200+index,port,uri,NOW.toISOString()])
-        await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at,metadata)
-          VALUES($1,'runtime_instance',$2,'worker',$3,$2,1,'active',$4,$5)`,['lease-'+id,id,agent,new Date(NOW.getTime()+600000).toISOString(),JSON.stringify({port,endpoint_uri:uri,process_id:200+index})])
+    const ids = ['one', 'two', 'one-new'].map(unitRuntimeId)
+    const agents = ['one', 'two', 'one']
+    const observedIndices = new Set<number>()
+    const listeners: ReturnType<typeof bindRuntimeEndpoint>[] = []
+    const inspect: HostRuntimeInspector = input => ({reasonCode:'OBSERVED', observations: listeners.flatMap((listener, index) =>
+      observedIndices.has(index) && (!input.runtimeInstanceId || input.runtimeInstanceId === ids[index]) && agents[index] === input.agentId && (!input.expectedHost || input.expectedHost === 'test-host')
+        ? [unitRuntimeObservation(agents[index], {runtime_instance_id:ids[index], host_id:'test-host',
+          process_id:200+index, port:listener.port, endpoint_uri:listener.endpointUri})] : [])})
+    function hold(index: number) {
+      observedIndices.add(index)
+      listeners.push(bindRuntimeEndpoint({fetch:()=>Response.json({runtime:index===2?'replacement':agents[index]}),
+        authorize:async()=> (await resolveRuntimeEndpoint(db,{agentId:agents[index],runtimeInstanceId:ids[index],hostId:'test-host',inspect})).ok}))
+    }
+    async function publish(index:number) {
+      return listeners[index].publish(async()=>{
+        await db.execute(`INSERT OR IGNORE INTO agents(agent_id,display_name,agent_type,profile_enabled) VALUES($1,$1,'dev',1)`,[agents[index]])
+        await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at,metadata)
+          VALUES($1,$2,'local_process',NULL,NULL,NULL,'{}')`,[ids[index],agents[index]])
+        await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at,metadata)
+          VALUES($1,'runtime_instance',$2,'worker',$3,$2,1,'active','2026-05-07T23:51:00Z','2099-01-01T00:00:00Z','{}')`,['lease-'+ids[index],ids[index],agents[index]])
       })
     }
     try {
+      hold(0); hold(1)
       expect(listeners[0].port).toBeGreaterThan(0)
       expect(listeners[0].port).not.toBe(listeners[1].port)
-      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',now:NOW})).ok).toBe(false)
-      await Promise.all([publish(0,'one','one'),publish(1,'two','two')])
+      expect((await fetch(listeners[0].endpointUri)).status).toBe(503)
+      expect((await resolveRuntimeEndpoint(db,{agentId:'one',inspect})).ok).toBe(false)
+      await Promise.all([publish(0),publish(1)])
+      const history=await db.query('SELECT * FROM agent_runtime_instances ORDER BY runtime_instance_id')
       for(let i=0;i<2;i++) {
-        const id=i?'two':'one', result=await resolveRuntimeEndpoint(db,{agentId:id,runtimeInstanceId:id,hostId:'test-host',now:NOW})
+        const result=await resolveRuntimeEndpoint(db,{agentId:agents[i],runtimeInstanceId:ids[i],hostId:'test-host',inspect})
         expect(result.endpoint?.port).toBe(listeners[i].port)
-        expect(await (await fetch(result.endpoint!.endpointUri)).json()).toEqual({runtime:id})
-        expect((await resolveRuntimeEndpoint(db,{agentId:id,hostId:'foreign-host',now:NOW})).ok).toBe(false)
+        expect(await (await fetch(result.endpoint!.endpointUri)).json()).toEqual({runtime:agents[i]})
+        expect((await resolveRuntimeEndpoint(db,{agentId:agents[i],hostId:'foreign-host',inspect})).ok).toBe(false)
       }
-      listeners.push(bindRuntimeEndpoint({fetch:()=>Response.json({runtime:'replacement'})}))
-      await publish(2,'one-new','one')
-      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',now:NOW})).code).toBe('RUNTIME_ENDPOINT_AMBIGUOUS')
-      await db.execute("UPDATE agent_runtime_instances SET status='stopped' WHERE runtime_instance_id='one'")
-      await db.execute("UPDATE control_plane_leases SET status='released' WHERE lease_id='lease-one'")
-      const replacement=await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',now:NOW})
-      expect(replacement.endpoint?.runtimeInstanceId).toBe('one-new')
+      hold(2); await publish(2)
+      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',inspect})).code).toBe('RUNTIME_ENDPOINT_AMBIGUOUS')
+      await db.execute("UPDATE control_plane_leases SET status='released' WHERE lease_id=$1",['lease-'+ids[0]])
+      expect((await fetch(listeners[0].endpointUri)).status).toBe(503)
+      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',inspect})).ok).toBe(false)
+      listeners[0].server.stop(true); observedIndices.delete(0)
+      const replacement=await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',inspect})
+      expect(replacement.endpoint?.runtimeInstanceId).toBe(ids[2])
       expect(replacement.endpoint?.port).toBe(listeners[2].port)
       expect(await (await fetch(replacement.endpoint!.endpointUri)).json()).toEqual({runtime:'replacement'})
-      expect((await resolveRuntimeEndpoint(db,{agentId:'one',runtimeInstanceId:'one',hostId:'test-host',now:NOW})).ok).toBe(false)
-      await db.execute("UPDATE control_plane_leases SET holder_agent_id='two' WHERE lease_id='lease-one-new'")
-      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',now:NOW})).ok).toBe(false)
-      await db.execute("UPDATE control_plane_leases SET expires_at='2020-01-01' WHERE lease_id='lease-two'")
-      expect((await resolveRuntimeEndpoint(db,{agentId:'two',hostId:'test-host',now:NOW})).ok).toBe(false)
-      expect(await (await fetch(listeners[0].endpointUri)).json()).toEqual({runtime:'one'})
+      expect((await resolveRuntimeEndpoint(db,{agentId:'one',runtimeInstanceId:ids[0],hostId:'test-host',inspect})).ok).toBe(false)
+      await db.execute("UPDATE control_plane_leases SET holder_agent_id='two' WHERE lease_id=$1",['lease-'+ids[2]])
+      expect((await resolveRuntimeEndpoint(db,{agentId:'one',hostId:'test-host',inspect})).ok).toBe(false)
+      await db.execute("UPDATE control_plane_leases SET expires_at='2020-01-01' WHERE lease_id=$1",['lease-'+ids[1]])
+      expect((await resolveRuntimeEndpoint(db,{agentId:'two',hostId:'test-host',inspect})).ok).toBe(false)
+      await expect(fetch(listeners[0].endpointUri)).rejects.toThrow()
+      expect(await db.query('SELECT * FROM agent_runtime_instances WHERE runtime_instance_id<>$1 ORDER BY runtime_instance_id',[ids[2]])).toEqual(history)
     } finally {listeners.forEach(l=>l.server.stop(true));await db.close();rmSync(dir,{recursive:true,force:true})}
   })
+
   test('P06 registration failure closes only its own held socket', async () => {
-    const good=bindRuntimeEndpoint({fetch:()=>new Response('good')}), bad=bindRuntimeEndpoint({fetch:()=>new Response('bad')})
+    const good=bindRuntimeEndpoint({fetch:()=>new Response('good'),authorize:async()=>true}), bad=bindRuntimeEndpoint({fetch:()=>new Response('bad')})
     try {
+      expect((await fetch(good.endpointUri)).status).toBe(503)
+      await good.publish(async()=>{})
       await expect(bad.publish(async()=>{throw new Error('synthetic DB failure')})).rejects.toThrow('RUNTIME_ENDPOINT_REGISTRATION_FAILED')
       await expect(fetch(bad.endpointUri)).rejects.toThrow()
       expect(await (await fetch(good.endpointUri)).text()).toBe('good')

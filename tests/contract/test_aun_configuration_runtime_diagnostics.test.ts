@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { canonicalConfigurationJson, canonicalDesiredDocument, computeDesiredDigest, normalizeDesiredStateRow } from '../../core/aun-configuration-desired-state'
-import { createPostgresTestDatabase } from '../helpers/postgres-test-database'
+import { fixture as privateLegacyFixture } from '../helpers/runtime-observation-nonpersistence-db-fixture'
 
 const repoRoot = join(import.meta.dir, '../..')
 const sql = (name: string) => readFileSync(join(repoRoot, 'db/migrations', name), 'utf8')
@@ -15,28 +15,24 @@ const projection = { provider_repo_root:'/old/provider',provider_config_root:'/o
   project:'product-fixture',repository:'fixture/repository',weight:1.0,'😀':'astral','':'private-use' }
 
 async function fixture(run: (db: PgAdapter) => Promise<void>) {
-  // A missing explicit test endpoint is an error, never a skip or ambient DB fallback.
-  let base = process.env.AGENT_COM_TEST_DATABASE_URL
-  if (!base && process.env.CI === 'true') {
-    const candidate = process.env.DATABASE_URL
-    if (candidate && !/[\r\n]/.test(candidate)) {
-      const url = new URL(candidate)
-      if (['postgres:', 'postgresql:'].includes(url.protocol) && url.pathname === '/agent_comms_test') base = candidate
-    }
-  }
-  if (!base) throw new Error('EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED')
-  const database = createPostgresTestDatabase(`seat_diag_${process.pid}_${randomUUID().replaceAll('-','')}`, {AGENT_COM_TEST_DATABASE_URL:base})
-  let db: PgAdapter | undefined
+  // This verifies the historical diagnostics-format transition before the
+  // nonpersistence cutover. Seed legacy rows on the fixed old schema, then
+  // prove the new guard preserves them; never disable an installed guard.
+  const owned = await privateLegacyFixture('postgres', false)
+  const url = new URL(process.env.AGENT_COM_TEST_DATABASE_URL!)
+  url.pathname = '/' + owned.name
+  const db = new PgAdapter(url.href)
   try {
-    const migrated = Bun.spawnSync([process.execPath,'--no-env-file','db/migrate.ts'],{
-      cwd:repoRoot,env:{PATH:process.env.PATH!,HOME:process.env.HOME!,AGENT_COM_DB:'postgres',DATABASE_URL:database.databaseUrl},stdout:'pipe',stderr:'pipe',
-    })
-    expect(migrated.exitCode).toBe(0)
-    if (migrated.exitCode !== 0) throw new Error('ISOLATED_BASE_MIGRATION_FAILED')
-    db = new PgAdapter(database.databaseUrl)
     await db.execute(legacy)
     await run(db)
-  } finally { if(db)await db.close();database.drop() }
+    const before = await protectedSnapshot(db)
+    await owned.apply()
+    expect(await protectedSnapshot(db)).toEqual(before)
+    await expect(db.execute("UPDATE agents SET runtime='forbidden-new-observation'"))
+      .rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+    expect(await protectedSnapshot(db)).toEqual(before)
+  } finally {await db.close(); await owned.close()}
+
 }
 async function seed(db:PgAdapter,agent:string,port:number|null=8801) {
   await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,runtime_engine_preference,home_directory,channel_port,

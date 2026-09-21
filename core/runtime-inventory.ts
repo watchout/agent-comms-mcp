@@ -155,11 +155,13 @@ export type RuntimeInventoryReport = {
 }
 
 export interface V2NativeFrozenSetReadOptions {
+  inspect?: HostRuntimeInspector
   nowMs?: number
   maxHeartbeatAgeMs?: number
 }
 
 export interface AllAgentCommunicationCandidateOptions {
+  inspect?: HostRuntimeInspector
   nowMs?: number
   maxHeartbeatAgeMs?: number
   controlSourceByAgent: Record<string, string>
@@ -224,6 +226,25 @@ export async function readV2NativeFrozenEnabledSet(
 
   const result: V2NativeMeshFrozenAgentV1[] = []
   for (const agent of selected) {
+    // LLM membership is resolved from logical authority and current OS state.
+    // No saved PID/path/status/provider or reader's ambient checkout supplies it.
+    const selectedProvider = await resolveSeatProvider(db, {agentId:String(agent.agent_id), inspect:options.inspect})
+    const observed = selectedProvider.observation
+    if (selectedProvider.ok && observed) {
+      const checkout = collectGitCheckoutEvidence(observed.workspace, {})
+      const observedAt = parseTimestampMs(observed.observed_at)
+      if (!checkout.commit_sha || !/^[0-9a-f]{40}$/.test(checkout.commit_sha)
+        || observedAt === null || nowMs - observedAt > maxAgeMs) {
+        throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
+      }
+      result.push({agent_id:String(agent.agent_id), profile_revision:String(agent.profile_revision),
+        runtime_engine:observed.provider, runtime_instance_id:observed.runtime_instance_id,
+        runtime_checkout_root:observed.workspace, runtime_checkout_sha:checkout.commit_sha})
+      continue
+    }
+    // Existing provider-free S0 fixtures retain their distinct contract. This
+    // compatibility branch never authorizes an LLM from saved observations.
+    // Its replacement with logical S0 deployment proof remains needs:arc.
     const runtimes = await db.query<any>(
       `SELECT runtime_instance_id, runtime_engine, checkout_path, commit_sha,
               status, stopped_at, last_seen_at
@@ -234,23 +255,13 @@ export async function readV2NativeFrozenEnabledSet(
     )
     const live = runtimes.filter(runtime => {
       const seen = parseTimestampMs(runtime.last_seen_at)
-      return runtime.stopped_at === null
+      return runtime.runtime_engine === 'deterministic-s0' && runtime.stopped_at === null
         && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
-        && seen !== null
-        && nowMs - seen <= maxAgeMs
+        && seen !== null && nowMs - seen <= maxAgeMs
     })
     if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
     const runtime = live[0]
-    // The S0 mesh executes a provider-free TurnRuntime. Its runtime identity
-    // is distinct from a Codex/Claude host and must not require an LLM ancestor.
-    // LLM seats still require current observation of the exact frozen instance.
-    const declaredEngine = normalizeString(runtime.runtime_engine)
-    const provider = declaredEngine === 'deterministic-s0' ? null
-      : await resolveSeatProvider(db, {agentId:String(agent.agent_id),now:new Date(nowMs)})
-    const engine = declaredEngine === 'deterministic-s0' ? declaredEngine
-      : provider?.ok && provider.code === 'SELECTED_LIVE'
-        && provider.observation?.runtime_instance_id === String(runtime.runtime_instance_id)
-        ? provider.provider : null
+    const engine = 'deterministic-s0'
     const instanceId = normalizeString(runtime.runtime_instance_id)
     const checkoutRoot = normalizeString(runtime.checkout_path)
     const checkoutSha = normalizeString(runtime.commit_sha)
@@ -363,8 +374,9 @@ export async function generateAllAgentCommunicationManifestCandidates(
       agentBlockers.push('discord_mode_missing_or_unknown')
     }
 
+    const provider = await resolveSeatProvider(db,{agentId,inspect:options.inspect})
     const workspaces = await db.query<any>(
-      `SELECT w.workspace_id, w.local_path, w.repo_url
+      `SELECT w.workspace_id, w.repo_url
          FROM agent_workspace_bindings b
          JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
         WHERE b.agent_id = $1 AND b.active = true AND b.binding_role = 'primary'
@@ -373,31 +385,19 @@ export async function generateAllAgentCommunicationManifestCandidates(
     )
     if (workspaces.length !== 1) agentBlockers.push(`primary_workspace_count_${workspaces.length}`)
     const workspace = workspaces[0]
-    const workspacePath = normalizeString(workspace?.local_path)
+    const workspacePath = normalizeString(provider.observation?.workspace)
     const repository = normalizeRepository(workspace?.repo_url)
     if (!workspacePath || !workspacePath.startsWith('/')) agentBlockers.push('workspace_path_missing_or_non_absolute')
     if (!repository) agentBlockers.push('target_repository_missing_or_invalid')
 
     const runtimes = await db.query<any>(
-      `SELECT runtime_instance_id, workspace_id, runtime_engine, status, stopped_at, last_seen_at
-         FROM agent_runtime_instances
-        WHERE agent_id = $1
-        ORDER BY started_at DESC`,
-      [agentId],
-    )
-    const live = runtimes.filter(runtime => {
-      const seen = parseTimestampMs(runtime.last_seen_at)
-      return runtime.stopped_at === null
-        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
-        && seen !== null
-        && nowMs - seen <= maxAgeMs
-        && String(runtime.workspace_id ?? '') === String(workspace?.workspace_id ?? '')
-    })
-    if (live.length !== 1) agentBlockers.push(`selected_runtime_count_${live.length}`)
-    if (live.length === 1 && !normalizeString(live[0]?.runtime_instance_id)) {
-      agentBlockers.push('runtime_instance_id_missing')
-    }
-    const provider = await resolveSeatProvider(db,{agentId,now:new Date(nowMs)})
+      `SELECT runtime_instance_id, workspace_id FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+    const current = runtimes.filter(runtime => provider.ok && provider.observation
+      && String(runtime.runtime_instance_id) === provider.observation.runtime_instance_id
+      && String(runtime.workspace_id ?? '') === String(workspace?.workspace_id ?? ''))
+    if (current.length !== 1) agentBlockers.push(`selected_runtime_count_${current.length}`)
+    const observedAt = parseTimestampMs(provider.observation?.observed_at)
+    if (observedAt === null || nowMs - observedAt > maxAgeMs) agentBlockers.push('runtime_observation_stale')
     const engine = manifestRuntimeEngine(provider.provider)
     if (!provider.ok || !engine) agentBlockers.push(provider.code)
     const profileRevision = Number(agent.profile_revision)

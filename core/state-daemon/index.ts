@@ -307,11 +307,17 @@ export class StateDaemon {
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
   private readonly runtimeInspector: HostRuntimeInspector
+  private readonly readNativeProof: Parameters<typeof evaluateRuntimeMemoryReadyGate>[1]['readNativeProof']
   private readonly providerObserver: typeof observeSeatProvider
 
-  constructor(deps: StateDaemonDeps & {providerObserver?: typeof observeSeatProvider; runtimeInspector?:HostRuntimeInspector}) {
+  constructor(deps: StateDaemonDeps & {
+    providerObserver?: typeof observeSeatProvider
+    runtimeInspector?: HostRuntimeInspector
+    readNativeProof?: Parameters<typeof evaluateRuntimeMemoryReadyGate>[1]['readNativeProof']
+  }) {
     this.providerObserver = deps.providerObserver ?? observeSeatProvider
     this.runtimeInspector=deps.runtimeInspector ?? inspectHostRuntime
+    this.readNativeProof = deps.readNativeProof
     this.db = deps.db
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
@@ -1515,6 +1521,8 @@ export class StateDaemon {
         action_kind: action.kind,
       },
       policy: this.memoryReadyPolicy,
+      inspect: this.runtimeInspector,
+      readNativeProof: this.readNativeProof,
     })
     return {
       ...gate,

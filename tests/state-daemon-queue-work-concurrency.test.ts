@@ -1,3 +1,4 @@
+import { unitRuntimeAuthority, unitRuntimeId, unitRuntimeInspector, unitNativeProof, unitLogicalProof } from './helpers/logical-runtime-unit-fixture'
 /**
  * E7 — bounded concurrent queue-work runners (issue #940 definition v2, R1).
  *
@@ -7,7 +8,6 @@
  * stay pending, are re-swept later, and never consume a retry attempt.
  */
 import { describe, expect, test } from 'bun:test'
-import { hostname } from 'node:os'
 import { resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import { StateDaemon } from '../core/state-daemon'
 import { FakeAlertSink, FakeClock, FakeMetrics, FakePgListen, FakeTmux } from './contract/state-daemon/fakes'
@@ -342,48 +342,18 @@ describe('queue-work concurrency bound (E7)', () => {
             rowCount: 1,
           }
         }
-        if (sql.includes('JOIN control_plane_leases')) {
-          return { rows: [{
-            runtime_instance_id: 'rt-f5', agent_id: 'seat-b', runtime_kind: 'local_process',
-            host_id: hostname(), process_id: 1234, port: 19123, endpoint_uri: 'http://127.0.0.1:19123',
-            runtime_status: 'running', last_seen_at: clock.now().toISOString(),
-            lease_id: 'f5-lease', fencing_token: 1, holder_agent_id: 'seat-b', holder_runtime_instance_id: 'rt-f5',
-            lease_status: 'active', expires_at: '2030-01-01T00:00:00.000Z',
-            lease_metadata: { port: 19123, process_id: 1234, endpoint_uri: 'http://127.0.0.1:19123' },
-          }], rowCount: 1 }
-        }
-        if (sql.includes('FROM agent_runtime_instances') && !sql.includes('FROM runtime_memory_ready_evidence')) {
-          return {
-            rows: [{
-              runtime_instance_id: 'rt-f5', agent_id: 'seat-b', runtime_engine: 'codex',
-              runtime_kind: 'local_process', session_name: 'seat-b-session', port: 19123,
-              host_id: hostname(), process_id: 1234,
-              checkout_path: '/repo', commit_sha: null,
-              started_at: '2026-08-27T00:00:00.000Z', last_seen_at: clock.now().toISOString(),
-              status: 'running', metadata: {},
-            }],
-            rowCount: 1,
-          }
-        }
+        if (sql.includes('JOIN control_plane_leases')) return {rows: [unitRuntimeAuthority('seat-b')], rowCount: 1}
         if (sql.includes('FROM runtime_memory_ready_evidence')) {
           return {
             rows: [{
-              id: 1, agent_id: 'seat-b', project: 'agent-comms-mcp', runtime_instance_id: 'rt-f5',
+              id: 1, agent_id: 'seat-b', project: 'agent-comms-mcp', runtime_instance_id: unitRuntimeId('seat-b'),
               profile_revision: null, profile_source: null, session_name: 'seat-b-session', port: 19123,
               expected_agent_id: 'seat-b', checkout_path: '/repo', checkout_commit_sha: null,
               recovery_command: 'mcp__wasurezu__recover_context', result_status: 'ready',
               failure_reason: null, completed_at: '2026-08-27T23:55:00.000Z',
               evidence_path: null, evidence_log_id: null,
               valid_until: '2030-01-01T00:00:00.000Z', source: 'wasurezu_boot_recovery',
-              metadata: { seat_context_receipt: {
-                schema_version: 'seat-context-consumption/v1', agent_id: 'seat-b', project: 'agent-comms-mcp',
-                runtime_instance_id: 'rt-f5', target_runtime: 'codex',
-                pack_id: 'restart_pack:seat-b:agent-comms-mcp:1787788500000',
-                response_digest: 'a'.repeat(64), work_digest: 'b'.repeat(64),
-                invocation_digest: 'c'.repeat(64), transport_binding_digest: 'd'.repeat(64),
-                completed_at: '2026-08-27T23:55:00.000Z',
-                consumption: { runtime_instance_id: 'rt-f5', invocation_digest: 'c'.repeat(64), consumer: 'fixture-host-input' },
-              } },
+              metadata: {seat_context_proof: unitLogicalProof('seat-b', 'agent-comms-mcp')},
             }],
             rowCount: 1,
           }
@@ -412,13 +382,9 @@ describe('queue-work concurrency bound (E7)', () => {
       },
       // The integrated AUN path requires observed provider identity and a
       // consumed recovery receipt; legacy agent.runtime alone is insufficient.
-      providerObserver: (input) => ({
-        schema_version: 'seat-provider-observation/v1', agent_id: input.agentId,
-        runtime_instance_id: input.runtimeInstanceId, host_id: hostname(), process_id: 1234,
-        provider_pid: 5678, provider_started_at: 'fixture-start', provider: 'codex',
-        session_name: input.sessionName, workspace: input.workspace,
-        observed_at: input.now!.toISOString(), source: 'process_ancestry', verified: providerObservationVerified,
-      }),
+      runtimeInspector: input => providerObservationVerified ? unitRuntimeInspector(input) : {reasonCode: 'PROVIDER_UNVERIFIED', observations: []},
+      readNativeProof: unitNativeProof,
+
     })
     let releaseSaturatingRunner!: () => void
     const saturatingRunner = new Promise<void>((resolve) => { releaseSaturatingRunner = resolve })
