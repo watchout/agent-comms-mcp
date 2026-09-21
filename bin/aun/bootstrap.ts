@@ -1,3 +1,5 @@
+import { inspectHostRuntime } from '../../core/host-runtime-observer'
+import { durableRuntimeMetadata } from '../../core/runtime-durable-data'
 import { readNativeSeatContextReceipt } from '../../core/seat-context-recovery'
 import { resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
 import { observeSeatMemoryBinding, observeSeatProvider, resolveSeatProvider, readObservedProviderRoot } from '../../core/seat-runtime-selection'
@@ -1010,6 +1012,25 @@ type RuntimeReceiptDecision = {
   evidenceDigest: string
 }
 
+async function observedBootstrapRuntimeRows(db:DbAdapter,agentId:string):Promise<any[]> {
+  const anchors=await db.query<any>(`SELECT runtime_instance_id,agent_id,runtime_kind,metadata FROM agent_runtime_instances WHERE agent_id=$1`,[agentId])
+  const fresh=inspectHostRuntime({agentId})
+  if(fresh.reasonCode!=='OBSERVED')return []
+  const rows:any[]=[]
+  for(const anchor of anchors) {
+    const metadata=parseJsonRecord(anchor.metadata)
+    const id=anchor.runtime_kind==='local_process'?String(anchor.runtime_instance_id):metadata.mcp_runtime_instance_id
+    const matching=fresh.observations.filter(o=>o.runtime_instance_id===id)
+    if(matching.length!==1)continue
+    const o=matching[0],endpoint=await resolveRuntimeEndpoint(db,{agentId,runtimeInstanceId:String(id)})
+    if(!endpoint.ok || endpoint.endpoint?.processId!==o.process_id || endpoint.endpoint.processStartedAt!==o.process_started_at)continue
+    rows.push({...anchor,runtime_engine:o.provider,session_name:o.session_name,
+      process_id:anchor.runtime_kind==='bootstrap_bound_provider'?o.provider_pid:o.process_id,
+      port:o.port,checkout_path:o.workspace,commit_sha:metadata.source_commit ?? null,status:'active',metadata})
+  }
+  return rows
+}
+
 function classifyRuntimeReceiptRows(active: any[], tuple: RuntimeReceiptTuple): RuntimeReceiptDecision {
   const bootstrapRows = active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')
   const ordinaryActiveCount = active.length - bootstrapRows.length
@@ -1083,16 +1104,7 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
   if (!subject?.runtimeInstanceId) return evaluateRuntimeMemoryReadyGate(db as any, input)
 
   if (expectedTuple) {
-    const selectedRows = await db.query<any>(
-      `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
-              port, checkout_path, commit_sha, status, metadata
-         FROM agent_runtime_instances
-        WHERE runtime_instance_id = $1
-          AND agent_id = $2
-          AND status IN ('running', 'active')
-        LIMIT 1`,
-      [subject.runtimeInstanceId, input.agent_id],
-    )
+    const selectedRows = (await observedBootstrapRuntimeRows(db,input.agent_id)).filter(row=>row.runtime_instance_id===subject.runtimeInstanceId)
     const selection = classifyRuntimeReceiptRows(selectedRows, expectedTuple)
     if (!selection.ok || selection.action !== 'reuse'
       || selection.runtimeInstanceId !== subject.runtimeInstanceId) {
@@ -1414,7 +1426,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   const explicitTmuxSession = env.AUN_BOOTSTRAP_TMUX_SESSION?.trim() ?? ''
   const explicitTmuxPane = env.AUN_BOOTSTRAP_TMUX_PANE?.trim() ?? ''
   const bunPath = process.execPath
-  const adapterDeps = { run, bunPath, serverEntry: 'server.ts' }
+  const adapterDeps = { run, bunPath, serverEntry: 'entrypoints/runtime.ts' }
   const adapters: Record<BootstrapResolvedRuntime, BootstrapRuntimeAdapter> = {
     codex: createCodexBootstrapAdapter(adapterDeps),
     claude: createClaudeBootstrapAdapter(adapterDeps),
@@ -1894,7 +1906,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         databaseLocatorRef: env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
         databaseCredentialRef: env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
         bunPath,
-        serverEntry: 'server.ts',
+        serverEntry: 'entrypoints/runtime.ts',
         providerRepoRoot,
         providerConfigRoot,
         daemonCheckout,
@@ -2136,12 +2148,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }
         }
       }
-      const observedMcp = await withBootstrapDb(env, db => db.queryOne<any>(
-        'SELECT process_id, session_name, checkout_path, host_id FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2',
-        [endpoint.endpoint!.runtimeInstanceId, context.agentId]), {readonly:true})
-      const providerObservation = observedMcp && (options.observeProvider ?? observeSeatProvider)({agentId:context.agentId,
-        runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId, processId:Number(observedMcp.process_id),
-        sessionName:observedMcp.session_name, workspace:observedMcp.checkout_path, hostId:observedMcp.host_id})
+      const inspectedMcp=inspectHostRuntime({agentId:context.agentId,runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,logicalWorkspace:context.workspaceRoot})
+      const providerObservation=inspectedMcp.reasonCode==='OBSERVED' && inspectedMcp.observations.length===1 ? inspectedMcp.observations[0] : null
       if (!providerObservation || providerObservation.provider_pid !== providerPid
         || providerObservation.provider !== context.resolvedRuntime
         || providerObservation.workspace !== context.workspaceRoot) throw new Error('current provider observation unavailable')
@@ -2154,20 +2162,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           [context.agentId],
         )
         if (!agent) throw new Error('runtime receipt agent unavailable')
-        const readActive = () => tx.query<any>(
-          `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
-                  port, checkout_path, commit_sha, status, metadata
-             FROM agent_runtime_instances
-            WHERE agent_id = $1 AND status IN ('running', 'active')
-            ORDER BY runtime_instance_id`,
-          [context.agentId],
-        )
+        const readActive = () => observedBootstrapRuntimeRows(tx,context.agentId)
         const active = await readActive()
-        runtimeBeforeDigest = bootstrapDigest(active)
-        runtimeBeforeIdentities = active.map((row) => ({
-          runtime_instance_id: String(row.runtime_instance_id),
-          row_digest: bootstrapDigest(row),
-        }))
+        const legacyBefore=await tx.query<any>(`SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+          port, checkout_path, commit_sha, status, metadata FROM agent_runtime_instances WHERE agent_id=$1 ORDER BY runtime_instance_id`,[context.agentId])
+        runtimeBeforeDigest = bootstrapDigest(legacyBefore)
+        runtimeBeforeIdentities = legacyBefore.map(row=>({runtime_instance_id:String(row.runtime_instance_id),row_digest:bootstrapDigest(row)}))
         const decision = classifyRuntimeReceiptRows(active, runtimeTuple)
         if (!decision.ok) throw new RuntimeReceiptSelectionError(decision.discriminator, decision.evidenceDigest)
         if (decision.action === 'reuse' && decision.runtimeInstanceId) {
@@ -2176,14 +2176,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const id = randomUUID()
         const inserted = await tx.query<{ runtime_instance_id: string }>(
           `INSERT INTO agent_runtime_instances
-             (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-              process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-           VALUES
-             ($1, $2, $3, 'bootstrap_bound_provider', $4,
-              $5, $6, $7, $8, 'running', now(), now(), COALESCE($9::jsonb, '{}'::jsonb))
+             (runtime_instance_id, agent_id, runtime_kind, runtime_engine, status, started_at, metadata)
+           VALUES ($1,$2,'bootstrap_bound_provider',NULL,NULL,NULL,$3::jsonb)
            RETURNING runtime_instance_id`,
-          [id, context.agentId, context.resolvedRuntime, sessionName, providerPid, port,
-            runtimeTuple.checkout_path, context.repoHead, JSON.stringify({ bootstrap_run_id: context.runId, tuple_digest: runtimeTupleDigest, mcp_runtime_instance_id:endpoint.endpoint?.runtimeInstanceId, provider_observation:providerObservation })],
+          [id,context.agentId,JSON.stringify(durableRuntimeMetadata({bootstrap_run_id:context.runId,
+            mcp_runtime_instance_id:endpoint.endpoint!.runtimeInstanceId,source_commit:context.repoHead}))],
         )
         const insertedId = String(inserted[0]?.runtime_instance_id ?? id)
         const postInsert = classifyRuntimeReceiptRows(await readActive(), runtimeTuple)
@@ -2361,13 +2358,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       let tupleBindingMatches = !mutation
       let tupleBindingSource: 'release_context' | 'bound_runtime_receipt' = 'release_context'
       if (mutation && selectedRuntimeInstanceId && releaseContextTuple && boundTupleDigest) {
-        const selected = await withBootstrapDb(env, (db) => db.queryOne<any>(
-          `SELECT agent_id, runtime_engine, runtime_kind, session_name, process_id,
-                  port, checkout_path, commit_sha, status, metadata
-             FROM agent_runtime_instances
-            WHERE runtime_instance_id = $1 AND agent_id = $2`,
-          [selectedRuntimeInstanceId, context.agentId],
-        ), { readonly: true })
+        const selected = await withBootstrapDb(env,async db=>(await observedBootstrapRuntimeRows(db,context.agentId)).find(row=>row.runtime_instance_id===selectedRuntimeInstanceId) ?? null,{readonly:true})
         selectedRuntimeRowPresent = Boolean(selected)
         const metadata = parseJsonRecord(selected?.metadata)
         const selectedTuple: RuntimeReceiptTuple | null = selected
@@ -2394,7 +2385,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           && selectedTuple!.port === releaseContextTuple.port
         tupleBindingMatches = currentProviderIdentityMatches
           && selectedRuntimeTupleDigest === boundTupleDigest
-          && metadata.tuple_digest === boundTupleDigest
+          && selectedRuntimeTupleDigest === boundTupleDigest
         if (tupleBindingMatches) {
           expectedTuple = selectedTuple
           tupleBindingSource = 'bound_runtime_receipt'
@@ -3702,16 +3693,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             const row = await tx.queryOne<any>('SELECT status, metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2', [runtimeId, context.agentId])
             const metadata = parseJsonRecord(row?.metadata)
             if (metadata.bootstrap_run_id !== context.runId) return false
-            if (row?.status === 'running' || row?.status === 'active') {
-              const stopped = await tx.execute(
-                `UPDATE agent_runtime_instances SET status = 'stopped', stopped_at = now(), last_seen_at = now()
-                  WHERE runtime_instance_id = $1 AND agent_id = $2 AND status IN ('running', 'active')`,
-                [runtimeId, context.agentId],
-              )
-              if (stopped.rowCount !== 1) return false
-            } else if (row?.status !== 'stopped') {
-              return false
-            }
+            if(!row || (row.status!==null && row.status!=='stopped')) return false
+            // Retain the logical anchor and all foreign-key history. No liveness write.
+
           }
           const evidence = evidenceId === null || evidenceId === undefined
             ? null
@@ -3804,9 +3788,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             await tx.execute(`UPDATE runtime_memory_ready_evidence
               SET result_status = 'failed', failure_reason = 'BOOTSTRAP_ROLLBACK', valid_until = now()
               WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [context.runId])
-            await tx.execute(`UPDATE agent_runtime_instances
-              SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), last_seen_at = now()
-              WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId])
+            // No physical runtime stop snapshot is persisted during rollback.
             let exactQueueUpdateCount = 0
             for (const row of ownedQueueBefore) {
               const updated = await tx.execute(`UPDATE message_queue

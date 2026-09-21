@@ -326,17 +326,7 @@ export class PollingDriver {
     if (this.pollTimer) return
     this.notifyPending = opts.notifyPending ?? null
 
-    this.heartbeatTimer = setInterval(async () => {
-      const c = getDb ? await getDb() : null
-      if (c) {
-        await c.query(
-          `UPDATE agents SET last_seen_at = now(),
-           status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-           WHERE agent_id = $1`,
-          [agentId],
-        ).catch(() => {})
-      }
-    }, POLL_DRIVER_HEARTBEAT_MS)
+    // Poll-driver liveness must not be persisted in agents.
 
     this.pollTimer = setInterval(() => {
       this.poll(agentId).catch(err => {

@@ -171,16 +171,8 @@ async function selectExpiredClaimAgents(
 }
 
 async function syncAgentStatusForAgents(db: ClaimTtlDb, agentIds: string[]): Promise<void> {
-  for (const agentId of agentIds) {
-    await db.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-  }
+  // Queue transitions remain durable; busy/idle is derived when read.
+  return
 }
 
 /**

@@ -168,17 +168,16 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
 }): Promise<SeatProviderSelection> {
   const unavailable = (): SeatProviderSelection => ({ok:false,provider:null,observation:null,code:'PROVIDER_MISSING'})
   // DB contributes logical identity/authority only. A DB failure never becomes a cold launch.
-  let anchors: any[]
-  try {
-    const read=await db.query(`SELECT r.runtime_instance_id, r.agent_id, r.runtime_kind,
+  const authoritySql=`SELECT r.runtime_instance_id, r.agent_id, r.runtime_kind,
       l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token,
       CASE WHEN l.status = 'active' AND l.expires_at > CURRENT_TIMESTAMP THEN 1 ELSE 0 END AS authority_live
       FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
       ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
         AND l.lease_purpose = 'worker' AND l.status = 'active'
-      WHERE r.agent_id = $1 AND r.runtime_kind = 'local_process'`, [input.agentId])
-    anchors=Array.isArray(read)?read:read.rows
-  } catch {return unavailable()}
+      WHERE r.agent_id = $1 AND r.runtime_kind = 'local_process'`
+  const readAuthority=async()=>{const read=await db.query(authoritySql,[input.agentId]);return Array.isArray(read)?read:read.rows}
+  let anchors: any[]
+  try {anchors=await readAuthority()} catch {return unavailable()}
   const observed=(input.inspect ?? inspectHostRuntime)({agentId:input.agentId,expectedHost:input.hostId})
   if(!['OBSERVED','NO_LIVE_RUNTIME'].includes(observed.reasonCode)) return unavailable()
   const live:SeatProviderObservation[]=[]
@@ -190,6 +189,15 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
     if(matches.length!==1) return unavailable()
     live.push(observation)
   }
+  try {
+    const after=await readAuthority()
+    for(const o of live) {
+      const before=anchors.find(row=>String(row.runtime_instance_id)===o.runtime_instance_id)
+      if(after.filter((row:any)=>String(row.runtime_instance_id)===o.runtime_instance_id && row.agent_id===input.agentId
+        && row.holder_agent_id===input.agentId && String(row.holder_runtime_instance_id)===o.runtime_instance_id
+        && Number(row.authority_live)===1 && Number(row.fencing_token)===Number(before?.fencing_token)).length!==1) return unavailable()
+    }
+  }catch{return unavailable()}
   return selectSeatProvider({...input,live,history:[],allowHistory:false,now:input.now ?? new Date()})
 }
 

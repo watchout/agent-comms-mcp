@@ -1,3 +1,4 @@
+import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector, type HostRuntimeObservation } from './host-runtime-observer'
 import { hostname } from 'node:os'
 import { createHash } from 'node:crypto'
 import type { DbAdapter } from './db'
@@ -71,6 +72,7 @@ export type RuntimeCleanupReport = {
 }
 
 export type RuntimeCleanupPlanOptions = {
+  inspect?: HostRuntimeInspector
   staleMinutes?: number
   includeDisabledProfiles?: boolean
   includeTestProfiles?: boolean
@@ -297,7 +299,19 @@ export async function buildRuntimeCleanupReport(
   const tmuxPanes = options.tmuxPanes ?? []
   const portListeners = options.portListeners ?? []
   const agents = await loadAgents(db)
-  const runtimes = await loadRuntimes(db)
+  const anchors=await loadRuntimes(db)
+  const runtimes:RuntimeRow[]=[]
+  for(const agent of agents) {
+    const fresh=(options.inspect ?? inspectHostRuntime)({agentId:agent.agent_id})
+    if(fresh.reasonCode!=='OBSERVED') continue
+    for(const o of fresh.observations) {
+      const owned=anchors.filter(r=>r.agent_id===agent.agent_id && r.runtime_instance_id===o.runtime_instance_id)
+      if(owned.length!==1)continue
+      runtimes.push({...owned[0],host_id:o.host_id,session_name:o.session_name,process_id:o.process_id,
+        port:o.port,checkout_path:o.workspace,runtime_engine:o.provider,status:'active',started_at:o.process_started_at,
+        last_seen_at:o.observed_at,stopped_at:null,metadata:{observation:o}})
+    }
+  }
 
   const runtimeByAgent = new Map<string, RuntimeRow[]>()
   for (const runtime of runtimes) {
@@ -710,6 +724,16 @@ export async function executeRuntimeCleanup(
   for (const target of report.targets) {
     const executable = target.actions.filter((action) => action.kind !== 'noop')
     if (executable.length === 0) continue
+    if(!target.agent_id || !target.runtime_instance_id) throw new Error('RUNTIME_CLEANUP_UNBOUND_HOLDER')
+    const before=(options.inspect ?? inspectHostRuntime)({agentId:target.agent_id,runtimeInstanceId:target.runtime_instance_id})
+    if(before.reasonCode!=='OBSERVED' || before.observations.length!==1) throw new Error('RUNTIME_CLEANUP_UNKNOWN_HOLDER')
+    const own=before.observations[0]
+    if(own.process_id!==target.pid || own.port!==target.port) throw new Error('RUNTIME_CLEANUP_HOLDER_CHANGED')
+    const work=await queryRows<{n:number}>(db,`SELECT COUNT(*) AS n FROM message_queue
+      WHERE agent_id=$1 AND status IN ('pending','received','in_progress')`,[target.agent_id])
+    if(work.length!==1 || Number(work[0].n)!==0) throw new Error('RUNTIME_CLEANUP_ACTIVE_OR_UNKNOWN_WORK')
+    const after=(options.inspect ?? inspectHostRuntime)({agentId:target.agent_id,runtimeInstanceId:target.runtime_instance_id})
+    if(after.reasonCode!=='OBSERVED' || after.observations.length!==1 || !sameHostRuntime(own,after.observations[0])) throw new Error('RUNTIME_CLEANUP_HOLDER_CHANGED')
     for (const action of executable) {
       if (action.kind === 'stop_runtime' && action.runtime_instance_id) {
         throw new Error('RUNTIME_CLEANUP_REQUIRES_FRESH_OWNED_PROCESS_AND_NO_WORK')
@@ -717,8 +741,7 @@ export async function executeRuntimeCleanup(
         if (!options.killProcess) throw new Error(`KILL_PROCESS_DEPENDENCY_MISSING: ${action.pid}`)
         await options.killProcess(action.pid)
       } else if (action.kind === 'kill_tmux_session' && action.tmux_session) {
-        if (!options.killTmuxSession) throw new Error(`KILL_TMUX_DEPENDENCY_MISSING: ${action.tmux_session}`)
-        await options.killTmuxSession(action.tmux_session)
+        throw new Error('RUNTIME_CLEANUP_TMUX_SCOPE_UNPROVEN')
       }
     }
     await auditCleanupTarget(db, target, report.plan_hash, false)

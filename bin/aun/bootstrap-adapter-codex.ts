@@ -996,6 +996,8 @@ export function expectedBootstrapMcpTuple(
     environment: {
       AGENT_ID: context.agentId,
       AGENT_COM_EXPECTED_AGENT_ID: context.agentId,
+      AGENT_COM_WORKSPACE: realpathOrResolve(context.workspaceRoot),
+      AGENT_COM_RUNTIME_SESSION: context.env.AUN_BOOTSTRAP_TMUX_SESSION?.trim() || `runtime:${context.agentId}`,
       ...databaseEnvironment,
       AGENT_COM_PG_NOTIFY: 'false',
       AGENT_COMMS_TTL_SWEEP_DISABLED: '1',

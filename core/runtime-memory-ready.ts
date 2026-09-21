@@ -210,14 +210,7 @@ export async function resolveRuntimeMemoryReadyProject(
       if (!project || /[:\r\n\0]/.test(project)) continue
       const gate = await evaluateRuntimeMemoryReadyGate(db,{agent_id:agentId,project,now,requested_runtime_kind:'local_process'})
       if (!gate.ok || gate.runtime_instance_id !== runtime.runtime_instance_id) continue
-      const evidence = await queryRows<{metadata:unknown}>(db,
-        'SELECT metadata FROM runtime_memory_ready_evidence WHERE id=$1 AND agent_id=$2 AND runtime_instance_id=$3',
-        [gate.evidence_id,agentId,runtime.runtime_instance_id])
-      const receipt = parseObject(evidence[0]?.metadata).seat_context_receipt as SeatContextReceipt | undefined
-      const native = receipt?.native_delivery
-      if (!validateSeatContextReceipt(receipt,{agentId,project,runtimeInstanceId:runtime.runtime_instance_id})
-        || !native || native.agent_id !== agentId || native.project !== project
-        || seatContextDigest(native) !== receipt?.response_digest) continue
+      // The gate has freshly re-read the original native receipt for this project.
       projects.add(project)
     }
   }
@@ -858,7 +851,8 @@ export async function evaluateRuntimeMemoryReadyGate(
     })
     if (!endpoint.ok || !endpoint.endpoint || endpoint.endpoint.port !== currentRuntime.port
       || endpoint.endpoint.processId !== parseObject(selectedRuntime.metadata).provider_observation?.process_id
-      || endpoint.endpoint.checkoutPath !== currentRuntime.checkout_path) {
+      || endpoint.endpoint.checkoutPath !== currentRuntime.checkout_path
+      || endpoint.endpoint.processStartedAt !== parseObject(selectedRuntime.metadata).provider_observation?.process_started_at) {
       return fail(withEvidence, 'endpoint_unavailable', { code: endpoint.code })
     }
   } catch { return fail(withEvidence, 'endpoint_unavailable', { code: 'RUNTIME_ENDPOINT_READ_FAILED' }) }
@@ -926,7 +920,7 @@ export function buildWasurezuBootstrapEvidence(input: {
  * input. A sealed bootstrap receipt cannot be relabelled to this MCP UUID. */
 export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryReadyDb, input: {
   agentId: string; project: string; runtimeInstanceId: string; receipt: SeatContextReceipt
-  now?: Date; validForSeconds?: number; observeProvider?: typeof observeSeatProvider
+  now?: Date; validForSeconds?: number; observeProvider?: typeof observeSeatProvider; inspect?: HostRuntimeInspector; readNativeProof?: typeof readCurrentNativeProof
 }): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
   const now = input.now ?? new Date()
   if (!validateSeatContextReceipt(input.receipt, input)) throw new Error('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
@@ -937,14 +931,14 @@ export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryRe
     throw new Error('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
   }
   const resolution = await resolveRuntimeMemoryReadyCurrent(db, {
-    agentId: input.agentId, requestedRuntimeKind: 'local_process', now,
+    agentId: input.agentId, requestedRuntimeKind: 'local_process', now, inspect:input.inspect,
   })
   const runtime = resolution.current_runtime
   if (!resolution.ok || !runtime || runtime.runtime_instance_id !== input.runtimeInstanceId
     || runtime.runtime_kind !== 'local_process' || !runtime.session_name || !runtime.checkout_path) {
     throw new Error('MEMORY_NATIVE_CURRENT_RUNTIME_MISMATCH')
   }
-  const endpoint = await resolveRuntimeEndpoint(db, {agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,now})
+  const endpoint = await resolveRuntimeEndpoint(db, {agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,now,inspect:input.inspect})
   if (!endpoint.ok || !endpoint.endpoint || !endpoint.endpoint.processId) throw new Error('MEMORY_NATIVE_ENDPOINT_UNAVAILABLE')
   const observed = (input.observeProvider ?? observeSeatProvider)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
     processId:endpoint.endpoint.processId,sessionName:runtime.session_name,workspace:runtime.checkout_path,now})
@@ -964,7 +958,7 @@ export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryRe
     checkout_commit_sha: runtime.commit_sha, completed_at: input.receipt.completed_at,
     valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
   }))
-  const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process'})
+  const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
   if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}`)
   return recorded
 }

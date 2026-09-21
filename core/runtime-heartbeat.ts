@@ -1,5 +1,5 @@
 import { durableRuntimeMetadata } from './runtime-durable-data'
-import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
+import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -246,7 +246,9 @@ async function heartbeatRuntimeEndpointLease(
   holderConnectorInstanceId: string | null,
 ): Promise<EndpointLeaseHeartbeatResult | null> {
   const ttlMs = runtimeEndpointLeaseTtlMs()
-  const now = new Date()
+  const clock = await db.query('SELECT CURRENT_TIMESTAMP AS database_now')
+  const now = new Date(clock.rows[0]?.database_now)
+  if (!Number.isFinite(now.getTime())) throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
   const heartbeatAt = dbTimestamp(now)
   const expiresAt = dbTimestamp(new Date(now.getTime() + ttlMs))
   const metadata = JSON.stringify(durableRuntimeMetadata())
@@ -284,7 +286,8 @@ async function heartbeatRuntimeEndpointLease(
           AND holder_agent_id = $3
           AND holder_runtime_instance_id = $4
           AND status = 'active'
-          AND expires_at > $6
+          AND expires_at > CURRENT_TIMESTAMP
+          AND $7 > CURRENT_TIMESTAMP
         RETURNING lease_id, heartbeat_at, expires_at`,
       [
         active.lease_id,
@@ -312,7 +315,7 @@ async function heartbeatRuntimeEndpointLease(
           AND lease_scope_id = $1
           AND lease_purpose = $2
           AND status = 'active'
-          AND expires_at <= $3`,
+          AND expires_at <= CURRENT_TIMESTAMP`,
       [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE, heartbeatAt],
     )
     throw new Error('RUNTIME_ENDPOINT_LEASE_EXPIRED')
@@ -438,6 +441,8 @@ export async function heartbeatRuntimeInstance(
     WHERE agent_id = $1 AND active = true AND binding_role = 'primary'`,[input.agentId])
   if(binding.rows.length>1) throw new Error('RUNTIME_WORKSPACE_BINDING_AMBIGUOUS')
   const workspaceId=binding.rows[0]?.workspace_id ?? input.workspaceId ?? null
+  const confirm=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(confirm.reasonCode!=='OBSERVED' || confirm.observations.length!==1 || !sameHostRuntime(held[0],confirm.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
   const runtime=await db.query(`INSERT INTO agent_runtime_instances
     (runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
     VALUES ($1,$2,$3,$4,NULL,NULL,NULL,$5::jsonb)
@@ -450,9 +455,13 @@ export async function heartbeatRuntimeInstance(
 
   const memoryReadyIdentity = null
   const connectorRowsUpserted = {rowCount:0,connectorInstanceId:null}
+  const preLease=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(preLease.reasonCode!=='OBSERVED' || preLease.observations.length!==1 || !sameHostRuntime(held[0],preLease.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
   const endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null)
   if(!endpointLease) throw new Error('RUNTIME_ENDPOINT_LEASE_UNCONFIRMED')
 
+  const after=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(after.reasonCode!=='OBSERVED' || after.observations.length!==1 || !sameHostRuntime(held[0],after.observations[0])) throw new Error('RUNTIME_POST_COMMIT_HOLDER_CHANGED')
   const row = runtime.rows[0]
   return {
     ok: true,

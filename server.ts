@@ -4489,6 +4489,11 @@ function killProcessOnPort(port: number): boolean {
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
 const bridgeEndpoint = bindRuntimeEndpoint({
   port: REQUESTED_WEBHOOK_PORT,
+  async authorize() {
+    const db=await tryGetDb(); if(!db) return false
+    const endpoint=await resolveRuntimeEndpoint(db,{agentId:AGENT_ID,runtimeInstanceId:RUNTIME_INSTANCE_ID})
+    return endpoint.ok && endpoint.endpoint?.processId===process.pid && endpoint.endpoint.port===bridgeEndpoint.port
+  },
   async fetch(req) {
     if (req.method !== 'POST') {
       return new Response('Method not allowed', { status: 405 })

@@ -1,3 +1,4 @@
+import { sameHostRuntime, type HostRuntimeObservation } from '../host-runtime-observer'
 import { observeSeatProvider, resolveSeatProvider } from '../seat-runtime-selection'
 /**
  * StateDaemon — queue-state-driven dispatch supervisor (Issue #323, spec v0.6).
@@ -210,6 +211,7 @@ export function automaticProcessingInputsFromAgent(
   agent: {
     agent_type?: string | null
     runtime?: string | null
+    observed_runtime_provider?: string | null
     runtime_engine_preference?: string | null
     status?: string | null
     profile_enabled?: unknown
@@ -227,9 +229,7 @@ export function automaticProcessingInputsFromAgent(
     enrolled: agent !== null,
     enabled: agent !== null && isProfileEnabled(agent.profile_enabled) && agent.disabled_at == null,
     runtimeReady: agent !== null
-      && Boolean(agent.runtime?.trim())
-      && Boolean(agent.status?.trim())
-      && !isInactiveAgentStatus(agent.status ?? null),
+      && Boolean(agent.observed_runtime_provider?.trim()),
     channelMember,
     humanAgent: agent?.agent_type === 'human',
   }
@@ -255,7 +255,8 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
     )
     channelMember = parseChannelMembers(channelRows.rows[0]?.members).includes(input.agentId)
   }
-  return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent, channelMember))
+  const current = agent ? await resolveSeatProvider(db,{agentId:input.agentId}) : null
+  return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent ? {...agent,observed_runtime_provider:current?.ok?current.provider:null}:null, channelMember))
 }
 
 export type QueueWorkScheduleResult =
@@ -897,72 +898,39 @@ export class StateDaemon {
 
   async refreshClaims(): Promise<RefreshResult> {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
-    const inflightQueueWorkIds = Array.from(this.inflightQueueWorkIds)
-      .filter((id) => /^[1-9]\d*$/.test(id))
-      .map((id) => Number.parseInt(id, 10))
-    let sql = `UPDATE message_queue mq
-          SET claim_expires_at = $1::timestamptz + ($2 || ' seconds')::interval,
-              last_heartbeat_at = $1::timestamptz
-        WHERE mq.status IN ('received', 'in_progress')
-          AND mq.claim_expires_at > $1::timestamptz
-          AND mq.payload NOT LIKE '%"runner_error"%'
-          AND ${unboundedQueuePredicate('mq.agent_id','postgres')}
-          AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
-          AND mq.claimed_by = mq.agent_id
-          AND mq.claimed_at IS NOT NULL
-          AND (
-            mq.claimed_at >= $1::timestamptz - ($3 || ' seconds')::interval
-            OR mq.id = ANY($4::bigint[])
-          )
-          AND EXISTS (
-            SELECT 1 FROM agents a
-             WHERE a.agent_id = mq.agent_id
-               AND (
-                 a.status IN ('online', 'busy')
-                 OR mq.id = ANY($4::bigint[])
-               )
-               AND a.profile_enabled IS TRUE
-               AND a.disabled_at IS NULL
-               AND COALESCE(NULLIF(BTRIM(a.runtime_engine_preference), ''), NULLIF(BTRIM(a.runtime), '')) IS NOT NULL
-               AND EXISTS (
-                 SELECT 1
-                   FROM agent_messages am
-                   JOIN channels c ON c.id = am.channel_id
-                  WHERE am.id::text = mq.message_id
-                    AND mq.agent_id = ANY(c.members)
-               )
-          )`
-    const now = this.clock.now()
-    const params: unknown[] = [now, this.config.claimTtlSec, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
-    sql += this.agentScopeClause(params, 'mq.agent_id')
-    sql += this.queueWorkFenceClause(params, 'mq')
-    sql += this.queueWorkResidueExclusionClause(params, 'mq')
-    const { rowCount } = await this.dbQuery(sql, params)
-    this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'ok' }, rowCount)
-
-    const skippedParams: unknown[] = [now, this.config.activeClaimMaxAgeSec, inflightQueueWorkIds]
-    let skippedSql = `SELECT count(*)::int AS n
-        FROM message_queue mq
-       WHERE mq.status IN ('received', 'in_progress')
-         AND mq.claim_expires_at > $1::timestamptz
-         AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
-         AND (
-           mq.claimed_by IS DISTINCT FROM mq.agent_id
-           OR mq.claimed_at IS NULL
-           OR (
-             mq.claimed_at < $1::timestamptz - ($2 || ' seconds')::interval
-             AND NOT (mq.id = ANY($3::bigint[]))
-           )
-         )`
-    skippedSql += this.agentScopeClause(skippedParams, 'mq.agent_id')
-    skippedSql += this.queueWorkFenceClause(skippedParams, 'mq')
-    skippedSql += this.queueWorkResidueExclusionClause(skippedParams, 'mq')
-    const skippedRows = await this.dbQuery<{ n: number }>(skippedSql, skippedParams)
-    const skipped = Number(skippedRows.rows[0]?.n ?? 0)
-    if (skipped > 0) {
-      this.metrics.inc('state_daemon_heartbeat_refresh_total', { result: 'active_claim_max_age_skipped' }, skipped)
+    const inflightQueueWorkIds=Array.from(this.inflightQueueWorkIds).filter(id=>/^[1-9]\d*$/.test(id)).map(Number)
+    const params:unknown[]=[this.config.activeClaimMaxAgeSec,inflightQueueWorkIds]
+    let select=`SELECT mq.id,mq.agent_id,mq.claimed_at::text AS claimed_at,mq.claimed_runtime_instance_id
+      FROM message_queue mq WHERE mq.status IN ('received','in_progress')
+       AND mq.claim_expires_at > CURRENT_TIMESTAMP AND mq.claimed_by=mq.agent_id AND mq.claimed_at IS NOT NULL
+       AND mq.claimed_runtime_instance_id IS NOT NULL
+       AND mq.payload NOT LIKE '%"runner_error"%'
+       AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
+       AND ${unboundedQueuePredicate('mq.agent_id','postgres')}
+       AND (mq.claimed_at >= CURRENT_TIMESTAMP - ($1 || ' seconds')::interval OR mq.id=ANY($2::bigint[]))
+       AND EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=mq.agent_id AND a.profile_enabled IS TRUE AND a.disabled_at IS NULL)
+       AND EXISTS (SELECT 1 FROM agent_messages am JOIN channels c ON c.id=am.channel_id
+         WHERE am.id::text=mq.message_id AND mq.agent_id=ANY(c.members))`
+    select+=this.agentScopeClause(params,'mq.agent_id')+this.queueWorkFenceClause(params,'mq')+this.queueWorkResidueExclusionClause(params,'mq')
+    const candidates=await this.dbQuery<any>(select,params)
+    let refreshed=0,skipped=0
+    for(const claim of candidates.rows) {
+      const observed=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id})
+      if(!observed.observation || observed.observation.runtime_instance_id!==String(claim.claimed_runtime_instance_id)) {skipped++;continue}
+      const verified=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id})
+      if(!verified.observation || !sameHostRuntime(observed.observation as HostRuntimeObservation,verified.observation as HostRuntimeObservation)) {skipped++;continue}
+      const result=await this.dbQuery(`UPDATE message_queue SET claim_expires_at=CURRENT_TIMESTAMP+($1 || ' seconds')::interval,
+        last_heartbeat_at=CURRENT_TIMESTAMP WHERE id=$2 AND agent_id=$3 AND claimed_by=$3 AND claimed_at=$4
+        AND claimed_runtime_instance_id=$5 AND status IN ('received','in_progress') AND claim_expires_at>CURRENT_TIMESTAMP
+        AND EXISTS (SELECT 1 FROM control_plane_leases l WHERE l.lease_scope_type='runtime_instance'
+          AND l.lease_scope_id=$5::text AND l.lease_purpose='worker' AND l.holder_agent_id=$3
+          AND l.holder_runtime_instance_id=$5 AND l.status='active' AND l.expires_at>CURRENT_TIMESTAMP)`,
+        [this.config.claimTtlSec,claim.id,claim.agent_id,claim.claimed_at,claim.claimed_runtime_instance_id])
+      refreshed+=result.rowCount
+      if(!result.rowCount)skipped++
     }
-    return { refreshed: rowCount, skipped }
+    this.metrics.inc('state_daemon_heartbeat_refresh_total',{result:'ok'},refreshed)
+    return {refreshed,skipped}
   }
 
   private async observedAgent<T extends AgentRow>(agent:T|null,now:Date):Promise<(T & {observed_runtime_provider:string|null})|null> {
@@ -970,7 +938,8 @@ export class StateDaemon {
     const selected=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)},
       {agentId:agent.agent_id,now,observe:this.providerObserver})
     return {...agent,observed_runtime_provider:selected.ok?selected.provider:null,
-      ...(selected.observation?{tmux_session:selected.observation.session_name,last_seen_at:new Date(selected.observation.observed_at)}:{})}
+      runtime:selected.ok?selected.provider:null,status:selected.ok?'online':'unknown',
+      tmux_session:selected.observation?.session_name ?? null,last_seen_at:selected.observation?new Date(selected.observation.observed_at):null}
   }
 
   // ── Bot liveness (§5.4 / R7 / 補強 #5) ─────────────────────────────────────
@@ -986,7 +955,7 @@ export class StateDaemon {
     const now = this.clock.now().getTime()
     for (const storedBot of rows) {
       const bot=(await this.observedAgent(storedBot,this.clock.now()))!
-      if (isInactiveAgentStatus(bot.status)) {
+      if (!bot.observed_runtime_provider || isInactiveAgentStatus(bot.status)) {
         this.metrics.inc('state_daemon_bot_liveness_skipped_total', { status: bot.status ?? 'unknown' })
         continue
       }
@@ -2213,6 +2182,12 @@ export class StateDaemon {
       await this.alert.alert(
         `host runtime adapter failed closed for ${row.agent_id} queue_id=${row.id}: ${hostSelection.failure.failure_code}`,
       )
+      return false
+    }
+    const finalProvider=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)}, {agentId:row.agent_id})
+    if(!providerSelection.observation || !finalProvider.observation || !sameHostRuntime(
+      providerSelection.observation as HostRuntimeObservation,finalProvider.observation as HostRuntimeObservation)) {
+      this.metrics.inc('state_daemon_wake_actions_total',{result:'runtime_changed_before_invocation'})
       return false
     }
     if (hostSelection.selected === 'host-runtime') {

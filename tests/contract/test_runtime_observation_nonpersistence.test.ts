@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { createHostRuntimeObserver, inspectHostRuntime, type HostRuntimeObservation } from '../../core/host-runtime-observer'
 import { durableMemoryMetadata, durableRuntimeMetadata } from '../../core/runtime-durable-data'
 import { heartbeatRuntimeInstance } from '../../core/runtime-heartbeat'
-import { resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
+import { bindRuntimeEndpoint, resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
 import { selectSeatProvider, resolveSeatProvider } from '../../core/seat-runtime-selection'
 import { nonpersistHostFixture } from '../helpers/nonpersist-host-fixture'
 const id='10000000-0000-4000-8000-000000000001'
@@ -54,6 +54,7 @@ describe('NP implementation: observation and durable boundaries',()=>{
   test('NP01: actual heartbeat SQL and parameters contain only anchor and authority data',async()=>{
     const calls:Array<{sql:string;params:unknown[]}>=[]
     const db={async query(sql:string,params:unknown[]=[]){calls.push({sql,params})
+      if(sql.includes('CURRENT_TIMESTAMP AS database_now')) return {rows:[{database_now:new Date().toISOString()}]}
       if(sql.includes('FROM agents'))return {rows:[{org_id:'default',metadata:{}}]}
       if(sql.includes('INSERT INTO agent_runtime_instances'))return {rows:[{runtime_instance_id:id,agent_id:'seat'}]}
       if(sql.includes('MAX(fencing_token)'))return {rows:[{max_token:0}]}
@@ -100,4 +101,35 @@ describe('NP implementation: observation and durable boundaries',()=>{
     expect(observer({agentId:'seat',deadline:3}).observations).toEqual([])
     expect(calls).toBe(1)
   })
+})
+
+describe('NP changed-input effect and authority regressions',()=>{
+ test('NP03: held port is inaccessible before commit and after authority loss',async()=>{
+   let calls=0,allowed=false
+   const held=bindRuntimeEndpoint({fetch:()=>{calls++;return new Response('effect')},authorize:async()=>allowed})
+   try {
+     expect((await fetch(held.endpointUri)).status).toBe(503);expect(calls).toBe(0)
+     let commit!:()=>void
+     const publishing=held.publish(()=>new Promise<void>(resolve=>{commit=resolve}))
+     expect((await fetch(held.endpointUri)).status).toBe(503);expect(calls).toBe(0)
+     allowed=true;commit();await publishing
+     expect((await fetch(held.endpointUri)).status).toBe(200);expect(calls).toBe(1)
+     allowed=false;expect((await fetch(held.endpointUri)).status).toBe(503);expect(calls).toBe(1)
+   }finally{held.server.stop(true)}
+ })
+ test('NP03: unknown commit closes only this held socket',async()=>{
+   const other=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('other')})
+   const failed=bindRuntimeEndpoint({fetch:()=>new Response('never'),authorize:async()=>true})
+   try{await expect(failed.publish(async()=>{throw new Error('unknown commit')})).rejects.toThrow('RUNTIME_ENDPOINT_REGISTRATION_FAILED')
+     expect((await fetch(`http://127.0.0.1:${other.port}`)).status).toBe(200)
+   }finally{other.stop(true);failed.server.stop(true)}
+ })
+ test('NP02: bypass authority constraints survive projection exactly',()=>{
+   const raw={actor:'owner',reason:'one scoped repair',timestamp:'2026-09-21T00:00:00Z',expires_at:'2026-09-21T01:00:00Z',
+     target:{agent_id:'seat'},queue_scope:{agent_id:'seat',queue_ids:[1,3],statuses:['pending'],action_kinds:['invoke']}}
+   const saved=durableMemoryMetadata(raw)
+   expect(saved.target).toEqual(raw.target);expect(saved.queue_scope).toEqual(raw.queue_scope)
+   expect((saved.queue_scope as any).queue_ids.includes(2)).toBe(false)
+   expect(()=>durableMemoryMetadata({...raw,queue_scope:{...raw.queue_scope,unknown_restriction:'only one'}})).toThrow('BYPASS_SCOPE_UNSUPPORTED_CONSTRAINT')
+ })
 })

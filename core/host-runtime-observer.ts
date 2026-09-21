@@ -24,7 +24,7 @@ export type HostRuntimeIo = {
 }
 const io: HostRuntimeIo = {
   run: (command, args, timeout) => execFileSync(command, args, {encoding:'utf8', timeout, maxBuffer:16*1024*1024,
-    stdio:['ignore','pipe','ignore'], env:{...process.env,TZ:'UTC',LC_ALL:'C'}}),
+    stdio:['ignore','pipe','ignore'], env:{PATH:process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin',LANG:'C',TZ:'UTC',LC_ALL:'C'}}),
   canonical: realpathSync, monotonic: () => performance.now(), wall: Date.now, host: hostname,
 }
 function field(command: string, key: string): string | null {
@@ -96,3 +96,10 @@ export function createHostRuntimeObserver(adapter: HostRuntimeIo = io): HostRunt
   }
 }
 export const inspectHostRuntime = createHostRuntimeObserver()
+
+/** Identity equality excludes freshness timestamps; every physical field is freshly read. */
+export function sameHostRuntime(a:HostRuntimeObservation,b:HostRuntimeObservation):boolean {
+  return ['agent_id','runtime_instance_id','host_id','process_id','process_started_at','provider_pid',
+    'provider_started_at','host_session_id','provider','session_name','workspace','port','endpoint_uri']
+    .every(key=>(a as any)[key]===(b as any)[key])
+}
