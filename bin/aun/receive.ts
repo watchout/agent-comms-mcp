@@ -6,6 +6,7 @@
  * audit and recovery workflows do not drain unrelated FIFO work.
  */
 import { spawnSync } from 'node:child_process'
+import { claimUnboundedRuntimeQueue } from '../../core/runtime-queue-claim'
 import { tryBoundedClaim } from '../../core/queue-admission'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
@@ -71,6 +72,7 @@ export interface ClaimedMessage {
   claimed_by?: string
   claimed_at?: string
   claim_expires_at?: string
+  claimed_runtime_instance_id?: string
   reply_chain?: unknown[]
   presentation?: PresentationEvidence
   routing?: QueueRoutingDecisionEvidence
@@ -526,38 +528,21 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           claimed_by: string
           claimed_at: string
           claim_expires_at: string
+          claimed_runtime_instance_id: string
         } | null = null
 
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
           const claimSource = plan.env.AUN_RECEIVE_CLAIM_SOURCE?.trim() || null
           const claimPayload = queuePayloadWithReceiveClaim(payload, {
             source: claimSource,
             agentId: plan.env.AGENT_ID,
             queueId: targetQueueId,
           })
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2,
-                    payload = COALESCE($5, payload)
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID, claimPayload],
-          )
-          if (update.rowCount !== 1) {
-            throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
-          }
-          const claimedRow = await tx.queryOne<Record<string, unknown>>(
-            `SELECT claimed_by, claimed_at::text AS claimed_at,
-                    claim_expires_at::text AS claim_expires_at
-               FROM message_queue
-              WHERE id = $1 AND agent_id = $2 AND status = 'received'`,
-            [selected.queue_id, plan.env.AGENT_ID],
-          )
+          const claimedRow = await claimUnboundedRuntimeQueue(tx, {
+            agentId:plan.env.AGENT_ID,queueId:selected.queue_id,ttlSeconds:claimTtlSec,
+            runtimeInstanceId:plan.env.AGENT_COM_RUNTIME_INSTANCE_ID,payload:claimPayload,
+          })
           const claimedAt = normalizeDate(claimedRow?.claimed_at)
           const persistedClaimExpiresAt = normalizeDate(claimedRow?.claim_expires_at)
           if (
@@ -571,15 +556,9 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
             claimed_by: plan.env.AGENT_ID,
             claimed_at: claimedAt,
             claim_expires_at: persistedClaimExpiresAt,
+            claimed_runtime_instance_id: claimedRow.claimed_runtime_instance_id,
           }
-          await tx.execute(
-            `UPDATE agents SET
-               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-               status_updated_at = now()
-             WHERE agent_id = $1`,
-            [plan.env.AGENT_ID],
-          )
+
         }
 
         const waitingRow = await tx.queryOne<{ n: number | string }>(
@@ -1053,6 +1032,7 @@ function claimedMessageFromRow(
     claimed_by: string
     claimed_at: string
     claim_expires_at: string
+    claimed_runtime_instance_id?: string
   } | null,
 ): ClaimedMessage {
   return {
@@ -1798,6 +1778,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
         }
 
+        let newClaimIdentity: Awaited<ReturnType<typeof claimUnboundedRuntimeQueue>> | null = null
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
           // Preserve the existing memory/presentation gates above. Once a
           // row is selected, bounded recipients use the same policy-first
@@ -1806,30 +1787,11 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             dialect: db.dialect, env: plan.env, queueId: String(selected.row.queue_id),
           })
           if (bounded === null) {
-          const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.row.queue_id, plan.env.AGENT_ID],
-          )
-          if (update.rowCount !== 1) {
-            throw new Error(`selected queue row changed before claim: queue_id=${selected.row.queue_id}`)
+          newClaimIdentity = await claimUnboundedRuntimeQueue(tx, {agentId:plan.env.AGENT_ID,queueId:selected.row.queue_id,
+            ttlSeconds:parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30',10),
+            runtimeInstanceId:plan.env.AGENT_COM_RUNTIME_INSTANCE_ID})
           }
-          }
-          await tx.execute(
-            `UPDATE agents SET
-               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-               status_updated_at = now()
-             WHERE agent_id = $1`,
-            [plan.env.AGENT_ID],
-          )
+
         }
 
         const waitingRow = await tx.queryOne<{ n: number | string }>(
@@ -1854,7 +1816,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           : null
         if (selected.row && !activeClaim.busy) {
           const payload = selectedRaw ? parsePayload(selectedRaw.payload) : {}
-          claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting)
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting, newClaimIdentity)
         }
 
         return {

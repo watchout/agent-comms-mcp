@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { claimUnboundedRuntimeQueue } from './core/runtime-queue-claim'
 import { buildStartLaunchArgv, start as planSeatStart } from './bin/aun/start'
 /**
  * Agent Communications MCP Plugin
@@ -1231,15 +1232,6 @@ async function registerAgent(): Promise<void> {
   const client = await tryGetDb()
   if (!client) throw new Error('RUNTIME_ENDPOINT_DATABASE_UNAVAILABLE')
 
-  // Check for duplicate online agent
-  const existing = await client.query(
-    `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
-    [AGENT_ID]
-  )
-  if (existing.rows.length > 0 && existing.rows[0].status === 'online') {
-    process.stderr.write(`agent-comms: WARNING — agent '${AGENT_ID}' is already online (last seen: ${existing.rows[0].last_seen_at})\n`)
-  }
-
   // UPSERT — merge metadata instead of overwriting so DB-only keys
   // (e.g. discord_id self-registered by D1) survive process restarts.
   // jsonb || does a shallow merge: $5's keys override existing ones, but
@@ -1254,7 +1246,7 @@ async function registerAgent(): Promise<void> {
     [AGENT_ID, config.agent.display_name, config.agent.agent_type,
      null]
   )
-  process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
+  process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered with logical identity\n`)
   await heartbeatRuntimeEvidence(client)
 
   // pg_notify: agent.online + audit_log
@@ -1309,8 +1301,7 @@ async function registerAgent(): Promise<void> {
 // a transactional DB query on every call. If the buffer is empty at `next`
 // time, falls back to a direct DB query (same as the Phase 4 implementation).
 //
-// Also sends heartbeat (agents.last_seen_at UPDATE) every 30 seconds so the
-// watchdog and polling-driver clients know the bot is alive.
+// Runtime liveness is observed afresh; polling never persists agent liveness.
 //
 // Lifecycle:
 //   - pollingDriver.start(agentId) is called from registerAgent()
@@ -2201,16 +2192,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // structural via the sweeper. TTL default 30s, env-overridable
       // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-      await client.query(
-        `UPDATE message_queue
-            SET status = 'received',
-                read_at = now(),
-                claimed_by = $1,
-                claimed_at = now(),
-                claim_expires_at = now() + ($2 || ' seconds')::interval
-          WHERE id = $3`,
-        [agentId, String(claimTtlSec), row.id],
-      )
+      await claimUnboundedRuntimeQueue(client,{agentId,queueId:row.id,ttlSeconds:claimTtlSec,
+        runtimeInstanceId:RUNTIME_INSTANCE_ID})
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
       // semantics, busy/idle is derived from the actual open-claim set,
@@ -5426,7 +5409,7 @@ const shutdown = async () => {
     process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId} (shutdown)\n`)
   }
   discordClients.clear()
-  bridgeServer.stop()
+  // Retain the socket until exact-holder lease release below.
   // Close all per-bot transports (multi-bot SSE)
   for (const [, ctx] of botContexts) {
     if (ctx.transport) await ctx.transport.close().catch(() => {})
@@ -5443,6 +5426,7 @@ const shutdown = async () => {
   }
   if (httpServer) httpServer.close()
   await unregisterAgent()
+  bridgeServer.stop()
   if (db) await db.end().catch(() => {})
   process.exit(0)
 }

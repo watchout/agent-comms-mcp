@@ -1201,6 +1201,7 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
       }
       const finalizer = await finalizeDoneQueueWork(legacyDb, {
         queueId: plan.queue_id,
+        runtimeInstanceId:env.AGENT_COM_RUNTIME_INSTANCE_ID,
         replySender: new AgentComCliReplySender(plan.repoRoot, env, adapter.runtime_id),
         writebackSender,
         ...(plan.expected_claim_source ? {
@@ -1225,12 +1226,14 @@ export async function runQueueWork(opts: RunQueueWorkOptions = {}): Promise<RunQ
       invocationSource: plan.invocation_source ?? undefined,
       expectedClaimSource: plan.expected_claim_source ?? undefined,
       claimFence: opts.claimFence,
+      runtimeInstanceId:env.AGENT_COM_RUNTIME_INSTANCE_ID,
       requireClaimFence: opts.requireClaimFence ?? plan.expected_claim_source !== null,
     })
     let finalizer: unknown = undefined
     if (plan.finalize && runner.ok) {
       finalizer = await finalizeDoneQueueWork(legacyDb, {
         queueId: runner.queue_id,
+        runtimeInstanceId:env.AGENT_COM_RUNTIME_INSTANCE_ID,
         replySender: new AgentComCliReplySender(plan.repoRoot, env, adapter.runtime_id),
         writebackSender,
         ...(plan.expected_claim_source ? {

@@ -30,6 +30,12 @@ replaces the former Work-only maker restriction. Current implementation details
 and remaining coverage are recorded in the dependent continuity spec and its
 verification packet; local fixture success is not TRIAL_READY.
 
+The [current implementation cell](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5757589027)
+(body SHA256 `4923e637e2e2490e5a36f5201ffc35d3565dfb32828f481cab9c95ede3156f5e`)
+permits the independent executor to update PR #968. Its [verification packet](verify/aun-v2-nonpersistence-20260921/trial-ready-003/RETURN.md)
+separates ordinary claim/lifecycle regression evidence from the pending
+configuration deployment and provider-free S0 contracts and NP11 B3 recovery.
+
 After applicable design disposition and cutover, previous physical-runtime
 persistence/DB liveness clauses in this document and dependent specs describe
 legacy behavior only; they cannot authorize physical snapshots or fallback to

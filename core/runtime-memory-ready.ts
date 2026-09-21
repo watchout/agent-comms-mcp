@@ -163,7 +163,7 @@ function enabledProfile(value: unknown): boolean {
 export async function resolveRuntimeMemoryReadyProject(
   db: RuntimeMemoryReadyDb,
   agentId: string,
-  options: { now?: Date } = {},
+  options: { now?: Date; inspect?: HostRuntimeInspector; readNativeProof?: typeof readCurrentNativeProof } = {},
 ): Promise<RuntimeMemoryReadyProjectResolution> {
   const agents = await queryRows<RuntimeMemoryReadyProjectAgentRow>(
     db,
@@ -197,7 +197,7 @@ export async function resolveRuntimeMemoryReadyProject(
   }
 
   const now = options.now ?? new Date()
-  const current = await resolveRuntimeMemoryReadyCurrent(db, {agentId,requestedRuntimeKind:'local_process',now})
+  const current = await resolveRuntimeMemoryReadyCurrent(db, {agentId,requestedRuntimeKind:'local_process',now,inspect:options.inspect})
   const runtime = current.current_runtime
   const projects = new Set<string>()
   if (current.ok && runtime) {
@@ -208,7 +208,7 @@ export async function resolveRuntimeMemoryReadyProject(
     for (const row of rows) {
       const project = normalizeText(row.project)
       if (!project || /[:\r\n\0]/.test(project)) continue
-      const gate = await evaluateRuntimeMemoryReadyGate(db,{agent_id:agentId,project,now,requested_runtime_kind:'local_process'})
+      const gate = await evaluateRuntimeMemoryReadyGate(db,{agent_id:agentId,project,now,requested_runtime_kind:'local_process',inspect:options.inspect,readNativeProof:options.readNativeProof})
       if (!gate.ok || gate.runtime_instance_id !== runtime.runtime_instance_id) continue
       // The gate has freshly re-read the original native receipt for this project.
       projects.add(project)
@@ -827,6 +827,12 @@ export async function evaluateRuntimeMemoryReadyGate(
     })) return fail(withEvidence, 'context_consumption_missing', { code: 'MEMORY_CONTEXT_RECOVERY_REQUIRED' })
     const nativeDelivery = (receipt as SeatContextReceipt).native_delivery
     if (nativeDelivery) {
+      if(nativeDelivery.agent_id!==expectedAgentId || nativeDelivery.project!==input.project
+        || nativeDelivery.target_runtime!==receipt.target_runtime || nativeDelivery.pack_ref!==receipt.pack_id
+        || nativeDelivery.input_sha256!==receipt.invocation_digest || nativeDelivery.work_sha256!==receipt.work_digest
+        || seatContextDigest(nativeDelivery)!==receipt.response_digest) {
+        return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_NATIVE_CONTEXT_IDENTITY_MISMATCH'})
+      }
       const metadata = parseObject(selectedRuntime.metadata)
       const observation = parseObject(metadata.provider_observation)
       const observedRuntimeId = selectedRuntime.runtime_kind === 'bootstrap_bound_provider'

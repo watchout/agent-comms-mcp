@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { unitRuntimeObservation, unitRuntimeId } from './helpers/logical-runtime-unit-fixture'
+import type { HostRuntimeObservation } from '../core/host-runtime-observer'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
@@ -14,6 +16,8 @@ import {
 let tmp: string
 let db: SqliteAdapter
 let policy: RuntimeMemoryReadyPolicy
+let observations: Map<string, HostRuntimeObservation>
+const inspect = () => ({reasonCode: 'OBSERVED' as const, observations: [...observations.values()]})
 
 function testPolicy(): RuntimeMemoryReadyPolicy {
   return parseRuntimeMemoryReadyPolicy(JSON.stringify({
@@ -33,6 +37,7 @@ beforeEach(() => {
   migrateSqlite(dbPath)
   db = new SqliteAdapter(dbPath)
   policy = testPolicy()
+  observations = new Map()
 })
 
 afterEach(async () => {
@@ -41,12 +46,7 @@ afterEach(async () => {
 })
 
 async function seedProfile(agentId: string): Promise<void> {
-  await db.execute(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port, metadata, home_directory)
-     VALUES ($1, $1, 'dev', 'TUI', 'idle', 8789, $2, $3)`,
-    [agentId, JSON.stringify({ tmux_session: 'discord-cto' }), '/work/codex'],
-  )
+  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type) VALUES($1,$1,'dev')`,[agentId])
 }
 
 async function seedRuntime(input: {
@@ -59,25 +59,21 @@ async function seedRuntime(input: {
   seen: string
   metadata?: Record<string, unknown>
 }): Promise<void> {
-  await db.execute(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-        port, checkout_path, status, started_at, last_seen_at, metadata)
-     VALUES ($1, 'codex-cto', $2, $3, $4, 8789, $5, 'running', $6, $6, $7)`,
-    [
-      input.id,
-      input.engine ?? 'TUI',
-      input.kind ?? 'local_process',
-      Object.hasOwn(input, 'session') ? input.session ?? null : 'discord-cto',
-      input.home ?? '/work/codex',
-      input.seen,
-      JSON.stringify({ source: input.source ?? 'server.ts', ...(input.metadata ?? {}) }),
-    ],
-  )
+  const holder = input.kind === 'bootstrap_bound_provider' ? unitRuntimeId(`mcp-${input.id}`) : input.id
+  const metadata = input.kind === 'bootstrap_bound_provider' ? {mcp_runtime_instance_id: holder} : {}
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at,metadata)
+    VALUES($1,'codex-cto',$2,NULL,NULL,NULL,$3)`,[input.id,input.kind ?? 'local_process',JSON.stringify(metadata)])
+  if (holder !== input.id) await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at)
+    VALUES($1,'codex-cto','local_process',NULL,NULL,NULL)`,[holder])
+  await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at,metadata)
+    VALUES($1,'runtime_instance',$2,'worker','codex-cto',$2,1,'active','2026-08-21T00:00:00Z','2099-01-01T00:00:00Z','{}')`,[`lease-${input.id}`,holder])
+  observations.set(holder,unitRuntimeObservation('codex-cto', {runtime_instance_id:holder,
+    provider: 'codex', session_name: Object.hasOwn(input,'session') ? input.session ?? null : 'discord-cto',
+    workspace:input.home ?? '/work/codex', observed_at:input.seen,process_started_at:'2026-07-01T00:00:00Z'}))
 }
 
 describe('runtime current resolver', () => {
-  test('codex-cto sole live profile mismatch remains current and only the stale same-group row is reapable', async () => {
+  test('codex-cto sole live holder remains current and stale same-kind diagnostics cannot mutate anchors', async () => {
     await seedProfile('codex-cto')
     await seedRuntime({
       id: 'fresh-profile-mismatch',
@@ -102,12 +98,13 @@ describe('runtime current resolver', () => {
       source: 'provider',
       seen: '2026-08-20T12:00:00.000Z',
     })
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id=$1",[unitRuntimeId('mcp-stale-cross-group')])
 
     const resolution = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
     expect(resolution.ok).toBe(true)
@@ -123,9 +120,7 @@ describe('runtime current resolver', () => {
         live: true,
         current: true,
         handling: 'WARN_ONLY_CURRENT_FALLBACK',
-        registration_metadata_provenance: expect.objectContaining({
-          schema_version: 'runtime-registration-metadata-provenance/v1',
-        }),
+        registration_metadata_provenance: null,
       }),
     ]))
     expect(resolution.reap_candidates.map(row => [row.runtime_instance_id, row.reason])).toEqual([
@@ -136,18 +131,20 @@ describe('runtime current resolver', () => {
 
     const reaped = await reapRuntimeMemoryReadyStaleRows(db as any, resolution.reap_candidates, new Date('2026-08-21T00:10:00.000Z'))
     expect(reaped).toHaveLength(1)
-    expect(reaped[0].reaped).toBe(true)
+    expect(reaped[0].reaped).toBe(false)
     const statuses = await db.query<{ runtime_instance_id: string; status: string }>(
       `SELECT runtime_instance_id, status FROM agent_runtime_instances ORDER BY runtime_instance_id`,
     )
-    expect(statuses).toEqual([
-      { runtime_instance_id: 'fresh-profile-mismatch', status: 'running' },
-      { runtime_instance_id: 'stale-cross-group', status: 'running' },
-      { runtime_instance_id: 'stale-profile-match', status: 'stopped' },
-    ])
+    expect(statuses).toEqual(expect.arrayContaining([
+      {runtime_instance_id:'fresh-profile-mismatch',status:null},
+      {runtime_instance_id:unitRuntimeId('mcp-stale-cross-group'),status:null},
+      {runtime_instance_id:'stale-cross-group',status:null},
+      {runtime_instance_id:'stale-profile-match',status:null},
+    ]))
+    expect(statuses).toHaveLength(4)
   })
 
-  test('freshest exact profile tuple is selected deterministically', async () => {
+  test('two live holders fail closed and revocation selects the sole remaining holder', async () => {
     await seedProfile('codex-cto')
     await seedRuntime({ id: 'older-exact', seen: '2026-08-21T00:08:00.000Z' })
     await seedRuntime({ id: 'newer-exact', seen: '2026-08-21T00:09:00.000Z' })
@@ -156,15 +153,19 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
-    expect(resolution.ok).toBe(true)
-    expect(resolution.code).toBe('RESOLVED')
-    expect(resolution.current_runtime?.runtime_instance_id).toBe('newer-exact')
+    expect(resolution.ok).toBe(false)
+    expect(resolution.code).toBe('NO_CURRENT_RUNTIME_FOR_PROFILE')
+    expect(resolution.current_runtime).toBeNull()
+    expect(resolution.current_candidates).toHaveLength(2)
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id='older-exact'")
+    const sole=await resolveRuntimeMemoryReadyCurrent(db as any,{agentId:'codex-cto',requestedRuntimeKind:'local_process',now:new Date('2026-08-21T00:10:00Z'),policy,inspect})
+    expect(sole.current_runtime?.runtime_instance_id).toBe('newer-exact')
   })
 
-  test('selects the newer observed location without letting the old profile tuple win', async () => {
+  test('a legacy profile tuple cannot break two-holder ambiguity or block a sole relocated holder', async () => {
     await seedProfile('codex-cto')
     await seedRuntime({
       id: 'newest-profile-mismatch',
@@ -178,21 +179,19 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
-    expect(resolution.ok).toBe(true)
-    expect(resolution.current_runtime?.runtime_instance_id).toBe('newest-profile-mismatch')
-    expect(resolution.current_candidates.map(row => row.runtime_instance_id)).toEqual(['newest-profile-mismatch','older-exact-current'])
+    expect(resolution.ok).toBe(false)
+    expect(resolution.current_runtime).toBeNull()
+    expect(resolution.current_candidates.map(row=>row.runtime_instance_id).sort()).toEqual(['newest-profile-mismatch','older-exact-current'].sort())
     expect(resolution.candidate_exclusions).toEqual([])
-    expect(resolution.profile_mismatch_observations).toEqual([
-      expect.objectContaining({
-        code: 'REGISTRATION_PROFILE_MISMATCH',
-        runtime_instance_id: 'newest-profile-mismatch',
-        current: true,
-        handling: 'WARN_ONLY_CURRENT_FALLBACK',
-      }),
-    ])
+    expect(resolution.profile_mismatch_observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({code:'REGISTRATION_PROFILE_MISMATCH',runtime_instance_id:'newest-profile-mismatch',current:false,handling:'WARN_ONLY_CURRENT_FALLBACK'})]))
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id='older-exact-current'")
+    const sole=await resolveRuntimeMemoryReadyCurrent(db as any,{agentId:'codex-cto',requestedRuntimeKind:'local_process',now:new Date('2026-08-21T00:10:00Z'),policy,inspect})
+    expect(sole.ok).toBe(true)
+    expect(sole.current_runtime?.checkout_path).toBe('/work/agent-comms-mcp')
   })
 
   test('distinguishes no rows and stale rows while a sole live mismatch remains resolvable', async () => {
@@ -201,7 +200,7 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
     expect(noRows.code).toBe('NO_CURRENT_RUNTIME_FOR_PROFILE')
     expect(noRows.candidate_absence_reason).toBe('NO_RUNTIME_ROWS')
@@ -217,23 +216,18 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
     expect(fallback).toMatchObject({ ok: true, code: 'RESOLVED', candidate_absence_reason: null })
     expect(fallback.current_runtime?.runtime_instance_id).toBe('live-mismatch-only')
     expect(fallback.candidate_exclusions).toHaveLength(0)
 
-    await db.execute(
-      `UPDATE agent_runtime_instances
-          SET last_seen_at = $1, started_at = $1
-        WHERE runtime_instance_id = $2`,
-      ['2026-08-20T00:00:00.000Z', 'live-mismatch-only'],
-    )
+    observations.set('live-mismatch-only',{...observations.get('live-mismatch-only')!,observed_at:'2026-08-20T00:00:00.000Z'})
     const staleOnly = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
     expect(staleOnly).toMatchObject({
       ok: false,
@@ -255,11 +249,14 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_process',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
-    expect(resolution.current_runtime?.runtime_instance_id).toBe('ordinary-exact')
-    expect(resolution.runtime_rows.map(row => row.runtime_instance_id)).toEqual(['ordinary-exact'])
+    // The bootstrap receipt has no independent ordinary lease; its underlying MCP is released for this case.
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id=$1",[unitRuntimeId('mcp-bootstrap-fresher')])
+    const ordinary=await resolveRuntimeMemoryReadyCurrent(db as any,{agentId:'codex-cto',requestedRuntimeKind:'local_process',now:new Date('2026-08-21T00:10:00Z'),policy,inspect})
+    expect(ordinary.current_runtime?.runtime_instance_id).toBe('ordinary-exact')
+    expect(ordinary.runtime_rows.map(row => row.runtime_instance_id)).toEqual(['ordinary-exact'])
   })
 
   test('requested kind defines an independent ordinary ranking surface', async () => {
@@ -275,7 +272,7 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_tmux',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
     expect(resolution.requested_runtime_kind).toBe('local_tmux')
@@ -302,12 +299,12 @@ describe('runtime current resolver', () => {
         checkout_path: '/work/codex',
       },
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
     expect(resolution.ok).toBe(true)
     expect(resolution.current_runtime?.runtime_instance_id).toBe('selected-bootstrap')
-    expect(resolution.profile?.runtime_kind).toBe('TUI')
+    expect(resolution.profile?.runtime_kind).toBeNull()
   })
 
   test('bootstrap-bound current fails closed without an exact sealed receipt row', async () => {
@@ -323,7 +320,7 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'bootstrap_bound_provider',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
     const wrongBinding = await resolveRuntimeMemoryReadyCurrent(db as any, {
       agentId: 'codex-cto',
@@ -335,7 +332,7 @@ describe('runtime current resolver', () => {
         checkout_path: '/work/not-the-sealed-receipt',
       },
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
 
     expect(missingReceipt).toMatchObject({ ok: false, code: 'NO_BOOTSTRAP_BOUND_ROW' })
@@ -354,7 +351,7 @@ describe('runtime current resolver', () => {
       agentId: 'codex-cto',
       requestedRuntimeKind: 'local_tmux',
       now: new Date('2026-08-21T00:10:00.000Z'),
-      policy,
+      policy, inspect,
     })
     expect(resolution.current_runtime).toMatchObject({
       runtime_instance_id: 'unknown-group',

@@ -1,3 +1,4 @@
+import { nonpersistHostFixture } from './helpers/nonpersist-host-fixture'
 import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
@@ -49,11 +50,14 @@ function runCli(dbPath: string, args: string[]): { status: number; stdout: strin
 async function withNorm022Db<T>(fn: (ctx: { dbPath: string; ids: FixtureIds }) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'norm-022-'))
   const dbPath = join(dir, 'norm-022.db')
+  let host: Awaited<ReturnType<typeof nonpersistHostFixture>> | undefined
   try {
     migrateSqlite(dbPath)
     const ids = seedRuntimeEndpointFixture(dbPath)
+    host = await nonpersistHostFixture(ids.runtimeId,ids.agentId)
     return await fn({ dbPath, ids })
   } finally {
+    await host?.close()
     rmSync(dir, { recursive: true, force: true })
   }
 }
@@ -66,45 +70,12 @@ function seedRuntimeEndpointFixture(dbPath: string): FixtureIds {
     runtimeId: randomUUID(),
     connectorId: randomUUID(),
   }
-  const home = `/tmp/${ids.agentId}`
-  db.prepare(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, metadata,
-        ui_id, ui_handle, home_directory, channel_port,
-        runtime_engine_preference, profile_enabled)
-     VALUES
-       (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
-  ).run(
-    ids.agentId,
-    ids.agentId,
-    JSON.stringify({ tmux_session: `tmux-${ids.agentId}`, supervisor_type: 'tmux' }),
-    ids.agentId,
-    home,
-  )
-  db.prepare(
-    `INSERT INTO agent_workspaces
-       (workspace_id, org_id, name, workspace_type, local_path, metadata)
-     VALUES
-       (?, 'default', ?, 'local_path', ?, ?)`,
-  ).run(ids.workspaceId, ids.agentId, home, JSON.stringify({ source: 'norm022_fixture' }))
-  db.prepare(
-    `INSERT INTO agent_workspace_bindings
-       (agent_id, workspace_id, binding_role, active)
-     VALUES
-       (?, ?, 'primary', 1)`,
-  ).run(ids.agentId, ids.workspaceId)
-  db.prepare(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
-        endpoint_uri, status, started_at, last_seen_at, metadata)
-     VALUES
-       (?, ?, ?, 'codex', 'local_process',
-        'http://127.0.0.1:19022', 'active', datetime('now'), datetime('now'), ?)`,
-  ).run(ids.runtimeId, ids.agentId, ids.workspaceId, JSON.stringify({
-    source: 'norm022_fixture',
-    supervisor_type: 'tmux',
-    supervisor_id: `tmux-${ids.agentId}`,
-  }))
+  db.prepare(`INSERT INTO agents(agent_id,display_name,agent_type,ui_id,ui_handle,profile_enabled)
+    VALUES(?,?,'dev',22022,?,1)`).run(ids.agentId,ids.agentId,ids.agentId)
+  db.prepare(`INSERT INTO agent_workspaces(workspace_id,org_id,name,workspace_type) VALUES(?,'default',?,'logical')`).run(ids.workspaceId,ids.agentId)
+  db.prepare(`INSERT INTO agent_workspace_bindings(agent_id,workspace_id,binding_role,active) VALUES(?,?,'primary',1)`).run(ids.agentId,ids.workspaceId)
+  db.prepare(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
+    VALUES(?,?,?,'local_process',NULL,NULL,NULL,'{}')`).run(ids.runtimeId,ids.agentId,ids.workspaceId)
   db.prepare(
     `INSERT INTO connector_instances
        (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri,
@@ -128,16 +99,16 @@ function insertRuntimeEndpointLease(dbPath: string, ids: FixtureIds, overrides: 
     `INSERT INTO control_plane_leases
        (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
         holder_runtime_instance_id, holder_connector_instance_id,
-        fencing_token, status, expires_at, metadata)
+        fencing_token, status, acquired_at, expires_at, metadata)
      VALUES
-       ('runtime_instance', ?, 'worker', ?, ?, ?, 1, ?, ${overrides.expires ?? "datetime('now', '+5 minutes')"}, ?)`,
+       ('runtime_instance', ?, 'worker', ?, ?, ?, 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ${overrides.expires ?? "datetime('now', '+5 minutes')"}, ?)`,
   ).run(
     ids.runtimeId,
     ids.agentId,
     ids.runtimeId,
     ids.connectorId,
     overrides.status ?? 'active',
-    JSON.stringify({ endpoint_kind: 'tcp', endpoint_uri: 'http://127.0.0.1:19022', readiness_probe: 'ok' }),
+    JSON.stringify({schema_version:'aun-runtime-nonpersistence/v1'}),
   )
   db.close()
 }
@@ -418,18 +389,8 @@ describe('NORM-022 frozen runtime endpoint lease fixtures', () => {
       const secondRuntimeId = randomUUID()
       const missingLeaseConnectorId = randomUUID()
       const db = new Database(dbPath)
-      db.prepare(
-        `INSERT INTO agent_runtime_instances
-           (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
-            endpoint_uri, status, started_at, last_seen_at, metadata)
-         VALUES
-           (?, ?, ?, 'codex', 'local_process',
-            'http://127.0.0.1:19023', 'active', datetime('now'), datetime('now'), ?)`,
-      ).run(secondRuntimeId, ids.agentId, ids.workspaceId, JSON.stringify({
-        source: 'norm022_fixture',
-        supervisor_type: 'tmux',
-        supervisor_id: `tmux-${ids.agentId}`,
-      }))
+      db.prepare(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
+        VALUES(?,?,?,'local_process',NULL,NULL,NULL,'{}')`).run(secondRuntimeId,ids.agentId,ids.workspaceId)
       db.prepare(
         `INSERT INTO connector_instances
            (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri,

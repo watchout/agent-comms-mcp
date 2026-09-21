@@ -7,72 +7,91 @@ import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import {
   buildWasurezuBootstrapEvidence,
-  evaluateRuntimeMemoryReadyGate,
+  evaluateRuntimeMemoryReadyGate as evaluateGate,
   recordRuntimeMemoryReadyEvidence,
   recordVerifiedNativeRuntimeMemoryReady,
-  resolveRuntimeMemoryReadyProject,
+  resolveRuntimeMemoryReadyProject as resolveProject,
 } from '../core/runtime-memory-ready'
 import { seatContextDigest, type SeatContextReceipt } from '../core/seat-context-recovery'
+import { unitRuntimeId, unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
+import type { HostRuntimeObservation } from '../core/host-runtime-observer'
+import { nonpersistHostFixture } from './helpers/nonpersist-host-fixture'
 import { memoryReadyBootstrap } from '../bin/aun/memory-ready'
 
 let tmp: string
 let dbPath: string
 let db: SqliteAdapter
+let actualHosts: Array<Awaited<ReturnType<typeof nonpersistHostFixture>>> = []
+let observations: Map<string, HostRuntimeObservation>
+let originals: Map<string, SeatContextReceipt>
+const inspect = (input: {agentId:string;runtimeInstanceId?:string}) => ({reasonCode:'OBSERVED' as const,
+  observations:[...observations.values()].filter(o=>o.agent_id===input.agentId && (!input.runtimeInstanceId || o.runtime_instance_id===input.runtimeInstanceId))})
+const readNativeProof = async (input: {agentId:string;project:string;runtimeInstanceId:string}) => {
+  const receipt=originals.get(`${input.runtimeInstanceId}:${input.project}`)
+  if(!receipt)throw new Error('NATIVE_ORIGINAL_UNAVAILABLE')
+  return receipt
+}
+const evaluateRuntimeMemoryReadyGate = (db:any,input:any)=>evaluateGate(db,{inspect,readNativeProof,...input})
+const resolveRuntimeMemoryReadyProject = (db:any,agent:string,input:any={})=>resolveProject(db,agent,{inspect,readNativeProof,...input})
+
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'memory-ready-'))
   dbPath = join(tmp, 'test.db')
   migrateSqlite(dbPath)
   db = new SqliteAdapter(dbPath)
+  observations = new Map(); originals = new Map()
 })
 
 afterEach(async () => {
+  for(const host of actualHosts)await host.close()
+  actualHosts=[]
   await db.close()
   rmSync(tmp, { recursive: true, force: true })
 })
 
+// Unit native adapter owns the original, independently of the persisted AUN proof.
+// Real native MCP/pipe provenance is exercised by test_runtime_nonpersist_native.
 function receiptFor(agentId: string, runtimeId: string, project = 'agent-comms-mcp') {
   return { schema_version: 'seat-context-consumption/v1', agent_id: agentId, project,
     runtime_instance_id: runtimeId, target_runtime: 'codex', pack_id: `restart_pack:${agentId}:${project}:1789280000000`,
     response_digest: 'a'.repeat(64), work_digest: 'b'.repeat(64), invocation_digest: 'c'.repeat(64), transport_binding_digest: 'd'.repeat(64),
-    completed_at: '2026-06-01T00:00:02.000Z', consumption: { runtime_instance_id: runtimeId, invocation_digest: 'c'.repeat(64), consumer: 'fixture-host-input' } }
+    completed_at: '2026-06-01T00:00:02.000Z', consumption: { runtime_instance_id: runtimeId, invocation_digest: 'c'.repeat(64), consumer: 'unit-original-input' } } as SeatContextReceipt
+}
+async function seedAnchor(agentId:string,id:string,kind='local_process') {
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at,metadata)
+    VALUES($1,$2,$3,NULL,NULL,NULL,$4)`,[id,agentId,kind,JSON.stringify({schema_version:'aun-runtime-nonpersistence/v1',source_commit:'a'.repeat(40)})])
 }
 async function leaseRuntime(runtimeId: string) {
   const row = await db.queryOne<any>('SELECT * FROM agent_runtime_instances WHERE runtime_instance_id=$1', [runtimeId])
-  await db.execute(`UPDATE agent_runtime_instances SET host_id=$2,process_id=1234,endpoint_uri=$3 WHERE runtime_instance_id=$1`, [runtimeId, hostname(), `http://127.0.0.1:${row.port}`])
-  await db.execute(`INSERT OR REPLACE INTO control_plane_leases (lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,heartbeat_at,expires_at,metadata)
-    VALUES ($1,'runtime_instance',$2,'worker',$3,$2,1,'active',$4,$4,'2099-01-01T00:00:00Z',$5)`,
-    [`lease-${runtimeId}`, runtimeId, row.agent_id, row.last_seen_at, JSON.stringify({port:row.port,process_id:1234,endpoint_uri:`http://127.0.0.1:${row.port}`})])
+  await db.execute(`INSERT OR REPLACE INTO control_plane_leases (lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at,metadata)
+    VALUES ($1,'runtime_instance',$2,'worker',$3,$2,1,'active','2026-06-01T00:00:01Z','2099-01-01T00:00:00Z','{}')`,
+    [`lease-${runtimeId}`, runtimeId, row.agent_id])
 }
-
 async function seedRuntime(agentId = 'agent-com-dev', port = 39100): Promise<void> {
-  await db.execute(
-    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port, metadata, home_directory)
-     VALUES ($1, $1, 'dev', 'codex', 'idle', $2, $3, $4)`,
-    [agentId, port, JSON.stringify({ tmux_session: `${agentId}-session` }), `/tmp/${agentId}`],
-  )
-  await db.execute(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-     VALUES ($1, $2, 'codex', 'local_process', $3, $4, $5, 'head-sha', 'running', $6, $7)`,
-    [`runtime-${agentId}`, agentId, `${agentId}-session`, port, `/tmp/${agentId}`, '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z'],
-  )
-  await leaseRuntime(`runtime-${agentId}`)
+  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type) VALUES($1,$1,'dev')`,[agentId])
+  const id=unitRuntimeId(`runtime-${agentId}`)
+  await seedAnchor(agentId,id)
+  observations.set(id,unitRuntimeObservation(agentId,{runtime_instance_id:id,port,endpoint_uri:`http://127.0.0.1:${port}`,
+    workspace:`/tmp/${agentId}`,observed_at:'2026-06-01T00:00:03Z',process_started_at:'2026-06-01T00:00:00Z'}))
+  await leaseRuntime(id)
 }
-
 
 async function recordReady(agentId = 'agent-com-dev', overrides: Record<string, unknown> = {}): Promise<void> {
+  const id = String(overrides.runtime_instance_id ?? unitRuntimeId(`runtime-${agentId}`))
+  const project = String(overrides.project ?? 'agent-comms-mcp')
+  if(!originals.has(`${id}:${project}`))originals.set(`${id}:${project}`,receiptFor(agentId,id,project))
   await recordRuntimeMemoryReadyEvidence(db as any, {
     agent_id: agentId,
     project: 'agent-comms-mcp',
-    runtime_instance_id: `runtime-${agentId}`,
+    runtime_instance_id: unitRuntimeId(`runtime-${agentId}`),
     profile_revision: 1,
     profile_source: 'legacy',
     session_name: `${agentId}-session`,
     port: 39100,
     expected_agent_id: agentId,
     checkout_path: `/tmp/${agentId}`,
-    checkout_commit_sha: 'head-sha',
+    checkout_commit_sha: 'a'.repeat(40),
     recovery_command: 'mcp__wasurezu__recover_context',
     result_status: 'ready',
     completed_at: '2026-06-01T00:00:02.000Z',
@@ -80,16 +99,15 @@ async function recordReady(agentId = 'agent-com-dev', overrides: Record<string, 
     evidence_log_id: `${agentId}-memory-ready-log`,
     valid_until: '2099-01-01T00:00:00.000Z',
     source: 'agent_memory_boot_recovery',
-    metadata: { seat_context_receipt: receiptFor(agentId, String(overrides.runtime_instance_id ?? `runtime-${agentId}`), String(overrides.project ?? 'agent-comms-mcp')) },
+    metadata: { seat_context_receipt: receiptFor(agentId, String(overrides.runtime_instance_id ?? unitRuntimeId(`runtime-${agentId}`)), String(overrides.project ?? 'agent-comms-mcp')) },
     ...overrides,
   } as any)
 }
 
 async function bindPrimaryWorkspace(agentId: string, workspacePath: string, workspaceId: string): Promise<void> {
   await db.execute(
-    `INSERT INTO agent_workspaces (workspace_id, name, local_path)
-     VALUES ($1, $2, $3)`,
-    [workspaceId, workspaceId, workspacePath],
+    `INSERT INTO agent_workspaces (workspace_id, name) VALUES ($1, $2)`,
+    [workspaceId, workspaceId],
   )
   await db.execute(
     `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
@@ -121,69 +139,69 @@ describe('runtime memory-ready evidence gate', () => {
       agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03Z'),
     })
     expect((await evaluate()).reason).toBe('context_consumption_missing')
-    await recordReady('agent-com-dev', { metadata: { seat_context_receipt: receiptFor('agent-com-dev', 'prior-runtime') } })
+    await expect(recordReady('agent-com-dev', { metadata: { seat_context_receipt: receiptFor('agent-com-dev', unitRuntimeId('prior-runtime')) } })).rejects.toThrow('MEMORY_LOGICAL_PROOF_BINDING_MISMATCH')
     expect((await evaluate()).reason).toBe('context_consumption_missing')
     await recordReady()
     expect((await evaluate()).ok).toBe(true)
     await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_agent_id='agent-com-dev'")
-    expect((await evaluate()).reason).toBe('endpoint_unavailable')
-    expect((await db.queryOne<any>("SELECT channel_port FROM agents WHERE agent_id='agent-com-dev'"))?.channel_port).toBe(39100)
+    expect((await evaluate()).reason).toBe('no_current_runtime_for_profile')
+    expect((await db.queryOne<any>("SELECT channel_port FROM agents WHERE agent_id='agent-com-dev'"))?.channel_port).toBeNull()
   })
   test('native input evidence remains bound to the observed provider process and start', async () => {
     await seedRuntime()
-    const native = { provider_pid: 5678, provider_started_at: '2026-06-01T00:00:00.000Z', target_runtime: 'codex',
+    const native = { agent_id:'agent-com-dev',project:'agent-comms-mcp',pack_ref:`restart_pack:agent-com-dev:agent-comms-mcp:1789280000000`,input_sha256:'c'.repeat(64),work_sha256:'b'.repeat(64),provider_pid: 5678, provider_started_at: '2026-06-01T00:00:00.000Z', target_runtime: 'codex',
       host_session_id: 'session-one', workspace_sha256: createHash('sha256').update('/tmp/agent-com-dev').digest('hex') }
     const observation = { verified: true, source: 'process_ancestry', agent_id: 'agent-com-dev',
-      runtime_instance_id: 'runtime-agent-com-dev', provider_pid: 5678, provider_started_at: native.provider_started_at,
+      runtime_instance_id: unitRuntimeId('runtime-agent-com-dev'), provider_pid: 5678, provider_started_at: native.provider_started_at,
       provider: 'codex', host_session_id: 'session-one', workspace: '/tmp/agent-com-dev' }
-    await db.execute('UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2',
-      [JSON.stringify({ provider_observation: observation }), 'runtime-agent-com-dev'])
-    await recordReady('agent-com-dev', { metadata: { seat_context_receipt: { ...receiptFor('agent-com-dev', 'runtime-agent-com-dev'), native_delivery: native } } })
+    observations.set(unitRuntimeId('runtime-agent-com-dev'),{...observations.get(unitRuntimeId('runtime-agent-com-dev'))!,...observation})
+    await recordReady('agent-com-dev', { metadata: { seat_context_receipt: { ...receiptFor('agent-com-dev', unitRuntimeId('runtime-agent-com-dev')), native_delivery: native, response_digest:seatContextDigest(native) } } })
+    originals.set(`${unitRuntimeId('runtime-agent-com-dev')}:agent-comms-mcp`,{...receiptFor('agent-com-dev',unitRuntimeId('runtime-agent-com-dev')),native_delivery:native,response_digest:seatContextDigest(native)} as any)
     const evaluate = () => evaluateRuntimeMemoryReadyGate(db as any, { agent_id: 'agent-com-dev', project: 'agent-comms-mcp', now: new Date('2026-06-01T00:00:03Z') })
     expect((await evaluate()).ok).toBe(true)
-    await db.execute('UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2',
-      [JSON.stringify({ provider_observation: { ...observation, provider_started_at: '2026-06-01T00:00:01.000Z' } }), 'runtime-agent-com-dev'])
+    observations.set(unitRuntimeId('runtime-agent-com-dev'),{...observations.get(unitRuntimeId('runtime-agent-com-dev'))!,provider_started_at:'2026-06-01T00:00:01.000Z'})
     expect((await evaluate()).reason).toBe('context_consumption_missing')
   })
   test('ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence', async () => {
     await seedRuntime()
-    const agentId = 'agent-com-dev', runtimeInstanceId = 'runtime-agent-com-dev'
+    const completed=new Date().toISOString()
+    const agentId = 'agent-com-dev', runtimeInstanceId = unitRuntimeId('runtime-agent-com-dev')
     const native = { schema_version: 'native-context-delivery/v1', status: 'accepted', agent_id: agentId, project: 'agent-comms-mcp',
       target_runtime: 'codex', host_session_id: 'native-session', provider_pid: 5678, provider_started_at: '2026-06-01T00:00:00.000Z',
       provider_executable_sha256: 'a'.repeat(64), workspace_sha256: createHash('sha256').update('/tmp/agent-com-dev').digest('hex'),
       pipe_sha256: 'b'.repeat(64), input_sha256: 'c'.repeat(64), work_sha256: 'b'.repeat(64),
-      pack_ref: `restart_pack:${agentId}:agent-comms-mcp:1789280000000`, delivered_at: '2026-06-01T00:00:02.000Z',
+      pack_ref: `restart_pack:${agentId}:agent-comms-mcp:1789280000000`, delivered_at: completed,
       attempt_id: 'native-attempt', attempt_started_at: '2026-06-01T00:00:01.000Z' }
-    const receipt = { ...receiptFor(agentId, runtimeInstanceId), native_delivery: native, response_digest: seatContextDigest(native) } as SeatContextReceipt
+    const receipt = { ...receiptFor(agentId, runtimeInstanceId), completed_at:completed, native_delivery: native, response_digest: seatContextDigest(native) } as SeatContextReceipt
     const observation = { schema_version: 'seat-provider-observation/v1', agent_id: agentId, runtime_instance_id: runtimeInstanceId,
       host_id: hostname(), process_id: 1234, provider_pid: 5678, provider_started_at: native.provider_started_at,
       host_session_id: native.host_session_id, provider: 'codex', session_name: `${agentId}-session`, workspace: `/tmp/${agentId}`,
-      observed_at: '2026-06-01T00:00:03.000Z', source: 'process_ancestry', verified: true } as const
-    await db.execute('UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2',
-      [JSON.stringify({provider_observation:observation}),runtimeInstanceId])
-    const args = {agentId,project:'agent-comms-mcp',runtimeInstanceId,receipt,now:new Date('2026-06-01T00:00:03Z'),observeProvider:()=>observation}
-    await expect(recordVerifiedNativeRuntimeMemoryReady(db as any, {...args, receipt:{...receipt,runtime_instance_id:'sealed-runtime'}})).rejects.toThrow('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
+      observed_at: completed, source: 'process_ancestry', verified: true } as const
+    observations.set(runtimeInstanceId,{...observations.get(runtimeInstanceId)!,...observation})
+    originals.set(`${runtimeInstanceId}:agent-comms-mcp`,receipt)
+    const args = {agentId,project:'agent-comms-mcp',runtimeInstanceId,receipt,now:new Date(),observeProvider:()=>observation,inspect,readNativeProof}
+    await expect(recordVerifiedNativeRuntimeMemoryReady(db as any, {...args, receipt:{...receipt,runtime_instance_id:unitRuntimeId('sealed-runtime')}})).rejects.toThrow('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
     await expect(recordVerifiedNativeRuntimeMemoryReady(db as any, {...args, observeProvider:()=>({...observation,provider_started_at:'2026-06-01T00:00:01.000Z'})})).rejects.toThrow('MEMORY_NATIVE_CURRENT_PROVIDER_MISMATCH')
     expect((await db.queryOne<any>('SELECT COUNT(*) AS total FROM runtime_memory_ready_evidence'))?.total).toBe(0)
     await recordVerifiedNativeRuntimeMemoryReady(db as any,args)
-    await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,session_name,port,checkout_path,status,started_at,last_seen_at)
-      VALUES('sealed-runtime',$1,'codex','bootstrap_bound_provider',$2,39100,$3,'active','2026-06-01T00:00:00Z','2026-06-01T00:00:01Z')`,[agentId,`${agentId}-session`,`/tmp/${agentId}`])
-    await recordReady(agentId,{runtime_instance_id:'sealed-runtime',completed_at:'2026-06-01T00:00:02.500Z'})
+    await seedAnchor(agentId,unitRuntimeId('sealed-runtime'),'bootstrap_bound_provider')
+    await recordReady(agentId,{runtime_instance_id:unitRuntimeId('sealed-runtime'),completed_at:'2026-06-01T00:00:02.500Z'})
     const ordinary = await evaluateRuntimeMemoryReadyGate(db as any,{agent_id:agentId,project:args.project,now:args.now})
     expect(ordinary.ok).toBe(true)
     expect(ordinary.current_runtime?.runtime_instance_id).toBe(runtimeInstanceId)
     await expect(resolveRuntimeMemoryReadyProject(db as any,agentId,{now:args.now})).resolves.toMatchObject({project:args.project,source:'verified_current_runtime_receipt'})
     const foreignNative = {...native,agent_id:'foreign-seat'}
     const foreignReceipt = {...receipt,project:'foreign-project',pack_id:`restart_pack:${agentId}:foreign-project:1789280000000`,native_delivery:foreignNative,response_digest:seatContextDigest(foreignNative)} as SeatContextReceipt
-    await recordReady(agentId,{project:'foreign-project',metadata:{seat_context_receipt:foreignReceipt}})
+    await recordReady(agentId,{project:'foreign-project',completed_at:completed,metadata:{seat_context_receipt:foreignReceipt}})
+    originals.set(`${runtimeInstanceId}:foreign-project`,foreignReceipt)
     await expect(resolveRuntimeMemoryReadyProject(db as any,agentId,{now:args.now})).resolves.toMatchObject({project:args.project})
-    const secondNative={...native,project:'second-project'}
+    const secondNative={...native,project:'second-project',pack_ref:`restart_pack:${agentId}:second-project:1789280000000`}
     const secondReceipt={...receipt,project:'second-project',pack_id:`restart_pack:${agentId}:second-project:1789280000000`,native_delivery:secondNative,response_digest:seatContextDigest(secondNative)} as SeatContextReceipt
-    await recordReady(agentId,{project:'second-project',metadata:{seat_context_receipt:secondReceipt}})
+    await recordReady(agentId,{project:'second-project',completed_at:completed,metadata:{seat_context_receipt:secondReceipt}})
+    originals.set(`${runtimeInstanceId}:second-project`,secondReceipt)
     await expect(resolveRuntimeMemoryReadyProject(db as any,agentId,{now:args.now})).rejects.toMatchObject({code:'PROJECT_AMBIGUOUS'})
 
-    await db.execute('UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2',
-      [JSON.stringify({provider_observation:{...observation,provider_pid:9999}}),runtimeInstanceId])
+    observations.set(runtimeInstanceId,{...observations.get(runtimeInstanceId)!,provider_pid:9999})
     expect((await evaluateRuntimeMemoryReadyGate(db as any,{agent_id:agentId,project:args.project,now:args.now})).ok).toBe(false)
   })
   test('explicit logical project resolution admits only current exact-runtime evidence', async () => {
@@ -254,7 +272,7 @@ describe('runtime memory-ready evidence gate', () => {
     await seedRuntime('relocated-seat')
     await db.execute('UPDATE agents SET metadata=$1 WHERE agent_id=$2',[JSON.stringify({memory_project:'product-fixture'}),'relocated-seat'])
     for (const path of ['/old-host/original-name','/new-host/different-basename']) {
-      await db.execute('UPDATE agents SET home_directory=$1 WHERE agent_id=$2',[path,'relocated-seat'])
+      observations.set(unitRuntimeId('runtime-relocated-seat'),{...observations.get(unitRuntimeId('runtime-relocated-seat'))!,workspace:path})
       await expect(resolveRuntimeMemoryReadyProject(db as any,'relocated-seat')).resolves.toMatchObject({project:'product-fixture',source:'agent_metadata_override'})
     }
   })
@@ -271,69 +289,31 @@ describe('runtime memory-ready evidence gate', () => {
 
     expect(gate.ok).toBe(true)
     expect(gate.reason).toBe('ready')
-    expect(gate.runtime_instance_id).toBe('runtime-agent-com-dev')
-    expect(gate.evidence_path).toBe('/tmp/agent-com-dev-memory-ready.json')
+    expect(gate.runtime_instance_id).toBe(unitRuntimeId('runtime-agent-com-dev'))
+    expect(gate.evidence_path).toBeNull()
   })
 
-  test('gate follows the common freshest exact-profile resolver instead of evidence-bound precedence', async () => {
-    await seedRuntime('aun', 8811)
-    await db.execute(
-      `UPDATE agents
-          SET metadata=$1, home_directory=$2
-        WHERE agent_id='aun'`,
-      [JSON.stringify({ tmux_session: 'discord-aun' }), '/tmp/aun'],
-    )
-    await db.execute(`DELETE FROM control_plane_leases WHERE holder_runtime_instance_id='runtime-aun'`)
-    await db.execute(
-      `UPDATE agent_runtime_instances
-          SET runtime_instance_id='runtime-aun-canonical', session_name='discord-aun', last_seen_at='2026-06-01T00:00:01.000Z'
-        WHERE agent_id='aun'`,
-    )
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-       VALUES ('runtime-aun-competing', 'aun', 'codex', 'local_process', 'discord-aun', 8811, '/tmp/aun', 'wrong-sha', 'running',
-               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:05.000Z')`,
-    )
-    await leaseRuntime('runtime-aun-canonical')
-    await recordReady('aun', {
-      project: 'codex-aun',
-      runtime_instance_id: 'runtime-aun-canonical',
-      session_name: 'discord-aun',
-      port: 8811,
-    })
-    await recordReady('aun', {
-      project: 'agent-comms-mcp',
-      runtime_instance_id: 'runtime-aun-competing',
-      session_name: 'discord-aun',
-      port: 8811,
-      checkout_path: '/tmp/aun',
-      checkout_commit_sha: 'wrong-sha',
-    })
-
-    const evaluate = () => evaluateRuntimeMemoryReadyGate(db as any, {
-      agent_id: 'aun',
-      project: 'codex-aun',
-      now: new Date('2026-06-01T00:00:06.000Z'),
-    })
-    const competingNewest = await evaluate()
-    expect(competingNewest.ok).toBe(false)
-    expect(competingNewest.reason).toBe('runtime_instance_mismatch')
-    expect(competingNewest.runtime_instance_id).toBe('runtime-aun-competing')
-    expect(competingNewest.evidence_id).not.toBeNull()
-
-    await db.execute(
-      `UPDATE agent_runtime_instances
-          SET last_seen_at=CASE runtime_instance_id
-            WHEN 'runtime-aun-canonical' THEN '2026-06-01T00:00:06.000Z'
-            ELSE '2026-06-01T00:00:02.000Z'
-          END
-        WHERE agent_id='aun'`,
-    )
-    const canonicalNewest = await evaluate()
-    expect(canonicalNewest.ok).toBe(true)
-    expect(canonicalNewest.runtime_instance_id).toBe('runtime-aun-canonical')
-    expect(canonicalNewest.evidence_id).toBe(competingNewest.evidence_id)
+  test('gate follows current logical authority rather than evidence-bound precedence', async () => {
+    await seedRuntime('aun',8811)
+    const canonical=unitRuntimeId('runtime-aun'), competing=unitRuntimeId('runtime-aun-competing')
+    await seedAnchor('aun',competing)
+    observations.set(competing,{...observations.get(canonical)!,runtime_instance_id:competing,port:8812,endpoint_uri:'http://127.0.0.1:8812'})
+    await leaseRuntime(competing)
+    await recordReady('aun',{project:'codex-aun'})
+    const evaluate=()=>evaluateRuntimeMemoryReadyGate(db,{agent_id:'aun',project:'codex-aun',now:new Date('2026-06-01T00:00:06Z')})
+    expect((await evaluate()).ok).toBe(false)
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id=$1",[canonical])
+    const competingCurrent=await evaluate()
+    expect(competingCurrent.ok).toBe(false)
+    expect(competingCurrent.reason).toBe('runtime_instance_mismatch')
+    expect(competingCurrent.runtime_instance_id).toBe(competing)
+    expect(competingCurrent.evidence_id).not.toBeNull()
+    await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id=$1",[competing])
+    await leaseRuntime(canonical)
+    const canonicalCurrent=await evaluate()
+    expect(canonicalCurrent.ok).toBe(true)
+    expect(canonicalCurrent.runtime_instance_id).toBe(canonical)
+    expect(canonicalCurrent.evidence_id).toBe(competingCurrent.evidence_id)
   })
 
   test('latest exact-project evidence never falls back when its runtime is inactive', async () => {
@@ -342,16 +322,10 @@ describe('runtime memory-ready evidence gate', () => {
       completed_at: '2026-06-01T00:00:02.000Z',
     })
     await recordReady('no-fallback', {
-      runtime_instance_id: 'runtime-no-fallback-stopped',
+      runtime_instance_id: unitRuntimeId('runtime-no-fallback-stopped'),
       completed_at: '2026-06-01T00:00:04.000Z',
     })
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-       VALUES ('runtime-no-fallback-stopped', 'no-fallback', 'codex', 'local_process', 'no-fallback-session',
-               39140, '/tmp/no-fallback', 'head-sha', 'stopped', '2026-06-01T00:00:03.000Z',
-               '2026-06-01T00:00:04.000Z')`,
-    )
+    await seedAnchor('no-fallback',unitRuntimeId('runtime-no-fallback-stopped'))
 
     const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
       agent_id: 'no-fallback',
@@ -362,7 +336,7 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.ok).toBe(false)
     expect(gate.reason).toBe('runtime_instance_mismatch')
     expect(gate.evidence_id).not.toBeNull()
-    expect(gate.details.evidence_runtime_instance_id).toBe('runtime-no-fallback-stopped')
+    expect(gate.details.evidence_runtime_instance_id).toBe(unitRuntimeId('runtime-no-fallback-stopped'))
   })
 
   test('equal evidence timestamps select the highest id without runtime fallback', async () => {
@@ -371,7 +345,7 @@ describe('runtime memory-ready evidence gate', () => {
       completed_at: '2026-06-01T00:00:02.000Z',
     })
     await recordReady('evidence-order', {
-      runtime_instance_id: 'runtime-evidence-order-missing',
+      runtime_instance_id: unitRuntimeId('runtime-evidence-order-missing'),
       completed_at: '2026-06-01T00:00:02.000Z',
     })
 
@@ -389,19 +363,19 @@ describe('runtime memory-ready evidence gate', () => {
     expect(gate.ok).toBe(false)
     expect(gate.reason).toBe('runtime_instance_mismatch')
     expect(Number(gate.evidence_id)).toBe(Number(latest?.id))
-    expect(gate.details.evidence_runtime_instance_id).toBe('runtime-evidence-order-missing')
+    expect(gate.details.evidence_runtime_instance_id).toBe(unitRuntimeId('runtime-evidence-order-missing'))
   })
 
   const profileMismatchCases = [
     {
       label: 'session',
       agentId: 'profile-session-mismatch',
-      update: `session_name='runtime-only-session'`,
-      evidence: { session_name: 'runtime-only-session' },
+      update: `session_name=unitRuntimeId('runtime-only-session')`,
+      evidence: { session_name: unitRuntimeId('runtime-only-session') },
       reason: 'session_mismatch',
       details: {
         profile_session_name: 'profile-session-mismatch-session',
-        runtime_session_name: 'runtime-only-session',
+        runtime_session_name: unitRuntimeId('runtime-only-session'),
       },
     },
     {
@@ -431,13 +405,10 @@ describe('runtime memory-ready evidence gate', () => {
   for (const profileMismatch of profileMismatchCases) {
     test(`current receipt and lease permit observed ${profileMismatch.label} replacement without profile edits`, async () => {
       await seedRuntime(profileMismatch.agentId, 39142)
-      await db.execute(
-        `UPDATE agent_runtime_instances
-            SET ${profileMismatch.update}
-          WHERE agent_id=$1`,
-        [profileMismatch.agentId],
-      )
-      await leaseRuntime(`runtime-${profileMismatch.agentId}`)
+      const id=unitRuntimeId(`runtime-${profileMismatch.agentId}`)
+      const change = profileMismatch.label==='session' ? {session_name:'runtime-only-session'}
+        : profileMismatch.label==='port' ? {port:39152,endpoint_uri:'http://127.0.0.1:39152'} : {workspace:'/tmp/runtime-only-checkout'}
+      observations.set(id,{...observations.get(id)!,...change})
       await recordReady(profileMismatch.agentId, { port: 39142, ...profileMismatch.evidence })
 
       const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
@@ -448,9 +419,9 @@ describe('runtime memory-ready evidence gate', () => {
 
       expect(gate.ok).toBe(true)
       const profile = await db.queryOne<any>('SELECT channel_port,home_directory,metadata FROM agents WHERE agent_id=$1', [profileMismatch.agentId])
-      expect(profile.channel_port).toBe(39142)
-      expect(profile.home_directory).toBe(`/tmp/${profileMismatch.agentId}`)
-      expect(JSON.parse(profile.metadata).tmux_session).toBe(`${profileMismatch.agentId}-session`)
+      expect(profile.channel_port).toBeNull()
+      expect(profile.home_directory).toBeNull()
+      expect(JSON.parse(profile.metadata).tmux_session).toBeUndefined()
 
     })
   }
@@ -458,12 +429,7 @@ describe('runtime memory-ready evidence gate', () => {
   test('legacy provider preference mismatch does not override current recovery and lease', async () => {
     const agentId = 'profile-runtime-engine-mismatch'
     await seedRuntime(agentId, 39142)
-    await db.execute(
-      `UPDATE agent_runtime_instances
-          SET runtime_engine='claude-code'
-        WHERE agent_id=$1`,
-      [agentId],
-    )
+    observations.set(unitRuntimeId(`runtime-${agentId}`),{...observations.get(unitRuntimeId(`runtime-${agentId}`))!,provider:'claude-code'})
     await recordReady(agentId, { port: 39142 })
 
     const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
@@ -492,7 +458,7 @@ describe('runtime memory-ready evidence gate', () => {
     })).reason).toBe('expired')
 
     await db.execute(`DELETE FROM runtime_memory_ready_evidence`)
-    await recordReady('agent-com-dev', { runtime_instance_id: 'runtime-other' })
+    await recordReady('agent-com-dev', { runtime_instance_id: unitRuntimeId('runtime-other') })
     expect((await evaluateRuntimeMemoryReadyGate(db as any, {
       agent_id: 'agent-com-dev',
       project: 'agent-comms-mcp',
@@ -575,16 +541,8 @@ describe('runtime memory-ready evidence gate', () => {
   })
 
   test('wrong identity on occupied expected port fails readiness', async () => {
-    await db.execute(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
-       VALUES ('target-dev', 'target-dev', 'dev', 'codex', 'idle', 39110),
-              ('other-dev', 'other-dev', 'dev', 'codex', 'idle', 39110)`,
-    )
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, session_name, port, status, started_at, last_seen_at)
-       VALUES ('runtime-other-dev', 'other-dev', 'codex', 'other-session', 39110, 'running', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z')`,
-    )
+    await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type) VALUES('target-dev','target','dev')`)
+    await seedRuntime('other-dev',39110)
 
     const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
       agent_id: 'target-dev',
@@ -599,29 +557,14 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant', async () => {
     await seedRuntime('port-shadow-target', 39111)
-    await db.execute(
-      `UPDATE agent_runtime_instances
-          SET runtime_kind='bootstrap_bound_provider', last_seen_at='2026-06-01T00:00:05.000Z'
-        WHERE runtime_instance_id='runtime-port-shadow-target'`,
-    )
-    await db.execute(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, channel_port)
-       VALUES ('port-shadow-other', 'port-shadow-other', 'dev', 'codex', 'idle', 39111)`,
-    )
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-       VALUES ('runtime-port-shadow-same-agent', 'port-shadow-target', 'codex', 'local_process',
-               'port-shadow-target-session', 39111, '/tmp/port-shadow-target', 'head-sha', 'running',
-               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:10.000Z'),
-              ('runtime-port-shadow-other', 'port-shadow-other', 'codex', 'local_process',
-               'port-shadow-other-session', 39111, '/tmp/port-shadow-other', 'other-sha', 'active',
-               '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z')`,
-    )
-    await recordReady('port-shadow-target', {
-      runtime_instance_id: 'runtime-port-shadow-target',
-      port: 39111,
-    })
+    const b5=unitRuntimeId('runtime-port-shadow-target'), ordinary=unitRuntimeId('runtime-port-shadow-same-agent')
+    await db.execute("UPDATE agent_runtime_instances SET runtime_kind='bootstrap_bound_provider' WHERE runtime_instance_id=$1",[b5])
+    await seedRuntime('port-shadow-other',39111)
+    await seedAnchor('port-shadow-target',ordinary)
+    observations.set(ordinary,{...observations.get(b5)!,runtime_instance_id:ordinary,port:39112,endpoint_uri:'http://127.0.0.1:39112'})
+    observations.delete(b5)
+    await leaseRuntime(ordinary)
+    await recordReady('port-shadow-target',{runtime_instance_id:b5,port:39111})
 
     const gate = await evaluateRuntimeMemoryReadyGate(db as any, {
       agent_id: 'port-shadow-target',
@@ -638,7 +581,7 @@ describe('runtime memory-ready evidence gate', () => {
     const evidence = buildWasurezuBootstrapEvidence({
       agent_id: 'wasurezu',
       project: 'agent-comms-mcp',
-      runtime_instance_id: 'runtime-wasurezu',
+      runtime_instance_id: unitRuntimeId('runtime-wasurezu'),
       session_name: 'wasurezu-session',
       port: 39120,
       completed_at: '2026-06-01T00:00:00.000Z',
@@ -666,7 +609,6 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('SQLite dry-run refuses WAL before touching existing database or shared-memory bytes', async () => {
     await seedRuntime('wasurezu', 39120)
-    await db.execute("UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'",[new Date().toISOString()])
     const snapshot = () => Object.fromEntries(readdirSync(tmp).sort().map(name => {
       const path=join(tmp,name), stat=statSync(path)
       return [name,{size:stat.size,mtime:stat.mtimeMs,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}]
@@ -691,7 +633,8 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('SQLite dry-run reads a clean rollback-journal database without file or journal changes', async () => {
     await seedRuntime('wasurezu',39120)
-    await db.execute("UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'",[new Date().toISOString()])
+    const host=await nonpersistHostFixture(unitRuntimeId('runtime-wasurezu'),'wasurezu');actualHosts.push(host)
+    await db.execute("UPDATE control_plane_leases SET acquired_at=clock_timestamp()")
     const cleanPath=join(tmp,'clean.db')
     await db.execute('VACUUM INTO $1',[cleanPath])
     expect(readFileSync(cleanPath)[18]).toBe(1)
@@ -711,15 +654,10 @@ describe('runtime memory-ready evidence gate', () => {
 
   test('transport-free bootstrap cannot claim context consumption', async () => {
     await seedRuntime('wasurezu', 39120)
-    await db.execute(
-      `UPDATE agent_runtime_instances SET last_seen_at=$1 WHERE runtime_instance_id='runtime-wasurezu'`,
-      [new Date().toISOString()],
-    )
-
     const result = await memoryReadyBootstrap({
       agentId: 'wasurezu',
       project: 'agent-comms-mcp',
-      runtimeInstanceId: 'runtime-wasurezu',
+      runtimeInstanceId: unitRuntimeId('runtime-wasurezu'),
       sessionName: 'wasurezu-session',
       port: '39120',
       checkoutPath: '/tmp/wasurezu',

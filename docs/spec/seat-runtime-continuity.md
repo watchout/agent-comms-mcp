@@ -245,6 +245,26 @@ never a bulk inference from `agents.status`; observing a replacement does not
 renew, clear or inherit its predecessor's claim. E7 shared slots, deferral metrics,
 child/slot timeouts, credential/sandbox isolation and existing queue guards remain.
 
+The ordinary unbounded receive/CLI/MCP claim stores the freshly authorized
+runtime UUID in `claimed_runtime_instance_id` in the same UPDATE as owner/time/expiry,
+with the exact lease/fence and database-clock expiry predicate. SQLite compares
+parsed instants for both SQL-format historical authority times and ISO claim times. Queue-work advance,
+result, error and finalize retain that incarnation; a replacement holder cannot
+execute or finish an old incarnation's claim. Re-observe ownership before terminal
+effects and retain logical owner/time/UUID evidence only. Provider-free S0 authority
+is a separate pending contract and is not inferred from an LLM provider observation.
+
+Stable profile enrollment updates only identity, UI identity, enablement and
+credential/expected-account references. Physical provider/path/port/session flags
+are rejected before mutation. Profile projection consumes an existing unambiguous
+logical primary workspace binding; it never derives an ID from a physical path or
+links runtime rows by saved status. Missing logical membership is an explicit
+blocker, not permission to invent deployment identity.
+
+Managed server shutdown releases its exact acquired lease while its process still
+holds the observed socket, then closes the socket. Startup and shutdown do not
+persist profile status, status_detail, provider, endpoint or liveness observations.
+
 ### NP4 — Replacement, legacy retention and rollback
 
 Startup order is SC2.3. Replacement/restart preserves logical seat/project,
@@ -299,7 +319,9 @@ bun test tests/contract/test_runtime_observation_nonpersistence.test.ts tests/ru
 bun test tests/runtime-memory-ready.test.ts tests/seat-context-recovery.test.ts tests/aun-configuration-desired-state.test.ts tests/contract/test_aun_configuration_runtime_diagnostics.test.ts tests/contract/test_aun_configuration_restart_gate.test.ts
 ```
 
-Product tests are not executed by this author. Bind a private PostgreSQL cluster,
+The original design author did not execute product tests. The current independent
+implementation packet is [trial-ready-003/RETURN.md](../verify/aun-v2-nonpersistence-20260921/trial-ready-003/RETURN.md).
+Bind a private PostgreSQL cluster,
 socket, role and explicit URL; `tests/helpers/postgres-test-database.ts` has
 ambient/default fallbacks, so a different DB name alone is not isolation proof.
 SQLite uses a newly created fixture DB, seeded legacy rows and loopback-only
