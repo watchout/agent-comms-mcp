@@ -1,0 +1,123 @@
+
+tests/contract/test_runtime_observation_nonpersistence_db.test.ts:
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:10:17)
+(fail) postgres runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [0.53ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:24:17)
+(fail) postgres runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [0.21ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:50:17)
+(fail) postgres runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [0.11ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:63:17)
+(fail) postgres runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [0.08ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:10:17)
+(fail) sqlite runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [0.02ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:24:17)
+(fail) sqlite runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [0.02ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:50:17)
+(fail) sqlite runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [0.02ms]
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:63:17)
+(fail) sqlite runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata
+14 | function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
+15 | export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
+16 |  const root=process.env.AUN_NP_FIXTURE_ROOT
+17 |  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
+18 |  if(!root||!raw||!realpathSync(root).startsWith('/private/tmp/aun-np-db-'))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+19 |  const url=new URL(raw)
+                ^
+TypeError: <redacted> cannot be parsed as a URL.
+ code: "ERR_INVALID_URL"
+
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:19:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-db-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:71:95)
+(fail) PostgreSQL old physical-writing rollback is explicitly refused [0.06ms]
+
+ 0 pass
+ 9 fail
+Ran 9 tests across 1 file. [37.00ms]

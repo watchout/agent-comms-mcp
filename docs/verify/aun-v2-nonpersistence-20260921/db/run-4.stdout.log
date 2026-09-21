@@ -1,0 +1,11 @@
+bun test v1.3.11 (af24e281)
+{"case":"fixture-identity","kind":"postgres","name":"np_8aca80a449b445438e8bfa34dbc38d47","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"fixture-identity","kind":"postgres","name":"np_068e6e4f2da545d8b1dc922864de73ae","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"fixture-identity","kind":"postgres","name":"np_f39cb84d648a4f8baeea95b8d22d75d5","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"rollback","kind":"postgres","before_sha256":"68dfa9888a7d90be190c2b735e80e868bd1266ef99d0917a1fa55bbc9506a850","after_sha256":"68dfa9888a7d90be190c2b735e80e868bd1266ef99d0917a1fa55bbc9506a850","schema_restored":true}
+{"case":"fixture-identity","kind":"postgres","name":"np_7ca8b2ea88814c84be06df63c275930c","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"legacy-preservation","kind":"sqlite","before_sha256":"e1112b6d9af6f7b276544f35ebcce2e3e1769fc0533bb46bde8bad366506e85b","after_sha256":"e1112b6d9af6f7b276544f35ebcce2e3e1769fc0533bb46bde8bad366506e85b","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+{"case":"guards-and-null-anchor","kind":"sqlite","rejected_cases":14,"logical_audit_event_and_owner_content":"PRESERVED"}
+{"case":"rollback","kind":"sqlite","before_sha256":"e35357b88c6d49fef8574be732c6cca448e529b9fb6a78e8425557885796dea8","after_sha256":"e35357b88c6d49fef8574be732c6cca448e529b9fb6a78e8425557885796dea8","schema_restored":true}
+{"case":"fixture-identity","kind":"postgres","name":"np_47d6a2f678be4184a1eb816b39febc21","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"fixture-identity","kind":"postgres","name":"np_31fb1828bcfe41109b5f36b8b5f46dc2","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
