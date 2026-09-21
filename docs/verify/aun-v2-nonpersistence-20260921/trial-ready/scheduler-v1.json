@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/state-daemon-queue-work-scheduler.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "f0883332581c0da7f024e90dee74c96821ee01eccc51002fafe535aab8bc4ae6",
+  "source_head": "23b6f055ecc8f0971e7eed2f5546188a5a5f2fef",
+  "working_diff_sha256": "a3d9fc9e52f294a73dfca36a401c3ee542eebe2dfc68af5039013f009bd29a5f",
+  "started_at": "2026-09-21T07:56:49.488213+00:00",
+  "ended_at": "2026-09-21T07:56:49.759352+00:00",
+  "exit_code": 1,
+  "log_sha256": "6aa4f7e504015ef446c077e29e2d5b3162ee294c2534ff4167b5c206a7674b9b"
+}

@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/seat-runtime-continuity.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "c617a588a8bfe7387ee5033e4fa1e6258cc3fe855872a74fcac8c6c477ebca50",
+  "source_head": "23b6f055ecc8f0971e7eed2f5546188a5a5f2fef",
+  "working_diff_sha256": "374bc1e19eeae68d447a40f86c6acb11b490c1db76676ca6ea2f2334bf512552",
+  "started_at": "2026-09-21T08:02:38.547188+00:00",
+  "ended_at": "2026-09-21T08:02:38.679388+00:00",
+  "exit_code": 1,
+  "log_sha256": "a26096ccbc3c86429ca01ef927d1adfb68a4835e13afbfe2b8554f2f8fe2bb37"
+}

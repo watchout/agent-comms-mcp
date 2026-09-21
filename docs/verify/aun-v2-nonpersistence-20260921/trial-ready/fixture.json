@@ -1,0 +1,8 @@
+{
+  "root": "/private/tmp/aun-independent-pg-7i5o4k48",
+  "private_socket": "/private/tmp/aun-independent-pg-7i5o4k48/socket",
+  "listen_addresses": "",
+  "postgres": "17.9",
+  "started_at": "2026-09-21T07:51:03.753547+00:00",
+  "cell": "CELL-AUN-940-TRIAL-READY-20260921-002"
+}

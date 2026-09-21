@@ -1,0 +1,952 @@
+{
+  "source_head": "ef42f44abcfdec35888aee8da4ea37afea14c64f",
+  "observed_failures": 47,
+  "hypotheses": [
+    "consumer behavior itself failed",
+    "fixture failed before consumer assertion"
+  ],
+  "discriminating_measurement": "raw stack/first exception and actual fixture/consumer source were compared per case; category marks the observed stopping point, not proof that the consumer is correct",
+  "entries": [
+    {
+      "id": "FAIL-01",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 22,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:176",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "owned endpoint＋論理leaseでstrict doctor正常を再検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-02",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 41,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:186",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "論理connectorだけを残しleaseなしのdoctor拒否を再検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-03",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > stale_ttl_expiry",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 60,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:200",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "非保存anchorでDB時刻を進め、旧lease expiryと新fenceを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-04",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > duplicate_active_lease_fenced",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 79,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:237",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "論理anchorで二重取得と旧fence拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-05",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > restart_gated_by_lease_heartbeat_fencing",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 99,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:278",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "owned host＋有効/失効leaseでrestart前拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-06",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 118,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:332",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "有効holderでもprofile disable/権限revocationで拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-07",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 137,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:346",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "複数channelが単一論理anchor/held endpointを共有する条件を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-08",
+      "suite": "regression1-final",
+      "test": "NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed",
+      "category": "F01",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 156,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/norm-022-runtime-endpoint-lease.test.ts:77",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:54",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:389",
+        "tests/norm-022-runtime-endpoint-lease.test.ts:72",
+        "cli/index.ts:2655"
+      ],
+      "cause": "旧fixtureのagents INSERT（runtime/status/固定port/path）を非保存guardが拒否。doctor/health/lease assertionに未到達。",
+      "required_change": "一部connectorの論理lease不足を別途作り拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "CLI doctor/healthを含むconsumer移行とfixture移行が未完。guardを外すだけでは旧仕様を復活させるため採用しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-09",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > upserts runtime instance and connector rows from connector evidence",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 171,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:63",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "D1でconnector物理upsertの期待は旧仕様。論理anchor作成・物理新規書込0へ期待を移行。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-10",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > does not attach existing connector rows without connector evidence",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 182,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:161",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "owned holderを追加してconnector既存行が不変、論理leaseのみ作成されることを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-11",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > renews an existing runtime endpoint lease on heartbeat",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 193,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:227",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "取得済みleaseId/fence receiptと同じ実在holderを渡しexact renewalを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-12",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > expired runtime endpoint cannot be resurrected by its delayed heartbeat",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 207,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:315",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "最初のholder gateを満たしてからDB leaseを失効し、要求したLEASE_EXPIREDで拒否することを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-13",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > uses agent profile home_directory as the canonical workspace when present",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 218,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:372",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "DB home優先はD1と不整合。実在cwd優先・旧home不変・他workspace拒否へ移行。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-14",
+      "suite": "regression1-final",
+      "test": "runtime heartbeat evidence > registers the codex-cto MCP runtime from its seat profile without PWD or TMUX metadata",
+      "category": "F02",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 229,
+      "observed_error": "RUNTIME_CURRENT_HOLDER_UNVERIFIED",
+      "source_refs": [
+        "tests/runtime-heartbeat.test.ts:471",
+        "core/runtime-heartbeat.ts:442",
+        "tests/runtime-heartbeat.test.ts:63"
+      ],
+      "cause": "fixtureの固定PID/endpointにcurrent OS holder証拠がなく、runtime-heartbeat.ts:446でRUNTIME_CURRENT_HOLDER_UNVERIFIED。lease/connector assertionより先に停止。",
+      "required_change": "profileだけでは登録不可。pre-exec UUID/実在cwd/socketを与え正常と不足時拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この旧heartbeat suiteの6件は未移行。統合42件のholder/fence PASSは、この6件の目的別assertを代替しない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-15",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > codex-cto sole live profile mismatch remains current and only the stale same-group row is reapable",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 361,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:81",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "現行観測だけをcurrentにし、旧historyを消去/停止書込しない期待へ変更する。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-16",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > freshest exact profile tuple is selected deterministically",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 380,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:151",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "DB保存tuple順位ではなく、fresh holderと複数holder拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-17",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > selects the newer observed location without letting the old profile tuple win",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 399,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:168",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "新cwdはobserverから渡し、旧profile/履歴不変を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-18",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 418,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:199",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "logical anchor不在・authority失効・observer不在を別ケース化して識別を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-19",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 437,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:246",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "logical local_processとbootstrap_bound_providerを並置しkind分離を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-20",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > requested kind defines an independent ordinary ranking surface",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 456,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:266",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "要求kindごとにlogical authority＋観測を与え、他kindがshadowしないことを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-21",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 475,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:287",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "sealed receiptのmcp_runtime_instance_idとparent leaseを供給しexact bindingを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-22",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 494,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:314",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "logical fixture上でsealed receipt欠落/別UUIDの拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-23",
+      "suite": "regression1-final",
+      "test": "runtime current resolver > unknown group uses the frozen 30m/24h defaults",
+      "category": "F03",
+      "raw_log": "regression1-final.log",
+      "raw_fail_line": 513,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-current-resolver.test.ts:44",
+        "tests/runtime-current-resolver.test.ts:346",
+        "tests/runtime-current-resolver.test.ts:44",
+        "core/runtime-current-resolver.ts:357"
+      ],
+      "cause": "seedProfileが旧runtime/status/port/pathを書き、非保存guardが拒否（seedProfile:44）。resolver本体のassertに未到達。",
+      "required_change": "policyの30m/24h既定値を旧物理INSERTに依存しないケースで検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "旧DB freshness/reaping/profile tupleを根拠にした期待値との整合が未完。実体の履歴を書換えてPASSにしない。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-24",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 22,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:118",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "logical proof一致/不一致と原本可読/不読、lease失効を組合せ検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-25",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 41,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:133",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "原本native receiptを用いPID/start差分の拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-26",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 60,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:149",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "実MCP UUIDと別kind logical receiptを作りwrong UUID拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-27",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 79,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:192",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "論理project明示＋原本project一致を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-28",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 98,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:225",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "projectなしの論理profileをseedし、物理pathから名前空間を補完しないことを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-29",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 117,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:240",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "論理metadataのmemory_projectだけを与え決定性を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-30",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 136,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:254",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "observerのcwdだけ替えlogical project/DB bytes不変を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-31",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > valid current-runtime-bound evidence passes",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 155,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:263",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "実原本＋logical proof＋fresh holder＋live leaseの正常を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-32",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > gate follows the common freshest exact-profile resolver instead of evidence-bound precedence",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 174,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:279",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "旧profile順位をfresh current/authority選択に置換し、evidenceからcurrentを逆選択しないことを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-33",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 193,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:340",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "最新logical evidenceのauthorityを失効し、過去evidenceへfallbackしないことを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-34",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 212,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:369",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "同時刻logical evidenceのid順位と原本不一致拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-35",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 231,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:433",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "observer sessionと原本sessionを一致させ、新旧profile/履歴不変を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-36",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 250,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:433",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "実held portを替えて原本/leaseと再束縛し、profile portを書かないことを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-37",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 269,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:433",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "実cwdと原本workspace SHAを合わせ、旧checkout history不変を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-38",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 288,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:460",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "旧profileはcutover前にseedし、現原本/observer優先と旧行不変を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-39",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 307,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:480",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "logical proof欠落/期限切れ/別UUIDを個別負例として検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-40",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 326,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:504",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "logical runtimeに監査metadataなしのbypassを与え拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-41",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 345,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:529",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "logical runtime＋明示owner/expiry/target/queue-scopeを保持したbypass正常を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-42",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 364,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:551",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "logical runtimeで別queue/status/actionのbypass拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-43",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 382,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:578",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "同一DB profile portではなく、実socket holderが別agentの場合を作り拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-44",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 401,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:601",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "B5 receiptの鮮度でforeign OS holderを隠せないことを実holderで検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-45",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 426,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:668",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "runtime seedは論理化し、WAL/SHMのbyte不変とdry-run拒否を維持。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-46",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 445,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:693",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "論理fixtureでDB/journalのbyte不変とread-only dry-runを検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    },
+    {
+      "id": "FAIL-47",
+      "suite": "regression2-final",
+      "test": "runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption",
+      "category": "F04",
+      "raw_log": "regression2-final.log",
+      "raw_fail_line": 464,
+      "observed_error": "AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN",
+      "source_refs": [
+        "tests/runtime-memory-ready.test.ts:49",
+        "tests/runtime-memory-ready.test.ts:713",
+        "tests/runtime-memory-ready.test.ts:49",
+        "core/runtime-memory-ready.ts:804"
+      ],
+      "cause": "seedRuntimeまたはテスト内INSERTが旧runtime/status/port/pathを書き、非保存guardが拒否。readiness/CLIの目的assertに未到達。",
+      "required_change": "論理fixtureで原本transportなしのbootstrapを実行しconsumption拒否を検証。",
+      "response": "未修正として保持。FAILをPASSへ読み替えない。",
+      "unaddressed_reason": "この24件のfixtureと期待値の移行は未完。原本・current tupleをコピーJSONへ置換して合格にすることは不可。",
+      "consumer_assertion_verified": false
+    }
+  ]
+}

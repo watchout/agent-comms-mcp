@@ -1,0 +1,7 @@
+{
+  "stopped_at": "2026-09-21T08:10:42.813401+00:00",
+  "private_root": "/private/tmp/aun-independent-pg-7i5o4k48",
+  "pg_ctl_exit_code": 0,
+  "postmaster_pid_file_exists": false,
+  "shared_runtime_operations": 0
+}

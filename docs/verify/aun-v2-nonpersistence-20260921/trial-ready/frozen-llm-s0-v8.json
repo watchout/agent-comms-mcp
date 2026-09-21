@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "ba54ec562ec3a2ea5e5f7176e1296eff0ff46a114c935332e47b55048ef01084",
+  "source_head": "23b6f055ecc8f0971e7eed2f5546188a5a5f2fef",
+  "working_diff_sha256": "36f0fbcececcc07bad1e10556f698f085e77078220014c10f7e2324779fdc6e9",
+  "started_at": "2026-09-21T08:06:05.620926+00:00",
+  "ended_at": "2026-09-21T08:06:05.745430+00:00",
+  "exit_code": 0,
+  "log_sha256": "149fbb2f3651cae42fd3e717909ae6b7347274c030db1b3b8dc7b83f0a956d3a"
+}
