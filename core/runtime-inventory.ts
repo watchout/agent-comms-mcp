@@ -524,21 +524,7 @@ function blockerFromWarning(agentId: string, warning: string): string | null {
 }
 
 async function queryAgentRows(db: DbAdapter): Promise<any[]> {
-  try {
-    return await db.query(
-      `SELECT agent_id, agent_type, runtime, status
-         FROM agents
-        ORDER BY agent_id`,
-    )
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    if (!/runtime/i.test(message)) throw err
-    return await db.query(
-      `SELECT agent_id, agent_type, cli_type AS runtime, status
-         FROM agents
-        ORDER BY agent_id`,
-    )
-  }
+  return db.query(`SELECT agent_id, agent_type FROM agents ORDER BY agent_id`)
 }
 
 export async function buildRuntimeInventoryReport(

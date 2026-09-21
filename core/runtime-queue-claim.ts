@@ -9,7 +9,7 @@ export async function claimUnboundedRuntimeQueue(db: RuntimeEndpointDb, input: {
 }) {
   if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 1) throw new Error('CLAIM_TTL_INVALID')
   const resolved = await resolveRuntimeEndpoint(db, {agentId: input.agentId, runtimeInstanceId: input.runtimeInstanceId})
-  if (!resolved.ok || !resolved.endpoint) throw new Error('CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE')
+  if (!resolved.ok || !resolved.endpoint) throw new Error(`CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE:${resolved.code}`)
   const holder = resolved.endpoint
   const clockResult=await db.query('SELECT clock_timestamp() AS database_now')
   const clock=(Array.isArray(clockResult)?clockResult:clockResult.rows)[0]

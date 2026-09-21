@@ -148,19 +148,19 @@ beforeEach(async () => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   withDb((db) => {
     db.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, home_directory)
-        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'codex', 'idle', '{"discord_id":"999001","tmux_session":"actionable-dev-session"}', '/tmp/actionable-dev'),
-               ('codex-cto', 'codex-cto', 'dev', 'codex', 'idle', '{"discord_id":"999002"}', NULL),
-               ('auditor', 'auditor', 'auditor', 'codex', 'idle', '{}', NULL);
-      UPDATE agents SET channel_port = 39001 WHERE agent_id = '${TEST_AGENT}';
+      INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', '{"discord_id":"999001"}'),
+               ('codex-cto', 'codex-cto', 'dev', '{"discord_id":"999002"}'),
+               ('auditor', 'auditor', 'auditor', '{}');
       INSERT INTO channels (id, name, members)
         VALUES ('actionable-ch', 'actionable-ch', '["${TEST_AGENT}","codex-cto","auditor"]');
       INSERT INTO channel_routing_policy (channel_id, primary_agent_id, outbound_allowlist, policy_source)
         VALUES ('actionable-ch', '${TEST_AGENT}', '["${TEST_AGENT}","codex-cto"]', 'receive-actionable-test');
     `)
   })
-  await createReadyNativeRuntime(dbPath,tmpDir,'actionable-dev','runtime-actionable-dev')
+  const native = await createReadyNativeRuntime(dbPath,tmpDir,'actionable-dev',randomUUID())
   acceptedNativeEvidence=withDb(db=>db.prepare('SELECT * FROM runtime_memory_ready_evidence WHERE agent_id=? ORDER BY id DESC LIMIT 1').get(TEST_AGENT) as any)
+  env.PATH = native.cliPath + ':' + env.PATH
   env.AGENT_COMMS_MEMORY_READY_PROJECT='agent-comms-mcp'
 })
 
@@ -446,7 +446,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
   })
 
   test('Discord chat with missing target binding fails closed without LLM classification', () => {
-    withDb((db) => db.exec(`UPDATE agents SET metadata = '{"tmux_session":"actionable-dev-session"}' WHERE agent_id = '${TEST_AGENT}'`))
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
       source: 'discord',
@@ -466,7 +466,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
   })
 
   test('Discord chat with only agent-id mention metadata and missing target binding fails closed', () => {
-    withDb((db) => db.exec(`UPDATE agents SET metadata = '{"tmux_session":"actionable-dev-session"}' WHERE agent_id = '${TEST_AGENT}'`))
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
       source: 'discord',

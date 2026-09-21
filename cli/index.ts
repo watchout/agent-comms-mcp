@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { resolveSeatProvider } from '../core/seat-runtime-selection'
 import { claimUnboundedRuntimeQueue } from '../core/runtime-queue-claim'
 import { inspectHostRuntime } from '../core/host-runtime-observer'
 /**
@@ -1866,7 +1867,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
       source: 'bot_profile_projector',
       agent_id: projection.agent_id,
       profile_revision: projection.profile_revision,
-      expected_provider_identity: expectedProviderIdentity(row),
+      expected_provider_subject_id: expectedProviderSubjectId(row),
       token_source_ref_set: Boolean(row.provider_token_source_ref),
     })
     const capabilities = JSON.stringify({ roles: ['profile_projection'], source: 'bot_profile_projector' })
@@ -2016,7 +2017,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
       source: 'bot_profile_projector',
       agent_id: projection.agent_id,
       profile_revision: projection.profile_revision,
-      expected_provider_identity: expectedProviderIdentity(row),
+      expected_provider_subject_id: expectedProviderSubjectId(row),
     })
     const existing = await db.query(
       `SELECT provider_identity_id, status
@@ -5228,16 +5229,13 @@ async function status(args: string[]) {
         `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
         [agentId],
       )
-      const agent = await db.query(
-        `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
-        [agentId],
-      )
+      const provider = await resolveSeatProvider(db,{agentId})
       // Issue #278 (A) segment 3d — agents.current_message_id is gone.
       // The "in-flight claim" view is now the most-recent active per-row
       // claim from message_queue.
       const claim = await db.query(
         `SELECT id::text AS id FROM message_queue
-            WHERE claimed_by = $1 AND status = 'received'
+            WHERE claimed_by = $1 AND status IN ('received','in_progress')
             ORDER BY claimed_at DESC NULLS LAST
             LIMIT 1`,
         [agentId],
@@ -5246,8 +5244,8 @@ async function status(args: string[]) {
         `SELECT wa.*,
                 mq.status AS queue_status,
                 mq.message_id AS message_id,
-                ari.status AS runtime_status,
-                ari.last_seen_at AS runtime_last_seen_at
+                NULL AS runtime_status,
+                NULL AS runtime_last_seen_at
            FROM worker_activity wa
            LEFT JOIN message_queue mq ON mq.id = wa.queue_id
            LEFT JOIN agent_runtime_instances ari ON ari.runtime_instance_id = wa.runtime_instance_id
@@ -5257,12 +5255,11 @@ async function status(args: string[]) {
           LIMIT 1`,
         [agentId],
       ).catch(() => ({ rows: [] as any[] }))
-      const row = agent.rows[0]
       const result = {
         agent_id: agentId,
         pending: pending.rows[0]?.n ?? 0,
-        status: row?.status ?? 'unknown',
-        last_seen_at: row?.last_seen_at ?? null,
+        status: provider.ok ? (claim.rows.length ? 'busy' : 'online') : 'unknown',
+        last_seen_at: provider.observation?.observed_at ?? null,
         current_message_id: claim.rows[0]?.id ?? null,
         worker_activity: workerActivity.rows[0] ? normalizeWorkerActivity(workerActivity.rows[0]) : null,
       }
@@ -5285,7 +5282,13 @@ async function status(args: string[]) {
       //              still receiving queue rows, etc.) follow the tables.
       // --format json → extended schema (additive over the brief shape).
       const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
-      const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
+      const identities = await db.query('SELECT agent_id FROM agents')
+      const observations = new Map<string, NonNullable<Awaited<ReturnType<typeof resolveSeatProvider>>['observation']>>()
+      for(const row of identities.rows) {
+        const resolved=await resolveSeatProvider(db,{agentId:row.agent_id})
+        if(resolved.ok && resolved.observation)observations.set(row.agent_id,resolved.observation)
+      }
+      const agOnline = {rows:[{cnt:String(observations.size)}]}
       const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
       const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
       const brief = hasFlag(flags, 'brief')
@@ -5309,51 +5312,31 @@ async function status(args: string[]) {
       const agentsRes = await db.query(
         `SELECT agent_id,
                 agent_type,
-                runtime,
-                status,
+                NULL AS runtime,
+                NULL AS status,
                 display_name,
-                home_directory,
-                last_seen_at,
+                NULL AS home_directory,
+                NULL AS last_seen_at,
                 metadata->>'discord_id' AS discord_id,
-                metadata->>'tmux_session' AS tmux_session,
+                NULL AS tmux_session,
                 metadata->>'discord_username' AS discord_username_cached,
                 metadata->>'retired' AS retired_raw
            FROM agents
           WHERE disabled_at IS NULL
-          ORDER BY (status = 'busy') DESC,
-                   (status = 'idle') DESC,
-                   agent_id`,
+          ORDER BY agent_id`,
       )
 
-      // Per-agent live runtime workspace lookup. Pulled from
-      // agent_runtime_instances so the value reflects the *actually
-      // running* checkout, not a stale metadata field. SQLite tests use
-      // bun:sqlite which has had this table since the NORM-020
-      // migration, but the column set is small so we tolerate an empty
-      // result silently.
-      const workspaceRes = await db.query(
-        `SELECT agent_id, checkout_path
-           FROM agent_runtime_instances
-          WHERE status = 'running' AND checkout_path IS NOT NULL`,
-      ).catch(() => ({ rows: [] as any[] }))
-      const workspaceByAgent = new Map<string, string>()
-      for (const r of workspaceRes.rows) {
-        // If two runtimes share an agent_id (shouldn't happen, but
-        // codex-aun lane is still normalising), prefer the first seen.
-        if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
+      const workspaceByAgent = new Map<string,string>()
+      for(const row of agentsRes.rows) {
+        const observed=observations.get(row.agent_id)
+        row.runtime=observed?.provider ?? null
+        row.status=observed ? 'online' : 'unknown'
+        row.last_seen_at=observed?.observed_at ?? null
+        row.tmux_session=observed?.session_name ?? null
+        row.home_directory=null // The old launch directory has no current authority.
+        if(observed?.workspace)workspaceByAgent.set(row.agent_id,observed.workspace)
       }
 
-      // Per CEO 2026-05-24 directive (msg `7d778234`): the live Discord
-      // API resolution path is removed. codex-aun lane (NORM-020) owns
-      // the per-bot connector/runtime identity work that will persist
-      // discord_username into the agents row at heartbeat time. The
-      // status CLI conforms to that spec once it lands. Until then,
-      // fall through to metadata.discord_username (read-only consumer)
-      // → display_name → placeholder.
-
-      // 起動ディレクトリ (launch directory) is the bot profile SSOT
-      // (`agents.home_directory`). It is distinct from runtime workspace
-      // (= what the process is actually executing inside).
       const queueRes = await db.query(
         `SELECT agent_id,
                 status,
@@ -5403,9 +5386,11 @@ async function status(args: string[]) {
         if (a.agent_type === 'human' && q && (q.pending + q.received + q.in_progress) > 0) {
           drifts.push(`human agent '${a.agent_id}' has ${q.pending + q.received + q.in_progress} queued rows — PR #533 fix should have prevented this; check fleet runtime build`)
         }
-        if (a.runtime === 'TUI' && (!a.tmux_session || a.tmux_session === '')) {
-          drifts.push(`agent '${a.agent_id}' runtime=TUI but metadata.tmux_session is missing`)
+        if(a.agent_type !== 'human' && !observations.has(a.agent_id)) {
+          drifts.push(`agent '${a.agent_id}' current runtime authority unavailable`)
         }
+        if(observations.has(a.agent_id) && q && q.received+q.in_progress>0)a.status='busy'
+
       }
 
       if (format === 'json') {
@@ -5455,10 +5440,7 @@ async function status(args: string[]) {
         'launch_dir'.padEnd(36) +
         'last_seen',
       )
-      // `launch_dir` is the bot profile home directory, distinct from
-      // the runtime workspace (= what the process is actually executing
-      // inside). Both are exposed in --format json under `launch_dir`
-      // and `workspace` respectively so dashboards can compare them.
+      // Preserve the launch_dir output key as NULL; workspace is current observation.
       const HOME = process.env.HOME ?? ''
       const shrinkHome = (p: string) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p)
       for (const a of agentsRes.rows) {

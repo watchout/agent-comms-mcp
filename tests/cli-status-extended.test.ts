@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import {observedSqliteRuntimeFixture} from './helpers/nonpersist-host-fixture'
 /**
  * #530 — `agent-com status` extended output regression.
  *
@@ -19,6 +20,7 @@ const REPO_ROOT = join(import.meta.dir, '..')
 const CLI = join(REPO_ROOT, 'cli', 'index.ts')
 const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 
+let host: Awaited<ReturnType<typeof observedSqliteRuntimeFixture>>
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
@@ -28,7 +30,7 @@ function runCli(args: string[]): { status: number; stdout: string; stderr: strin
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'cli-status-530-'))
   dbPath = join(tmpDir, 'test.db')
   env = {
@@ -42,22 +44,24 @@ beforeEach(() => {
 
   const db = new Database(dbPath)
   // Seed two agents: a healthy dev bot and a retired one with stale queue rows.
-  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, runtime, status) VALUES ('bot-a', 'bot-a', 'dev', 'TUI', 'idle')`)
-  db.exec(`UPDATE agents SET metadata = '{"tmux_session":"bot-a-tmux"}' WHERE agent_id='bot-a'`)
-  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, runtime, status) VALUES ('bot-retired', 'bot-retired', 'dev', 'TUI', 'offline')`)
+  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('bot-a', 'bot-a', 'dev')`)
+  expect(() => db.exec(`UPDATE agents SET metadata = '{"tmux_session":"bot-a-tmux"}' WHERE agent_id='bot-a'`)).toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('bot-retired', 'bot-retired', 'dev')`)
   db.exec(`UPDATE agents SET metadata = '{"retired":true}' WHERE agent_id='bot-retired'`)
   // Human agent (CEO-like) — must NOT be flagged for queue drift unless rows
   // exist for it. We add the row but no queue, so no warning.
-  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, runtime, status) VALUES ('human-ceo', 'human-ceo', 'human', 'discord', 'online')`)
+  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('human-ceo', 'human-ceo', 'human')`)
   // Channel.
   db.exec(`INSERT INTO channels (id, name, members) VALUES ('ch-1', 'ch-1', '["bot-a","bot-retired","human-ceo"]')`)
   // Queue: bot-retired has 2 stale pending rows → drift trigger.
   db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('bot-retired', ?, '{}', 'pending')`).run('msg-1')
   db.prepare(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('bot-retired', ?, '{}', 'pending')`).run('msg-2')
   db.close()
+  host=await observedSqliteRuntimeFixture(dbPath,'bot-a')
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await host?.close()
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
 })
 
@@ -77,8 +81,8 @@ describe('#530 status — extended JSON shape', () => {
 
     const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
     expect(botA).toBeDefined()
-    expect(botA.runtime).toBe('TUI')
-    expect(botA.tmux_session).toBe('bot-a-tmux')
+    expect(botA.runtime).toBe('codex')
+    expect(botA.tmux_session).toBe('session-bot-a')
     expect(botA.queue).toEqual({ pending: 0, received: 0, in_progress: 0, oldest: null })
 
     const retired = payload.agents.find((a: any) => a.agent_id === 'bot-retired')
@@ -94,16 +98,16 @@ describe('#530 status — extended JSON shape', () => {
     expect(driftHits[0]).toMatch(/retired agent .* still has 2 queued rows/)
   })
 
-  test('drift warning fires for TUI agent without tmux_session metadata', () => {
+  test('drift warning reports missing current runtime authority', () => {
     // Add a TUI bot with no metadata.tmux_session.
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, runtime, status) VALUES ('bot-no-tmux', 'bot-no-tmux', 'dev', 'TUI', 'idle')`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('bot-no-tmux', 'bot-no-tmux', 'dev')`)
     db.close()
     const r = runCli(['status', '--format', 'json'])
     const payload = JSON.parse(r.stdout.trim())
     const driftHits = payload.drifts.filter((d: string) => d.includes('bot-no-tmux'))
     expect(driftHits.length).toBe(1)
-    expect(driftHits[0]).toMatch(/runtime=TUI but metadata.tmux_session is missing/)
+    expect(driftHits[0]).toMatch(/current runtime authority unavailable/)
   })
 
   test('drift warning fires for human agent receiving queue rows (PR #533 follow-up)', () => {
@@ -144,19 +148,19 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
   test('JSON exposes discord_id and runtime workspace per agent', () => {
     const db = new Database(dbPath)
     db.exec(`UPDATE agents SET metadata = '{"discord_id":"1234567890"}' WHERE agent_id='bot-a'`)
-    db.exec(`INSERT INTO agent_runtime_instances (agent_id, runtime_engine, runtime_kind, status, checkout_path, started_at, last_seen_at) VALUES ('bot-a', 'TUI', 'local_process', 'running', '/Users/x/Developer/bot-a', datetime('now'), datetime('now'))`)
+    expect((db.query(`SELECT runtime,home_directory,channel_port FROM agents WHERE agent_id='bot-a'`).get() as any)).toEqual({runtime:null,home_directory:null,channel_port:null})
     db.close()
     const r = runCli(['status', '--format', 'json'])
     expect(r.status).toBe(0)
     const payload = JSON.parse(r.stdout.trim())
     const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
     expect(botA.discord_id).toBe('1234567890')
-    expect(botA.workspace).toBe('/Users/x/Developer/bot-a')
+    expect(botA.workspace).toBe(host.dir)
   })
 
-  test('launch_dir is read from agents.home_directory even when AUN_REGISTRY_PATH is set', () => {
+  test('launch_dir stays null and current workspace ignores an old registry path', () => {
     const db = new Database(dbPath)
-    db.exec(`UPDATE agents SET home_directory = '/Users/x/profile/bot-a' WHERE agent_id='bot-a'`)
+    expect(() => db.exec(`UPDATE agents SET home_directory = '/Users/x/profile/bot-a' WHERE agent_id='bot-a'`)).toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
     db.close()
     const registryPath = join(tmpDir, 'bot-registry.txt')
     require('node:fs').writeFileSync(registryPath, [
@@ -171,7 +175,8 @@ describe('#530 status — discord_id + workspace + launch_dir columns (CEO follo
     expect(r.status).toBe(0)
     const payload = JSON.parse((r.stdout ?? '').trim())
     const botA = payload.agents.find((a: any) => a.agent_id === 'bot-a')
-    expect(botA.launch_dir).toBe('/Users/x/profile/bot-a')
+    expect(botA.launch_dir).toBeNull()
+    expect(botA.workspace).toBe(host.dir)
   })
 
   test('text mode header includes discord_id and launch_dir columns', () => {

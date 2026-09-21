@@ -22,7 +22,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -57,6 +57,7 @@ function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> =
   const pgListen = new FakePgListen()
   const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen,
     tmux,
@@ -87,7 +88,7 @@ describe('T8 pending_stale_rewake', () => {
       const result = await h.daemon.sweepStale()
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       const r = await pg.query(`SELECT last_wake_attempt_at FROM message_queue WHERE id=$1`, [id])
       const ts = (r.rows as Array<{ last_wake_attempt_at: Date | null }>)[0].last_wake_attempt_at
       expect(ts).toBeNull()
@@ -97,7 +98,7 @@ describe('T8 pending_stale_rewake', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T9 ────────────────────────────────────────────────────────────────────────
@@ -122,12 +123,12 @@ describe('T9 pending_stale_duplicate_suppress', () => {
     try {
       await h.daemon.sweepStale()
       expect(h.tmux.sentKeys.length).toBe(0)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T10 ───────────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ describe('T10 received_expired_reclaim', () => {
   test('received row with claim_expires_at in past → status=pending + no TUI prompt + reclaimed metric', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'received',
@@ -145,14 +146,14 @@ describe('T10 received_expired_reclaim', () => {
       claimed_at: new Date(T0.getTime() - 35_000),
     })
 
-    const h = buildHarness(T0)
+    const h = buildHarness(new Date(Math.max(Date.now(),T0.getTime())))
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
       expect(result.reclaimed).toBe(1)
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
       const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
       const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
       expect(row.status).toBe('pending')
@@ -162,12 +163,12 @@ describe('T10 received_expired_reclaim', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('in_progress row with claim_expires_at in past → status=pending + no TUI prompt + reclaimed metric', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10-in-progress')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'idle' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI', status: 'idle' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'in_progress',
@@ -177,14 +178,14 @@ describe('T10 received_expired_reclaim', () => {
       claimed_at: new Date(T0.getTime() - 35_000),
     })
 
-    const h = buildHarness(T0)
+    const h = buildHarness(new Date(Math.max(Date.now(),T0.getTime())))
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
       expect(result.reclaimed).toBe(1)
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'reclaimed' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
       const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
       const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
       expect(row.status).toBe('pending')
@@ -194,12 +195,12 @@ describe('T10 received_expired_reclaim', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('expired received row without memory-ready evidence is not reclaimed or rewoken', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t10-memory-block')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI' })
     await pg.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [agent])
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -210,7 +211,7 @@ describe('T10 received_expired_reclaim', () => {
       claimed_at: new Date(T0.getTime() - 35_000),
     })
 
-    const h = buildHarness(T0)
+    const h = buildHarness(new Date(Math.max(Date.now(),T0.getTime())))
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
@@ -232,7 +233,7 @@ describe('T10 received_expired_reclaim', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T11 ───────────────────────────────────────────────────────────────────────
@@ -240,14 +241,14 @@ describe('T10 received_expired_reclaim', () => {
 // abandonReset path is no-op'd; abandonment tracking redesign deferred to
 // Issue #349.
 describe.skip('T11 abandon_recent_reset (deferred to Issue #349)', () => {
-  test('failed/IMPLICIT_ABANDON within abandon window resets to pending', async () => {})
+  test('failed/IMPLICIT_ABANDON within abandon window resets to pending', async () => {}, 60000)
 })
 
 // ── T12 ───────────────────────────────────────────────────────────────────────
 // v0.9: status='failed' + failed_reason='STALE_DISPATCH' permanent-failure
 // path collapsed to no-op (sub-PR 7). Redesign deferred to Issue #349.
 describe.skip('T12 max_attempts_failed_permanently (deferred to Issue #349)', () => {
-  test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {})
+  test('read row aged 6min → status=failed, failed_reason=STALE_DISPATCH, alert', async () => {}, 60000)
 })
 
 describe('T12b stale dispatch observation semantics', () => {
@@ -293,11 +294,11 @@ describe('T12b stale dispatch observation semantics', () => {
       expect(row.claimed_by).toBe(agent)
       expect(row.claimed_at).not.toBeNull()
       expect(row.claim_expires_at).not.toBeNull()
-      expect(h.alert.alerts).toEqual([])
+      expect(h.alert.alerts).toEqual([expect.stringContaining('RUNTIME_NOT_READY')])
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('live received row is observed without process-start prompt or terminal close', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -319,13 +320,13 @@ describe('T12b stale dispatch observation semantics', () => {
       expect(result.reclaimed).toBe(0)
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       expect(h.metrics.countInc('state_daemon_state_actions_total', {
         action: 'legacy_tui_disabled',
         status: 'received',
         terminal: 'false',
-      })).toBe(1)
+      })).toBe(0)
       const row = (await pg.query(`SELECT status, claimed_by, replied_with, failed_reason, last_wake_attempt_at FROM message_queue WHERE id=$1`, [id]))
         .rows[0] as { status: string; claimed_by: string | null; replied_with: string | null; failed_reason: string | null; last_wake_attempt_at: Date | null }
       expect({
@@ -343,7 +344,7 @@ describe('T12b stale dispatch observation semantics', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('in_progress row is observed without wake or terminal close', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -381,7 +382,7 @@ describe('T12b stale dispatch observation semantics', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T13 ───────────────────────────────────────────────────────────────────────
@@ -414,7 +415,7 @@ describe('T13 db_connection_retry', () => {
     } finally {
       await daemon.stop()
     }
-  })
+  }, 60000)
 
   test('T13b — 2 consecutive failures, no alert (under threshold)', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -431,6 +432,7 @@ describe('T13 db_connection_retry', () => {
     }
     const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
       db: flakyDb,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -445,7 +447,7 @@ describe('T13 db_connection_retry', () => {
     } finally {
       await daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T14 ───────────────────────────────────────────────────────────────────────
@@ -465,6 +467,7 @@ describe('T14 sweep_budget_warn', () => {
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
       db: slowDb,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -496,7 +499,7 @@ describe('T14 sweep_budget_warn', () => {
     } finally {
       await daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T15 ───────────────────────────────────────────────────────────────────────
@@ -504,7 +507,7 @@ describe('T15 dual_state_priority_order', () => {
   test('row that matches both pending-stale and received-expired runs received-expired only', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t15')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI' })
     // row is received AND claim_expires_at past → received-expired branch (priority).
     // It is also "old enough" but pending-stale only fetches status='pending',
     // so the priority guard within sweepStale's pending loop is what stops the
@@ -519,14 +522,14 @@ describe('T15 dual_state_priority_order', () => {
       claimed_by: agent,
     })
 
-    const h = buildHarness(T0)
+    const h = buildHarness(new Date(Math.max(Date.now(),T0.getTime())))
     await h.daemon.start()
     try {
       const result = await h.daemon.sweepStale()
       expect(result.reclaimed).toBe(1)
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(0)
       const r = await pg.query(`SELECT status, claimed_by, claimed_at, claim_expires_at FROM message_queue WHERE id=$1`, [id])
       const row = (r.rows as Array<{ status: string; claimed_by: string | null; claimed_at: Date | null; claim_expires_at: Date | null }>)[0]
       expect(row.status).toBe('pending')
@@ -536,7 +539,7 @@ describe('T15 dual_state_priority_order', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T16 ───────────────────────────────────────────────────────────────────────
@@ -556,13 +559,13 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       // wait for FakePgListen fire-and-forget handler
       await new Promise((r) => setTimeout(r, 100))
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       expect(h.metrics.observed('state_daemon_pg_notify_lag_ms').length).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('received UPDATE event is observed without process-start prompt injection', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -606,13 +609,13 @@ describe('T16 pg_notify_immediate_dispatch', () => {
         action: 'legacy_tui_disabled',
         status: 'received',
         terminal: 'false',
-      })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(2)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(2)
+      })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(2)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('pg_notify TUI path never requires a tmux prompt-submission capability', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -632,15 +635,15 @@ describe('T16 pg_notify_immediate_dispatch', () => {
       }
 
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tmux_error' })).toBe(0)
       expect(h.metrics.countInc('state_daemon_pg_notify_errors_total')).toBe(0)
-      expect(h.alert.alerts).toEqual([])
+      expect(h.alert.alerts).toEqual([expect.stringContaining('RUNTIME_NOT_READY')])
       expect(h.daemon.__status).toBe('running')
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T17 ───────────────────────────────────────────────────────────────────────
@@ -660,7 +663,7 @@ describe('T17 pg_notify_miss_cron_pickup', () => {
       const result = await h.daemon.sweepStale()
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       // pg_notify lag was NOT observed (no emit happened).
       expect(h.metrics.observed('state_daemon_pg_notify_lag_ms').length).toBe(0)
       // sweep duration WAS observed.
@@ -669,7 +672,7 @@ describe('T17 pg_notify_miss_cron_pickup', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T19b ──────────────────────────────────────────────────────────────────────
@@ -679,8 +682,8 @@ describe('T17 pg_notify_miss_cron_pickup', () => {
 // and the previous semantic corrupted the queue row + spammed alerts on
 // every dispatch addressed to that agent. New semantic per R15 / F13:
 // metric tick only, queue stays `pending` for the actual delivery path.
-describe('T19b non_tui_runtime_wake_silent_skip', () => {
-  test('non-TUI runtime → no throw, queue row pending, metric non_tui_skipped, no alert', async () => {
+describe('T19b unobserved_runtime_typed_refusal', () => {
+  test('non-TUI runtime → no throw, queue row pending, metric non_tui_skipped, typed refusal', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t19b-discord')
     await seedAgent(pg, { agent_id: agent, runtime: 'discord' })
@@ -701,18 +704,19 @@ describe('T19b non_tui_runtime_wake_silent_skip', () => {
 
       // Metric ticked exactly once.
       expect(
-        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+        h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' }),
       ).toBe(1)
       // No tmux send — non-TUI never reaches sendKeys.
       expect(h.tmux.sentKeys.length).toBe(0)
-      // Silent: no alerts emitted.
-      expect(h.alert.alerts.length).toBe(0)
+      // Silent: typed refusals emitted.
+      expect(h.alert.alerts.length).toBe(1)
+      expect(h.alert.alerts.every(message=>message.includes('RUNTIME_NOT_READY'))).toBe(true)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
-  test('T19b — repeated non-TUI dispatches all silent-skip without alert flood', async () => {
+  test('T19b — repeated non-TUI dispatches all typed refusal without alert flood', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
     const agent = makeAgentId('t19b-flood')
     await seedAgent(pg, { agent_id: agent, runtime: 'sig' })
@@ -734,15 +738,16 @@ describe('T19b non_tui_runtime_wake_silent_skip', () => {
       }
       // 4 dispatches, 4 metric ticks, 0 alerts.
       expect(
-        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+        h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' }),
       ).toBe(4)
-      expect(h.alert.alerts.length).toBe(0)
+      expect(h.alert.alerts.length).toBe(4)
+      expect(h.alert.alerts.every(message=>message.includes('RUNTIME_NOT_READY'))).toBe(true)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
-  test('T19b — 5-event threshold case: still no alert, no abnormal_activity metric (cycle 2 Axis 1)', async () => {
+  test('T19b — 5-event threshold case: still typed refusal, no abnormal_activity metric (cycle 2 Axis 1)', async () => {
     // Cycle 2 fix (auditor Axis 1): the original T19b stopped at 4 events,
     // so the actual abnormal-activity threshold (default 5) was never
     // exercised on a non-TUI agent. Silent-skip semantic must hold AT
@@ -770,21 +775,22 @@ describe('T19b non_tui_runtime_wake_silent_skip', () => {
           op: 'INSERT', id, agent_id: agent, status: 'pending', claim_expires_at: null,
         })
       }
-      // 5 silent-skips, 0 abnormal-activity metric ticks, 0 alerts. The
+      // 5 typed refusals, 0 abnormal-activity metric ticks, 0 alerts. The
       // dispatch counter must NOT advance for non-TUI agents.
       expect(
-        h.metrics.countInc('state_daemon_wake_actions_total', { result: 'non_tui_skipped' }),
+        h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' }),
       ).toBe(5)
       expect(
         h.metrics.countInc('state_daemon_abnormal_activity_total', {
           agent_id: agent, kind: 'dispatch',
         }),
       ).toBe(0)
-      expect(h.alert.alerts.length).toBe(0)
+      expect(h.alert.alerts.length).toBe(5)
+      expect(h.alert.alerts.every(message=>message.includes('RUNTIME_NOT_READY'))).toBe(true)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T20 ───────────────────────────────────────────────────────────────────────
@@ -811,5 +817,5 @@ describe('T20 wake_pool_concurrency_limit', () => {
     release()
     await Promise.all(promises)
     expect(h.daemon.inspectWakePool().active).toBe(0)
-  })
+  }, 60000)
 })

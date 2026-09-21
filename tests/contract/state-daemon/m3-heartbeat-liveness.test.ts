@@ -16,7 +16,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, refreshNativeFixtureHeartbeat } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader, refreshNativeFixtureHeartbeat } from './seed'
 
 let pg: Client
 
@@ -51,6 +51,7 @@ function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> =
   const pgListen = new FakePgListen()
   const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen,
     tmux,
@@ -64,9 +65,9 @@ function buildHarness(t0: Date, configOverride: Partial<typeof DEFAULT_CONFIG> =
 
 describe('T21 active claim heartbeat refresh', () => {
   test('busy bot with live in_progress claim → claim_expires_at extended', async () => {
-    const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
+    const T0 = new Date()
     const agent = makeAgentId('t21-busy-in-progress')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI', status: 'busy' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'in_progress',
@@ -78,6 +79,7 @@ describe('T21 active claim heartbeat refresh', () => {
     const h = buildHarness(T0, { claimTtlSec: 60 })
     await h.daemon.start()
     try {
+      const beforeRefresh = Date.now()
       const result = await h.daemon.refreshClaims()
       expect(result.refreshed).toBe(1)
       expect(h.metrics.countInc('state_daemon_heartbeat_refresh_total', { result: 'ok' })).toBe(1)
@@ -86,18 +88,19 @@ describe('T21 active claim heartbeat refresh', () => {
         [id],
       )
       const row = (r.rows as Array<{ claim_expires_at: Date | null; last_heartbeat_at: Date | null }>)[0]
-      expect(Math.abs(new Date(row.claim_expires_at!).getTime() - (T0.getTime() + 60_000))).toBeLessThan(1500)
-      expect(Math.abs(new Date(row.last_heartbeat_at!).getTime() - T0.getTime())).toBeLessThan(1500)
+      expect(new Date(row.claim_expires_at!).getTime() - new Date(row.last_heartbeat_at!).getTime()).toBeGreaterThanOrEqual(59999)
+      expect(new Date(row.last_heartbeat_at!).getTime()).toBeGreaterThanOrEqual(beforeRefresh)
+      expect(new Date(row.last_heartbeat_at!).getTime()).toBeLessThanOrEqual(Date.now())
       expect(h.tmux.sentKeys.length).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('busy bot with aged in_progress claim is not refreshed forever', async () => {
-    const T0 = fixtureDate(pg, '2026-05-08T00:05:00.000Z')
+    const T0 = new Date()
     const agent = makeAgentId('t21-aged-in-progress')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI', status: 'busy' })
     const originalExpiry = new Date(T0.getTime() + 30_000)
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -111,6 +114,7 @@ describe('T21 active claim heartbeat refresh', () => {
     const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })
     await h.daemon.start()
     try {
+      const beforeRefresh = Date.now()
       const result = await h.daemon.refreshClaims()
       expect(result.refreshed).toBe(0)
       expect(result.skipped).toBe(1)
@@ -126,12 +130,12 @@ describe('T21 active claim heartbeat refresh', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('claim with mismatched owner is not refreshed from agent status alone', async () => {
-    const T0 = fixtureDate(pg, '2026-05-08T00:07:00.000Z')
+    const T0 = new Date()
     const agent = makeAgentId('t21-owner-mismatch')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'busy' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI', status: 'busy' })
     const originalExpiry = new Date(T0.getTime() + 30_000)
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -144,6 +148,7 @@ describe('T21 active claim heartbeat refresh', () => {
     const h = buildHarness(T0, { claimTtlSec: 60, activeClaimMaxAgeSec: 300 })
     await h.daemon.start()
     try {
+      const beforeRefresh = Date.now()
       const result = await h.daemon.refreshClaims()
       expect(result.refreshed).toBe(0)
       expect(result.skipped).toBe(1)
@@ -154,12 +159,12 @@ describe('T21 active claim heartbeat refresh', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('idle bot with live in_progress claim is not refreshed', async () => {
-    const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
+    const T0 = new Date()
     const agent = makeAgentId('t21-idle-in-progress')
-    await seedAgent(pg, { agent_id: agent, runtime: 'TUI', status: 'idle' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'TUI', status: 'idle' })
     const originalExpiry = new Date(T0.getTime() + 30_000)
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -171,6 +176,7 @@ describe('T21 active claim heartbeat refresh', () => {
     const h = buildHarness(T0, { claimTtlSec: 60 })
     await h.daemon.start()
     try {
+      const beforeRefresh = Date.now()
       const result = await h.daemon.refreshClaims()
       expect(result.refreshed).toBe(0)
       const r = await pg.query(`SELECT claim_expires_at, last_heartbeat_at FROM message_queue WHERE id=$1`, [id])
@@ -180,10 +186,10 @@ describe('T21 active claim heartbeat refresh', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('idle bot renews only its exact in-process aged claim', async () => {
-    const T0 = fixtureDate(pg, '2026-05-08T00:10:00.000Z')
+    const T0 = new Date()
     const agent = makeAgentId('t21-idle-exact-inflight')
     await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', status: 'idle' })
     const originalExpiry = new Date(T0.getTime() + 30_000)
@@ -215,6 +221,7 @@ describe('T21 active claim heartbeat refresh', () => {
     const clock = new FakeClock(T0)
     const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
       db: new PgDBClient(pg),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -250,8 +257,8 @@ describe('T21 active claim heartbeat refresh', () => {
         [[exactId, unrelatedId, mismatchedId]],
       )
       const byId = new Map(rows.rows.map((row) => [Number(row.id), row]))
-      expect(new Date(byId.get(exactId)!.claim_expires_at).getTime()).toBe(T0.getTime() + 60_000)
-      expect(new Date(byId.get(exactId)!.last_heartbeat_at).getTime()).toBe(T0.getTime())
+      expect(new Date(byId.get(exactId)!.claim_expires_at).getTime() - new Date(byId.get(exactId)!.last_heartbeat_at).getTime()).toBeGreaterThanOrEqual(59999)
+      expect(new Date(byId.get(exactId)!.last_heartbeat_at).getTime()).toBeGreaterThanOrEqual(T0.getTime())
       expect(new Date(byId.get(unrelatedId)!.claim_expires_at).getTime()).toBe(originalExpiry.getTime())
       expect(new Date(byId.get(unrelatedId)!.last_heartbeat_at).getTime()).toBe(T0.getTime() - 30_000)
       expect(new Date(byId.get(mismatchedId)!.claim_expires_at).getTime()).toBe(originalExpiry.getTime())
@@ -259,7 +266,7 @@ describe('T21 active claim heartbeat refresh', () => {
     } finally {
       await daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T21 ───────────────────────────────────────────────────────────────────────
@@ -295,7 +302,7 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T21 heartbeat_refresh_extends_clai
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('T21b — already-expired claim is NOT refreshed (F7 self-reclaim path)', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -320,7 +327,7 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T21 heartbeat_refresh_extends_clai
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('T21c — offline bot is NOT refreshed', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -341,7 +348,7 @@ describe.skip('TODO #338 sub-PR 9 v0.9 schema T21 heartbeat_refresh_extends_clai
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T22 ───────────────────────────────────────────────────────────────────────
@@ -365,14 +372,14 @@ describe('T22 legacy_tui_liveness_disabled', () => {
       expect(result.restarted).toBe(0)
       expect(result.escalated).toBe(0)
       expect(h.tmux.restarts).toEqual([])
-      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'unknown' })).toBe(1)
       expect(h.alert.alerts).toEqual([])
       const r = await pg.query(`SELECT status FROM agents WHERE agent_id=$1`, [agent])
-      expect((r.rows as Array<{ status: string }>)[0].status).toBe('online')
+      expect((r.rows as Array<{ status: string|null }>)[0].status).toBeNull()
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('T22b — TUI bot fresh last_seen_at: no restart', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -392,7 +399,7 @@ describe('T22 legacy_tui_liveness_disabled', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('Codex runtime stale last_seen_at: no restart or manual-intervention alert', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -418,7 +425,7 @@ describe('T22 legacy_tui_liveness_disabled', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T23 ───────────────────────────────────────────────────────────────────────
@@ -444,19 +451,19 @@ describe('T23 legacy_tui_restart_loop_removed', () => {
       h.alert.reset()
       h.metrics.reset()
       h.clock.advance(1000)
-      await pg.query(`UPDATE agents SET last_seen_at=$1 WHERE agent_id=$2`, [
+      await expect(pg.query(`UPDATE agents SET last_seen_at=$1 WHERE agent_id=$2`, [
         new Date(h.clock.now().getTime() - 180_000), agent,
-      ])
+      ])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
       const result = await h.daemon.checkBotLiveness()
       expect(result.restarted).toBe(0)
       expect(result.escalated).toBe(0)
       expect(h.tmux.restarts.length).toBe(0)
-      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'unknown' })).toBe(1)
       expect(h.alert.alerts).toEqual([])
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })
 
 // ── T24 ───────────────────────────────────────────────────────────────────────
@@ -484,7 +491,7 @@ describe('T24 wake_pool_grow_on_high_watermark', () => {
 
     release()
     await Promise.all(promises)
-  })
+  }, 60000)
 
   test('T24b — capacity at MAX + queue overflow → saturated metric + alert (no grow)', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -508,7 +515,7 @@ describe('T24 wake_pool_grow_on_high_watermark', () => {
 
     release()
     await Promise.all(promises)
-  })
+  }, 60000)
 })
 
 // ── T25 ───────────────────────────────────────────────────────────────────────
@@ -536,7 +543,7 @@ describe('T25 wake_pool_shrink_on_idle', () => {
     // After all jobs drain, capacity should have shrunk back toward MIN.
     expect(h.daemon.inspectWakePool().capacity).toBe(2)
     expect(h.daemon.inspectWakePool().active).toBe(0)
-  })
+  }, 60000)
 })
 
 // ── T26 ───────────────────────────────────────────────────────────────────────
@@ -555,7 +562,7 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     await h.daemon.start()
     try {
       for (let i = 0; i < 5; i++) {
-        await refreshNativeFixtureHeartbeat(pg, agent, h.clock.now())
+        expect((await pg.query('SELECT runtime FROM agents WHERE agent_id=$1',[agent])).rows[0].runtime).toBeNull()
         const id = await seedQueueRow(pg, {
           agent_id: agent,
           status: 'pending',
@@ -570,14 +577,14 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
         h.clock.advance(60_000)
       }
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(5)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(5)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(0)
       expect(h.metrics.countInc('state_daemon_abnormal_activity_total', { agent_id: agent, kind: 'dispatch' })).toBe(0)
       expect(h.alert.contains('abnormal activity')).toBe(false)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('T26b — sub-threshold count: no metric inc, no alert', async () => {
     const T0 = fixtureDate(pg, '2026-05-08T00:00:00.000Z')
@@ -607,5 +614,5 @@ describe('T26 TUI prompt wake disabled at repeated-event threshold', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

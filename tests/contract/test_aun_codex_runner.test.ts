@@ -142,16 +142,16 @@ beforeEach(async () => {
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   dbExec(`
-    INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, home_directory)
-      VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010","tmux_session":"codex-aun-session"}', '/tmp/codex-aun'),
-             ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}', NULL);
-    UPDATE agents SET channel_port = 39002 WHERE agent_id = 'codex-aun';
+    INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+      VALUES ('codex-aun', 'codex-aun', 'dev', '{"discord_id":"999010"}'),
+             ('codex-cto', 'codex-cto', 'cto', '{"discord_id":"999011"}');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('runner-ch', '["codex-aun","codex-cto"]', 'aun-codex-runner-test');
   `)
-  await createReadyNativeRuntime(dbPath,tmpDir,'codex-aun','runtime-codex-aun')
+  const native = await createReadyNativeRuntime(dbPath,tmpDir,'codex-aun',randomUUID())
+  env.PATH = native.cliPath + ':' + env.PATH
   env.AGENT_COMMS_MEMORY_READY_PROJECT='agent-comms-mcp'
 })
 

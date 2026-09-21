@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -34,7 +35,8 @@ function baseEnv(dbPath: string): Record<string, string> {
     AGENT_COM_PG_NOTIFY: 'false',
     DISCORD_TOKEN: 'FAKE_TOKEN_DUAL_RUN_TEST',
     DISCORD_BOT_TOKEN: 'FAKE_TOKEN_DUAL_RUN_TEST',
-    AGENT_ID,
+    AGENT_ID, AGENT_COM_EXPECTED_AGENT_ID:AGENT_ID, AGENT_COM_RUNTIME_INSTANCE_ID:randomUUID(),
+    AGENT_COM_WORKSPACE:REPO_ROOT,AGENT_COM_RUNTIME_SESSION:'dual-run-fixture',AGENT_COM_RUNTIME_HEARTBEAT_DISABLED:'1',
   }
 }
 

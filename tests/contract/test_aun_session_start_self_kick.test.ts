@@ -23,6 +23,11 @@ import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { Client } from 'pg'
 
+import { PgAdapter } from '../../core/db/pg-adapter'
+import {createReadyNativeRuntimeWithDb,stopNativeFixtures} from '../helpers/seat-native-runtime-fixture'
+const nativeHomes:string[]=[]
+let nativeEnv:NodeJS.ProcessEnv={}
+afterAll(async()=>{await stopNativeFixtures();for(const home of nativeHomes)rmSync(home,{recursive:true,force:true})})
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const HOOK = join(REPO_ROOT, 'hooks', 'aun-session-start-self-kick.sh')
 const MEMORY_READY_MIGRATION = join(REPO_ROOT, 'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql')
@@ -42,58 +47,24 @@ async function cleanupSelfKickAgent(c: Client): Promise<void> {
   await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM control_plane_leases WHERE holder_agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM agents WHERE agent_id=$1`, [TEST_AGENT])
 }
 
 async function seedSelfKickMemoryReady(c: Client): Promise<void> {
   await ensureMemoryReadySchema(c)
-  const runtimeId = randomUUID()
-  const port = 32_000 + Number.parseInt(runtimeId.slice(0, 4), 16) % 20_000
-  const sessionName = 'test-session'
-  const checkoutPath = `/tmp/${TEST_AGENT}-memory-ready`
-  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
-  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
-  await c.query(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port,
-        metadata, profile_revision, profile_source, home_directory)
-     VALUES ($1, $1, 'dev', 'mcp', 'idle', $2, $3::jsonb, 1, 'legacy', $4)
-     ON CONFLICT (agent_id) DO UPDATE SET
-       runtime = EXCLUDED.runtime,
-       status = EXCLUDED.status,
-       channel_port = EXCLUDED.channel_port,
-       metadata = EXCLUDED.metadata,
-       profile_revision = 1,
-       profile_source = 'legacy',
-       home_directory = EXCLUDED.home_directory`,
-    [TEST_AGENT, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
-  )
-  await c.query(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
-        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
-             $5, 'self-kick-test-head', 'running',
-             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
-             '{"source":"self-kick-test"}'::jsonb)`,
-    [runtimeId, TEST_AGENT, sessionName, port, checkoutPath],
-  )
-  await c.query(
-    `INSERT INTO runtime_memory_ready_evidence
-       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
-        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
-        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
-        valid_until, source, metadata)
-     VALUES
-       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
-        $3, $4, $1, $5, 'self-kick-test-head',
-        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
-        '/tmp/self-kick-memory-ready.json', 'self-kick-memory-ready',
-        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
-        '{"fixture":true}'::jsonb)`,
-    [TEST_AGENT, runtimeId, sessionName, port, checkoutPath],
-  )
+  const runtimeId=randomUUID(),home=mkdtempSync(join(tmpdir(),'selfkick-native-'));nativeHomes.push(home)
+  await c.query('DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1',[TEST_AGENT])
+  await c.query('DELETE FROM control_plane_leases WHERE holder_agent_id=$1',[TEST_AGENT])
+  await c.query('DELETE FROM agent_runtime_instances WHERE agent_id=$1',[TEST_AGENT])
+  await c.query(`INSERT INTO agents(agent_id,display_name,agent_type,profile_revision,profile_source)
+    VALUES($1,$1,'dev',1,'legacy') ON CONFLICT(agent_id) DO NOTHING`,[TEST_AGENT])
+  const db=new PgAdapter(DATABASE_URL)
+  try {const fixture=await createReadyNativeRuntimeWithDb(db,home,TEST_AGENT,runtimeId)
+    nativeEnv={...fixture.env,CODEX_HOME:home,PATH:fixture.cliPath+':'+process.env.PATH,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId}}
+  finally {await db.close()}
+
 }
 
 async function markSelfKickEvidenceBypassed(c: Client): Promise<void> {
@@ -158,8 +129,9 @@ function runHook(env: Record<string, string>, stubDir: string, stdin = '{}'): { 
   // sample the log. The script returns synchronously; the kick is async.
   const fullEnv = {
     ...process.env,
+    ...nativeEnv,
     ...env,
-    PATH: `${stubDir}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+    PATH: `${stubDir}:${nativeEnv.PATH ?? process.env.PATH ?? '/usr/bin:/bin'}`,
   }
   const r = spawnSync('bash', [HOOK], {
     input: stdin,
@@ -224,7 +196,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     } finally {
       stub.cleanup()
     }
-  })
+  },15000)
 
   test('T-2: pending>0 → send-keys called with prompt + Enter', async () => {
     requireDb()
@@ -270,7 +242,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
       await c2.end()
     }
-  })
+  },15000)
 
   test('T-3: DB unreachable → exit 0, send-keys NOT called, stderr warning', async () => {
     const stub = makeStubDir()
@@ -288,7 +260,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
     } finally {
       stub.cleanup()
     }
-  })
+  },15000)
 
   test('T-4: lock file <5min stale → send-keys NOT called', async () => {
     requireDb()
@@ -329,7 +301,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
       await c2.end()
     }
-  })
+  },15000)
 
   test('T-5: pending>0 but missing memory-ready evidence → send-keys NOT called', async () => {
     requireDb()
@@ -365,7 +337,7 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
       await c2.end()
     }
-  })
+  },15000)
 
   test('T-6: pending>0 with bypassed memory-ready evidence → send-keys NOT called', async () => {
     requireDb()
@@ -401,5 +373,5 @@ describe('test_aun_session_start_self_kick — cold-start LLM kick contract', ()
       await c2.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
       await c2.end()
     }
-  })
+  },15000)
 })

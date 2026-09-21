@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import * as hostObserver from '../core/host-runtime-observer'
+import { unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
+import { describe, expect, test, spyOn } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
@@ -11,19 +13,23 @@ import {
   parseLsofTcpListeners,
 } from '../core/runtime-cleanup'
 
-async function withCleanupDb<T>(seedSql: string, fn: (db: SqliteAdapter, path: string) => Promise<T>): Promise<T> {
+async function withCleanupDb<T>(seed: {sql: string; observations: hostObserver.HostRuntimeObservation[]}, fn: (db: SqliteAdapter, path: string, observations: hostObserver.HostRuntimeObservation[]) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'agent-comms-cleanup-'))
   const dbPath = join(dir, 'agent-comms.db')
   let adapter: SqliteAdapter | null = null
+  const hostSpy=spyOn(hostObserver,'inspectHostRuntime').mockImplementation(input=>{
+    const found=seed.observations.filter(o=>o.agent_id===input.agentId && (!input.runtimeInstanceId || o.runtime_instance_id===input.runtimeInstanceId))
+    return {reasonCode:found.length?'OBSERVED':'NO_LIVE_RUNTIME',observations:found}
+  })
   try {
     migrateSqlite(dbPath)
-    const seed = new Database(dbPath)
-    seed.exec(seedSql)
-    seed.prepare('UPDATE agent_runtime_instances SET host_id = ? WHERE host_id IS NULL').run(hostname())
-    seed.close()
+    const seedDb = new Database(dbPath)
+    seedDb.exec(seed.sql)
+    seedDb.close()
     adapter = new SqliteAdapter(dbPath)
-    return await fn(adapter, dbPath)
+    return await fn(adapter, dbPath, seed.observations)
   } finally {
+    hostSpy.mockRestore()
     await adapter?.close()
     rmSync(dir, { recursive: true, force: true })
   }
@@ -32,19 +38,19 @@ async function withCleanupDb<T>(seedSql: string, fn: (db: SqliteAdapter, path: s
 describe('runtime cleanup lifecycle', () => {
   test('dry-run is stable and execute cleans observed codex-aun residue without touching active bots', async () => {
     const now = new Date('2026-05-29T07:40:00Z')
-    await withCleanupDb(`
+    await withCleanupDb({observations:[unitRuntimeObservation("codex-aun",{"runtime_instance_id": "runtime-codex-aun", "session_name": "discord-aun", "process_id": 4070, "port": 18070, "process_started_at": "2026-05-28T00:00:00Z", "observed_at": "2026-05-28T00:00:00Z"}),unitRuntimeObservation("codex-live",{"runtime_instance_id": "runtime-live", "session_name": "discord-live", "process_id": 5071, "port": 18071, "process_started_at": "2026-05-29T07:39:00Z", "observed_at": "2026-05-29T07:39:30Z"})],sql:`
       INSERT INTO agents
-        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        (agent_id, display_name, agent_type, metadata, profile_enabled)
       VALUES
-        ('codex-aun', 'AUN', 'dev', 'TUI', 'offline', '{"tmux_session":"discord-aun","supervisor_type":"tmux"}', 18070, 0),
-        ('codex-live', 'Live', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-live","supervisor_type":"tmux"}', 18071, 1);
+        ('codex-aun', 'AUN', 'dev', '{}', 0),
+        ('codex-live', 'Live', 'dev', '{}', 1);
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_kind)
       VALUES
-        ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'discord-aun', 4070, 18070, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z'),
-        ('runtime-live', 'codex-live', 'codex', 'local_process', 'discord-live', 5071, 18071, 'active', '2026-05-29T07:39:00Z', '2026-05-29T07:39:30Z');
-    `, async (db, dbPath) => {
+        ('runtime-codex-aun', 'codex-aun', 'local_process'),
+        ('runtime-live', 'codex-live', 'local_process');
+    `}, async (db, dbPath, observed) => {
       const observations = {
         now,
         staleMinutes: 15,
@@ -65,11 +71,8 @@ describe('runtime cleanup lifecycle', () => {
       const aun = first.targets.find((target) => target.agent_id === 'codex-aun')
       const live = first.targets.find((target) => target.agent_id === 'codex-live')
       expect(aun?.classification).toBe('disabled-profile-residue')
-      expect(aun?.actions.map((action) => action.kind).sort()).toEqual([
-        'kill_process',
-        'kill_tmux_session',
-        'stop_runtime',
-      ])
+      expect(aun?.actions.filter(action=>action.kind!=='noop').map(action=>action.kind)).toEqual(['kill_process'])
+      expect(aun?.actions.some(action=>action.kind==='kill_tmux_session')).toBe(false)
       expect(live?.classification).toBe('active')
       expect(live?.actions).toEqual([{ kind: 'noop', reason: 'fresh_active_runtime' }])
 
@@ -78,7 +81,7 @@ describe('runtime cleanup lifecycle', () => {
         `SELECT status, stopped_at FROM agent_runtime_instances WHERE runtime_instance_id = 'runtime-codex-aun'`,
       ).get() as { status: string; stopped_at: string | null }
       dryDb.close()
-      expect(row.status).toBe('active')
+      expect(row.status).toBeNull()
       expect(row.stopped_at).toBeNull()
 
       const killedPids: number[] = []
@@ -91,7 +94,7 @@ describe('runtime cleanup lifecycle', () => {
       })
       expect(executed.plan_hash).toBe(first.plan_hash)
       expect(killedPids).toEqual([4070])
-      expect(killedSessions).toEqual(['discord-aun'])
+      expect(killedSessions).toEqual([])
 
       const checkDb = new Database(dbPath)
       row = checkDb.prepare(
@@ -104,19 +107,20 @@ describe('runtime cleanup lifecycle', () => {
         `SELECT agent_id, target, detail FROM audit_log WHERE event_type = 'runtime.cleanup_target'`,
       ).get() as { agent_id: string; target: string; detail: string }
       checkDb.close()
-      expect(row.status).toBe('stopped')
-      expect(row.stopped_at).not.toBeNull()
-      expect(liveRow.status).toBe('active')
+      expect(row.status).toBeNull()
+      expect(row.stopped_at).toBeNull()
+      expect(liveRow.status).toBeNull()
       expect(liveRow.stopped_at).toBeNull()
       expect(audit.agent_id).toBe('codex-aun')
-      expect(audit.target).toBe('agent:codex-aun:disabled-profile-residue')
+      expect(audit.target).toBe('runtime-codex-aun')
       expect(JSON.parse(audit.detail)).toMatchObject({
-        pid: 4070,
-        port: 18070,
-        tmux_session: 'discord-aun',
+        classification: 'disabled-profile-residue',
         runtime_instance_id: 'runtime-codex-aun',
       })
 
+      expect(audit.detail).not.toContain('4070')
+      expect(audit.detail).not.toContain('discord-aun')
+      observed.splice(observed.findIndex(o=>o.agent_id==='codex-aun'),1)
       const cleanRerun = await buildRuntimeCleanupReport(db, {
         now,
         staleMinutes: 15,
@@ -130,17 +134,17 @@ describe('runtime cleanup lifecycle', () => {
 
   test('execute refuses unknown-risk plans unless explicitly overridden', async () => {
     const now = new Date('2026-05-29T07:40:00Z')
-    await withCleanupDb(`
+    await withCleanupDb({observations:[unitRuntimeObservation("stale-live",{"runtime_instance_id": "runtime-stale-live", "session_name": "discord-stale", "process_id": 6072, "port": 18072, "process_started_at": "2026-05-28T00:00:00Z", "observed_at": "2026-05-28T00:00:00Z"})],sql:`
       INSERT INTO agents
-        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        (agent_id, display_name, agent_type, metadata, profile_enabled)
       VALUES
-        ('stale-live', 'Stale Live', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-stale","supervisor_type":"tmux"}', 18072, 1);
+        ('stale-live', 'Stale Live', 'dev', '{}', 1);
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_kind)
       VALUES
-        ('runtime-stale-live', 'stale-live', 'codex', 'local_process', 'discord-stale', 6072, 18072, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
-    `, async (db) => {
+        ('runtime-stale-live', 'stale-live', 'local_process');
+    `}, async (db) => {
       const report = await buildRuntimeCleanupReport(db, {
         now,
         staleMinutes: 15,
@@ -163,18 +167,18 @@ describe('runtime cleanup lifecycle', () => {
 
   test('disabled/test residue cannot kill a listener owned by an active profile', async () => {
     const now = new Date('2026-05-29T07:40:00Z')
-    await withCleanupDb(`
+    await withCleanupDb({observations:[unitRuntimeObservation("active-owner",{"runtime_instance_id": "runtime-active-owner", "session_name": "discord-active-owner", "process_id": 7777, "port": 41234, "process_started_at": "2026-05-29T07:30:00Z", "observed_at": "2026-05-29T07:39:30Z"})],sql:`
       INSERT INTO agents
-        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        (agent_id, display_name, agent_type, metadata, profile_enabled)
       VALUES
-        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 41234, 1),
-        ('disabled-old', 'Disabled Old', 'dev', 'TUI', 'offline', '{"profile_class":"disabled-test","tmux_session":"discord-disabled-old","supervisor_type":"tmux"}', 41234, 0);
+        ('active-owner', 'Active Owner', 'dev', '{}', 1),
+        ('disabled-old', 'Disabled Old', 'dev', '{"profile_class": "disabled-test"}', 0);
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_kind)
       VALUES
-        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 41234, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z');
-    `, async (db) => {
+        ('runtime-active-owner', 'active-owner', 'local_process');
+    `}, async (db) => {
       const observations = {
         now,
         staleMinutes: 15,
@@ -204,17 +208,17 @@ describe('runtime cleanup lifecycle', () => {
 
   test('orphan listener pass treats active runtime port and pid ownership as unknown-risk', async () => {
     const now = new Date('2026-05-29T07:40:00Z')
-    await withCleanupDb(`
+    await withCleanupDb({observations:[unitRuntimeObservation("active-owner",{"runtime_instance_id": "runtime-active-owner", "session_name": "discord-active-owner", "process_id": 7777, "port": 2222, "process_started_at": "2026-05-29T07:30:00Z", "observed_at": "2026-05-29T07:39:30Z"})],sql:`
       INSERT INTO agents
-        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        (agent_id, display_name, agent_type, metadata, profile_enabled)
       VALUES
-        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 1111, 1);
+        ('active-owner', 'Active Owner', 'dev', '{}', 1);
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_kind)
       VALUES
-        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 2222, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z');
-    `, async (db) => {
+        ('runtime-active-owner', 'active-owner', 'local_process');
+    `}, async (db) => {
       const observations = {
         now,
         staleMinutes: 15,
@@ -242,19 +246,19 @@ describe('runtime cleanup lifecycle', () => {
 
   test('orphan listener pass protects active runtime listener while disabled residue cleanup remains scoped', async () => {
     const now = new Date('2026-05-29T07:40:00Z')
-    await withCleanupDb(`
+    await withCleanupDb({observations:[unitRuntimeObservation("active-owner",{"runtime_instance_id": "runtime-active-owner", "session_name": "discord-active-owner", "process_id": 7777, "port": 2222, "process_started_at": "2026-05-29T07:30:00Z", "observed_at": "2026-05-29T07:39:30Z"}),unitRuntimeObservation("disabled-old",{"runtime_instance_id": "runtime-disabled-old", "session_name": "discord-disabled-old", "process_id": 8888, "port": 3333, "process_started_at": "2026-05-28T00:00:00Z", "observed_at": "2026-05-28T00:00:00Z"})],sql:`
       INSERT INTO agents
-        (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+        (agent_id, display_name, agent_type, metadata, profile_enabled)
       VALUES
-        ('active-owner', 'Active Owner', 'dev', 'TUI', 'idle', '{"tmux_session":"discord-active-owner","supervisor_type":"tmux"}', 1111, 1),
-        ('disabled-old', 'Disabled Old', 'dev', 'TUI', 'offline', '{}', 3333, 0);
+        ('active-owner', 'Active Owner', 'dev', '{}', 1),
+        ('disabled-old', 'Disabled Old', 'dev', '{}', 0);
 
       INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+        (runtime_instance_id, agent_id, runtime_kind)
       VALUES
-        ('runtime-active-owner', 'active-owner', 'codex', 'local_process', 'discord-active-owner', 7777, 2222, 'active', '2026-05-29T07:30:00Z', '2026-05-29T07:39:30Z'),
-        ('runtime-disabled-old', 'disabled-old', 'codex', 'local_process', 'discord-disabled-old', 8888, 3333, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
-    `, async (db) => {
+        ('runtime-active-owner', 'active-owner', 'local_process'),
+        ('runtime-disabled-old', 'disabled-old', 'local_process');
+    `}, async (db) => {
       const observations = {
         now,
         staleMinutes: 15,
@@ -277,7 +281,7 @@ describe('runtime cleanup lifecycle', () => {
         kind: 'kill_process',
         pid: 8888,
         port: 3333,
-        reason: 'disabled_profile_port_listener',
+        reason: 'fresh_owned_disabled_runtime',
       })
       expect(report.summary.cleanup_targets).toBe(1)
       expect(report.summary.unknown_risk_targets).toBe(0)
@@ -289,21 +293,21 @@ describe('runtime cleanup lifecycle', () => {
         confirmHash: report.plan_hash,
         killProcess: (pid) => killedPids.push(pid),
       })
-      expect(override.summary.executable_actions).toBe(2)
+      expect(override.summary.executable_actions).toBe(1)
       expect(killedPids).toEqual([8888])
     })
   })
 
   test('active lease or foreign host prevents disabled-profile cleanup from stopping the actual holder',async()=>{
-    await withCleanupDb(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,status,profile_enabled) VALUES('seat','Seat','dev','TUI','offline',0);
-      INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,session_name,process_id,port,status,last_seen_at)
-      VALUES('held','seat','codex','local_process','seat-session',123,19999,'running','2026-09-13T00:00:00Z');`,async db=>{
+    await withCleanupDb({observations:[unitRuntimeObservation("seat",{"runtime_instance_id": "held", "session_name": "seat-session", "process_id": 123, "port": 19999, "observed_at": "2026-09-13T00:00:00Z"})],sql:`INSERT INTO agents(agent_id, display_name, agent_type, profile_enabled) VALUES('seat', 'Seat', 'dev', 0);
+      INSERT INTO agent_runtime_instances(runtime_instance_id, agent_id, runtime_kind)
+      VALUES('held', 'seat', 'local_process');`}, async (db,_path,observed)=>{
       const options={now:new Date('2026-09-13T01:00:00Z'),portListeners:[{pid:123,port:19999}],tmuxPanes:[]}
-      await db.execute("UPDATE agent_runtime_instances SET host_id='foreign-host'")
+      observed[0]={...observed[0],host_id:'foreign-host'}
       expect((await buildRuntimeCleanupReport(db,options)).summary.executable_actions).toBe(0)
-      await db.execute('UPDATE agent_runtime_instances SET host_id=$1',[hostname()])
+      observed[0]={...observed[0],host_id:hostname()}
       await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at)
-        VALUES('held-lease','runtime_instance','held','worker','seat','held',1,'active','2026-09-13T02:00:00Z')`)
+        VALUES('held-lease','runtime_instance','held','worker','seat','held',1,'active','2099-01-01T00:00:00Z')`)
       expect((await buildRuntimeCleanupReport(db,options)).summary.executable_actions).toBe(0)
     })
   })

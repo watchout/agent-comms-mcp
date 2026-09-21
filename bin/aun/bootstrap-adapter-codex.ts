@@ -22,7 +22,6 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
-import { PgAdapter } from '../../core/db/pg-adapter'
 import type {
   BootstrapCommandResult,
   BootstrapMutation,
@@ -115,45 +114,8 @@ function providerRoot(context: BootstrapStageContext): string | null {
   return typeof root === 'string' && root.length > 0 ? root : null
 }
 
-function objectRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value) } catch { return {} }
-  }
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {}
-}
-
-function providerAuthorityTupleDigest(agentId: string, row: Record<string, unknown>): string {
-  const metadata = objectRecord(row.metadata)
-  const projection = objectRecord(row.ordinary_projection)
-  return bootstrapDigest({
-    agent_id: String(row.agent_id ?? agentId),
-    repo_url: typeof row.repo_url === 'string' ? row.repo_url : null,
-    workspace_path: typeof row.workspace_path === 'string'
-      ? row.workspace_path
-      : typeof row.canonical_workspace === 'string'
-        ? row.canonical_workspace
-        : typeof row.home_directory === 'string'
-          ? row.home_directory
-          : null,
-    config_profile: {
-      runtime_engine_preference: String(row.runtime_engine_preference ?? '').toLowerCase() || null,
-      metadata_codex_home: typeof metadata.codex_home === 'string' ? metadata.codex_home : null,
-    },
-    provider_binding: {
-      expected_provider_identity_ref: typeof row.expected_provider_identity_ref === 'string'
-        ? row.expected_provider_identity_ref
-        : null,
-      provider_token_source_ref: typeof row.provider_token_source_ref === 'string'
-        ? row.provider_token_source_ref
-        : null,
-      projection_provider_config_root: typeof projection.provider_config_root === 'string'
-        ? projection.provider_config_root
-        : null,
-    },
-    projection_digest: bootstrapDigest(projection),
-  })
+export function cleanHostProviderAuthorityDigest(agentId: string, root: string): string {
+  return bootstrapDigest({schema_version: 'aun-clean-host-provider-authority/v1', agent_id: agentId, canonical_root: root})
 }
 
 async function liveProviderAuthorityDigest(context: BootstrapStageContext, run: BootstrapAdapterCommandRunner, admittedSource?: string): Promise<string | null> {
@@ -169,42 +131,22 @@ async function liveProviderAuthorityDigest(context: BootstrapStageContext, run: 
   }
   const recorded = context.providerRootAuthority?.authorityTupleDigest ?? null
   const runtimeState = context.priorState?.schema_version === 'shirube-v3/aun-bootstrap-run/v1'
-  const explicit = context.env.AGENT_COM_DB?.trim().toLowerCase()
-  const databaseUrl = context.env.DATABASE_URL?.trim()
-  const postgres = explicit === 'postgres'
-    || explicit === 'postgresql'
-    || (!explicit && Boolean(databaseUrl))
   if (!runtimeState) return recorded
-  if (!postgres) return explicit === 'sqlite' ? recorded : null
-  if (!databaseUrl) return null
-  const db = new PgAdapter(databaseUrl)
+  const source = admittedSource ?? authority?.canonicalSourceField
+  if (source !== 'clean_host_default') return null
+  const root = providerRoot(context)
+  const home = context.env.HOME
+  if (!root || !home) return null
   try {
-    const result = await db.queryOne<{ row: Record<string, unknown>; repo_url: string | null; workspace_path: string | null }>(
-      `SELECT to_jsonb(a) AS row, workspace.repo_url, workspace.local_path AS workspace_path
-         FROM agents a
-         LEFT JOIN LATERAL (
-           SELECT w.repo_url, w.local_path
-             FROM agent_workspace_bindings b
-             JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
-            WHERE b.agent_id = a.agent_id AND b.active = true
-            ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
-            LIMIT 1
-         ) workspace ON true
-        WHERE a.agent_id = $1`,
-      [context.agentId],
-    )
-    if (!result?.row) return null
-    const row = { ...result.row, repo_url: result.repo_url, workspace_path: result.workspace_path }
-    const metadata = objectRecord(row.metadata)
-    const projection = objectRecord(row.ordinary_projection)
-    const root = providerRoot(context)
-    if (!root || metadata.codex_home !== root || projection.provider_config_root !== root) return null
-    return providerAuthorityTupleDigest(context.agentId, row)
-  } catch {
-    return null
-  } finally {
-    await db.close().catch(() => {})
-  }
+    const expectedRoot = join(realpathSync(home), '.codex')
+    if (root !== expectedRoot || (existsSync(root) && realpathSync(root) !== root)) return null
+    const digest = cleanHostProviderAuthorityDigest(context.agentId, expectedRoot)
+    // A later live provider is checked above; the original clean admission
+    // remains independently bound to the exact root and sealed run.
+    if (!admittedSource && recorded !== digest) return null
+    return digest
+  } catch { return null }
+
 }
 
 function commandOptions(

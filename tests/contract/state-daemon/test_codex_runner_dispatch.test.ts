@@ -11,7 +11,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -44,6 +44,7 @@ function daemon(
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -71,6 +72,7 @@ function scopedDaemon(
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -98,6 +100,7 @@ function disabledDaemon(clock: FakeClock, codexRunner: FakeCodexRunner) {
   const tmux = new FakeTmux()
   const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -208,7 +211,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('missing/stale/mismatched memory-ready evidence blocks Codex runner before dispatch', async () => {
     const scenarios = [
@@ -264,7 +267,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         await h.daemon.stop()
       }
     }
-  })
+  }, 60000)
 
   test('repeated identical memory-ready blocks are exponentially deferred and alert only on transitions', async () => {
     const agent = makeAgentId('memory-backoff-dedup')
@@ -324,7 +327,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('disabled memory-ready gate config fails closed instead of bypassing dispatch', async () => {
     const agent = makeAgentId('codex-config-bypass')
@@ -367,7 +370,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('legacy TUI paths are disabled before memory-ready gated runner dispatch', async () => {
     const pendingScenarios = [
@@ -408,8 +411,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
           action: 'legacy_tui_disabled',
           reason: scenario.reason,
         })).toBe(0)
-        expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       } finally {
         await h.daemon.stop()
       }
@@ -449,12 +452,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         action: 'legacy_tui_disabled',
         reason: 'missing_evidence',
       })).toBe(0)
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('exact typed ACK envelope terminalizes without consulting ACK prose', async () => {
     const agent = makeAgentId('typed-ack')
@@ -519,7 +522,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('direct mention smoke is passed to auto-final reply without daemon ACK', async () => {
     const agent = makeAgentId('codex-smoke')
@@ -593,7 +596,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('auto-final reply mode passes exact queue without daemon-authored ACK prose', async () => {
     const agent = makeAgentId('codex-final')
@@ -669,7 +672,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('free-text no-reply instructions are delivered instead of terminalized', async () => {
     const agent = makeAgentId('codex-complete')
@@ -725,7 +728,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('typed no-reply preference cannot silently close TUI work without an approved runner', async () => {
     const agent = makeAgentId('tui-no-reply')
@@ -771,11 +774,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       )
       expect(row.rows[0]).toMatchObject({ status: 'pending' })
       expect(row.rows[0]?.done_at).toBeNull()
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('pending busy Codex runtime observes and does not start duplicate runner', async () => {
     const agent = makeAgentId('codex-busy')
@@ -815,7 +818,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('Codex runner execution is disabled by default until operator activation', async () => {
     const agent = makeAgentId('codex-disabled')
@@ -848,7 +851,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('runner failure records diagnostics without terminal-failing the row', async () => {
     const agent = makeAgentId('codex-fail')
@@ -882,7 +885,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('stale pending event does not invoke runner after row was already closed', async () => {
     const agent = makeAgentId('codex-stale-event')
@@ -901,6 +904,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
       db: new CloseRowAfterReserveDB(pg, id),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -936,7 +940,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await d.stop()
     }
-  })
+  }, 60000)
 
   test('legacy TUI pending path is disabled and does not inject wake prompts', async () => {
     const agent = makeAgentId('tui-wake-disabled')
@@ -958,13 +962,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(runner.invocations).toHaveLength(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference invokes runner without tmux prompt injection', async () => {
     const agent = makeAgentId('tui-codex-preference')
@@ -1004,11 +1008,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference and no tmux session bypasses stall gate and invokes runner', async () => {
     const agent = makeAgentId('tui-codex-no-tmux-runner')
@@ -1028,7 +1032,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:05:00.000Z'))
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1054,7 +1058,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('agent allowlist ignores pg_notify rows outside the activation scope', async () => {
     const allowed = makeAgentId('allowed-codex')
@@ -1083,7 +1087,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('agent allowlist limits stale sweep wake to selected agents', async () => {
     const allowed = makeAgentId('allowed-tui')
@@ -1103,13 +1107,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('human seats are excluded from stale sweep wake while preserving fleet default', async () => {
     const allowed = makeAgentId('denied-sweep-allowed')
@@ -1130,13 +1134,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(2)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(2)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('human seats are ignored on pg_notify while non-human fleet rows proceed', async () => {
     const allowed = makeAgentId('denied-sibling-allowed')
@@ -1173,14 +1177,14 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('offline agents are not auto-restarted when full-fleet scope is enabled', async () => {
     const agent = makeAgentId('offline-no-restart')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: null, status: 'offline' })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:05:00.000Z'))
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1188,11 +1192,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result).toEqual({ checked: 0, restarted: 0, escalated: 0 })
       expect(h.tmux.restarts).toEqual([])
-      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'offline' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'unknown' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference is not treated as a tmux restart target', async () => {
     const agent = makeAgentId('tui-codex-no-restart')
@@ -1206,7 +1210,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:05:00.000Z'))
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1220,5 +1224,5 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

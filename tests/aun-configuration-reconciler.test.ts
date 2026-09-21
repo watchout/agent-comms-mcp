@@ -113,6 +113,7 @@ export class FakeStore implements ConfigurationDesiredStateStore {
     if (this.unavailable) throw new Error('DB unavailable')
     return [...this.dueAgentIds]
   }
+  async supersedePendingEvents(): Promise<number> { return 0 }
   async markEventDelivered(event: AunConfigurationOutboxEvent): Promise<boolean> {
     this.delivered.push(event.eventId)
     this.events = this.events.filter((value) => value.eventId !== event.eventId)

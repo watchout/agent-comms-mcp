@@ -94,8 +94,8 @@ describe('bot/channel directory report', () => {
       migrateSqlite(dbPath)
       const seed = new Database(dbPath)
       seed.exec(`
-        INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status, metadata)
-        VALUES ('sqlite-bot', 'SQLite Bot', 'dev', 'TUI', 'idle', '{}');
+        INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+        VALUES ('sqlite-bot', 'SQLite Bot', 'dev', '{}');
         INSERT INTO channels (id, name, type, members)
         VALUES ('agent-com', 'agent-com', 'channel', '["sqlite-bot"]');
       `)
@@ -108,7 +108,7 @@ describe('bot/channel directory report', () => {
 
       expect(report.summary.agent_count).toBe(1)
       expect(report.agents[0]?.agent_id).toBe('sqlite-bot')
-      expect(report.agents[0]?.runtime).toBe('TUI')
+      expect(report.agents[0]?.runtime).toBe('')
       expect(report.agents[0]?.sendability).toBe('ready')
     } finally {
       await adapter?.close()

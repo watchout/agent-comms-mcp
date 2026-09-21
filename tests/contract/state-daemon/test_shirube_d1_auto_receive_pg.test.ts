@@ -1,3 +1,5 @@
+import {nonpersistHostFixture} from '../../helpers/nonpersist-host-fixture'
+import {heartbeatRuntimeInstance} from '../../../core/runtime-heartbeat'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
@@ -24,9 +26,11 @@ import { makeDeliveryFixture } from '../../aun-k3/delivery-fixture'
 const ROOT = resolve(import.meta.dir, '..', '..', '..')
 const BASE_DATABASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL ?? process.env.DATABASE_URL
 const tempDirs: string[] = []
+const hosts: Awaited<ReturnType<typeof nonpersistHostFixture>>[]=[]
 const schemas: Array<{ base: Client; name: string }> = []
 
 afterEach(async () => {
+  while(hosts.length) await hosts.pop()!.close()
   while (schemas.length > 0) {
     const fixture = schemas.pop()!
     try { await fixture.base.query(`DROP SCHEMA IF EXISTS "${fixture.name}" CASCADE`) } catch {}
@@ -94,8 +98,8 @@ async function insertReceivedLeaseRow(client: Client, suffix: string) {
        agent_id, message_id, payload, status, priority, created_at,
        claimed_by, claimed_at, claim_expires_at, last_heartbeat_at
      ) VALUES (
-       'dev-001', $1, $2, 'received', 1, clock_timestamp(),
-       'dev-001', date_trunc('milliseconds', clock_timestamp()),
+       'sd-test-d1-auto-receive-pg', $1, $2, 'received', 1, clock_timestamp(),
+       'sd-test-d1-auto-receive-pg', date_trunc('milliseconds', clock_timestamp()),
        clock_timestamp() + INTERVAL '700 milliseconds', clock_timestamp()
      )
      RETURNING id::text, claimed_at, claim_expires_at`,
@@ -165,10 +169,14 @@ function evidence() {
 async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' | 'ready') {
   if (agentState !== 'missing') {
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
-       VALUES ('dev-001', 'dev-001', 'dev', 'codex', $1, '{}'::jsonb, true)`,
-      [agentState === 'ready' ? 'online' : 'offline'],
+      `INSERT INTO agents (agent_id, display_name, agent_type, metadata, profile_enabled)
+       VALUES ('sd-test-d1-auto-receive-pg', 'sd-test-d1-auto-receive-pg', 'dev', '{}'::jsonb, true)`,
     )
+  }
+  if (agentState === 'ready') {
+    const host = await nonpersistHostFixture(randomUUID(), 'sd-test-d1-auto-receive-pg'); hosts.push(host)
+    await heartbeatRuntimeInstance(client, {agentId:'sd-test-d1-auto-receive-pg',runtimeInstanceId:host.runtimeId,
+      processId:host.endpoint.pid,port:host.endpoint.port,endpointUri:`http://127.0.0.1:${host.endpoint.port}`,checkoutPath:host.dir})
   }
   const idResult = await client.query<{ id: string }>(
     `SELECT nextval(pg_get_serial_sequence('message_queue', 'id'))::text AS id`,
@@ -177,7 +185,7 @@ async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' |
   const messageId = randomUUID()
   const target = {
     repository: 'watchout/agent-comms-mcp',
-    agent_id: 'dev-001',
+    agent_id: 'sd-test-d1-auto-receive-pg',
     control_source: authorization().control_source,
   }
   const binding: ShirubeD1RuntimeBinding = {
@@ -215,7 +223,7 @@ async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' |
     async insert() {
       await client.query(
         `INSERT INTO channels (id, name, type, members)
-         VALUES ('d1-pg-channel', 'd1-pg-channel', 'channel', ARRAY['dev-001']::text[])
+         VALUES ('d1-pg-channel', 'd1-pg-channel', 'channel', ARRAY['sd-test-d1-auto-receive-pg']::text[])
          ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`,
       )
       await client.query(
@@ -225,7 +233,7 @@ async function insertD1Queue(client: Client, agentState: 'missing' | 'offline' |
       )
       await client.query(
         `INSERT INTO message_queue (id, agent_id, message_id, payload, status, priority, created_at)
-         VALUES ($1, 'dev-001', $2, $3, 'pending', 1, clock_timestamp())`,
+         VALUES ($1, 'sd-test-d1-auto-receive-pg', $2, $3, 'pending', 1, clock_timestamp())`,
         [queueId, messageId, payload],
       )
     },
@@ -525,7 +533,7 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
           queueId: row.id,
           adapter,
           claimFence: {
-            claimedBy: 'dev-001',
+            claimedBy: 'sd-test-d1-auto-receive-pg',
             claimedAt: row.claimed_at.toISOString(),
           },
         })
@@ -590,7 +598,7 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
     try {
       const inserted = await client.query<{ id: string; message_id: string; created_at: Date }>(
         `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
-         VALUES ('dev-001', $1, $2, 'pending', 1, clock_timestamp())
+         VALUES ('sd-test-d1-auto-receive-pg', $1, $2, 'pending', 1, clock_timestamp())
          RETURNING id::text, message_id, created_at`,
         [
           `lockwait-renewal-${randomUUID()}`,
@@ -638,7 +646,7 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
       }
       let invoked = 0
       const outcome = await runAunRuntimeV2(db, {
-        agentId: 'dev-001',
+        agentId: 'sd-test-d1-auto-receive-pg',
         queueId,
         messageId: inserted.rows[0].message_id,
         createdAfter: inserted.rows[0].created_at.toISOString(),
@@ -656,8 +664,8 @@ describe('Shirube D1 state-daemon PostgreSQL production-composition lease safety
         },
         d1Runtime: {
           policy: { enabled: true, kill_switch: false },
-          allowsAgent(agentId: string | null) { return agentId === 'dev-001' },
-          isEnrolledAgent(agentId: string | null) { return agentId === 'dev-001' },
+          allowsAgent(agentId: string | null) { return agentId === 'sd-test-d1-auto-receive-pg' },
+          isEnrolledAgent(agentId: string | null) { return agentId === 'sd-test-d1-auto-receive-pg' },
           async prepareFinalizationSenders() { throw new Error('must not finalize') },
         } as any,
         env: {} as NodeJS.ProcessEnv,

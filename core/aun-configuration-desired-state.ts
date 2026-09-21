@@ -445,9 +445,13 @@ export async function listPendingConfigurationEvents(
   const rows = await db.query<any>(
     `SELECT event_id, agent_id, desired_revision, desired_digest, event_type,
             created_at, attempt_count, available_at, delivered_at
-       FROM aun_configuration_desired_outbox
-      WHERE delivered_at IS NULL AND available_at <= now()
-      ORDER BY desired_revision ASC, agent_id ASC
+       FROM (
+         SELECT o.*, row_number() OVER (PARTITION BY agent_id ORDER BY desired_revision DESC) AS position
+           FROM aun_configuration_desired_outbox o
+          WHERE delivered_at IS NULL AND superseded_at IS NULL AND available_at <= now()
+       ) pending
+      WHERE position = 1
+      ORDER BY available_at ASC, agent_id ASC
       LIMIT $1`,
     [limit],
   )
@@ -468,12 +472,13 @@ export type ConfigurationReconcileAuthority = Pick<AunConfigurationReconcileStat
 function reconcileFenceParams(state:ConfigurationReconcileAuthority):unknown[] {
   return [state.agentId,state.desiredRevision,state.desiredDigest,state.leaseId,state.fencingToken,state.holderAgentId,state.holderRuntimeInstanceId]
 }
-const RECONCILE_FENCE = `EXISTS (SELECT 1 FROM agents a,control_plane_leases l
-  WHERE a.agent_id=$1 AND a.desired_revision=$2 AND a.desired_digest=$3
+const RECONCILE_BINDING = ` a.agent_id=$1 AND a.desired_revision=$2 AND a.desired_digest=$3
     AND l.lease_id=$4::uuid AND l.fencing_token=$5
     AND l.lease_scope_type='runtime_instance' AND l.lease_scope_id='configuration-reconciler:' || a.agent_id
-    AND l.lease_purpose='maintenance' AND l.status='active' AND l.expires_at>clock_timestamp()
-    AND l.holder_agent_id=$6 AND l.holder_runtime_instance_id IS NOT DISTINCT FROM $7::uuid)`
+    AND l.lease_purpose='maintenance' AND l.status='active'
+    AND l.holder_agent_id=$6 AND l.holder_runtime_instance_id IS NOT DISTINCT FROM $7::uuid`
+const RECONCILE_FENCE = `EXISTS (SELECT 1 FROM agents a,control_plane_leases l
+  WHERE ${RECONCILE_BINDING} AND l.expires_at>clock_timestamp())`
 
 export async function markConfigurationEventDelivered(db:DbAdapter,eventId:string,desiredRevision:number,desiredDigest:string,
   authority:ConfigurationReconcileAuthority):Promise<boolean> {
@@ -481,8 +486,39 @@ export async function markConfigurationEventDelivered(db:DbAdapter,eventId:strin
   const row=await db.queryOne(`UPDATE aun_configuration_desired_outbox
     SET delivered_at=clock_timestamp(),attempt_count=attempt_count+1
     WHERE event_id=$8 AND agent_id=$1 AND desired_revision=$2 AND desired_digest=$3
-      AND delivered_at IS NULL AND ${RECONCILE_FENCE} RETURNING event_id`,[...reconcileFenceParams(authority),eventId])
+      AND delivered_at IS NULL AND superseded_at IS NULL AND ${RECONCILE_FENCE} RETURNING event_id`,[...reconcileFenceParams(authority),eventId])
   return !!row
+}
+
+/** Retire obsolete events without claiming their configuration was applied.
+ * Profile/lease locks serialize desired or holder changes; expiry is checked
+ * after the selected event locks, so waiting cannot resurrect stale authority.
+ */
+export async function supersedeConfigurationEvents(
+  db: DbAdapter, authority: ConfigurationReconcileAuthority, limit = 100,
+): Promise<number> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('OUTBOX_LIMIT_INVALID')
+  // The aggregate drains every locking row before yielding event_ids. Keep the
+  // volatile expiry check dependent on that barrier: a materialized SELECT alone
+  // can still stream its first row while the planner evaluates an outer filter.
+  const rows = await db.query(`WITH authority AS MATERIALIZED (
+      SELECT a.agent_id, l.expires_at FROM agents a, control_plane_leases l
+       WHERE ${RECONCILE_BINDING} FOR UPDATE OF a,l
+    ), obsolete AS MATERIALIZED (
+      SELECT o.event_id FROM aun_configuration_desired_outbox o JOIN authority a ON a.agent_id=o.agent_id
+       WHERE o.desired_revision<$2 AND o.delivered_at IS NULL AND o.superseded_at IS NULL
+       ORDER BY o.desired_revision ASC LIMIT $8 FOR UPDATE OF o
+    ), locked AS MATERIALIZED (
+      SELECT array_agg(event_id) AS event_ids FROM obsolete
+    )
+    UPDATE aun_configuration_desired_outbox o
+       SET superseded_at=clock_timestamp(),superseded_by_revision=$2,superseded_by_digest=$3
+      FROM authority a,locked
+     WHERE o.event_id=ANY(locked.event_ids) AND o.agent_id=a.agent_id
+       AND o.desired_revision<$2 AND o.delivered_at IS NULL AND o.superseded_at IS NULL
+       AND CASE WHEN cardinality(locked.event_ids)>0 THEN a.expires_at>clock_timestamp() ELSE false END
+     RETURNING o.event_id`, [...reconcileFenceParams(authority),limit])
+  return rows.length
 }
 
 /** Persist only logical reconcile outcome; physical readback remains caller-local. */

@@ -56,8 +56,8 @@ beforeAll(async () => {
     // Seed agents (clean state guaranteed by the DELETE above).
     for (const id of [AGENT_A, AGENT_B, AGENT_C]) {
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata)
-         VALUES ($1, $1, 'dev', 'test', 'online', $2)
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+         VALUES ($1, $1, 'dev', $2)
          ON CONFLICT (agent_id) DO UPDATE SET status='online'`,
         [id, JSON.stringify({ discord_id: `discord-${id}` })],
       )

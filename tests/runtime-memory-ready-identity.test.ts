@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import * as hostObserver from '../core/host-runtime-observer'
+import { unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
+import { afterEach, beforeEach, describe, expect, test, spyOn } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,12 +14,19 @@ import {
 } from '../core/runtime-memory-ready-identity'
 import { evaluateRuntimeMemoryReadyGate, recordRuntimeMemoryReadyEvidence } from '../core/runtime-memory-ready'
 
+const observations = new Map<string, hostObserver.HostRuntimeObservation>()
+let hostSpy: ReturnType<typeof spyOn>
 let tmp: string
 let db: SqliteAdapter
 let policy: RuntimeMemoryReadyPolicy
 const now = new Date('2026-08-23T00:10:00.000Z')
 
 beforeEach(() => {
+  observations.clear()
+  hostSpy = spyOn(hostObserver, 'inspectHostRuntime').mockImplementation(input => {
+    const rows = [...observations.values()].filter(row => row.agent_id === input.agentId && (!input.runtimeInstanceId || row.runtime_instance_id === input.runtimeInstanceId))
+    return { reasonCode: rows.length ? 'OBSERVED' : 'NO_LIVE_RUNTIME', observations: rows }
+  })
   tmp = mkdtempSync(join(tmpdir(), 'runtime-memory-ready-identity-'))
   const dbPath = join(tmp, 'test.db')
   migrateSqlite(dbPath)
@@ -32,6 +41,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  hostSpy?.mockRestore()
   await db.close()
   rmSync(tmp, { recursive: true, force: true })
 })
@@ -42,13 +52,8 @@ async function seedAgent(input: {
   home: string
   port: number
 }): Promise<void> {
-  await db.execute(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
-        home_directory, profile_enabled, disabled_at, profile_revision, profile_source)
-     VALUES ($1, $1, 'dev', 'TUI', 'idle', $2, $3, $4, 1, NULL, 7, 'fixture')`,
-    [input.agentId, input.port, JSON.stringify({ tmux_session: input.session }), input.home],
-  )
+  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,profile_enabled,profile_revision,profile_source)
+    VALUES($1,$1,'dev',1,7,'fixture')`,[input.agentId])
 }
 
 async function seedRuntime(input: {
@@ -61,23 +66,15 @@ async function seedRuntime(input: {
   seen: string
   metadata?: Record<string, unknown>
 }): Promise<void> {
-  await db.execute(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-        port, checkout_path, commit_sha, status, started_at, stopped_at, last_seen_at, metadata)
-     VALUES ($1, $2, 'TUI', 'local_process', $3, $4, $5, 'head', $6, $8, $7, $8, $9)`,
-    [
-      input.runtimeId,
-      input.agentId,
-      input.session,
-      input.port,
-      input.checkout,
-      input.status,
-      input.status === 'stopped' ? input.seen : null,
-      input.seen,
-      JSON.stringify({ source: 'server.ts', ...(input.metadata ?? {}) }),
-    ],
-  )
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,metadata)
+    VALUES($1,$2,'local_process','{}')`,[input.runtimeId,input.agentId])
+  if(input.status === 'running') {
+    observations.set(input.runtimeId,unitRuntimeObservation(input.agentId,{runtime_instance_id:input.runtimeId,
+      session_name:input.session,workspace:input.checkout,port:input.port,observed_at:input.seen,
+      process_started_at:'2026-08-22T00:00:00.000Z'}))
+    await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at)
+      VALUES($1,'runtime_instance',$2,'worker',$3,$2,1,'active','2026-08-22T00:01:00Z','2099-01-01T00:00:00Z')`,['lease-'+input.runtimeId,input.runtimeId,input.agentId])
+  }
 }
 
 async function seedEvidence(input: {
@@ -97,7 +94,7 @@ async function seedEvidence(input: {
     port: input.port,
     expected_agent_id: input.agentId,
     checkout_path: input.checkout,
-    checkout_commit_sha: 'head',
+    checkout_commit_sha: 'a'.repeat(40),
     recovery_command: 'mcp__wasurezu__recover_context',
     result_status: 'ready',
     failure_reason: null,
@@ -188,17 +185,19 @@ describe('startup memory identity canary scope', () => {
     expect(await db.query<any>("SELECT id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")).toEqual([])
   })
 
-  test('allowlist never includes disabled, offline, profile-disabled or human seats', async () => {
+  test('allowlist excludes logical ineligible seats and reports an unobserved seat explicitly', async () => {
     const names = ['qa', 'disabled', 'offline', 'profile-disabled', 'human', 'outside']
     for (const name of names) await seedRotatedSeat(name)
     await db.execute("UPDATE agents SET disabled_at = '2026-08-22' WHERE agent_id = 'disabled'")
-    await db.execute("UPDATE agents SET status = 'offline' WHERE agent_id = 'offline'")
+    observations.delete('offline-current')
     await db.execute("UPDATE agents SET profile_enabled = 0 WHERE agent_id = 'profile-disabled'")
     await db.execute("UPDATE agents SET agent_type = 'human' WHERE agent_id = 'human'")
-    await db.execute("UPDATE agents SET status = 'busy' WHERE agent_id = 'qa'")
+    expect((await db.query<any>("SELECT status FROM agents WHERE agent_id='qa'"))[0].status).toBeNull()
     const probe = observedOptions(names.filter(name => name !== 'outside'))
-    expect((await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)).map(row => row.agent_id)).toEqual(['qa'])
-    expect(probe.resolved).toEqual(['qa'])
+    const results = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, probe.options)
+    expect(results.map(row => row.agent_id)).toEqual(['offline','qa'])
+    expect(results.find(row => row.agent_id === 'offline')?.status).not.toBe('REFRESHED')
+    expect(probe.resolved).toEqual(['offline','qa'])
     expect(probe.refreshed).toEqual(['qa'])
     const audits = await db.query<any>("SELECT agent_id FROM audit_log WHERE event_type = 'runtime.memory_ready_identity'")
     expect(audits.every(row => row.agent_id === 'qa')).toBe(true)
@@ -286,7 +285,7 @@ describe('runtime memory-ready identity reconciliation', () => {
     expect(evidenceRows[0].runtime_instance_id).toBe('ec08bc6f-466f-4727-853f-81895e4f6d05')
   })
 
-  test('read-only monitor types codex-cto registration drift and devauditor superseded binding', async () => {
+  test('read-only monitor ignores removed physical registration values and reports superseded binding', async () => {
     await seedAgent({ agentId: 'codex-cto', session: 'discord-cto', home: '/work/codex', port: 8808 })
     await seedRuntime({
       runtimeId: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
@@ -355,23 +354,12 @@ describe('runtime memory-ready identity reconciliation', () => {
     expect(report.summary).toEqual({
       inventory: 2,
       profile_mismatch_excluded: 0,
-      registration_profile_mismatch: 1,
+      registration_profile_mismatch: 0,
       profile_mismatch_deprioritized: 0,
       superseded_evidence_binding: 1,
     })
+    expect(report.findings.some(row => row.code === 'REGISTRATION_PROFILE_MISMATCH')).toBe(false)
     expect(report.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        code: 'REGISTRATION_PROFILE_MISMATCH',
-        agent_id: 'codex-cto',
-        runtime_instance_id: 'eb785a47-81fb-4907-83a4-0cac5b62fce6',
-        details: expect.objectContaining({
-          current: true,
-          handling: 'WARN_ONLY_CURRENT_FALLBACK',
-          registration_metadata_provenance: expect.objectContaining({
-            schema_version: 'runtime-registration-metadata-provenance/v1',
-          }),
-        }),
-      }),
       expect.objectContaining({
         code: 'SUPERSEDED_EVIDENCE_BINDING',
         agent_id: 'devauditor',

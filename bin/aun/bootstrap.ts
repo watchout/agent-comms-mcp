@@ -64,7 +64,7 @@ import {
   observeBootstrapQueueSmoke,
   type BootstrapQueueSmokeConsumerEvidence,
 } from '../../core/queue-runtime'
-import { createCodexBootstrapAdapter, type BootstrapAdapterCommandRunner } from './bootstrap-adapter-codex'
+import { cleanHostProviderAuthorityDigest, createCodexBootstrapAdapter, type BootstrapAdapterCommandRunner } from './bootstrap-adapter-codex'
 import { createClaudeBootstrapAdapter, parseClaudeMcpGet } from './bootstrap-adapter-claude'
 import {
   BOOTSTRAP_STAGES,
@@ -675,7 +675,6 @@ async function resolveProviderRootAuthority(input: {
   repoRoot: string
   run?: BootstrapAdapterCommandRunner
   observeProvider?: typeof observeSeatProvider
-  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
 }): Promise<{
   ok: true
   authority: ProviderRootAuthority | null
@@ -694,18 +693,7 @@ async function resolveProviderRootAuthority(input: {
     canonicalRealpathDigest: bootstrapDigest(existsSync(cleanRoot) ? realpathSync(cleanRoot) : cleanRoot),
     projectionMatches: true,
     callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== cleanRoot),
-    authorityTupleDigest: bootstrapDigest({
-      agent_id: input.agentId,
-      repo_url: null,
-      workspace_path: null,
-      config_profile: { runtime_engine_preference: null, metadata_codex_home: null },
-      provider_binding: {
-        expected_provider_identity_ref: null,
-        provider_token_source_ref: null,
-        projection_provider_config_root: null,
-      },
-      projection_digest: bootstrapDigest({}),
-    }),
+    authorityTupleDigest: cleanHostProviderAuthorityDigest(input.agentId, cleanRoot),
   })
   if (input.requestedRuntime === 'claude') return { ok: true, authority: null }
 
@@ -1406,6 +1394,7 @@ type DefaultPortsOptions = {
   home: string
   repoRoot: string
   observeProvider?: typeof observeSeatProvider
+  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
 }
 
 type BootstrapConfigurationTransaction = {
@@ -2268,6 +2257,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           agent_id: context.agentId,
           expected_agent_id: context.agentId,
           project,
+          readNativeProof:options.readNativeProof,
         },
         selectedRuntimeInstanceId
           ? {
@@ -2293,20 +2283,26 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ))
         const metadata = parseJsonRecord(evidence?.metadata)
         const nativeTransport = await readConfiguredWasurezuTransport(context, run)
+        const observed=inspectHostRuntime({agentId:context.agentId,runtimeInstanceId:endpoint.endpoint.runtimeInstanceId})
+        const current=observed.reasonCode==='OBSERVED' && observed.observations.length===1?observed.observations[0]:null
+        const nativeReceipt=nativeTransport && current?await readNativeSeatContextReceipt({transport:nativeTransport,
+          agentId:context.agentId,project,runtimeInstanceId:String(payload.runtime_instance_id),targetRuntime:current.provider,
+          providerPid:current.provider_pid,providerStartedAt:current.provider_started_at,hostSessionId:current.host_session_id??undefined,
+          cwd:current.workspace,env,signal:context.abortSignal}):null
         const readbackDigest = bootstrapDigest({
           evidence_id: evidence?.id ?? null,
           runtime_instance_id: evidence?.runtime_instance_id ?? null,
           project: evidence?.project ?? null,
           valid_until: evidence?.valid_until ?? null,
-          provider_tuple_digest: metadata.provider_tuple_digest ?? null,
-          recovery_response_digest: metadata.recovery_response_digest ?? null,
-          runtime_tuple_digest: metadata.runtime_tuple_digest ?? null,
+          provider_tuple_digest: nativeTransport?.tupleDigest ?? null,
+          recovery_response_digest: nativeReceipt?.response_digest ?? null,
+          runtime_tuple_digest: selectedRuntimeTupleDigest ?? null,
         })
         mutationMatches = evidence?.result_status === 'ready'
           && metadata.bootstrap_run_id === payload.bootstrap_run_id
           && Boolean(evidence?.valid_until) && Date.parse(String(evidence.valid_until)) > Date.now()
           && nativeTransport?.tupleDigest === payload.provider_tuple_digest
-          && metadata.provider_tuple_digest === payload.provider_tuple_digest
+          && nativeReceipt?.invocation_digest === parseJsonRecord(metadata.seat_context_proof).invocation_digest
           && readbackDigest === mutation.actual_after_digest
       }
       return gate.ok && runtimeMatches && mutationMatches
@@ -2526,7 +2522,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             if(!installed?.present) await db.execute(configurationMigrationSql)
             await db.execute(diagnosticsMigrationSql)
             await db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-21-runtime-observation-nonpersistence.up.sql'),'utf8'))
-            return db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-21-runtime-observation-restart-contract.up.sql'),'utf8'))
+            await db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-21-runtime-observation-restart-contract.up.sql'),'utf8'))
+            return db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-22-configuration-outbox-supersession.up.sql'),'utf8'))
           })
           return {
             exitCode: 0,
@@ -2586,6 +2583,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'], evidenceRefs: [tmuxAuthority.evidenceRef] }
       }
       const session = tmuxAuthority.session
+      env.AUN_BOOTSTRAP_TMUX_SESSION=session
       const port = await choosePort(run, context, existing)
       if (port === null) return { ok: false, reasonCodes: ['NO_GO_PORT_CONFLICT'] }
       env.AUN_BOOTSTRAP_CHANNEL_PORT = String(port)
@@ -2887,7 +2885,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       const profile = await profileGet(context.agentId)
       if (profile) {
         env.AUN_BOOTSTRAP_CHANNEL_PORT = '0'
-        env.AUN_BOOTSTRAP_TMUX_SESSION = String(profile.tmux_session ?? '')
+        const current=await withBootstrapDb(env,db=>resolveSeatProvider(db,{agentId:context.agentId}),{readonly:true})
+        if(current.ok && current.observation)env.AUN_BOOTSTRAP_TMUX_SESSION=current.observation.session_name
       }
       const [mcp, runtimeIdentity, memory, daemon, daemonNative] = await Promise.all([
         adapter.readbackMcpRegistration(context),
@@ -3616,6 +3615,7 @@ export type BootstrapDependencies = {
   ports?: BootstrapExecutionPorts
   run?: BootstrapAdapterCommandRunner
   observeProvider?: typeof observeSeatProvider
+  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
   uuid?: () => string
   stageDeadlineMs?: Partial<Record<BootstrapStage, number>>
 }
@@ -3710,7 +3710,7 @@ export async function bootstrap(
     if (typeof runtimeId === 'string' && runtimeId) env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = runtimeId
   }
   hydrateRunEnvironment(state)
-  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot, observeProvider: dependencies.observeProvider })
+  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot, observeProvider: dependencies.observeProvider, readNativeProof:dependencies.readNativeProof })
   let lockHeld = false
   const bootstrapStartedAt = performance.now()
   const boundedDeadline = (stage: BootstrapStage, task: (signal: AbortSignal) => Promise<BootstrapStageOutcome>) =>

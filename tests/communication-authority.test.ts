@@ -1,3 +1,4 @@
+import { unitRuntimeAuthority, unitRuntimeInspector } from './helpers/logical-runtime-unit-fixture'
 import { describe, expect, test } from 'bun:test'
 import {
   CHANNEL_COMMUNICATION_AUTHORITY,
@@ -91,6 +92,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const db = {
       query: async (sql: string) => {
         queries.push(sql)
+        if (sql.includes('FROM agent_runtime_instances')) return {rows:[unitRuntimeAuthority('aun')],rowCount:1}
         if (sql.includes('FROM agents')) {
           return {
             rows: [{
@@ -111,7 +113,7 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      humanAgent: false,
+      inspect: unitRuntimeInspector,
     })
 
     expect(verdict).toMatchObject({ ok: true, host_allowlist_required: false, reasons: [] })
@@ -121,14 +123,14 @@ describe('Issue #917 Phase 1 automatic-processing eligibility', () => {
 
   test('F04 state-daemon adapter blocks a DB-enrolled runtime when channels.members omits it', async () => {
     const db = {
-      query: async (sql: string) => sql.includes('FROM agents')
+      query: async (sql: string) => sql.includes('FROM agent_runtime_instances') ? {rows:[unitRuntimeAuthority('aun')]} : sql.includes('FROM agents')
         ? { rows: [{ agent_id: 'aun', runtime: 'codex-exec', status: 'online', profile_enabled: true, disabled_at: null }] }
         : { rows: [{ members: ['codex-audit'] }] },
     }
     const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(db as any, {
       agentId: 'aun',
       channelId: 'channel-a',
-      humanAgent: false,
+      inspect: unitRuntimeInspector,
     })
 
     expect(verdict.ok).toBe(false)

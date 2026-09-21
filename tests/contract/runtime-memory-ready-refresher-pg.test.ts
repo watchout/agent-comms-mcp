@@ -54,6 +54,7 @@ describe('memory-ready refresher PostgreSQL parity', () => {
   })
 
   test('confirms current native evidence without extending it and denies a seat missing that evidence', async () => {
+    const native = new Map<string,Awaited<ReturnType<typeof createReadyNativeRuntimeWithDb>>>()
     const ids = [`${prefix}-alpha`, `${prefix}-bravo`]
     for (const [index, agentId] of ids.entries()) {
       const runtimeId = index === 0
@@ -62,20 +63,11 @@ describe('memory-ready refresher PostgreSQL parity', () => {
       const session = `${agentId}-session`
       const home = mkdtempSync(join(tmpdir(),'refresh-native-'));fixtureHomes.push(home)
       await pg.query(
-        `INSERT INTO agents
-           (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
-            home_directory, profile_enabled, profile_revision, profile_source, disabled_at)
-         VALUES ($1, $1, 'test', 'codex', $2, $3, $4::jsonb, $5, true, 1, 'fixture', NULL)`,
-        [
-          agentId,
-          index === 0 ? 'idle' : 'busy',
-          39_500 + index,
-          JSON.stringify({ tmux_session: session, memory_project: 'agent-comms-mcp' }),
-          home,
-        ],
+        `INSERT INTO agents(agent_id,display_name,agent_type,metadata,profile_enabled,profile_revision,profile_source)
+         VALUES($1,$1,'test',$2::jsonb,true,1,'fixture')`,[agentId,JSON.stringify({memory_project:'agent-comms-mcp'})],
       )
       const db=new PgAdapter(databaseUrl)
-      try {await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId)}
+      try {native.set(agentId,await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId))}
       finally {await db.close()}
 
     }
@@ -83,11 +75,14 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     const evidenceRows=()=>pg.query(`SELECT * FROM runtime_memory_ready_evidence WHERE agent_id LIKE $1 ORDER BY agent_id`,[`${prefix}-%`])
     // Force the same legacy-path mismatch on Linux and macOS; actual native
     // receipt, held endpoint and current runtime still have to pass the gate.
-    await pg.query("UPDATE agents SET home_directory='/legacy/physical-path' WHERE agent_id LIKE $1",[`${prefix}-%`])
+    await expect(pg.query("UPDATE agents SET home_directory='/legacy/physical-path' WHERE agent_id LIKE $1",[`${prefix}-%`])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
     const before=(await evidenceRows()).rows
+    const originalPath=process.env.PATH
+    process.env.PATH=[...native.values()][0].cliPath+':'+originalPath
+    try {
     const refresh=()=>runRuntimeMemoryReadyFleetRefresh({
       async query<T = any>(sql: string, params?: any[]) {
-        const fleetInventory = sql.includes("status IN ('idle', 'busy')") && sql.includes('ORDER BY agent_id')
+        const fleetInventory = sql.includes('profile_enabled') && sql.includes('ORDER BY agent_id')
         const scopedSql = fleetInventory
           ? sql.replace('ORDER BY agent_id', 'AND agent_id LIKE $1 ORDER BY agent_id')
           : sql
@@ -106,7 +101,7 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     const fixtureSeats = report.seats.filter(row => row.agent_id.startsWith(prefix))
     expect(fixtureSeats).toHaveLength(2)
     expect(fixtureSeats.every(row => row.status === 'ready'),JSON.stringify(fixtureSeats)).toBe(true)
-    expect(fixtureSeats.every(row => row.details.registration_profile_mismatch)).toBe(true)
+    expect(fixtureSeats.every(row => !row.details.registration_profile_mismatch)).toBe(true)
     const evidence = await pg.query(
       `SELECT agent_id, result_status
          FROM runtime_memory_ready_evidence
@@ -124,5 +119,6 @@ describe('memory-ready refresher PostgreSQL parity', () => {
     expect((await evidenceRows()).rows).toEqual(before.filter(row=>row.agent_id===ids[0]))
     expect(missing.provider_effects).toBe(0)
     expect(missing.discord_visible_sends).toBe(0)
-  })
+    } finally {process.env.PATH=originalPath}
+  },15000)
 })

@@ -239,37 +239,21 @@ if (crashFixtureStage) {
         'psql', databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
         join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
       ], { cwd: repoRoot, env }).exitCode).toBe(0)
-      const profileSet = Bun.spawnSync([
-        process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b3-fences',
-        '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
-        '--channel-port', '8801', '--tmux-session', 'b3-session', '--enabled', 'true', '--execute',
-      ], { cwd: repoRoot, env })
-      expect(profileSet.exitCode).toBe(0)
       db = new PgAdapter(databaseUrl)
-      await db.execute(
-        `UPDATE agents SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($2::text), true),
-                           canonical_workspace = $4,
-                           canonical_home = $5,
-                           supervisor_identity = 'launchd:com.agent-comms.state-daemon',
-                           ordinary_communication_enrollment = true,
-                           ordinary_projection = $3::jsonb,
-                           desired_release_commit = $6,
-                           desired_release_tree = $7,
-                           desired_control_refs = $8::jsonb
-          WHERE agent_id = $1`,
-        [
-          'b3-fences', codexRoot,
-          JSON.stringify({
-            owner: 'continuous-reconciler', provider_repo_root: repoRoot, provider_config_root: codexRoot,
-            daemon_checkout: join(home, '.agent-comms', 'state-daemon', 'releases', 'c'.repeat(40)),
-            schema_version: 'aun-configuration-projection/v1',
-          }),
-          repoRoot, home, 'c'.repeat(40), 'd'.repeat(40),
-          JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#b3-fence-fixture']),
-        ],
-      )
-      const native=await nativeHostFixture(home,repoRoot,'b3-fences','agent-comms-mcp','b3-session')
-      await registerNativeFixtureRuntime(db,native,'b3-fences','agent-comms-mcp','b3-session',repoRoot,'aaaaaaaa-1111-4111-8111-111111111111')
+      for(const file of ['2026-09-13-seat-runtime-continuity-diagnostics.up.sql','2026-09-21-runtime-observation-nonpersistence.up.sql','2026-09-21-runtime-observation-restart-contract.up.sql','2026-09-22-configuration-outbox-supersession.up.sql']) {
+        await db.execute(readFileSync(join(repoRoot,'db/migrations',file),'utf8'))
+      }
+      const profileSet = Bun.spawnSync([
+        process.execPath,'cli/index.ts','agent','profile','set','b3-fences',
+        '--enabled','true','--provider-token-source-ref','secret-ref:fixture','--expected-provider-identity','{"account_id":"fixture"}','--execute',
+      ],{cwd:repoRoot,env})
+      expect(profileSet.exitCode).toBe(0)
+      await db.execute(`UPDATE agents SET supervisor_identity='launchd:com.agent-comms.state-daemon',expected_provider_identity_ref='fixture:account',
+        ordinary_communication_enrollment=true,ordinary_projection=$2::jsonb,desired_release_commit=$3,desired_release_tree=$4,desired_control_refs=$5::jsonb WHERE agent_id=$1`,
+        ['b3-fences',JSON.stringify({owner:'continuous-reconciler',schema_version:'aun-configuration-projection/v1'}),'a'.repeat(40),'b'.repeat(40),JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803'])])
+      const id='aaaaaaaa-1111-4111-8111-111111111111'
+      const native=await nativeHostFixture(home,repoRoot,'b3-fences','agent-comms-mcp','b3-session','accepted',id,codexRoot)
+      await registerNativeFixtureRuntime(db,native,'b3-fences','agent-comms-mcp','b3-session',repoRoot,id)
       const preAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-fences'])
       const preOutbox = await db.query<any>(
         `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -310,7 +294,7 @@ if (crashFixtureStage) {
       const existing=await executionPorts.ensureAgentProfile(context)
       expect(existing.ok).toBe(true)
       expect(existing.mutation).toBeUndefined()
-      expect(existing.mutations).toBeUndefined()
+      expect(existing.mutations ?? []).toHaveLength(0)
       expect((await db.query<any>('SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id=$1 ORDER BY event_id',['b3-fences']))).toEqual(preOutbox)
 
       // This is transaction-level coverage through the existing internal test
@@ -330,10 +314,11 @@ if (crashFixtureStage) {
       expect(bootstrapDigest(afterAuthorityAgent?.row)).toBe(bootstrapDigest(driftBaselineAgent?.row))
       expect(bootstrapDigest(afterAuthorityOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
       expect((await db.queryOne<any>(`SELECT metadata->>'codex_home' AS codex_home FROM agents WHERE agent_id = $1`, ['b3-fences']))?.codex_home)
-        .toBe(codexRoot)
+        .toBeNull()
       expect(existsSync(join(home, '.aun', 'bootstrap', context.agentId, `${context.runId}.configuration-desired.rollback.json`))).toBe(false)
       rmSync(codexRoot,{recursive:true});renameSync(driftedRoot,codexRoot)
 
+      context.repoHead='e'.repeat(40)
       const outcome = await executionPorts.ensureConfigurationDesiredState(context)
       expect(outcome?.mutation).toBeDefined()
       if(!outcome)throw new Error('configuration transaction result missing')

@@ -1,3 +1,4 @@
+import {unitRuntimeObservation} from '../helpers/logical-runtime-unit-fixture'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -8,7 +9,7 @@ import { bindRuntimeEndpoint, requestedRuntimePort, resolveRuntimeEndpoint } fro
 // own only ephemeral loopback listeners; no server.ts startup, DB, or orphan kill.
 const held: ReturnType<typeof bindRuntimeEndpoint>[] = []
 const bind = (port?: number) => {
-  const endpoint = bindRuntimeEndpoint({ port, fetch: () => new Response('owned fixture') })
+  const endpoint = bindRuntimeEndpoint({ port, authorize:async()=>true, fetch: () => new Response('owned fixture') })
   held.push(endpoint)
   return endpoint
 }
@@ -20,13 +21,16 @@ function leaseRow(endpoint: ReturnType<typeof bindRuntimeEndpoint>) {
     runtime_instance_id: 'current-runtime', agent_id: 'fixture-seat', runtime_kind: 'local_process',
     host_id: 'fixture-host', process_id: 4201, session_name: 'fixture-session', checkout_path: '/fixture',
     port: endpoint.port, endpoint_uri: endpoint.endpointUri, runtime_status: 'active', last_seen_at: NOW.toISOString(),
-    lease_id: 'lease-current', fencing_token: 2, holder_agent_id: 'fixture-seat',
+    authority_live:1, acquired_at:'2026-09-13T00:01:00Z', lease_id: 'lease-current', fencing_token: 2, holder_agent_id: 'fixture-seat',
     holder_runtime_instance_id: 'current-runtime', lease_status: 'active', expires_at: '2026-09-13T01:05:00Z',
     lease_metadata: { port: endpoint.port, endpoint_uri: endpoint.endpointUri, process_id: 4201 },
   }
 }
-const resolveRows = (rows: any[]) => resolveRuntimeEndpoint({ query: async () => rows }, {
-  agentId: 'fixture-seat', runtimeInstanceId: 'current-runtime', hostId: 'fixture-host', now: NOW,
+const inspectRow=(row:any)=>()=>({reasonCode:'OBSERVED',observations:[unitRuntimeObservation('fixture-seat',{
+  runtime_instance_id:row.runtime_instance_id,host_id:'fixture-host',process_id:4201,process_started_at:'2026-09-13T00:00:00Z',
+  session_name:'fixture-session',workspace:'/fixture',port:row.port,endpoint_uri:row.endpoint_uri})]})
+const resolveRows = (rows: any[], observed:any=rows[0]) => resolveRuntimeEndpoint({ query: async () => rows }, {
+  agentId: 'fixture-seat', runtimeInstanceId: 'current-runtime', hostId: 'fixture-host', now: NOW, inspect:observed?inspectRow(observed):()=>({reasonCode:'NO_LIVE_RUNTIME',observations:[]}),
 })
 
 describe('test_aun_port_collision — held OS endpoint and owner isolation', () => {
@@ -50,6 +54,8 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
     for (const seat of seats) {
       expect(seat.port).toBeGreaterThan(0)
       expect(seat.port).toBeLessThanOrEqual(65535)
+      expect((await fetch(seat.endpointUri)).status).toBe(503)
+      await seat.publish(async()=>({registered:true}))
       expect(await (await fetch(seat.endpointUri)).text()).toBe('owned fixture')
     }
   })
@@ -59,7 +65,7 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
     const result = await endpoint.publish(async (port, uri) => {
       expect(port).toBe(endpoint.server.port)
       expect(uri).toBe(`http://127.0.0.1:${port}`)
-      expect(await (await fetch(uri)).text()).toBe('owned fixture')
+      expect((await fetch(uri)).status).toBe(503)
       expect(() => bind(port)).toThrow()
       return { port, uri }
     })
@@ -69,6 +75,7 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
 
   test('explicit collision leaves the existing owner alive', async () => {
     const owner = bind()
+    await owner.publish(async()=>({registered:true}))
     expect(() => bind(requestedRuntimePort({ AUN_STATIC_WEBHOOK_PORT: String(owner.port) }))).toThrow()
     expect(await (await fetch(owner.endpointUri)).text()).toBe('owned fixture')
   })
@@ -76,6 +83,7 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
   test('registration failure releases only its own socket', async () => {
     const failed = bind()
     const survivor = bind()
+    await survivor.publish(async()=>({registered:true}))
     await expect(failed.publish(async () => { throw new Error('fixture registration refused') }))
       .rejects.toThrow('RUNTIME_ENDPOINT_REGISTRATION_FAILED')
     await expect(fetch(failed.endpointUri)).rejects.toThrow()
@@ -102,17 +110,13 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
     expect(resolved.ok).toBe(true)
     expect(resolved.endpoint).toMatchObject({ runtimeInstanceId: row.runtime_instance_id, port: row.port, fencingToken: 2 })
     for (const mismatch of [
-      { holder_agent_id: 'foreign-seat' }, { holder_runtime_instance_id: 'previous-runtime' },
-      { host_id: 'other-host' }, { lease_status: 'released' },
-      { expires_at: '2026-09-13T00:59:59Z' }, { runtime_status: 'stopped' },
-      { last_seen_at: '2026-09-12T00:00:00Z' }, { fencing_token: 0 },
-      { lease_metadata: { ...row.lease_metadata, process_id: 4202 } },
-      { lease_metadata: { ...row.lease_metadata, endpoint_uri: 'http://127.0.0.1:1' } },
-    ]) {
-      expect((await resolveRows([{ ...row, ...mismatch }])).code).toBe('RUNTIME_ENDPOINT_UNAVAILABLE')
-    }
+      { holder_agent_id:'foreign-seat' },{ holder_runtime_instance_id:'previous-runtime' },
+      { authority_live:0 },{ fencing_token:0 },{ acquired_at:'2026-09-12T00:00:00Z' },
+    ])expect((await resolveRows([{...row,...mismatch}],row)).ok).toBe(false)
+    // Legacy physical columns and copied metadata are irrelevant to current authority.
+    expect((await resolveRows([{...row,runtime_status:'stopped',host_id:'old-host',lease_metadata:{port:1}}],row)).ok).toBe(true)
     expect((await resolveRows([])).endpoint).toBeNull()
-    expect((await resolveRows([row, { ...row, lease_id: 'ambiguous-lease' }])).code).toBe('RUNTIME_ENDPOINT_AMBIGUOUS')
+    expect((await resolveRows([row, { ...row, lease_id: 'ambiguous-lease' }])).code).toBe('RUNTIME_ENDPOINT_HOLDER_UNVERIFIED')
   })
 
   test('a rebound seat cannot use the previous runtime lease', async () => {
@@ -120,10 +124,11 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
     const oldRow = leaseRow(old)
     old.server.stop(true)
     const current = bind()
+    await current.publish(async()=>({registered:true}))
     const currentRow = { ...leaseRow(current), runtime_instance_id: 'replacement-runtime', holder_runtime_instance_id: 'replacement-runtime' }
     const result = await resolveRuntimeEndpoint({ query: async () => [
-      { ...oldRow, lease_status: 'released', runtime_status: 'stopped' }, currentRow,
-    ] }, { agentId: 'fixture-seat', hostId: 'fixture-host', now: NOW })
+      { ...oldRow, authority_live:0, lease_status: 'released', runtime_status: 'stopped' }, currentRow,
+    ] }, { agentId: 'fixture-seat', hostId: 'fixture-host', now: NOW,inspect:inspectRow(currentRow) })
     expect(result.endpoint?.runtimeInstanceId).toBe('replacement-runtime')
     expect(result.endpoint?.port).toBe(current.port)
     expect(await (await fetch(current.endpointUri)).text()).toBe('owned fixture')

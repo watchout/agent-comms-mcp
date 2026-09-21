@@ -142,17 +142,21 @@ for(const kind of ['postgres','sqlite'] as const)test(`D-CFG-1 ${kind} preserves
    db.exec(`CREATE TABLE aun_configuration_restart_requests(request_id TEXT PRIMARY KEY,host_id TEXT NOT NULL,agent_id TEXT NOT NULL,to_revision INTEGER NOT NULL,to_digest TEXT NOT NULL,candidate_digest TEXT NOT NULL,rollback_artifact_digest TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'AWAITING_OWNER_DECISION',UNIQUE(host_id,agent_id,to_revision,to_digest,candidate_digest))`)
    db.query("INSERT INTO aun_configuration_restart_requests VALUES('old','old-host','agent',1,'digest','old-candidate','old-artifact','REJECTED')").run()
    db.query("INSERT INTO aun_configuration_restart_requests VALUES('duplicate','second-host','agent',1,'digest','other-candidate','old-artifact','REJECTED')").run()
+   const sql="INSERT INTO aun_configuration_restart_requests(request_id,agent_id,to_revision,to_digest,rollback_release_commit,rollback_release_tree) VALUES(?,?,?,?,?,?)"
+   const previousMigrationGate=process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED
+   process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED='1'
+   try {
    expect(()=>applyConfigurationRestartLogicalSqlite(db)).toThrow('LOGICAL_RESTART_CONFLICT')
    expect((db.query('SELECT count(*) n FROM aun_configuration_restart_requests').get() as any).n).toBe(2)
    db.exec("DELETE FROM aun_configuration_restart_requests WHERE request_id='duplicate'")
    applyConfigurationRestartLogicalSqlite(db)
    expect(db.query('SELECT request_id,candidate_digest,rollback_artifact_digest,status FROM aun_configuration_restart_requests').get()).toEqual({request_id:'old',candidate_digest:'old-candidate',rollback_artifact_digest:'old-artifact',status:'REJECTED'})
    expect(db.query('PRAGMA table_info(aun_configuration_restart_requests)').all().some((v:any)=>v.name==='host_id')).toBe(false)
-   const sql="INSERT INTO aun_configuration_restart_requests(request_id,agent_id,to_revision,to_digest,rollback_release_commit,rollback_release_tree) VALUES(?,?,?,?,?,?)"
    db.query(sql).run('new','agent',2,'new-digest','a'.repeat(40),'b'.repeat(40))
    expect(()=>db.query(sql).run('no-release','agent',3,'third',null,null)).toThrow('PERSISTENCE_FORBIDDEN')
    expect(()=>db.exec("UPDATE aun_configuration_restart_requests SET candidate_digest='forbidden' WHERE request_id='new'")).toThrow('PERSISTENCE_FORBIDDEN')
    applyRuntimeObservationNonpersistenceSqlite(db);applyConfigurationRestartLogicalSqlite(db)
+   } finally {if(previousMigrationGate===undefined)delete process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED;else process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=previousMigrationGate}
    db.query(sql).run('next','agent',3,'next-digest','a'.repeat(40),'b'.repeat(40))
    expect((db.query('SELECT count(*) n FROM aun_configuration_restart_requests').get() as any).n).toBe(3)
   }finally{db.close()}

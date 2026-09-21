@@ -40,6 +40,13 @@ replaces the former Work-only maker restriction. Current implementation details
 and remaining coverage are recorded in the dependent continuity spec and its
 verification packet; local fixture success is not TRIAL_READY.
 
+The [cycle-3 corrective handoff](https://github.com/watchout/agent-comms-mcp/pull/968#issuecomment-5768672897)
+(body SHA256 `9c55621c662ce4dadc0d366766b8a7679863ecf1a31fbe0330c722b8aab1f3d2`) also requires F-CFG-OUTBOX-01 closure:
+older pending configuration events acquire a distinct superseded terminal state,
+never a false delivery timestamp. Current desired/holder/fence checks remain;
+newest-per-agent selection and bounded cleanup keep the current event and other
+due agents progressing. The continuity spec defines this logical-only amendment.
+
 The [current implementation cell](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5757589027)
 (body SHA256 `4923e637e2e2490e5a36f5201ffc35d3565dfb32828f481cab9c95ede3156f5e`)
 permits the independent executor to update PR #968. Its [verification packet](verify/aun-v2-nonpersistence-20260921/trial-ready-003/RETURN.md)
@@ -58,6 +65,102 @@ Kusabi/Wasurezu storage is not silently declared compliant by an AUN-only change
 Physical diagnostics stay excluded from desired digest/revision/outbox. The
 existing legacy-format transition and incompatible-down guard remain distinct
 from this proposed non-persistence migration and require their own exact evidence.
+Schema initialization and re-entry also preserve NULL physical columns; a legacy
+runtime default backfill must never run against logical identities after cutover.
+Queue repair changes logical claim state. Status readers derive busy/idle from
+current claims and live observation; repair must not mirror that derived result
+into `agents.status`, `status_detail` or `status_updated_at`.
+The same rule applies to explicit `processing`, `done` and `record-no-reply`
+transitions: persist the queue lifecycle and terminal baton atomically without
+copying derived busy/idle state into the agent profile.
+Heartbeat reports scoped claim-owner and age refusals as skipped work, preserving
+the existing age-budget metric. Renewal timestamps use the database clock, and
+only the exact active runtime holder can renew an eligible claim.
+Queue-observation migration bootstrap includes enabled logical profiles and queue history,
+without a legacy status predicate. Sender feedback derives busy from unexpired active
+claims; only a fresh successful OS enumeration proving no live holder permits an
+offline advisory. Probe errors and ambiguous holders remain unknown. Busy feedback
+is out-of-band (no queue INSERT or status_detail copy).
+Mention lookup caches logical enabled membership, never DB liveness; a NULL historical status cannot make an enrolled target unknown.
+Receive routing, including Discord direct mentions, obtains the target runtime
+from fresh provider observation plus exact logical holder authority. A NULL
+legacy profile runtime is neither a routing denial nor permission to claim;
+unavailable current authority remains blocked at the ordinary claim fence.
+Bot-status keeps logical connector-to-runtime UUID coverage distinct from current
+endpoint authority: missing bindings and uncovered connectors cannot report full
+coverage, even when one runtime endpoint is available.
+Memory-ready fleet inventory selects enabled, non-disabled logical profiles (and
+non-human seats for refresh). It does not filter on legacy DB liveness; each
+selected seat must pass current host observation and logical holder authority,
+with unavailable seats reported explicitly. Absent legacy physical profile
+fields are not drift; historical non-NULL values may remain diagnostic-only.
+CLI status composes runtime, workspace, session and liveness from the same
+current provider authority. It retains logical queue/identity counts and outputs
+unknown/NULL when observation is unavailable; it never recovers a launch path
+from a removed DB field or an old registry file.
+OS enumeration may outlive an unrelated candidate process. Before its seat is
+known, an environment-read failure may be ignored only when a fresh PID listing
+proves that candidate has exited, within the original observation deadline.
+A still-present unreadable process, or any change after holder identification,
+continues to deny observation. No previous observation is reused.
+A process may also own the multi-bot MCP listener. Its current pre-exec
+AGENT_COMMS_PORT (or EXPECTED_BOTS with the server's default 8800) identifies
+that auxiliary listener only. The observer excludes that OS-owned port and
+requires exactly one remaining loopback runtime listener. Unrecognized extra
+listeners, invalid configuration, or a missing runtime socket deny observation;
+MCP configuration never grants a runtime lease or readiness.
+For a bearer-bound multi-bot connection, a queue claim resolves the target bot's
+current holder. The transport process UUID is used only for its own seat.
+Shutdown releases only a lease actually acquired by that process; a listener
+that never acquired authority has no release receipt and performs no revocation.
+The N1 active-seat query also uses enabled logical profiles with a currently
+observed exact runtime endpoint and worker lease. Its version identifies this
+change from persisted idle/busy values; the probe window, retries, channel and
+success/failure calculations are unchanged. Unobserved seats do not become
+active through a historical status or endpoint field.
+Bootstrap carries its freshly validated session into subsequent native MCP
+registration and readback in invocation memory; it does not save the session in
+the profile. Final readiness re-observes this session and verifies mutation
+digests against the current native original plus logical proof; NULL legacy
+profile fields and removed physical receipt metadata never supply readback.
+For a clean enrollment, the sealed invocation's canonical HOME/.codex root is
+its registration admission basis on both DB backends. Readback checks that root
+again; it does not require a copied provider root in PostgreSQL. Existing-seat
+registration stays read-only and requires fresh provider-root observation.
+Rollback retains its exact run, tuple, root and admission-digest fences.
+Workspace enrollment stores an opaque logical workspace ID and its active seat
+binding; the local identity declaration carries that ID. It never derives the ID
+from a path or writes the path to agent_workspaces. Re-enrollment uses the declared
+ID or an explicit --workspace-id and rejects another seat's active binding.
+Identity resolution joins that logical binding and independently verifies the
+current authorized provider at the requested canonical workspace. A copied
+identity file alone is insufficient; verified same-seat relocation is allowed.
+Full-channel smoke classifies runtime availability and endpoint readiness from
+current provider observation and the exact worker lease. Historical runtime or
+endpoint rows cannot make the smoke pass; logical delivery evidence is retained.
+The legacy wake-on-insert adapter retains its bounded notification/SQLite poll
+contract, but resolves a session only from fresh provider observation and an exact
+worker lease after checking logical profile eligibility. A stored tmux session or
+status cannot select the destination. Its real-tmux regression uses harmless owned
+processes and a current lease; it does not start a provider.
+The self-kick pending-count adapter uses the ordinary memory-ready gate before
+reading logical queue counts. SQL liveness and stored physical receipt fields
+cannot admit a kick; its existing bounded deadline and fail-closed count remain.
+The read-only watchdog's current seven-dimension report uses fresh runtime
+endpoint authority and logical queue ownership. Legacy heartbeat/profile readers
+remain explicit historical diagnostics only. Without a fresh memory or Discord
+connectivity probe it reports that evidence as unavailable; persisted liveness
+cannot make a current report healthy. Queue-visibility smoke requires an enabled,
+non-human logical target with no pending work or active claim; it neither requires
+nor starts a TUI. Runtime/session diagnostics are freshly observed when available
+and are not proof of queue processing or trial readiness.
+
+Regression fixtures seed logical identity under the active guard. Tests of live
+provider, endpoint or liveness behavior supply fresh observations at the existing
+OS boundary; historical migration tests retain their pre-cutover seed explicitly. The frozen
+fleet-runtime-v1 canary reader remains a legacy-only contract; it must not admit
+a new logical-only profile as an old physical canary. Its migration regression
+uses pre-cutover history, then installs the guard before queue/ABA assertions.
 
 The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
 and seat continuity. Provider and endpoint observations do not replace the immutable

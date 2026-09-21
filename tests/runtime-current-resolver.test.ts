@@ -113,16 +113,7 @@ describe('runtime current resolver', () => {
     expect(resolution.candidate_absence_reason).toBeNull()
     expect(resolution.current_candidates).toHaveLength(1)
     expect(resolution.candidate_exclusions).toHaveLength(0)
-    expect(resolution.profile_mismatch_observations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        code: 'REGISTRATION_PROFILE_MISMATCH',
-        runtime_instance_id: 'fresh-profile-mismatch',
-        live: true,
-        current: true,
-        handling: 'WARN_ONLY_CURRENT_FALLBACK',
-        registration_metadata_provenance: null,
-      }),
-    ]))
+    expect(resolution.profile_mismatch_observations).toEqual([]) // NULL is absence, not drift
     expect(resolution.reap_candidates.map(row => [row.runtime_instance_id, row.reason])).toEqual([
       ['stale-profile-match', 'absolute'],
     ])
@@ -186,8 +177,7 @@ describe('runtime current resolver', () => {
     expect(resolution.current_runtime).toBeNull()
     expect(resolution.current_candidates.map(row=>row.runtime_instance_id).sort()).toEqual(['newest-profile-mismatch','older-exact-current'].sort())
     expect(resolution.candidate_exclusions).toEqual([])
-    expect(resolution.profile_mismatch_observations).toEqual(expect.arrayContaining([
-      expect.objectContaining({code:'REGISTRATION_PROFILE_MISMATCH',runtime_instance_id:'newest-profile-mismatch',current:false,handling:'WARN_ONLY_CURRENT_FALLBACK'})]))
+    expect(resolution.profile_mismatch_observations).toEqual([])
     await db.execute("UPDATE control_plane_leases SET status='released' WHERE holder_runtime_instance_id='older-exact-current'")
     const sole=await resolveRuntimeMemoryReadyCurrent(db as any,{agentId:'codex-cto',requestedRuntimeKind:'local_process',now:new Date('2026-08-21T00:10:00Z'),policy,inspect})
     expect(sole.ok).toBe(true)

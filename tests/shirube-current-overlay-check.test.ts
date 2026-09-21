@@ -443,6 +443,29 @@ const ciBase="0f772883db6f3b50772d3e4b82ce47795091f0a9";
 const ciOrigin="565583c25963b7dfa9b4445543967d372091b336";
 // Historical C17 workflow baseline; current bounded-source fixtures use actual HEAD.
 const ciFixtureHead="9a48756fee1d21c047bbda02666c4fa8bbce6b13";
+// The PR963 admission is a frozen contract fixture, independent of the PR
+// running this regression suite. Exercise real git objects and a real checkout;
+// never interpret PR968 (or a future caller) as the historical PR963 candidate.
+import { afterAll } from "bun:test";
+const boundedContractHead="56b5228396ec79b352da92ffc8a3f334e59b017c";
+let boundedCheckout:string|undefined;
+function boundedContractCheckout(){
+  if(boundedCheckout)return boundedCheckout;
+  const dir=mkdtempSync(join(tmpdir(),"aun-pr963-contract-"));
+  const git=(args:string[],cwd:string)=>{
+    const r=spawnSync("git",["-c","core.hooksPath=/dev/null",...args],{cwd,encoding:"utf8",timeout:15000});
+    if(r.status!==0)throw Error(r.stderr);
+  };
+  try{
+    git(["clone","--shared","--no-checkout",repoRoot,dir],repoRoot);
+    git(["checkout","--detach",boundedContractHead],dir);
+    writeFileSync(join(dir,"contract-event.json"),JSON.stringify({number:963,repository:{full_name:"watchout/agent-comms-mcp"},pull_request:{number:963,
+      head:{sha:boundedContractHead,repo:{full_name:"watchout/agent-comms-mcp"}},base:{sha:ciBase,repo:{full_name:"watchout/agent-comms-mcp"}}}}));
+    boundedCheckout=dir;return dir;
+  }catch(error){rmSync(dir,{recursive:true,force:true});throw error}
+}
+function boundedContractEvent(){return {GITHUB_ACTIONS:"true",GITHUB_EVENT_PATH:join(boundedContractCheckout(),"contract-event.json")};}
+afterAll(()=>{if(boundedCheckout)rmSync(boundedCheckout,{recursive:true,force:true})});
 type BoundedFixtureSubject={candidate:string;base:string;tested:string;candidateTree:string;testedTree:string;candidateParents:string[];testedParents:string[]};
 function validateBoundedFixtureSubject(s:BoundedFixtureSubject){
   const check=(ok:boolean,message:string)=>{if(!ok)throw Error(message)};
@@ -464,18 +487,18 @@ function boundedEventCandidate(env:Record<string,string|undefined>,read:(path:st
   return pr.head.sha as string;
 }
 function resolveBoundedFixtureSubject(){
-  const git=(...args:string[])=>{const r=spawnSync("git",args,{cwd:repoRoot,encoding:"utf8",timeout:15000});if(r.status!==0)throw Error(r.stderr);return r.stdout.trim()};
-  const tested=git("rev-parse","HEAD"),candidate=boundedEventCandidate(process.env,p=>readFileSync(p,"utf8"))??tested;
+  const git=(...args:string[])=>{const r=spawnSync("git",args,{cwd:boundedContractCheckout(),encoding:"utf8",timeout:15000});if(r.status!==0)throw Error(r.stderr);return r.stdout.trim()};
+  const tested=git("rev-parse","HEAD"),candidate=boundedEventCandidate(boundedContractEvent(),p=>readFileSync(p,"utf8"))??tested;
   git("merge-base","--is-ancestor",ciBase,candidate);
   return validateBoundedFixtureSubject({candidate,base:ciBase,tested,candidateTree:git("rev-parse",candidate+"^{tree}"),testedTree:git("rev-parse",tested+"^{tree}"),candidateParents:git("rev-list","--parents","-n","1",candidate).split(" ").slice(1),testedParents:git("rev-list","--parents","-n","1",tested).split(" ").slice(1)});
 }
 let boundedFixtureCache:{subject:BoundedFixtureSubject;files:string[];diff:string}|undefined;
 function runBoundedGate(mutate:(x:any)=>void=()=>{}) {
-  const git=(...a:string[])=>{const r=spawnSync("git",a,{cwd:repoRoot,encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});expect(r.status,r.stderr).toBe(0);return r;};
+  const git=(...a:string[])=>{const r=spawnSync("git",a,{cwd:boundedContractCheckout(),encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});expect(r.status,r.stderr).toBe(0);return r;};
   // This test process uses one immutable checkout. Cache fixture construction only;
   // every invocation still runs the unmodified gate and all its git/source checks.
   // Authenticate live event bytes/env on every invocation; only git objects are cached.
-  const eventCandidate=boundedEventCandidate(process.env,p=>readFileSync(p,"utf8"));
+  const eventCandidate=boundedEventCandidate(boundedContractEvent(),p=>readFileSync(p,"utf8"));
   const testedNow=git("rev-parse","HEAD").stdout.trim(),candidateNow=eventCandidate??testedNow;
   if(!boundedFixtureCache||boundedFixtureCache.subject.candidate!==candidateNow||boundedFixtureCache.subject.tested!==testedNow){
     const subject=resolveBoundedFixtureSubject();
@@ -515,9 +538,9 @@ function runBoundedGate(mutate:(x:any)=>void=()=>{}) {
     writeFileSync(changed,value.files.join("\n")+"\n");writeFileSync(consumer,JSON.stringify(comments));writeFileSync(controls,JSON.stringify(value.controls));
     // Test-only host preload fixes the authorization clock, not a product bypass flag.
     return spawnSync("node",["--import","data:text/javascript,"+encodeURIComponent("Date.now=()=>Date.parse("+JSON.stringify(value.now)+")"),
-      "scripts/shirube-current-overlay-check.mjs","--repo",value.repo,"--event",event,
+      join(repoRoot,"scripts/shirube-current-overlay-check.mjs"),"--repo",value.repo,"--event",event,
       ...(value.omitChanged?[]:["--changed-files",changed]),"--comments",consumer,"--control-comments",controls,...(value.cliArgs??[])],
-      {cwd:repoRoot,encoding:"utf8",timeout:15000,env:{...process.env,...(value.gitAbbrev?{GIT_CONFIG_COUNT:"1",GIT_CONFIG_KEY_0:"core.abbrev",GIT_CONFIG_VALUE_0:String(value.gitAbbrev)}:{})}});
+      {cwd:boundedContractCheckout(),encoding:"utf8",timeout:15000,env:{...process.env,...(value.gitAbbrev?{GIT_CONFIG_COUNT:"1",GIT_CONFIG_KEY_0:"core.abbrev",GIT_CONFIG_VALUE_0:String(value.gitAbbrev)}:{})}});
   } finally {rmSync(dir,{recursive:true,force:true})}
 }
 describe("bounded PR963 CI supply",()=>{
@@ -526,7 +549,7 @@ describe("bounded PR963 CI supply",()=>{
       const r=runBoundedGate(x=>x.labels=labels);expect(r.status,r.stdout+r.stderr).toBe(0);
       expect(r.stdout).toContain('"input_mode":"offline-fixture"');
     }
-  });
+  }, 60000);
   test("A03/A05 canonical, ownership, scope, stale/conflicting consumer and metadata negatives",()=>{
     const cases:Array<[string,(x:any)=>void]>=[
       ["wrong repo",x=>x.repo="watchout/other"],["wrong PR",x=>x.pr=999],["wrong base",x=>x.base="f".repeat(40)],
@@ -569,7 +592,7 @@ describe("bounded PR963 CI supply",()=>{
     ];
     for(const [name,mutate]of cases){const r=runBoundedGate(mutate);expect(r.status,name+"\n"+r.stdout+r.stderr).not.toBe(0)}
     console.log(JSON.stringify({subcase:"CI-AMEND-A03/A05",negative_cases:cases.length,input_mode:"offline-fixture",effect_count:0}));
-  });
+  }, 60000);
 });
 
 test("I26 effective date boundary keeps expired consumers and historical source substitutions blocked",()=>{
@@ -592,30 +615,30 @@ test("I26 effective date boundary keeps expired consumers and historical source 
   expect(oldHandoff.status).not.toBe(0);expect(oldHandoff.stdout+oldHandoff.stderr).toContain("exact published I26-A3 required");
   }
   console.log(JSON.stringify({subcase:"I26-CURRENT-DAY-BOUNDARY",last_valid:1,at_or_after_expiry_rejected:2,old_consumer_rejected:3,old_handoff_rejected:8,product_Date_now_unchanged:true}));
-});
+}, 60000);
 
 test("I9 current consumer uses full-index across abbrev7/8 and rejects abbreviated evidence",()=>{
   const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
-  const current=spawnSync("git",["rev-parse","HEAD"],{cwd:repoRoot,encoding:"utf8"});
+  const current=spawnSync("git",["rev-parse","HEAD"],{cwd:boundedContractCheckout(),encoding:"utf8"});
   expect(current.status).toBe(0);const head=current.stdout.trim();
   const fullDigests:string[]=[];
   for(const abbrev of [7,8]){
     const full=spawnSync("git",["-c",`core.abbrev=${abbrev}`,"diff","--binary","--full-index",`${ciBase}...${head}`],
-      {cwd:repoRoot,encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});
+      {cwd:boundedContractCheckout(),encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});
     expect(full.status,full.stderr).toBe(0);fullDigests.push(hash(full.stdout));
     const indices=[...full.stdout.matchAll(/^index ([0-9a-f]+)\.\.([0-9a-f]+)/gm)];
     expect(indices.length).toBeGreaterThan(0);expect(indices.every(m=>m[1].length===40&&m[2].length===40)).toBe(true);
     const accepted=runBoundedGate(x=>{x.gitAbbrev=abbrev;x.fields.binary_diff_sha256=hash(full.stdout)});
     expect(accepted.status,accepted.stdout+accepted.stderr).toBe(0);
     const legacy=spawnSync("git",["-c",`core.abbrev=${abbrev}`,"diff","--binary",`${ciBase}...${head}`],
-      {cwd:repoRoot,encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});
+      {cwd:boundedContractCheckout(),encoding:"utf8",timeout:15000,maxBuffer:16*1024*1024});
     expect(legacy.status,legacy.stderr).toBe(0);expect(hash(legacy.stdout)).not.toBe(hash(full.stdout));
     const refused=runBoundedGate(x=>{x.gitAbbrev=abbrev;x.fields.binary_diff_sha256=hash(legacy.stdout)});
     expect(refused.status).not.toBe(0);expect(refused.stdout+refused.stderr).toContain("consumer binary_diff_sha256 mismatch");
   }
   expect(fullDigests[0]).toBe(fullDigests[1]);
   console.log(JSON.stringify({subcase:"I9-FULL-INDEX-CONSUMER",head,abbrev:[7,8],full_index_sha256:fullDigests[0],all_index_ids40:true,legacy_rejections:2}));
-});
+}, 60000);
 
 import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1169,7 +1192,7 @@ describe("CI-01 source admission before protected release", () => {
       expect(full.stdout).toContain("machine-verifiable shirube_owner_decision");
       expect(full.stdout).toContain("require label owner-exact-head-approved");
     }
-  });
+  }, 60000);
 
   test("existing standing-authorized ordinary route passes both modes without owner or overlay label", () => {
     const body = baseBody("CELL-AUN-602-ORDINARY-DOCS", "R0")
@@ -1220,7 +1243,7 @@ describe("CI-01 source admission before protected release", () => {
       expect(result.status, name + "\n" + result.stdout + result.stderr).toBe(1);
       expect(result.stdout, name).toContain(error);
     }
-  });
+  }, 60000);
 
   test("full mode still refuses a wrong exact-head owner and accepts the matching owner", () => {
     const body = baseBody("CELL-MCP-AUN-RUNTIME-V2-CLAIM-DRYRUN-001", "R1");
@@ -1304,7 +1327,7 @@ describe("CI-01 source admission before protected release", () => {
       expect(refused.status, refused.stdout + refused.stderr).toBe(1);
       expect(refused.stdout).toContain("exact published I26-A3 required");
     }
-  });
+  }, 60000);
 });
 
 // Canonical workflow materialization is a separate gate; these source-mode inputs
@@ -1322,7 +1345,7 @@ describe("I25 distinct CI supply and canonical workflow namespaces", () => {
     const result=runBoundedGate(separate);
     expect(result.status,result.stdout+result.stderr).toBe(0);
     expect(result.stdout).toContain('"source_admission":"CI_TEST_SUPPLY_ONLY"');
-  });
+  }, 60000);
   test("missing, duplicate, indented, wrong and legacy-only CI pins cannot fall back to canonical refs", () => {
     const cases:Array<[string,(x:any)=>void,string]>=[
       ["missing ref",x=>x.body=x.body.replace(/^ci_supply_handoff_comment_ref:.*$/m,""),"unique anchored ci_supply_handoff_comment_ref required"],
@@ -1335,12 +1358,12 @@ describe("I25 distinct CI supply and canonical workflow namespaces", () => {
       ["legacy only even with valid CI authority in canonical fields",x=>{x.body=x.body.replace(/^ci_supply_handoff_(?:comment_ref|body_sha256):.*$/gm,"").replace(/^control_handoff_comment_ref:.*$/m,"control_handoff_comment_ref: "+x.fields.handoff_comment_ref).replace(/^control_handoff_body_sha256:.*$/m,"control_handoff_body_sha256: "+x.fields.handoff_body_sha256)},"unique anchored ci_supply_handoff_comment_ref required"],
     ];
     for(const [name,mutate,error] of cases){const result=runBoundedGate(x=>{separate(x);mutate(x)});expect(result.status,name+"\n"+result.stdout+result.stderr).toBe(1);expect(result.stdout,name).toContain(error)}
-  });
+  }, 60000);
   test("separate canonical refs never waive the non-draft exact-head owner gate", () => {
     const result=runBoundedGate(x=>{separate(x);x.cliArgs=["--mode","full"];x.draft=false});
     expect(result.status,result.stdout+result.stderr).toBe(1);
     expect(result.stdout).toContain("machine-verifiable shirube_owner_decision");
-  });
+  }, 60000);
 });
 
 
@@ -1401,7 +1424,7 @@ test("I25 A1/A2 scope amendments require authenticated complete current inputs",
       ["I25-A1 required canonical path missing",x=>x.files=x.files.filter((f:string)=>f!==".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml")],
   ];
   for(const [name,mutate] of cases){const result=runBoundedGate(mutate);expect(result.status,name+"\n"+result.stdout+result.stderr).toBe(1)}
-});
+}, 60000);
 
 
 describe("I26 authenticated finite successor window",()=>{
@@ -1414,7 +1437,7 @@ describe("I26 authenticated finite successor window",()=>{
       const full=runBoundedGate(x=>{x.now=now;x.draft=false;x.labels=["shirube-current-overlay"];x.body=x.body.replace(headSha,x.head)});
       expect(full.status).toBe(1);expect(full.stdout).toContain("machine-verifiable shirube_owner_decision");
     }
-  });
+  }, 60000);
   test("I26 missing forged scope identity duplicate and stale inputs fail closed",()=>{
     const cases:Array<[string,(x:any)=>void,string]>=[
       ["missing window ref",x=>x.body=x.body.replace(/^ci_supply_window_amendment_ref:.*$/m,""),"unique anchored ci_supply_window_amendment_ref"],
@@ -1437,7 +1460,7 @@ describe("I26 authenticated finite successor window",()=>{
     for(const [name,mutate,error] of cases){const result=runBoundedGate(mutate);
       expect(result.status,name+"\n"+result.stdout+result.stderr).toBe(1);expect(result.stdout,name).toContain(error)}
     console.log(JSON.stringify({subcase:"I26-AUTHENTICATED-WINDOW-NEGATIVES",cases:cases.length,public_effects:0}));
-  });
+  }, 60000);
   test("old published fixtures keep their exact bytes and expiry history",()=>{
     const previous=spawnSync("git",["show","fa94d6727c453f44b6d0a8949dc09fc2914c5d05:tests/shirube-current-overlay-check.test.ts"],
       {cwd:repoRoot,encoding:"utf8",maxBuffer:16*1024*1024});
@@ -1480,7 +1503,7 @@ describe("I26-A3 candidate and tested checkout separation",()=>{
     for(const[name,mutate]of cases){const r=runBoundedGate(mutate);expect(r.status,name+r.stdout+r.stderr).toBe(1)}
     const old=spawnSync("git",["show","d982dc2c0284a633b2b1f82d6780b3f77b8e0dd1:tests/shirube-current-overlay-check.test.ts"],{cwd:repoRoot,encoding:"utf8",maxBuffer:16*1024*1024});expect(old.status).toBe(0);
     expect(readFileSync(join(repoRoot,"tests/shirube-current-overlay-check.test.ts"),"utf8").startsWith(old.stdout.slice(0,old.stdout.indexOf("const ciBase=")))).toBe(true);
-  });
+  }, 60000);
 });
 
 

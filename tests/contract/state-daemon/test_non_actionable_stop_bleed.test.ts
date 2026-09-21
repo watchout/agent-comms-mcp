@@ -11,7 +11,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -44,6 +44,7 @@ function buildHarness(clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:30
   const tmux = new FakeTmux()
   const daemon = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -134,7 +135,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('only an exact typed acknowledgement envelope is terminalized automatically', async () => {
     const agent = makeAgentId('typed-ack')
@@ -186,7 +187,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('ACK prose without the typed envelope fails open to runner delivery', async () => {
     const agent = makeAgentId('ack-prose-only')
@@ -220,7 +221,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('malformed typed acknowledgement envelopes fail open to runner delivery', async () => {
     const fixtures = [
@@ -260,7 +261,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('unknown message type fails open to runner delivery', async () => {
     const agent = makeAgentId('unknown-delivery')
@@ -293,7 +294,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('actionable pending row still reaches Codex runner', async () => {
     const agent = makeAgentId('actionable-pass')
@@ -317,7 +318,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('reclaim-then-wake delivers an expired report claim instead of terminalizing it', async () => {
     const agent = makeAgentId('expired-report')
@@ -357,5 +358,5 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

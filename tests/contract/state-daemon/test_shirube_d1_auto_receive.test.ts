@@ -1,3 +1,4 @@
+import {observedSqliteRuntimeFixture} from '../../helpers/nonpersist-host-fixture'
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -114,7 +115,7 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
 
     const target = {
       repository: 'watchout/agent-comms-mcp',
-      agent_id: 'dev-001',
+      agent_id: 'sd-test-d1-auto-receive',
       control_source: authorization().control_source,
     }
     const binding: ShirubeD1RuntimeBinding = {
@@ -140,13 +141,14 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
     }
 
     await db.execute(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, profile_enabled, disabled_at)
-       VALUES ('dev-001', 'dev-001', 'dev', 'codex', 'online', 1, NULL)`,
+      `INSERT INTO agents (agent_id, display_name, agent_type, profile_enabled, disabled_at)
+       VALUES ('sd-test-d1-auto-receive', 'sd-test-d1-auto-receive', 'dev', 1, NULL)`,
     )
+    const host = await observedSqliteRuntimeFixture(path, 'sd-test-d1-auto-receive')
     await db.execute(
       `INSERT INTO channels (id, name, type, members)
        VALUES ('channel-auto-receive', 'channel-auto-receive', 'channel', $1)`,
-      [JSON.stringify(['dev-001'])],
+      [JSON.stringify(['sd-test-d1-auto-receive'])],
     )
     await db.execute(
       `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, source)
@@ -157,7 +159,7 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
     await db.execute(
       `INSERT INTO message_queue (agent_id, message_id, payload, status, priority, created_at)
        VALUES ($1, $2, $3, 'pending', 1, $4)`,
-      ['dev-001', 'message-auto-receive', JSON.stringify({
+      ['sd-test-d1-auto-receive', 'message-auto-receive', JSON.stringify({
         content: delivery.unit.content.text,
         author_id: 'external-target',
         message_type: 'phase_handoff',
@@ -193,7 +195,7 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
     await daemon.start()
     try {
       const event = JSON.stringify({
-        op: 'INSERT', id: 1, agent_id: 'dev-001', status: 'pending', claim_expires_at: null,
+        op: 'INSERT', id: 1, agent_id: 'sd-test-d1-auto-receive', status: 'pending', claim_expires_at: null,
       })
       // No receive/runtime-v2/runner/finalizer call is made by the fixture.
       // Duplicate delivery is deliberate: the daemon must coalesce it.
@@ -226,6 +228,7 @@ describe('Shirube D1 state-daemon queue-arrival auto-receive', () => {
       await expect(legacyDb.query('SELECT unsupported_fixture_function()')).rejects.toThrow()
     } finally {
       await daemon.stop()
+      await host.close()
       await db.close()
       if (previousDbType === undefined) delete process.env.AGENT_COM_DB
       else process.env.AGENT_COM_DB = previousDbType

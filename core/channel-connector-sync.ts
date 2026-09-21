@@ -309,10 +309,10 @@ async function ensureConnector(db: DbAdapter, item: ChannelConnectorSyncItem, bi
   await db.execute(
     `INSERT INTO connector_instances (
        agent_id, provider, connector_kind, transport, connector_uri,
-       status, trust_status, capabilities, metadata, last_seen_at
+       status, trust_status, capabilities, metadata
      ) VALUES (
        $1, $2, 'chat_adapter', 'discord_gateway', $3,
-       'active', 'local', $4, $5, NOW()
+       'active', 'local', $4, $5
      )`,
     [
       item.adapter_owner_agent_id,

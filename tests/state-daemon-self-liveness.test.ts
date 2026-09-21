@@ -1,3 +1,4 @@
+import {unitRuntimeAuthority,unitRuntimeInspector} from './helpers/logical-runtime-unit-fixture'
 /**
  * Crash-only self-liveness (#940 liveness definition D2/D3/D4).
  *
@@ -221,6 +222,7 @@ describe('state-daemon self-liveness (crash-only)', () => {
     const db = {
       query: async (sql: string, params?: unknown[]) => {
         if (sql.includes('SELECT DISTINCT mq.agent_id')) return { rows: pairs, rowCount: pairs.length }
+        if (sql.includes('JOIN control_plane_leases')) return {rows:[unitRuntimeAuthority(String(params?.[0]))],rowCount:1}
         if (sql.includes('FROM agents')) {
           const id = String(params?.[0])
           const eligible = id === 'eligible-seat'
@@ -230,8 +232,7 @@ describe('state-daemon self-liveness (crash-only)', () => {
               agent_type: 'dev',
               runtime: 'codex',
               runtime_engine_preference: 'codex',
-              status: eligible ? 'idle' : 'offline',
-              profile_enabled: true,
+              profile_enabled: eligible,
               disabled_at: null,
             }],
             rowCount: 1,
@@ -246,6 +247,7 @@ describe('state-daemon self-liveness (crash-only)', () => {
     const clock = new FakeClock('2026-08-28T00:00:00.000Z')
     const daemon = new StateDaemon({
       db: db as any,
+      runtimeInspector: unitRuntimeInspector,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
       clock,

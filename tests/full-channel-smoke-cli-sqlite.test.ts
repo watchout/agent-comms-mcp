@@ -1,3 +1,4 @@
+import {observedSqliteRuntimeFixture} from './helpers/nonpersist-host-fixture'
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -49,8 +50,8 @@ function seedHealthyEvidence(dbPath: string): { inboundId: string; replyId: stri
   try {
     db.exec('PRAGMA foreign_keys = ON')
     db.prepare(
-      `INSERT INTO agents (agent_id, display_name, agent_type, status, profile_enabled, metadata)
-       VALUES ('hotel-dev', 'hotel-dev', 'dev', 'idle', 1, '{}')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type, profile_enabled, metadata)
+       VALUES ('hotel-dev', 'hotel-dev', 'dev', 1, '{}')`,
     ).run()
     db.prepare(`INSERT INTO channels (id, name, members) VALUES ('hotel-kanri', 'hotel-kanri', ?)`).run(
       JSON.stringify(['hotel-dev']),
@@ -64,13 +65,9 @@ function seedHealthyEvidence(dbPath: string): { inboundId: string; replyId: stri
        VALUES ('hotel-kanri', 'hotel-dev', 'hotel-dev', ?)`,
     ).run(JSON.stringify(['hotel-dev']))
     db.prepare(
-      `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, runtime_engine, status, last_seen_at, metadata)
-       VALUES (?, 'hotel-dev', 'codex', 'active', datetime('now'), '{}')`,
+      `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, metadata)
+       VALUES (?, 'hotel-dev', '{}')`,
     ).run(runtimeId)
-    db.prepare(
-      `INSERT INTO agent_endpoints (endpoint_id, agent_id, endpoint_uri, status, metadata)
-       VALUES (?, 'hotel-dev', 'local://hotel-dev', 'active', '{}')`,
-    ).run(randomUUID())
     db.prepare(
       `INSERT INTO connector_instances (connector_instance_id, agent_id, runtime_instance_id, provider, status, metadata)
        VALUES (?, 'hotel-dev', ?, 'discord', 'active', '{}')`,
@@ -119,12 +116,14 @@ function seedHealthyEvidence(dbPath: string): { inboundId: string; replyId: stri
 }
 
 describe('NORM-060 full-channel smoke CLI (SQLite)', () => {
-  test('smoke run dry-run reports lifecycle evidence without writes', () => {
+  test('smoke run dry-run reports lifecycle evidence without writes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-comms-full-smoke-cli-'))
     const dbPath = join(dir, 'agent-comms.db')
+    let host:Awaited<ReturnType<typeof observedSqliteRuntimeFixture>>|undefined
     try {
       migrateSqlite(dbPath)
       const { inboundId, replyId } = seedHealthyEvidence(dbPath)
+      host=await observedSqliteRuntimeFixture(dbPath,'hotel-dev')
 
       const before = tableCounts(dbPath)
       const result = runSmokeCli(dbPath, ['--format', 'json', '--window-hours', '24'])
@@ -145,16 +144,19 @@ describe('NORM-060 full-channel smoke CLI (SQLite)', () => {
       expect(target.lifecycle.audit_event_types).toContain('smoke.fixture_terminal')
       expect(tableCounts(dbPath)).toEqual(before)
     } finally {
+      await host?.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('smoke run execute injects a bounded probe in SQLite', () => {
+  test('smoke run execute injects a bounded probe in SQLite', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-comms-full-smoke-cli-'))
     const dbPath = join(dir, 'agent-comms.db')
+    let host:Awaited<ReturnType<typeof observedSqliteRuntimeFixture>>|undefined
     try {
       migrateSqlite(dbPath)
       seedHealthyEvidence(dbPath)
+      host=await observedSqliteRuntimeFixture(dbPath,'hotel-dev')
 
       const dry = runSmokeCli(dbPath, ['--format', 'json', '--window-hours', '24'])
       expect(dry.status).toBe(0)
@@ -210,6 +212,7 @@ describe('NORM-060 full-channel smoke CLI (SQLite)', () => {
         db.close()
       }
     } finally {
+      await host?.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })

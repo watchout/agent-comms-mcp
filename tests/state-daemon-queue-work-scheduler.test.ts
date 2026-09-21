@@ -1107,7 +1107,7 @@ describe('state_daemon queue work scheduler boundary', () => {
     expect(query?.sql).toContain('JOIN agents a')
     expect(query?.sql).toContain('a.profile_enabled = true')
     expect(query?.sql).toContain('a.disabled_at IS NULL')
-    expect(query?.sql).toContain("a.status NOT IN ('disabled', 'offline', 'retired')")
+    expect(query?.sql).not.toContain('a.status')
     expect(query?.sql).toContain("mq.payload::jsonb #>> '{receive_claim,source}' = $2")
     expect(query?.sql).toContain("mq.payload::jsonb #>> '{queue_work_execution,source}' = $2")
     expect(query?.sql).toContain("mq.payload::jsonb #>> '{runner_result,invocation_source}' = $2")

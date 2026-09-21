@@ -18,6 +18,8 @@ Args: ${changes.args ?? 'run --cwd /workspace /repo/server.ts'}
 Environment:
   AGENT_ID=${changes.agent ?? 'claude-probe'}
   AGENT_COM_EXPECTED_AGENT_ID=claude-probe
+  AGENT_COM_WORKSPACE=/workspace
+  AGENT_COM_RUNTIME_SESSION=runtime:claude-probe
   DATABASE_URL=${changes.database ?? 'postgresql:///probe'}
   AGENT_COM_PG_NOTIFY=false
   AGENT_COMMS_TTL_SWEEP_DISABLED=1

@@ -1315,7 +1315,7 @@ async function unregisterAgent(): Promise<void> {
   stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
-    await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid, lease:runtimeLeaseReceipt})
+    if (runtimeLeaseReceipt) await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid, lease:runtimeLeaseReceipt})
     const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
       agentId: AGENT_ID,
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -2193,7 +2193,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
       await claimUnboundedRuntimeQueue(client,{agentId,queueId:row.id,ttlSeconds:claimTtlSec,
-        runtimeInstanceId:RUNTIME_INSTANCE_ID})
+        runtimeInstanceId:agentId===AGENT_ID?RUNTIME_INSTANCE_ID:undefined})
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
       // semantics, busy/idle is derived from the actual open-claim set,

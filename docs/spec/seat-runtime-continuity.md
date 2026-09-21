@@ -122,7 +122,23 @@ limited to request-local observations/diagnostics.
 Reconcile and bootstrap READY/IDEMPOTENT_READY use fresh runtime/account and
 native configuration readback, never that table. Existing desired-outbox
 `delivered_at` and logical event/audit represent durable completion, still
-requiring exact desired revision/digest and current holder/fence. B3 calls the
+requiring exact desired revision/digest and current holder/fence.
+The cycle-3 outbox correction distinguishes delivery from supersession. A newer
+logical desired revision makes older pending events obsolete, even when policy
+returns to the same digest. Under the exact current desired/maintenance-holder
+fence, mark at most 100 older events with `superseded_at`,
+`superseded_by_revision` and `superseded_by_digest`; leave their `delivered_at`
+and attempt count unchanged. Current/future revisions and already terminal rows
+cannot be superseded. Lock the current profile, lease and selected events, and
+check expiry after lock acquisition. Invalid holder/fence/current desired yields
+zero updates. Keep old payload/revision/digest and existing delivery history.
+Pending selection excludes both terminal forms and selects the newest pending
+event per agent before the global 100-agent limit. Thus a backlog of old events
+for one agent cannot consume the entire sweep or hide its current event; unused
+slots remain available to periodic due agents. Reconciliation can remove old
+events without asserting that the old configuration was applied. Normal current
+event delivery and fresh native readback keep their existing fences.
+B3 calls the
 ordinary profile writer with stable enrollment fields only and updates the same
 logical release handoff for both new and existing enabled profiles. Its rollback
 restores only the logical fields it changed, preserves physical history and

@@ -449,13 +449,13 @@ export async function resolveRuntimeMemoryReadyCurrent(
         })
       }
     } else {
-      if (instance.runtime_engine !== profile.runtime_kind) {
+      if (profile.runtime_kind !== null && instance.runtime_engine !== profile.runtime_kind) {
         mismatches.push({ field: 'runtime_engine', expected: profile.runtime_kind, observed: instance.runtime_engine })
       }
-      if (instance.session_name !== profile.session_name) {
+      if (profile.session_name !== null && instance.session_name !== profile.session_name) {
         mismatches.push({ field: 'session_name', expected: profile.session_name, observed: instance.session_name })
       }
-      if (instance.checkout_path !== profile.home_directory) {
+      if (profile.home_directory !== null && instance.checkout_path !== profile.home_directory) {
         mismatches.push({ field: 'checkout_path', expected: profile.home_directory, observed: instance.checkout_path })
       }
     }

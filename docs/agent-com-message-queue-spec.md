@@ -981,47 +981,17 @@ disconnected → idle:      heartbeat再開時
 
 ### 8.2 送信者フィードバック
 
-```typescript
-async function notifySenderOfDeliveryStatus(
-  senderId: string, targetId: string, messageId: string
-) {
-  const target = await db.getAgent(targetId);
+v2 非保存契約では `agents.status` / `status_detail` を読んで配信状態を判定しない。
+論理登録済みの送信者・受信者について、期限内の active queue claim があれば
+`{ emitted: 'system_info', reason: 'queue-skip' }` を返す。Issue #251(b) により
+busy 通知は queue に INSERT せず、呼出し側の counter と stderr で観測する。
+処理内容や status_detail をコピーしない。
 
-  // idle → フィードバック不要（即配信）
-  if (target.status === "idle") return;
-
-  // busy → ビジー通知
-  if (target.status === "busy") {
-    const pending = await db.countPending(targetId);
-    const elapsed = target.status_updated_at
-      ? Math.floor((Date.now() - new Date(target.status_updated_at).getTime()) / 1000)
-      : null;
-
-    await db.insertQueue(senderId, null, JSON.stringify({
-      author_id: "system",
-      content: `⏳ ${targetId} はタスク処理中` +
-        (elapsed ? `、${elapsed}秒経過` : "") +
-        `。キューに入りました（待ち${pending}件）。処理完了後に配信されます。`,
-      message_type: "system_info",
-      channel_name: "system",
-    }));
-    return;
-  }
-
-  // disconnected → エラー通知 + watchdog通知
-  if (target.status === "disconnected") {
-    await db.insertQueue(senderId, null, JSON.stringify({
-      author_id: "system",
-      content: `⚠️ ${targetId} はオフラインです。` +
-        `メッセージはキューに保存されました。セッション復旧後に配信されます。`,
-      message_type: "system_error",
-      channel_name: "system",
-    }));
-    await notifyWatchdog(targetId, "disconnected");
-    return;
-  }
-}
-```
+active claim がない場合は現在の OS 観測を行う。正常な列挙で live runtime が
+存在しないことを確認できた場合のみ、送信者の queue に system_error の
+復旧待ち通知を1件保存する。観測エラー・曖昧な holder は unknown とし、
+オフラインと断定しない。live holder / 自己送信 / 未登録の送信者は通知不要。
+すべて best-effort で、通知失敗を元の送信処理の失敗にしない。
 
 ### 8.3 busy解除時の対応開始通知
 

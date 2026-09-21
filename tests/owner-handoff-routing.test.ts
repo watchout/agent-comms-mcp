@@ -21,10 +21,10 @@ async function withOwnerHandoffDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Pro
     migrateSqlite(dbPath)
     const seed = new Database(dbPath)
     seed.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, status)
+      INSERT INTO agents (agent_id, display_name, agent_type)
       VALUES
-        ('codex-cto', 'codex-cto', 'lead', 'idle'),
-        ('dev-001', 'dev-001', 'dev', 'idle')
+        ('codex-cto', 'codex-cto', 'lead'),
+        ('dev-001', 'dev-001', 'dev')
     `)
     seed.exec(`INSERT INTO channels (id, name, members) VALUES ('ops-ch', 'ops-ch', '["codex-cto","dev-001"]')`)
     seed.close()

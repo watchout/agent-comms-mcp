@@ -35,9 +35,8 @@ async function fixture(run: (db: PgAdapter) => Promise<void>) {
 
 }
 async function seed(db:PgAdapter,agent:string,port:number|null=8801) {
-  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,runtime_engine_preference,home_directory,channel_port,
-    expected_provider_identity,provider_token_source_ref,ordinary_projection,desired_control_refs,desired_release_commit,desired_release_tree)
-    VALUES($1,$1,'bot','TUI',true,$2,$3,$4,'{"account_id":"fixture"}'::jsonb,'secret-ref:fixture/provider',$5::jsonb,$6::jsonb,$7,$8)`,
+  await db.execute(`INSERT INTO agents(agent_id, display_name, agent_type, runtime, profile_enabled, runtime_engine_preference, home_directory, channel_port, expected_provider_identity, provider_token_source_ref, ordinary_projection, desired_control_refs, desired_release_commit, desired_release_tree)
+    VALUES($1, $1, 'bot', 'TUI', true, $2, $3, $4, '{"account_id":"fixture"}'::jsonb, 'secret-ref:fixture/provider', $5::jsonb, $6::jsonb, $7, $8)`,
     [agent,port===null?null:'codex',port===null?null:'/old/'+agent,port,JSON.stringify(projection),JSON.stringify(['fixture:owner','fixture:design','fixture:owner']),'a'.repeat(40),'b'.repeat(40)])
 }
 async function row(db:PgAdapter,agent:string) { return await db.queryOne<any>('SELECT * FROM agents WHERE agent_id=$1',[agent]) }
@@ -62,8 +61,8 @@ async function protectedSnapshot(db:PgAdapter) {
 }
 async function seedHistory(db:PgAdapter,agent:string) {
   const runtime=randomUUID(),lease=randomUUID(),message=randomUUID(),old=await row(db,agent)
-  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,host_id,session_name,process_id,port,checkout_path,status,metadata)
-    VALUES($1,$2,'codex','local_process','fixture-host','fixture-session',12345,47891,'/observed/workspace','running','{"memory_project":"product-fixture"}')`,[runtime,agent])
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id, agent_id, runtime_kind, metadata)
+    VALUES($1, $2, 'local_process', '{"memory_project":"product-fixture"}')`,[runtime,agent])
   await db.execute(`INSERT INTO agent_endpoints(agent_id,endpoint_uri) VALUES($1,'http://127.0.0.1:47891')`,[agent])
   await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at)
     VALUES($1,'runtime_instance',$2::text,'worker',$3,$2::uuid,3,'active',now()+interval '1 hour')`,[lease,runtime,agent])

@@ -383,8 +383,7 @@ export async function reconcileRuntimeMemoryReadyFleetIdentity(
     db,
     `SELECT agent_id
        FROM agents
-      WHERE status IN ('idle', 'busy')
-        AND COALESCE(profile_enabled, true) = true
+      WHERE COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
         AND COALESCE(agent_type, 'dev') <> 'human'
         ${agentScope}
@@ -411,8 +410,7 @@ export async function queryRuntimeMemoryReadyIdentityMonitor(
     db,
     `SELECT agent_id
        FROM agents
-      WHERE status IN ('idle', 'busy')
-        AND COALESCE(profile_enabled, true) = true
+      WHERE COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
       ORDER BY agent_id`,
   )

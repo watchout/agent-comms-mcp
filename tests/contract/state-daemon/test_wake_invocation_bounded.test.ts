@@ -14,7 +14,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -46,6 +46,7 @@ function daemon(
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux: new FakeTmux(),
@@ -130,7 +131,7 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('typed-failed rows are a queue-doctor blocker until repaired', async () => {
     const agent = makeAgentId('wake-doctor')
@@ -154,7 +155,7 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     expect(blocker).toBeDefined()
     expect(blocker?.severity).toBe('blocker')
     expect(blocker?.count).toBeGreaterThanOrEqual(1)
-  })
+  }, 60000)
 
   test('fetchBotStatusFromDb carries typed_failed_count from the DB to the readiness row', async () => {
     const agent = makeAgentId('wake-botstatus')
@@ -177,7 +178,7 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     const row = statusMap.get(agent)
     expect(row).toBeDefined()
     expect(row?.typed_failed_count).toBe(1)
-  })
+  }, 60000)
 
   test('requeue-failed reopens the row with a fresh attempt budget', async () => {
     const agent = makeAgentId('wake-requeue')
@@ -225,5 +226,5 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

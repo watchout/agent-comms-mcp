@@ -151,7 +151,7 @@ export async function verifyFixtureEndpoint(endpoint:string,major:16|17):Promise
 
 export async function seedNormalTransport(admin: Client): Promise<void> {
   await admin.query("INSERT INTO channels(id,name,members) VALUES('fixture-channel','bounded fixture',ARRAY['qa','codex-cto','different-consumer']) ON CONFLICT(id) DO NOTHING")
-  await admin.query("INSERT INTO agents(agent_id,display_name,agent_type,status,runtime) VALUES('qa','QA','dev','idle','TUI'),('codex-cto','CTO','dev','idle','TUI'),('different-consumer','Projection fixture','dev','idle','TUI') ON CONFLICT(agent_id) DO NOTHING")
+  await admin.query("INSERT INTO agents(agent_id, display_name, agent_type) VALUES('qa', 'QA', 'dev'),('codex-cto', 'CTO', 'dev'),('different-consumer', 'Projection fixture', 'dev') ON CONFLICT(agent_id) DO NOTHING")
   await admin.query("INSERT INTO channel_adapters(channel_id,platform,external_id,metadata) VALUES('fixture-channel','discord','999999999999999999','{\"adapter_owner_agent_id\":\"different-consumer\"}')")
   const connector=(await admin.query("INSERT INTO connector_instances(agent_id,status) VALUES('different-consumer','active') RETURNING connector_instance_id")).rows[0].connector_instance_id
   await admin.query("INSERT INTO connector_credentials(agent_id,connector_instance_id,secret_ref,status) VALUES('different-consumer',$1,'fixture:never-resolve','active')",[connector])

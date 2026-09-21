@@ -1527,6 +1527,7 @@ async function migrate() {
 
   await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-21-runtime-observation-nonpersistence.up.sql'), 'utf8'))
   await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-21-runtime-observation-restart-contract.up.sql'), 'utf8'))
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-22-configuration-outbox-supersession.up.sql'), 'utf8'))
 
   console.log('Migration complete.')
   await client.end()

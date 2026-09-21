@@ -1,3 +1,5 @@
+import {unitRuntimeObservation} from '../helpers/logical-runtime-unit-fixture'
+import type {HostRuntimeObservation} from '../../core/host-runtime-observer'
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
@@ -8,7 +10,7 @@ import {
   getAutoSkipPatterns,
 } from '../../config/auto-skip-patterns'
 import {
-  fetchBotStatusFromDb,
+  fetchBotStatusFromDb as realFetchBotStatusFromDb,
   formatPendingAge,
   type BotHealthState,
 } from '../../core/bot-status-db'
@@ -189,6 +191,19 @@ describe('Issue #277 (heartbeat) — buildLine threshold logic', () => {
 const DATABASE_URL = process.env.DATABASE_URL
 const dbDescribe = DATABASE_URL ? describe : describe.skip
 
+const currentHosts = new Map<string,HostRuntimeObservation>()
+let observationFault: Record<string,unknown>|null=null
+const fetchBotStatusFromDb=(client:Client)=>{
+  let reads=0
+  return realFetchBotStatusFromDb(client,{inspect:input=>{
+    reads++
+    if(observationFault?.host_id)return {reasonCode:'HOST_MISMATCH',observations:[]}
+    const observations=[...currentHosts.values()].filter(row=>row.agent_id===input.agentId&&(!input.runtimeInstanceId||row.runtime_instance_id===input.runtimeInstanceId))
+      .map(row=>reads>1&&observationFault?{...row,...observationFault}:row)
+    return {reasonCode:observations.length?'OBSERVED':'NO_LIVE_RUNTIME',observations}
+  }})
+}
+
 dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
   let client: Client
   const TEST_AGENT = `test-hb-${randomUUID().slice(0, 8)}`
@@ -205,32 +220,26 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     )
     await client.query(`DELETE FROM connector_instances WHERE agent_id = $1`, [agentId])
     await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+    for(const [id,host] of currentHosts)if(host.agent_id===agentId)currentHosts.delete(id)
+    observationFault=null
   }
 
-  const seedRuntime = async (runtimeId: string) => {
-    await client.query(`INSERT INTO agent_runtime_instances
-      (runtime_instance_id, agent_id, runtime_engine, runtime_kind, status,
-       host_id, process_id, port, endpoint_uri, last_seen_at)
-      VALUES ($1, $2, 'TUI', 'local_process', 'active', $3, 4201, 41234,
-        'http://127.0.0.1:41234', NOW())`, [runtimeId, TEST_AGENT, hostname()])
+  const seedRuntime = async (runtimeId:string, visible=true, agentId=TEST_AGENT) => {
+    await client.query(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind) VALUES($1,$2,'local_process')`,[runtimeId,agentId])
+    if(visible)currentHosts.set(runtimeId,unitRuntimeObservation(agentId,{runtime_instance_id:runtimeId,observed_at:new Date().toISOString()}))
   }
-  const seedLease = async (runtimeId: string, connectorId: string) => {
-    await client.query(`INSERT INTO control_plane_leases
-      (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
-       holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at, metadata)
-      VALUES ('runtime_instance', $1, 'worker', $2, $3, $4, 1, NOW() + INTERVAL '5 minutes', $5::jsonb)`,
-      [runtimeId, TEST_AGENT, runtimeId, connectorId, JSON.stringify({
-        endpoint_uri: 'http://127.0.0.1:41234', port: 41234, process_id: 4201,
-      })])
+  const seedLease = async (runtimeId:string,connectorId:string|null,agentId=TEST_AGENT) => {
+    await client.query(`INSERT INTO control_plane_leases(lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,holder_connector_instance_id,fencing_token,expires_at,metadata)
+      VALUES('runtime_instance',$1,'worker',$2,$3,$4,1,NOW()+INTERVAL '5 minutes','{}')`,[runtimeId,agentId,runtimeId,connectorId])
   }
 
   beforeAll(async () => {
     client = new Client({ connectionString: DATABASE_URL })
     await client.connect()
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
-       VALUES ($1, $1, 'dev', 'claude-code', 'idle', now() - INTERVAL '10 seconds')
-       ON CONFLICT (agent_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, status = 'idle'`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev')
+       ON CONFLICT (agent_id) DO NOTHING`,
       [TEST_AGENT],
     )
   })
@@ -253,8 +262,8 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(row).toBeDefined()
     expect(row!.pending_count).toBe(0)
     expect(row!.oldest_pending_at).toBeNull()
-    expect(['healthy', 'busy_active', 'busy_stuck', 'crashed', 'offline'] as BotHealthState[]).toContain(row!.health_state)
-    expect(row!.endpoint_lease_state).toBe('not_applicable')
+    expect(['healthy', 'busy_active', 'busy_stuck', 'crashed', 'offline', 'unknown'] as BotHealthState[]).toContain(row!.health_state)
+    expect(row!.endpoint_lease_state).toBe('missing_runtime')
     expect(row!.active_endpoint_lease_count).toBe(0)
   })
 
@@ -293,8 +302,8 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
     expect(row.endpoint_lease_state).toBe('ok')
     expect(row.active_endpoint_lease_count).toBe(1)
-    expect(row.endpoint_lease_expires_at).not.toBeNull()
-    expect(row.endpoint_lease_heartbeat_at).not.toBeNull()
+    expect(row.endpoint_lease_expires_at).toBeNull()
+    expect(row.endpoint_lease_heartbeat_at).toBeNull()
 
     // Matching scope alone is insufficient: retain the exact current holder tuple.
     for (const mismatch of [
@@ -302,19 +311,17 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
       { endpoint_uri: 'http://127.0.0.1:41234', port: 41235, process_id: 4201 },
       { endpoint_uri: 'http://127.0.0.1:41234', port: 41234, process_id: 4202 },
     ]) {
-      await client.query('UPDATE control_plane_leases SET metadata = $2::jsonb WHERE lease_scope_id = $1',
-        [runtimeId, JSON.stringify(mismatch)])
+      await expect(client.query('UPDATE control_plane_leases SET metadata = $2::jsonb WHERE lease_scope_id = $1',
+        [runtimeId, JSON.stringify(mismatch)])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+      observationFault=mismatch
       row = (await fetchBotStatusFromDb(client)).get(TEST_AGENT)!
       expect(row.endpoint_lease_state).toBe('missing_lease')
       expect(row.active_endpoint_lease_count).toBe(0)
     }
-    await client.query(`UPDATE control_plane_leases SET metadata = $2::jsonb WHERE lease_scope_id = $1`,
-      [runtimeId, JSON.stringify({ endpoint_uri: 'http://127.0.0.1:41234', port: 41234, process_id: 4201 })])
-    await client.query('UPDATE agent_runtime_instances SET host_id = $2 WHERE runtime_instance_id = $1',
-      [runtimeId, 'foreign-fixture-host'])
+    await expect(client.query('UPDATE agent_runtime_instances SET host_id=$2 WHERE runtime_instance_id=$1',[runtimeId,'foreign-fixture-host'])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+    observationFault={host_id:'foreign-fixture-host'}
     expect((await fetchBotStatusFromDb(client)).get(TEST_AGENT)!.endpoint_lease_state).toBe('missing_lease')
-    await client.query('UPDATE agent_runtime_instances SET host_id = $2 WHERE runtime_instance_id = $1',
-      [runtimeId, hostname()])
+    observationFault=null
     await client.query("UPDATE control_plane_leases SET expires_at = NOW() - INTERVAL '1 second' WHERE lease_scope_id = $1", [runtimeId])
     expect((await fetchBotStatusFromDb(client)).get(TEST_AGENT)!.endpoint_lease_state).toBe('missing_lease')
   })
@@ -326,7 +333,7 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     const connectorB = randomUUID()
 
     await seedRuntime(runtimeA)
-    await seedRuntime(runtimeB)
+    await seedRuntime(runtimeB,false)
     await client.query(
       `INSERT INTO connector_instances
          (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, metadata)
@@ -352,7 +359,7 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
 
     await cleanupRuntimeEvidence(TEST_AGENT)
     await seedRuntime(runtimeA)
-    await seedRuntime(runtimeB)
+    await seedRuntime(runtimeB,false)
     await client.query(
       `INSERT INTO connector_instances
          (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, metadata)
@@ -393,47 +400,52 @@ dbDescribe('Issue #277 (D) — bot_status DB truth round-trip', () => {
     expect(ageSec).toBeGreaterThanOrEqual(110)
   })
 
-  test('case D-boundary-1 — status=busy + last_seen 3h ago classifies as busy_stuck (auditor BLOCK fix)', async () => {
+  test('case D-boundary-1 — unobserved busy hint cannot establish current health', async () => {
     const stuck = `test-stuck-${randomUUID().slice(0, 8)}`
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
-       VALUES ($1, $1, 'dev', 'claude-code', 'busy', now() - INTERVAL '3 hours')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev')`,
       [stuck],
     )
     try {
       const m = await fetchBotStatusFromDb(client)
-      expect(m.get(stuck)!.health_state).toBe('busy_stuck')
+      expect(m.get(stuck)!.health_state).toBe('unknown')
     } finally {
       await client.query(`DELETE FROM agents WHERE agent_id = $1`, [stuck])
     }
   })
 
-  test('case D-boundary-2 — status=idle + last_seen 3h ago classifies as crashed', async () => {
+  test('case D-boundary-2 — unobserved idle hint cannot establish a crash', async () => {
     const dead = `test-dead-${randomUUID().slice(0, 8)}`
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
-       VALUES ($1, $1, 'dev', 'claude-code', 'idle', now() - INTERVAL '3 hours')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev')`,
       [dead],
     )
     try {
       const m = await fetchBotStatusFromDb(client)
-      expect(m.get(dead)!.health_state).toBe('crashed')
+      expect(m.get(dead)!.health_state).toBe('unknown')
     } finally {
       await client.query(`DELETE FROM agents WHERE agent_id = $1`, [dead])
     }
   })
 
-  test('case D-boundary-3 — status=busy + recent heartbeat classifies as busy_active', async () => {
+  test('case D-boundary-3 — current holder with an active claim classifies as busy_active', async () => {
     const active = `test-active-${randomUUID().slice(0, 8)}`
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
-       VALUES ($1, $1, 'dev', 'claude-code', 'busy', now() - INTERVAL '10 seconds')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev')`,
       [active],
     )
+    const id=randomUUID()
+    await seedRuntime(id,true,active);await seedLease(id,null,active)
+    await client.query(`INSERT INTO message_queue(agent_id,message_id,payload,status,claimed_by,claimed_runtime_instance_id,claimed_at,claim_expires_at) VALUES($1,$2,'{}','in_progress',$1,$3,now(),now()+interval '1 minute')`,[active,randomUUID(),id])
     try {
       const m = await fetchBotStatusFromDb(client)
       expect(m.get(active)!.health_state).toBe('busy_active')
     } finally {
+      await client.query(`DELETE FROM message_queue WHERE agent_id=$1`,[active])
+      await cleanupRuntimeEvidence(active)
       await client.query(`DELETE FROM agents WHERE agent_id = $1`, [active])
     }
   })

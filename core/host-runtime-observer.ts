@@ -44,6 +44,22 @@ function field(command: string, key: string): string | null {
 function start(value: string): string {
   const text=value.trim(); return new Date(/^\d{4}-\d\d-\d\dT/.test(text)?text:`${text} UTC`).toISOString()
 }
+/** Distinguish the server's optional MCP transport from its runtime bridge.
+ * All listeners come from the same OS-owned process; configuration is read fresh.
+ */
+function runtimeListenerPorts(listeners: string[], env: string): number[] | null {
+  const configured = field(env, 'AGENT_COMMS_PORT')
+  const multiBot = configured !== null || field(env, 'EXPECTED_BOTS') !== null
+  const auxiliary = multiBot ? Number(configured ?? '8800') : null
+  if (multiBot && (!/^\d+$/.test(configured ?? '8800') || !Number.isSafeInteger(auxiliary) || auxiliary! < 1 || auxiliary! > 65535)) return null
+  const runtimeListeners = listeners.filter(value => {
+    const match = /^(?:127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]):(\d+)$/.exec(value)
+    return auxiliary === null || !match || Number(match[1]) !== auxiliary
+  })
+  if (runtimeListeners.some(value => !/^127\.0\.0\.1:\d+$/.test(value))) return null
+  const ports = [...new Set(runtimeListeners.map(value => Number(value.slice(value.lastIndexOf(':') + 1))))]
+  return ports.length === 1 && ports[0] > 0 && ports[0] <= 65535 ? ports : null
+}
 /** A single absolute monotonic deadline covers enumeration and every candidate. */
 function hostRuntimeObserver(adapter: HostRuntimeIo, native:boolean) {
   return (input:HostRuntimeInspectionInput) => {
@@ -63,7 +79,17 @@ function hostRuntimeObserver(adapter: HostRuntimeIo, native:boolean) {
       const observations:Array<HostRuntimeObservation|NativeHostRuntimeObservation>=[]
       for(const candidate of processes) {
         if(!/(?:^|\s|\/)server\.[cm]?[jt]s(?:\s|$)/.test(candidate.command)) continue
-        const env=run('ps',['eww','-p',String(candidate.pid),'-o','command='])
+        let env:string
+        try { env=run('ps',['eww','-p',String(candidate.pid),'-o','command=']) }
+        catch(error) {
+          // Enumeration is not atomic. An unrelated server can exit before we
+          // read its seat identity. Confirm absence; an unreadable live process
+          // remains fail-closed, and all reads share the original deadline.
+          const currentPids=run('ps',['-axo','pid=']).split(/\s+/).filter(Boolean).map(Number)
+          if(!currentPids.length || currentPids.some(pid=>!Number.isSafeInteger(pid)||pid<1))throw error
+          if(!currentPids.includes(candidate.pid))continue
+          throw error
+        }
         if(field(env,'AGENT_ID')!==input.agentId) continue
         const uuid=field(env,'AGENT_COM_RUNTIME_INSTANCE_ID')
         if(!uuid || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid)) return fail('RUNTIME_UUID_UNBOUND')
@@ -82,8 +108,8 @@ function hostRuntimeObserver(adapter: HostRuntimeIo, native:boolean) {
           // deriving a provider or requiring an LLM parent.
           const listeners=run('lsof',['-nP','-a','-p',String(candidate.pid),'-iTCP','-sTCP:LISTEN','-Fn'])
             .split('\n').filter(l=>l.startsWith('n')).map(l=>l.slice(1))
-          const ports=[...new Set(listeners.map(v=>/^127\.0\.0\.1:(\d+)$/.exec(v)?.[1]).filter(Boolean).map(Number))]
-          if(ports.length!==1 || listeners.some(v=>!/^127\.0\.0\.1:\d+$/.test(v))) return fail('SOCKET_OWNER_AMBIGUOUS')
+          const ports=runtimeListenerPorts(listeners,env)
+          if(!ports) return fail('SOCKET_OWNER_AMBIGUOUS')
           if(processStart()!==before || run('ps',['eww','-p',String(candidate.pid),'-o','command='])!==env) return fail('PROCESS_IDENTITY_CHANGED')
           const observed=adapter.wall()
           if(observed<wall || adapter.monotonic()>=deadline) return fail('HOST_OBSERVATION_DEADLINE')
@@ -105,8 +131,8 @@ function hostRuntimeObserver(adapter: HostRuntimeIo, native:boolean) {
         const providerEnv=run('ps',['eww','-p',String(process.pid),'-o','command='])
         const listeners=run('lsof',['-nP','-a','-p',String(candidate.pid),'-iTCP','-sTCP:LISTEN','-Fn'])
           .split('\n').filter(l=>l.startsWith('n')).map(l=>l.slice(1))
-        const ports=[...new Set(listeners.map(v=>/^127\.0\.0\.1:(\d+)$/.exec(v)?.[1]).filter(Boolean).map(Number))]
-        if(ports.length!==1 || listeners.some(v=>!/^127\.0\.0\.1:\d+$/.test(v))) return fail('SOCKET_OWNER_AMBIGUOUS')
+        const ports=runtimeListenerPorts(listeners,env)
+        if(!ports) return fail('SOCKET_OWNER_AMBIGUOUS')
         if(processStart()!==before
           || start(run('ps',['-p',String(process.pid),'-o','lstart=']))!==providerStart
           || run('ps',['eww','-p',String(candidate.pid),'-o','command='])!==env) return fail('PROCESS_IDENTITY_CHANGED')

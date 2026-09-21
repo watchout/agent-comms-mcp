@@ -396,7 +396,8 @@ export function migrateSqlite(dbPath?: string): void {
        AND agent_type <> 'human'
        AND COALESCE(profile_enabled, 1) = 1
   `)
-  gatedExec(`UPDATE agents SET runtime = 'TUI' WHERE runtime IS NULL OR runtime = '' OR runtime = 'unknown'`)
+  // Runtime observations stay NULL after cutover, including on migration re-entry.
+  // Existing legacy values are history; neither backfill nor overwrite them.
   gatedExec(`UPDATE agents SET registered_at = COALESCE(registered_at, created_at, datetime('now')) WHERE registered_at IS NULL OR registered_at = ''`)
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_agent_uri ON agents(agent_uri) WHERE agent_uri IS NOT NULL`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope)`)

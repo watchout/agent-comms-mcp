@@ -1,24 +1,38 @@
 import { Database } from 'bun:sqlite'
 import { Client } from 'pg'
 import { randomUUID, createHash } from 'node:crypto'
-import { readFileSync, writeFileSync, realpathSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { readFileSync, writeFileSync, realpathSync, mkdtempSync } from 'node:fs'
+import { join, dirname, isAbsolute } from 'node:path'
 import { applyRuntimeObservationNonpersistenceSqlite } from '../../db/migrate-sqlite'
 
 export const baseline='174c04e7db86b5fbc89c4bce08dbe48583c5ffac'
 export const repo=join(import.meta.dir,'../..')
 export const upgrade=readFileSync(join(repo,'db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql'),'utf8')
 export const digest=(v:unknown)=>createHash('sha256').update(typeof v==='string'?v:JSON.stringify(v)).digest('hex')
-export type Fixture={kind:'postgres'|'sqlite',query:(sql:string,values?:unknown[])=>Promise<any[]>,exec:(sql:string)=>Promise<void>,apply:()=>Promise<void>,close:()=>Promise<void>,db?:Database,name:string}
+export type Fixture={kind:'postgres'|'sqlite',query:(sql:string,values?:unknown[])=>Promise<any[]>,exec:(sql:string)=>Promise<void>,apply:()=>Promise<void>,close:()=>Promise<void>,db?:Database,name:string,databaseUrl:string}
 const gate={AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED:'1'}
 function fixtureEnv(extra:Record<string,string>) {return {PATH:process.env.PATH!,LANG:'C',...gate,...extra}}
 export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixture> {
- const root=process.env.AUN_NP_FIXTURE_ROOT
  const raw=process.env.AGENT_COM_TEST_DATABASE_URL
- if(!root||!raw||!/^\/private\/tmp\/aun-(?:np-db|independent-pg)-[A-Za-z0-9_-]+$/.test(realpathSync(root)))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+ if(!raw)throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
  const url=new URL(raw)
- if(url.username!=='fixture'||url.password||url.hostname!=='localhost'||realpathSync(url.searchParams.get('host')??'')!==join(realpathSync(root),'socket'))throw Error('PRIVATE_SOCKET_FIXTURE_ONLY')
- const name='np_'+randomUUID().replaceAll('-','')
+ // Public PR Checks owns disposable PostgreSQL services. Admit only that explicit
+ // CI binding, never an ambient DATABASE_URL or arbitrary remote database.
+ const ci=process.env.CI==='true' && process.env.GITHUB_ACTIONS==='true'
+   && process.env.GITHUB_REPOSITORY==='watchout/agent-comms-mcp'
+   && !!process.env.RUNNER_TEMP && isAbsolute(process.env.RUNNER_TEMP)
+   && ['postgres:','postgresql:'].includes(url.protocol)
+   && ['localhost','127.0.0.1'].includes(url.hostname) && !url.search
+   && url.username==='postgres' && url.password==='postgres'
+   && ((url.port==='5432' && url.pathname==='/agent_comms_test')
+     || (url.port==='5433' && url.pathname==='/agent_comms_bounded17_test'))
+ if(ci && !process.env.AUN_NP_FIXTURE_ROOT)process.env.AUN_NP_FIXTURE_ROOT=mkdtempSync(join(realpathSync(process.env.RUNNER_TEMP!),'aun-np-db-'))
+ const root=process.env.AUN_NP_FIXTURE_ROOT
+ if(!root || (ci
+   ? dirname(realpathSync(root))!==realpathSync(process.env.RUNNER_TEMP!) || !/^aun-np-db-[A-Za-z0-9_-]+$/.test(root.split('/').at(-1)!)
+   : !/^\/private\/tmp\/aun-(?:np-db|independent-pg)-[A-Za-z0-9_-]+$/.test(realpathSync(root))))throw Error('EXPLICIT_OWNED_FIXTURE_REQUIRED')
+ if(!ci && (url.username!=='fixture'||url.password||url.hostname!=='localhost'||realpathSync(url.searchParams.get('host')??'')!==join(realpathSync(root),'socket')))throw Error('PRIVATE_SOCKET_FIXTURE_ONLY')
+ const name='np_'+randomUUID().replaceAll('-','')+'_test'
  let pg:Client|undefined,db:Database|undefined,admin:Client|undefined
  const oldSqlite=Bun.spawnSync(['git','show',`${baseline}:db/migrate-sqlite.ts`],{cwd:repo,stdout:'pipe',stderr:'pipe'})
  const oldPg=Bun.spawnSync(['git','show',`${baseline}:db/migrate.ts`],{cwd:repo,stdout:'pipe',stderr:'pipe'})
@@ -32,7 +46,8 @@ export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixt
    admin=new Client({connectionString:raw});await admin.connect()
    const id=(await admin.query("SELECT current_database() db,current_user actor,current_setting('server_version') version,current_setting('unix_socket_directories') socket,current_setting('listen_addresses') listen")).rows[0]
    console.log(JSON.stringify({case:'fixture-identity',kind,name,...id}))
-   if(id.actor!=='fixture'||!id.version.startsWith('17.')||id.socket!==join(root,'socket')||id.listen!=='')throw Error('FIXTURE_IDENTITY_MISMATCH')
+   if(ci ? id.actor!=='postgres'||!/^1[67]\./.test(id.version)||id.db!==url.pathname.slice(1)
+     : id.actor!=='fixture'||!id.version.startsWith('17.')||id.socket!==join(root,'socket')||id.listen!=='')throw Error('FIXTURE_IDENTITY_MISMATCH')
    await admin.query(`CREATE DATABASE ${name}`)
    const next=new URL(raw);next.pathname='/'+name;target=next.href
  } else target=file
@@ -52,7 +67,7 @@ export async function fixture(kind:'postgres'|'sqlite',fresh=false):Promise<Fixt
  // SQLite EventLog is normally installed by its own existing schema owner.
  // This fixture uses that exact base table before DB guard installation.
  if(kind==='sqlite')await exec(`CREATE TABLE IF NOT EXISTS event_log(seq INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,event_type TEXT NOT NULL,occurred_at TEXT NOT NULL DEFAULT(datetime('now')),seat_id TEXT,seat_instance_id TEXT,conversation_id TEXT,causation_id TEXT,correlation_id TEXT,turn_id TEXT,reply_id TEXT,claim_epoch INTEGER,payload TEXT NOT NULL DEFAULT '{}')`)
- return {kind,name,query,exec,db,apply:async()=>{if(pg)await pg.query(upgrade);else applyRuntimeObservationNonpersistenceSqlite(db!)},close:async()=>{if(pg)await pg.end();if(db)db.close();if(admin){await admin.query(`DROP DATABASE ${name}`);await admin.end()}}}
+ return {kind,name,databaseUrl:target,query,exec,db,apply:async()=>{if(pg)await pg.query(upgrade);else {const previous=process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED;process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED='1';try{applyRuntimeObservationNonpersistenceSqlite(db!)}finally{if(previous===undefined)delete process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED;else process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=previous}}},close:async()=>{if(pg)await pg.end();if(db)db.close();if(admin){await admin.query(`DROP DATABASE ${name}`);await admin.end()}}}
 }
 export async function insert(f:Fixture,table:string,value:Record<string,unknown>) {
  const keys=Object.keys(value);await f.query(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map((_,i)=>'$'+(i+1)).join(',')})`,Object.values(value))

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'bun:test'
+import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
 // PR #1 spec v3 §3 / ADR-001: parseLegacyGatewayEnv is defined in server.ts
@@ -21,6 +22,7 @@ async function runCase(raw: string | undefined): Promise<{ result: boolean; stde
   const proc = Bun.spawn(['bun', '-e', SNIPPET], {
     env: {
       ...process.env,
+      AGENT_COM_RUNTIME_INSTANCE_ID:randomUUID(),
       PARSE_RAW: raw === undefined ? '__UNDEFINED__' : raw,
       DISCORD_TOKEN: '',
       DISCORD_BOT_TOKEN: '',

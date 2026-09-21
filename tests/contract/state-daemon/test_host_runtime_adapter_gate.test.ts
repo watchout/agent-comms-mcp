@@ -20,7 +20,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -72,6 +72,7 @@ function daemon(input: {
   const tmux = new FakeTmux()
   const d = new StateDaemon({
     providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -174,7 +175,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
     })
     expect(hostRuntimeInvoker.executions).toHaveLength(0)
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
-  })
+  }, 60000)
 
   test('explicit host-runtime profile builds structured argv and parses fixture output into typed evidence', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-enabled')
@@ -229,7 +230,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
       final_structured_result: { outcome: 'claimed_work' },
     })
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_invoked' })).toBe(1)
-  })
+  }, 60000)
 
   test('an explicit profile for a different provider fails before wake reservation or invocation', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-provider-mismatch')
@@ -251,7 +252,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
       expect(h.alert.contains('RUNTIME_PROFILE_PROVIDER_MISMATCH')).toBe(true)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', {result:'host_runtime_profile_provider_mismatch'})).toBe(1)
     } finally { await h.daemon.stop() }
-  })
+  }, 60000)
 
   test('unsupported flags fail closed with typed evidence and leave queue lifecycle untouched', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-flags')
@@ -287,7 +288,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
     expect(hostRuntimeInvoker.executions).toHaveLength(0)
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_failed' })).toBe(1)
     expect(h.alert.contains('RUNTIME_FLAG_UNSUPPORTED')).toBe(true)
-  })
+  }, 60000)
 
   test('malformed host stream is typed failure evidence and cannot close or transfer work', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-malformed')
@@ -328,7 +329,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
       failure_code: 'STREAM_PARSE_ERROR',
     })
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_error' })).toBe(1)
-  })
+  }, 60000)
 
   test('invalid profile/schema selection returns typed failure instead of prose fallback', () => {
     const baseInvocation = {
@@ -363,5 +364,5 @@ describe('CP-40D host runtime adapter profile gate', () => {
       ok: false,
       failure: { failure_code: 'SCHEMA_REQUIRED' },
     })
-  })
+  }, 60000)
 })

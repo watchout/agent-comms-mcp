@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test, spyOn } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
@@ -8,6 +8,7 @@ import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
 import type { BootstrapExecutionPorts, BootstrapStageContext } from '../../bin/aun/bootstrap-types'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
+import {readNativeSeatContextReceipt} from '../../core/seat-context-recovery'
 import { bootstrapDigest } from '../../core/aun-bootstrap-state'
 import {
   DEFAULT_STATE_DAEMON_LISTENER_AGENT_ID,
@@ -19,6 +20,7 @@ import {
 import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
+import * as hostObserver from '../../core/host-runtime-observer'
 import { observeSeatProvider } from '../../core/seat-runtime-selection'
 import { resolveConfigurationRuntime } from '../../core/aun-configuration-candidate'
 
@@ -288,24 +290,21 @@ describe('aun bootstrap clean-host journal', () => {
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
     const profile = Bun.spawnSync([
       process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b5-rollback',
-      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
-      '--channel-port', '8812', '--tmux-session', 'b5-session', '--enabled', 'true', '--execute',
+      '--enabled', 'true', '--execute',
     ], { cwd: repoRoot, env })
     expect(profile.exitCode).toBe(0)
     const db = new SqliteAdapter(dbPath)
     await db.execute(
       `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5)`,
-      ['ordinary-b5', 'b5-rollback', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
+         (runtime_instance_id, agent_id, runtime_kind, metadata)
+       VALUES ($1, $2, 'local_process', $3)`,
+      ['ordinary-b5', 'b5-rollback', JSON.stringify({source_commit:'a'.repeat(40)})],
     )
     await db.execute(
       `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-       VALUES ($1, $2, 'codex', 'bootstrap_bound_provider', 'b5-session', 7312, 8812, $3, $4, 'running', now(), now(), $5)`,
-      ['bootstrap-b5', 'b5-rollback', repoRoot, 'a'.repeat(40), JSON.stringify({ bootstrap_run_id: 'b5-rollback-run' })],
+         (runtime_instance_id, agent_id, runtime_kind, metadata)
+       VALUES ($1, $2, 'bootstrap_bound_provider', $3)`,
+      ['bootstrap-b5', 'b5-rollback', JSON.stringify({schema_version:'aun-runtime-nonpersistence/v1',bootstrap_run_id: 'bootstrap-10000000-0000-4000-8000-000000000004'})],
     )
     const runtimeProjection = `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
                                       port, checkout_path, commit_sha, status, metadata
@@ -318,19 +317,19 @@ describe('aun bootstrap clean-host journal', () => {
       repoRoot,
     })
     const context = {
-      runId: 'b5-rollback-run', agentId: 'b5-rollback', requestedRuntime: 'codex', resolvedRuntime: 'codex',
+      runId: 'bootstrap-10000000-0000-4000-8000-000000000004', agentId: 'b5-rollback', requestedRuntime: 'codex', resolvedRuntime: 'codex',
       repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
       priorState: { mutations: [] } as any,
     } satisfies BootstrapStageContext
     const outcome = await ports.rollbackMutation(context, {
       mutation_id: 'b5-rollback-mutation', stage: 'B5_MEMORY_READINESS', kind: 'memory_readiness',
-      owner_key: 'memory:b5-rollback-run:bootstrap-b5:none', before_digest: bootstrapDigest(ordinaryBefore),
+      owner_key: 'memory:bootstrap-10000000-0000-4000-8000-000000000004:bootstrap-b5:none', before_digest: bootstrapDigest(ordinaryBefore),
       intended_after_digest: 'receipt', actual_after_digest: 'receipt',
       rollback_action: 'expire run-owned memory evidence and stop only a run-owned runtime receipt',
       rollback_status: 'not_run',
       rollback_payload: {
         runtime_instance_id: 'bootstrap-b5', runtime_created: true, evidence_id: null,
-        bootstrap_run_id: 'b5-rollback-run',
+        bootstrap_run_id: 'bootstrap-10000000-0000-4000-8000-000000000004',
         runtime_before_identities: [{ runtime_instance_id: 'ordinary-b5', row_digest: bootstrapDigest(ordinaryBefore) }],
       },
     })
@@ -342,7 +341,7 @@ describe('aun bootstrap clean-host journal', () => {
     const ordinaryAfter = await db.queryOne<any>(runtimeProjection, ['ordinary-b5', 'b5-rollback'])
     const bootstrapAfter = await db.queryOne<any>('SELECT status FROM agent_runtime_instances WHERE runtime_instance_id = $1', ['bootstrap-b5'])
     expect(bootstrapDigest(ordinaryAfter)).toBe(bootstrapDigest(ordinaryBefore))
-    expect(bootstrapAfter?.status).toBe('stopped')
+    expect(bootstrapAfter).toEqual({status:null})
     await db.close()
   })
 
@@ -354,7 +353,7 @@ describe('aun bootstrap clean-host journal', () => {
     const postgresDatabase = createPostgresTestDatabase(databaseName)
     postgresDatabases.push(postgresDatabase)
     const databaseUrl = postgresDatabase.databaseUrl
-    const native=await nativeHostFixture(home,repoRoot,'b5-concurrency','b5-concurrency-project','b5-session')
+    const native=await nativeHostFixture(home,repoRoot,'b5-concurrency','b5-concurrency-project','b5-session','accepted','ba000000-0000-4000-8000-000000000001')
     const baseEnv = {
       ...process.env,
       HOME: home,
@@ -368,8 +367,7 @@ describe('aun bootstrap clean-host journal', () => {
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env: baseEnv }).exitCode).toBe(0)
     const profileSet = Bun.spawnSync([
       process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b5-concurrency',
-      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
-      '--channel-port', '8812', '--tmux-session', 'b5-session', '--enabled', 'true', '--execute',
+      '--enabled', 'true', '--execute',
     ], { cwd: repoRoot, env: baseEnv })
     expect(profileSet.exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
@@ -395,11 +393,8 @@ describe('aun bootstrap clean-host journal', () => {
         const heartbeatDb = new PgAdapter(databaseUrl)
         try {
           await heartbeatDb.execute(
-            `UPDATE agent_runtime_instances
-                SET last_seen_at = now()
-              WHERE runtime_instance_id = $1
-                AND agent_id = $2
-                AND runtime_kind = 'local_process'`,
+            `UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '30 minutes'
+              WHERE holder_runtime_instance_id=$1 AND holder_agent_id=$2 AND lease_purpose='worker' AND status='active'`,
             ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency'],
           )
           ordinaryHeartbeatAdvances++
@@ -422,7 +417,7 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const runGate = async (runId: string) => {
       const env = { ...baseEnv }
-      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot, observeProvider:native.observeProvider })
+      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot, observeProvider:native.observeProvider,readNativeProof:input=>readNativeSeatContextReceipt({agentId:input.agentId,project:input.project,runtimeInstanceId:input.runtimeInstanceId,targetRuntime:'codex',providerPid:input.observation.provider_pid,providerStartedAt:input.observation.provider_started_at,hostSessionId:input.observation.host_session_id??undefined,transport:{command:native.node,args:[native.memory],env:native.env},cwd:input.observation.workspace,env:{PATH:process.env.PATH!,LANG:'C',...native.env}}) })
       const context = {
         runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
         repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
@@ -431,19 +426,19 @@ describe('aun bootstrap clean-host journal', () => {
       const outcome = await ports.ensureMemoryReadiness(context)
       return { context, outcome, ports }
     }
-    const outcomes = await Promise.all([runGate('b5-concurrent-a'), runGate('b5-concurrent-b')])
+    const outcomes = await Promise.all([runGate('bootstrap-10000000-0000-4000-8000-000000000001'), runGate('bootstrap-10000000-0000-4000-8000-000000000002')])
     for (const runResult of outcomes) expect(runResult.outcome).toMatchObject({ ok: true })
     const createReadback = new PgAdapter(databaseUrl)
     const activeAfterCreate = await createReadback.query<any>(
       `SELECT runtime_instance_id, runtime_kind, status FROM agent_runtime_instances
-        WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
+        WHERE agent_id = $1 ORDER BY runtime_instance_id`,
       ['b5-concurrency'],
     )
     await createReadback.close()
     const createdReceipts = activeAfterCreate.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')
     expect(createdReceipts).toHaveLength(1)
 
-    const reuseRun = await runGate('b5-reuse-after-heartbeat')
+    const reuseRun = await runGate('bootstrap-10000000-0000-4000-8000-000000000003')
     expect(reuseRun.outcome.ok).toBe(true)
     expect(reuseRun.outcome.mutation).toBeDefined()
 
@@ -461,14 +456,26 @@ describe('aun bootstrap clean-host journal', () => {
       { id: 'commit_sha', values: { ...expectedReceipt, commit_sha: 'b'.repeat(40) } },
     ]
     const driftDb = new PgAdapter(databaseUrl)
-    const writeReceiptTuple = async (values: typeof expectedReceipt) => driftDb.execute(
-      `UPDATE agent_runtime_instances
-          SET runtime_kind = $2, runtime_engine = $3, session_name = $4, process_id = $5,
-              port = $6, checkout_path = $7, commit_sha = $8
-        WHERE runtime_instance_id = $1`,
-      [createdReceipts[0].runtime_instance_id, values.runtime_kind, values.runtime_engine,
-        values.session_name, values.process_id, values.port, values.checkout_path, values.commit_sha],
-    )
+    const savedMetadata=(await driftDb.queryOne<any>('SELECT metadata FROM agent_runtime_instances WHERE runtime_instance_id=$1',[createdReceipts[0].runtime_instance_id])).metadata
+    const actualInspect=hostObserver.inspectHostRuntime
+    let observationDrift:Record<string,unknown>|null=null
+    const inspection=spyOn(hostObserver,'inspectHostRuntime').mockImplementation(input=>{
+      const actual=actualInspect(input)
+      if(!observationDrift || input.agentId!=='b5-concurrency')return actual
+      return {...actual,observations:actual.observations.map(o=>({...o,...observationDrift}))}
+    })
+    const writeReceiptTuple = async (values: typeof expectedReceipt) => {
+      observationDrift=null
+      await driftDb.execute(`UPDATE agent_runtime_instances SET runtime_kind=$2,metadata=$3 WHERE runtime_instance_id=$1`,
+        [createdReceipts[0].runtime_instance_id,values.runtime_kind,JSON.stringify({...savedMetadata,source_commit:values.commit_sha})])
+      const physical={runtime_engine:'provider',session_name:'session_name',process_id:'provider_pid',port:'port',checkout_path:'workspace'} as const
+      for(const [column,key] of Object.entries(physical))if(values[column as keyof typeof values]!==expectedReceipt[column as keyof typeof expectedReceipt]) {
+        await expect(driftDb.execute(`UPDATE agent_runtime_instances SET ${column}=$2 WHERE runtime_instance_id=$1`,
+          [createdReceipts[0].runtime_instance_id,values[column as keyof typeof values]])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+        // Only negative observations are injected. Successful readback uses the real OS holder.
+        observationDrift={[key]:values[column as keyof typeof values]}
+      }
+    }
     const rejectedDrifts: string[] = []
     try {
       for (const drift of driftCases) {
@@ -493,6 +500,7 @@ describe('aun bootstrap clean-host journal', () => {
         },
         'B5_MEMORY_READINESS',
       )
+      if(!restoredReadback.ok)console.error('B5_RESTORED',restoredReadback)
       expect(restoredReadback.ok).toBe(true)
 
       const unboundSameHeadReadback = await reuseRun.ports.revalidateStage!(
@@ -577,9 +585,8 @@ describe('aun bootstrap clean-host journal', () => {
       expect(wrongEvidenceReadback.ok).toBe(false)
 
       await driftDb.execute(
-        `UPDATE agent_runtime_instances SET status = 'stopped'
-          WHERE runtime_instance_id = $1`,
-        [createdReceipts[0].runtime_instance_id],
+        `UPDATE control_plane_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE lease_id=$1`,
+        [native.runtimeId],
       )
       const inactiveReadback = await reuseRun.ports.revalidateStage!(
         {
@@ -592,9 +599,8 @@ describe('aun bootstrap clean-host journal', () => {
       )
       expect(inactiveReadback.ok).toBe(false)
       await driftDb.execute(
-        `UPDATE agent_runtime_instances SET status = 'running'
-          WHERE runtime_instance_id = $1`,
-        [createdReceipts[0].runtime_instance_id],
+        `UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '30 minutes' WHERE lease_id=$1`,
+        [native.runtimeId],
       )
 
       providerTransportDrift = true
@@ -610,6 +616,7 @@ describe('aun bootstrap clean-host journal', () => {
       expect(transportMismatchReadback.ok).toBe(false)
       providerTransportDrift = false
     } finally {
+      inspection.mockRestore()
       await driftDb.close()
     }
 
@@ -618,22 +625,31 @@ describe('aun bootstrap clean-host journal', () => {
       `SELECT runtime_instance_id, runtime_kind, session_name, process_id, port,
               checkout_path, commit_sha, status, metadata
          FROM agent_runtime_instances
-        WHERE agent_id = $1 AND status IN ('running', 'active') ORDER BY runtime_instance_id`,
+        WHERE agent_id = $1 ORDER BY runtime_instance_id`,
       ['b5-concurrency'],
     )
     expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toEqual([
       expect.objectContaining({
         runtime_instance_id: createdReceipts[0].runtime_instance_id,
         runtime_kind: 'bootstrap_bound_provider',
-        status: 'running',
+        status: null,
       }),
     ])
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
-      { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
+      { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: null },
     ].map((row) => expect.objectContaining(row)))
     expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
     await readback.close()
   }, 30000)
+
+  async function installConfigurationFixture(db: PgAdapter, repoRoot: string) {
+    for (const file of ['2026-07-26-aun-configuration-reconciliation.up.sql',
+      '2026-09-13-seat-runtime-continuity-diagnostics.up.sql',
+      '2026-09-21-runtime-observation-nonpersistence.up.sql',
+      '2026-09-21-runtime-observation-restart-contract.up.sql','2026-09-22-configuration-outbox-supersession.up.sql']) {
+      await db.execute(readFileSync(join(repoRoot, 'db/migrations', file), 'utf8'))
+    }
+  }
 
   test('live Codex account-root observation survives stale, absent and symlinked profile metadata', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-root-db-')))
@@ -652,20 +668,15 @@ describe('aun bootstrap clean-host journal', () => {
     const repoRoot = join(import.meta.dir, '..', '..')
     const env = { ...process.env, HOME: home, DATABASE_URL: databaseUrl, AGENT_COM_DB: 'postgres' } as Record<string, string>
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
-    expect(Bun.spawnSync([
-      'psql', databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
-      join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
-    ], { cwd: repoRoot, env }).exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
+    try {
+    await installConfigurationFixture(db, repoRoot)
     await db.execute(
-      `INSERT INTO agents (
-         agent_id, display_name, agent_type, runtime, metadata,
-         runtime_engine_preference, ordinary_projection
-       ) VALUES ($1, $2, 'bot', 'TUI', $3::jsonb, 'codex', $4::jsonb)`,
-      ['root-authority', 'Root authority fixture', JSON.stringify({ codex_home: codexRoot }), JSON.stringify({ provider_config_root: codexRoot })],
+      `INSERT INTO agents (agent_id, display_name, agent_type, metadata) VALUES ($1, $2, 'bot', '{}')`,
+      ['root-authority', 'Root authority fixture'],
     )
     const native=await nativeHostFixture(home,repoRoot,'root-authority','root-project','root-session')
-    await registerNativeFixtureRuntime(db,native,'root-authority','root-project','root-session',repoRoot,randomUUID())
+    await registerNativeFixtureRuntime(db,native,'root-authority','root-project','root-session',repoRoot,native.runtimeId)
     const observeRoot={observeProvider:native.observeProvider,run:async(_command:string,args:string[])=>({exitCode:0,stdout:args.includes('lstart=')?native.observed.provider.startedAt:`/fixture/codex HOME=${home} CODEX_HOME=${codexRoot}`,stderr:''})}
     const exact = await bootstrapInternal.resolveProviderRootAuthority({
       ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
@@ -683,9 +694,9 @@ describe('aun bootstrap clean-host journal', () => {
     expect(readFileSync(wrongConfig).equals(wrongBefore.bytes)).toBe(true)
     expect({ dev: wrongAfter.dev, ino: wrongAfter.ino, mode: wrongAfter.mode & 0o777, size: wrongAfter.size })
       .toEqual({ dev: wrongBefore.stat.dev, ino: wrongBefore.stat.ino, mode: wrongBefore.stat.mode & 0o777, size: wrongBefore.stat.size })
-    await db.execute(`UPDATE agents SET ordinary_projection = $2::jsonb WHERE agent_id = $1`, [
+    await expect(db.execute(`UPDATE agents SET ordinary_projection = $2::jsonb WHERE agent_id = $1`, [
       'root-authority', JSON.stringify({ provider_config_root: '/tmp/conflict' }),
-    ])
+    ])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
     const conflict = await bootstrapInternal.resolveProviderRootAuthority({
       ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
@@ -697,18 +708,19 @@ describe('aun bootstrap clean-host journal', () => {
     expect(missing).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
     const symlinkRoot = join(home, '.codex-link')
     symlinkSync(codexRoot, symlinkRoot)
-    await db.execute(
+    await expect(db.execute(
       `UPDATE agents SET metadata = jsonb_build_object('codex_home', $2::text), ordinary_projection = jsonb_build_object('provider_config_root', $2::text)
         WHERE agent_id = $1`,
       ['root-authority', symlinkRoot],
-    )
+    )).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
     const ambiguous = await bootstrapInternal.resolveProviderRootAuthority({
       ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
     expect(ambiguous).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
+    await stopNativeFixtures()
     const noCurrent=await bootstrapInternal.resolveProviderRootAuthority({agentId:'root-authority',requestedRuntime:'codex',env,home,repoRoot,observeProvider:()=>null})
     expect(noCurrent).toMatchObject({ok:false,reasonCode:'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING'})
-    await db.close()
+    } finally { await db.close() }
   }, 30_000)
 
   test('B3 preserves existing seat authority and outbox despite stale runtime projection', async () => {
@@ -727,39 +739,23 @@ describe('aun bootstrap clean-host journal', () => {
       AUN_BOOTSTRAP_CHANNEL_PORT: '8801', AUN_BOOTSTRAP_PROCESS_RUNTIME: 'codex',
     } as Record<string, string>
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env }).exitCode).toBe(0)
-    expect(Bun.spawnSync([
-      'psql', databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f',
-      join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql'),
-    ], { cwd: repoRoot, env }).exitCode).toBe(0)
     const profileSet = Bun.spawnSync([
       process.execPath, 'cli/index.ts', 'agent', 'profile', 'set', 'b3-held',
-      '--runtime', 'TUI', '--runtime-engine', 'codex', '--home-directory', repoRoot,
-      '--channel-port', '8801', '--tmux-session', 'b3-session', '--enabled', 'true', '--execute',
+      '--enabled', 'true', '--provider-token-source-ref','secret-ref:fixture','--expected-provider-identity','{"account_id":"fixture"}', '--execute',
     ], { cwd: repoRoot, env })
     expect(profileSet.exitCode).toBe(0)
+    const native=await nativeHostFixture(home,repoRoot,'b3-held','b3-project','b3-session')
     const db = new PgAdapter(databaseUrl)
-    await db.execute(
-      `UPDATE agents SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($2::text), true),
-                         canonical_workspace = $4,
-                         canonical_home = $5,
-                         supervisor_identity = 'launchd:com.agent-comms.state-daemon',
-                         ordinary_communication_enrollment = true,
-                         ordinary_projection = $3::jsonb,
-                         desired_release_commit = $6,
-                         desired_release_tree = $7,
-                         desired_control_refs = $8::jsonb
-        WHERE agent_id = $1`,
-      [
-        'b3-held', codexRoot,
-        JSON.stringify({
-          owner: 'continuous-reconciler', provider_repo_root: repoRoot, provider_config_root: codexRoot,
-          daemon_checkout: join(home, '.agent-comms', 'state-daemon', 'releases', 'c'.repeat(40)),
-          schema_version: 'aun-configuration-projection/v1',
-        }),
-        repoRoot, home, 'c'.repeat(40), 'd'.repeat(40),
-        JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#preexisting-fixture']),
-      ],
-    )
+    try {
+    await installConfigurationFixture(db, repoRoot)
+    await registerNativeFixtureRuntime(db,native,'b3-held','b3-project','b3-session',repoRoot,native.runtimeId)
+    await db.execute(`UPDATE agents SET supervisor_identity='launchd:com.agent-comms.state-daemon',expected_provider_identity_ref='fixture:account',
+      ordinary_communication_enrollment=true, ordinary_projection=$2::jsonb,
+      desired_release_commit=$3, desired_release_tree=$4, desired_control_refs=$5::jsonb WHERE agent_id=$1`,
+      ['b3-held',JSON.stringify({owner:'continuous-reconciler',schema_version:'aun-configuration-projection/v1'}),
+      'c'.repeat(40),'d'.repeat(40),JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#preexisting-fixture'])])
+    await expect(db.execute(`UPDATE agents SET canonical_workspace=$2,canonical_home=$3 WHERE agent_id=$1`,
+      ['b3-held',repoRoot,home])).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
     const preAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
     const preOutbox = await db.query<any>(
       `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -767,6 +763,8 @@ describe('aun bootstrap clean-host journal', () => {
     )
     const run = async (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => {
       const joined = args.join(' ')
+      if(command==='ps'&&args.includes('lstart='))return {exitCode:0,stdout:native.observed.provider.startedAt,stderr:''}
+      if(command==='ps'&&args.includes('eww'))return {exitCode:0,stdout:`/fixture/codex HOME=${home} CODEX_HOME=${codexRoot}`,stderr:''}
       if (command === 'git' && joined === 'rev-parse HEAD^{tree}') return { exitCode: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' }
       if (command === 'tmux') return { exitCode: 0, stdout: 'b3-session\n', stderr: '' }
       if (command === process.execPath && args[0] === 'cli/index.ts') {
@@ -778,29 +776,33 @@ describe('aun bootstrap clean-host journal', () => {
       }
       return { exitCode: 1, stdout: '', stderr: `unexpected ${command} ${joined}` }
     }
+    const root=await bootstrapInternal.resolveProviderRootAuthority({run,env,home,repoRoot,agentId:'b3-held',requestedRuntime:'codex',observeProvider:native.observeProvider})
+    if(!root.ok)throw new Error(root.reasonCode)
     const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
     const context: BootstrapStageContext = {
       runId: 'b3-held-run', agentId: 'b3-held', requestedRuntime: 'codex', resolvedRuntime: 'codex',
       repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
       priorState: { mutations: [] } as any,
-      providerRootAuthority: {
-        existingTarget: true, canonicalSourceField: 'metadata.codex_home', canonicalRoot: codexRoot,
-        canonicalRootDigest: bootstrapDigest(codexRoot), canonicalRealpathDigest: bootstrapDigest(codexRoot),
-        projectionMatches: true, callerMismatch: false,
-      },
+      providerRootAuthority:root.authority,
     }
     const outcome = await ports.ensureAgentProfile(context)
     expect(outcome.ok).toBe(true)
     expect(outcome.mutation).toBeUndefined()
-    expect(outcome.mutations).toBeUndefined()
+    expect(outcome.mutations).toHaveLength(1)
+    expect(outcome.mutations?.[0].kind).toBe('configuration_desired')
     const finalAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
     const finalOutbox = await db.query<any>(
       `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
       ['b3-held'],
     )
-    expect(bootstrapDigest(finalAgent?.row)).toBe(bootstrapDigest(preAgent?.row))
-    expect(bootstrapDigest(finalOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
-    await db.close()
+    const releaseKeys=['desired_revision','desired_digest','desired_updated_at','desired_updated_by','desired_release_commit','desired_release_tree','desired_control_refs']
+    const stable=(row:any)=>Object.fromEntries(Object.entries(row.row).filter(([key])=>!releaseKeys.includes(key)))
+    expect(stable(finalAgent)).toEqual(stable(preAgent))
+    expect(finalAgent.row.desired_release_commit).toBe('a'.repeat(40))
+    const historicalEventIds = new Set(preOutbox.map(value => value.row.event_id))
+    expect(finalOutbox.filter(value => historicalEventIds.has(value.row.event_id))).toEqual(preOutbox)
+    expect(finalOutbox).toHaveLength(preOutbox.length+1)
+    } finally { await db.close() }
   }, 30_000)
 
   test('ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects', async () => {
@@ -811,8 +813,8 @@ describe('aun bootstrap clean-host journal', () => {
     expect(Bun.spawnSync([process.execPath,'--no-env-file','db/migrate.ts'],{cwd:repoRoot,env}).exitCode).toBe(0)
     const db=new PgAdapter(fixtureDb.databaseUrl)
     try {
-      await db.execute(readFileSync(join(repoRoot,'db/migrations/2026-07-26-aun-configuration-reconciliation.up.sql'),'utf8'))
-      await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status) VALUES('preserved-seat','Preserved','bot','TUI',true,'idle')`)
+      await installConfigurationFixture(db, repoRoot)
+      await db.execute(`INSERT INTO agents(agent_id, display_name, agent_type, profile_enabled) VALUES('preserved-seat', 'Preserved', 'bot', true)`)
       await db.execute(`INSERT INTO message_queue(agent_id,message_id,status,claimed_by,claimed_at,payload) VALUES('preserved-seat',$1,'in_progress','preserved-seat',now(),'{}')`,[randomUUID()])
       const snapshot=async()=>bootstrapDigest({
         agents:await db.query('SELECT to_jsonb(a) AS row FROM agents a ORDER BY agent_id'),
@@ -826,9 +828,9 @@ describe('aun bootstrap clean-host journal', () => {
         const {mode,durableProject}=scenario,key=`${mode}-${durableProject}`
         const agent=`native-cli-${key}`,project='stable-cli-project',session=`session-${key}`,runtimeId=randomUUID()
         const localHome=join(home,key);mkdirSync(localHome);mkdirSync(join(localHome,'.codex'));mkdirSync(join(localHome,'bin'))
-        const native=await nativeHostFixture(localHome,repoRoot,agent,project,session,mode)
-        await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status,runtime_engine_preference,metadata)
-          VALUES($1,$1,'bot','TUI',true,'idle','claude-code',$2)`,[agent,JSON.stringify(durableProject?{memory_project:project}:{})])
+        const native=await nativeHostFixture(localHome,repoRoot,agent,project,session,mode,runtimeId)
+        await db.execute(`INSERT INTO agents(agent_id, display_name, agent_type, profile_enabled, metadata)
+          VALUES($1, $1, 'bot', true, $2)`,[agent,JSON.stringify(durableProject?{memory_project:project}:{})])
         await registerNativeFixtureRuntime(db,native,agent,project,session,repoRoot,runtimeId)
         const queue=await db.queryOne<any>(`INSERT INTO message_queue(agent_id,message_id,status,payload) VALUES($1,$2,'pending',$3) RETURNING id`,
           [agent,randomUUID(),JSON.stringify({author_id:'aun-bootstrap',message_type:'instruction',content:'fixture native ready receive',next_action:'none',no_reply_required:true})])
@@ -885,8 +887,9 @@ describe('aun bootstrap clean-host journal', () => {
         if(mode==='accepted') {
           expect(JSON.parse(ready.stdout)).toMatchObject({mutation_performed:true,native_receipt_checked:true,memory_ready:{ok:true,runtime_instance_id:runtimeId}})
           expect(evidence[0].runtime_instance_id).toBe(runtimeId)
-          expect(evidence[0].metadata.seat_context_receipt.native_delivery.provider_pid).toBe(native.observed.provider.pid)
-          expect(evidence[0].metadata.seat_context_receipt.native_delivery.project).toBe(project)
+          expect(evidence[0].metadata.seat_context_proof).toMatchObject({agent_id:agent,project,runtime_instance_id:runtimeId})
+          expect(evidence[0].metadata.seat_context_receipt).toBeUndefined()
+          expect(JSON.stringify(evidence[0])).not.toContain('provider_pid')
           expect((await db.queryOne<any>('SELECT status,claimed_by FROM message_queue WHERE id=$1',[queue.id]))).toMatchObject({status:'received',claimed_by:agent})
           await db.execute("UPDATE control_plane_leases SET expires_at=now()-interval '1 second' WHERE lease_id=$1",[runtimeId])
           const stale=await invoke(['memory-ready-bootstrap','--agent-id',agent])
@@ -900,7 +903,7 @@ describe('aun bootstrap clean-host journal', () => {
         expect(existsSync(join(localHome,'.aun/bootstrap'))).toBe(false)
       }
       expect((await db.queryOne<any>("SELECT status,claimed_by FROM message_queue WHERE agent_id='preserved-seat'"))).toMatchObject({status:'in_progress',claimed_by:'preserved-seat'})
-      expect((await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"))?.function).toBeNull()
+      expect((await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"))?.function).toBe('aun_configuration_legacy_desired_document(agents)')
     } finally {await db.close()}
   },30_000)
 
@@ -909,8 +912,8 @@ describe('aun bootstrap clean-host journal', () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-')))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
-    const native=await nativeHostFixture(home,repoRoot,'clean-default','bootstrap-clean-project','clean-session')
     const ordinaryRuntimeId=randomUUID()
+    const native=await nativeHostFixture(home,repoRoot,'clean-default','bootstrap-clean-project','clean-session','accepted',ordinaryRuntimeId)
     const dbPath = join(home, 'agent-com.db')
     let sqlitePrestate: Buffer | null = null
     if (fixture === 'sqlite-existing') {
@@ -951,9 +954,10 @@ describe('aun bootstrap clean-host journal', () => {
       name: 'aun', enabled: true,
       transport: {
         type: 'stdio', command: realpathSync(process.execPath),
-        args: ['run', '--cwd', realpathSync(repoRoot), join(realpathSync(repoRoot), 'server.ts')],
+        args: ['run', '--cwd', realpathSync(repoRoot), join(realpathSync(repoRoot), 'entrypoints/runtime.ts')],
         env: {
           AGENT_ID: 'clean-default', AGENT_COM_EXPECTED_AGENT_ID: 'clean-default',
+          AGENT_COM_WORKSPACE:repoRoot,AGENT_COM_RUNTIME_SESSION:'clean-session',
           ...(databaseUrl
             ? { DATABASE_URL: databaseUrl }
             : { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: realpathSync(dbPath) }),
@@ -1042,6 +1046,7 @@ describe('aun bootstrap clean-host journal', () => {
         if(exitCode===0 && args[0]==='cli/index.ts' && args.includes('set')) {
           const fixtureDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
           try {
+            if(backend==='postgres')await fixtureDb.execute(`UPDATE agents SET expected_provider_identity_ref='fixture:account',provider_token_source_ref='secret-ref:fixture' WHERE agent_id='clean-default'`)
             await registerNativeFixtureRuntime(fixtureDb,native,'clean-default','bootstrap-clean-project','clean-session',repoRoot,ordinaryRuntimeId)
           } finally {await fixtureDb.close()}
         }
@@ -1051,8 +1056,7 @@ describe('aun bootstrap clean-host journal', () => {
     }
 
     const input = { agentId: 'clean-default', runtime: 'codex' as const, home, repoRoot, workspaceRoot: repoRoot, env }
-    const first = await bootstrap(input, { run, observeProvider:native.observeProvider })
-    if(first.status!=='READY') console.error('CLEAN_HOST_RESULT',JSON.stringify(first))
+    const first = await bootstrap(input, { run, observeProvider:native.observeProvider,readNativeProof:input=>readNativeSeatContextReceipt({agentId:input.agentId,project:input.project,runtimeInstanceId:input.runtimeInstanceId,targetRuntime:'codex',providerPid:input.observation.provider_pid,providerStartedAt:input.observation.provider_started_at,hostSessionId:input.observation.host_session_id??undefined,transport:{command:native.node,args:[native.memory],env:native.env},cwd:input.observation.workspace,env:{PATH:process.env.PATH!,LANG:'C',...native.env}}) })
     expect(first.status).toBe('READY')
     // B8 must use the same actual fixture host as B5, never an outer controller's Codex ancestor.
     const configurationDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
@@ -1064,8 +1068,12 @@ describe('aun bootstrap clean-host journal', () => {
       expect(current.observation.runtime_instance_id).toBe(ordinaryRuntimeId)
       expect(current.providerHome).toBe(home)
       expect(current.providerConfigRoot).toBe(join(home,'.codex'))
+      const lease = await configurationDb.queryOne<any>(`SELECT lease_id,expires_at FROM control_plane_leases WHERE holder_runtime_instance_id=$1 AND lease_purpose='worker'`, [ordinaryRuntimeId])
+      expect(lease).toBeTruthy()
+      await configurationDb.execute(`UPDATE control_plane_leases SET expires_at=$2 WHERE lease_id=$1`,[lease.lease_id,'2000-01-01T00:00:00Z'])
       await expect(resolveConfigurationRuntime(configurationDb,'clean-default',env,repoRoot,
-        {observeProvider:()=>null,run})).rejects.toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+        {observeProvider:native.observeProvider,run})).rejects.toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+      await configurationDb.execute(`UPDATE control_plane_leases SET expires_at=$2 WHERE lease_id=$1`,[lease.lease_id,lease.expires_at])
     } finally {await configurationDb.close()}
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
@@ -1133,7 +1141,7 @@ describe('aun bootstrap clean-host journal', () => {
       '--reason', `aun-bootstrap-no-effect:${first.run_id}:contention`,
     ])).exitCode).toBe(0)
 
-    const second = await bootstrap(input, { run, observeProvider:native.observeProvider })
+    const second = await bootstrap(input, { run, observeProvider:native.observeProvider,readNativeProof:input=>readNativeSeatContextReceipt({agentId:input.agentId,project:input.project,runtimeInstanceId:input.runtimeInstanceId,targetRuntime:'codex',providerPid:input.observation.provider_pid,providerStartedAt:input.observation.provider_started_at,hostSessionId:input.observation.host_session_id??undefined,transport:{command:native.node,args:[native.memory],env:native.env},cwd:input.observation.workspace,env:{PATH:process.env.PATH!,LANG:'C',...native.env}}) })
     if(second.status!=='IDEMPOTENT_READY')console.error('CLEAN_HOST_SECOND',JSON.stringify(second))
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
@@ -1163,7 +1171,7 @@ describe('aun bootstrap clean-host journal', () => {
       invalidPayloadQueueId = String(invalidShared[0]!.id)
       await ownedDb.close()
     }
-    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run, observeProvider:native.observeProvider })
+    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run, observeProvider:native.observeProvider,readNativeProof:input=>readNativeSeatContextReceipt({agentId:input.agentId,project:input.project,runtimeInstanceId:input.runtimeInstanceId,targetRuntime:'codex',providerPid:input.observation.provider_pid,providerStartedAt:input.observation.provider_started_at,hostSessionId:input.observation.host_session_id??undefined,transport:{command:native.node,args:[native.memory],env:native.env},cwd:input.observation.workspace,env:{PATH:process.env.PATH!,LANG:'C',...native.env}}) })
     if(rolledBack.status!=='ROLLED_BACK') {
       console.error('CLEAN_HOST_ROLLBACK',JSON.stringify(rolledBack))
       console.error('CLEAN_HOST_PROFILE_COMMANDS',JSON.stringify(profileCommandTrace))

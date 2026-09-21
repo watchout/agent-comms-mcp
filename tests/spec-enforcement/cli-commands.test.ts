@@ -232,20 +232,22 @@ describe('T2 — top-level dispatch routes next/send/agents', () => {
 })
 
 describe('T2b — bot profile projection/write invariants', () => {
-  test('profile set casts channel_port parameters for Postgres writes', () => {
-    expect(CLI_SRC).toMatch(/CASE WHEN \$22 THEN \$21::int ELSE NULL END/)
-    expect(CLI_SRC).toMatch(/channel_port = CASE WHEN \$22 THEN \$21::int ELSE agents\.channel_port END/)
+  test('profile set rejects physical channel-port input before writes', () => {
+    const writer=CLI_SRC.slice(CLI_SRC.indexOf('async function upsertBotProfile'),CLI_SRC.indexOf('async function upsertBotProfile')+3500)
+    expect(writer).toContain('assertLogicalProfileInput(input)')
+    expect(writer).not.toMatch(/channel_port\s*=/)
   })
 
   test('profile set uses the Postgres sequence for implicit ui_id allocation', () => {
-    expect(CLI_SRC).toMatch(/const implicitUiIdSql = isSqliteMode\(\)[\s\S]*?nextval\('agent_ui_id_seq'\)/)
-    expect(CLI_SRC).toMatch(/CASE WHEN \$24 THEN \$23::bigint ELSE \$\{implicitUiIdSql\} END/)
-    expect(CLI_SRC).toMatch(/COALESCE\(agents\.ui_id, \$\{implicitUiIdSql\}\)/)
+    expect(CLI_SRC).toContain("nextval('agent_ui_id_seq')")
+    expect(CLI_SRC).toContain('COALESCE($4::bigint,${nextUi})')
+    expect(CLI_SRC).toContain('COALESCE($4::bigint,agents.ui_id,${nextUi})')
   })
 
-  test('profile project links active runtime rows to the projected workspace', () => {
-    expect(CLI_SRC).toMatch(/table: 'agent_runtime_instances'[\s\S]*?action: 'link_active_workspace'/)
-    expect(CLI_SRC).toMatch(/UPDATE agent_runtime_instances[\s\S]*?SET workspace_id = \$2[\s\S]*?status IN \('running', 'active'\)[\s\S]*?workspace_id IS NULL/)
+  test('profile project uses an existing logical workspace binding without status-based runtime links', () => {
+    expect(CLI_SRC).toContain('agent_workspace_bindings')
+    expect(CLI_SRC).toContain('logical_workspace')
+    expect(CLI_SRC).not.toMatch(/UPDATE agent_runtime_instances[\s\S]{0,100}SET workspace_id/)
   })
 })
 
@@ -641,9 +643,9 @@ describe('T11b — runtime inventory CLI surface', () => {
     expect(CLI_SRC).toMatch(/read-only runtime\/connector\/binding freshness report/)
   })
 
-  test('runtime inventory is DB evidence based and read-only', () => {
+  test('runtime inventory combines logical DB authority and fresh observations read-only', () => {
     expect(RUNTIME_INVENTORY_SRC).toMatch(/db_is_source_of_truth/)
-    expect(RUNTIME_INVENTORY_SRC).toMatch(/runtime_instance_id is concrete process\/session evidence/)
+    expect(RUNTIME_INVENTORY_SRC).toMatch(/DB supplies logical seat\/UUID\/authority; physical runtime fields are fresh host observations/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/connector_instances/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/channel_connector_bindings/)
     expect(RUNTIME_INVENTORY_SRC).toMatch(/channel_routing_policy/)

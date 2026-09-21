@@ -385,13 +385,15 @@ describe('S2-A (FEAT-005) — daemon-owns-outbound', () => {
     expect(pgResolver).toContain("agent_type NOT IN ('human', 'system')")
     expect(pgResolver).toContain('COALESCE(profile_enabled, true)')
     expect(pgResolver).toContain('disabled_at IS NULL')
-    expect(pgResolver).toContain("status IS DISTINCT FROM 'disabled'")
+    expect(pgResolver).toContain('resolveSeatProvider(client,{agentId})')
+    expect(pgResolver).not.toContain('tmux_session')
 
     const sqliteResolver = sliceFn(wakeDaemon, 'resolveSqliteProfileSession')
     expect(sqliteResolver).toContain("agent_type NOT IN ('human', 'system')")
     expect(sqliteResolver).toContain('COALESCE(profile_enabled, 1) = 1')
     expect(sqliteResolver).toContain('disabled_at IS NULL')
-    expect(sqliteResolver).toContain("status <> 'disabled'")
+    expect(sqliteResolver).toContain('resolveSeatProvider(db,{agentId})')
+    expect(sqliteResolver).not.toContain('tmux_session')
   })
 
   test('14. consumeOneOutboundRow force-releases the re-entrancy guard after OUTBOUND_TICK_TIMEOUT_MS', () => {

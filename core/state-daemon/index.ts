@@ -908,14 +908,15 @@ export class StateDaemon {
     if (this.status !== 'running') return { refreshed: 0, skipped: 0 }
     const inflightQueueWorkIds=Array.from(this.inflightQueueWorkIds).filter(id=>/^[1-9]\d*$/.test(id)).map(Number)
     const params:unknown[]=[this.config.activeClaimMaxAgeSec,inflightQueueWorkIds]
-    let select=`SELECT mq.id,mq.agent_id,mq.claimed_at::text AS claimed_at,mq.claimed_runtime_instance_id
+    let select=`SELECT mq.id,mq.agent_id,mq.claimed_at::text AS claimed_at,mq.claimed_runtime_instance_id,
+       (mq.claimed_by=mq.agent_id) AS claim_owner_matches,
+       (mq.claimed_at >= clock_timestamp() - ($1 || ' seconds')::interval OR mq.id=ANY($2::bigint[])) AS age_eligible
       FROM message_queue mq WHERE mq.status IN ('received','in_progress')
-       AND mq.claim_expires_at > clock_timestamp() AND mq.claimed_by=mq.agent_id AND mq.claimed_at IS NOT NULL
+       AND mq.claim_expires_at > clock_timestamp() AND mq.claimed_at IS NOT NULL
        AND mq.claimed_runtime_instance_id IS NOT NULL
        AND mq.payload NOT LIKE '%"runner_error"%'
        AND mq.payload NOT LIKE '%"source":"state-daemon-d1-auto-receive"%'
        AND ${unboundedQueuePredicate('mq.agent_id','postgres')}
-       AND (mq.claimed_at >= clock_timestamp() - ($1 || ' seconds')::interval OR mq.id=ANY($2::bigint[]))
        AND EXISTS (SELECT 1 FROM agents a WHERE a.agent_id=mq.agent_id AND a.profile_enabled IS TRUE AND a.disabled_at IS NULL)
        AND EXISTS (SELECT 1 FROM agent_messages am JOIN channels c ON c.id=am.channel_id
          WHERE am.id::text=mq.message_id AND mq.agent_id=ANY(c.members))`
@@ -923,6 +924,10 @@ export class StateDaemon {
     const candidates=await this.dbQuery<any>(select,params)
     let refreshed=0,skipped=0
     for(const claim of candidates.rows) {
+      if(![true,1].includes(claim.claim_owner_matches)) {skipped++;continue}
+      if(![true,1].includes(claim.age_eligible)) {
+        skipped++;this.metrics.inc('state_daemon_heartbeat_refresh_total',{result:'active_claim_max_age_skipped'});continue
+      }
       const observed=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
       if(!observed.observation || observed.observation.runtime_instance_id!==String(claim.claimed_runtime_instance_id)) {skipped++;continue}
       const verified=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
@@ -2397,7 +2402,6 @@ export class StateDaemon {
            ON a.agent_id = mq.agent_id
           AND a.profile_enabled = true
           AND a.disabled_at IS NULL
-          AND a.status NOT IN ('disabled', 'offline', 'retired')
          LEFT JOIN agent_messages am ON am.id::text = mq.message_id
         WHERE mq.status='done'
           AND mq.payload LIKE '%"runner_result"%'

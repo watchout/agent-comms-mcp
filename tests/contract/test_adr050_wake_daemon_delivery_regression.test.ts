@@ -123,14 +123,14 @@ describe('ADR-050 §6d — wake-daemon stderr regression (no UnixSignalBus / SIG
 
     // Wait until the daemon's stderr proves it observed the row. Either
     // "wake .* for <agent>/<msg>" (would-be success path) OR
-    // "no active DB-profile tmux session for agent <agent>" (no-profile path used here) is
+    // "no current authorized tmux session for agent <agent>" (no-profile path used here) is
     // a positive proof; we accept either to keep the test independent
     // of tmux setup state.
     const observed = await waitFor(
       () => dStderr,
       (s) =>
         new RegExp(`wake .* for ${AGENT_ID}/${messageId}`).test(s)
-          || new RegExp(`no active DB-profile tmux session for agent ${AGENT_ID}`).test(s),
+          || new RegExp(`no current authorized tmux session for agent ${AGENT_ID}`).test(s),
       15000,
       100,
     )

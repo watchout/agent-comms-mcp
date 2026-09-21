@@ -48,7 +48,8 @@ WITH queue_status AS (
 SELECT a.agent_id,a.agent_type,a.profile_enabled,a.disabled_at,
  COALESCE(q.pending_count,0) AS pending_count,q.oldest_pending_at,
  COALESCE(q.active_claim_count,0) AS active_claim_count,COALESCE(q.typed_failed_count,0) AS typed_failed_count,
- (SELECT COUNT(*) FROM connector_instances ci WHERE ci.agent_id=a.agent_id AND ci.status='active') AS active_connector_count
+ (SELECT COUNT(*) FROM connector_instances ci WHERE ci.agent_id=a.agent_id AND ci.status='active') AS active_connector_count,
+ (SELECT array_agg(ci.runtime_instance_id::text) FROM connector_instances ci WHERE ci.agent_id=a.agent_id AND ci.status='active') AS connector_runtime_ids
  FROM agents a LEFT JOIN queue_status q ON q.agent_id=a.agent_id
 `
 
@@ -72,6 +73,7 @@ export async function fetchBotStatusFromDb(client: Client, options:{inspect?:Hos
     oldest_pending_at: Date | null
     active_claim_count: string | number
     health_state: BotHealthState
+    connector_runtime_ids?: Array<string|null>
     active_connector_count: string | number
     runtime_linked_connector_count: string | number
     active_endpoint_lease_count: string | number
@@ -86,6 +88,11 @@ export async function fetchBotStatusFromDb(client: Client, options:{inspect?:Hos
       runtimeInstanceId:provider.observation?.runtime_instance_id,inspect:options.inspect}) : null
     const observed=provider.ok && endpoint?.ok ? provider.observation : null
     const claims=parseCount(row.active_claim_count)
+    const connectors=row.connector_runtime_ids ?? []
+    const linked=connectors.filter(id=>id!==null).length
+    const covered=observed?connectors.filter(id=>id===observed.runtime_instance_id).length:0
+    const connectorCount=parseCount(row.active_connector_count)
+    const coverageState=connectorCount>linked?'missing_runtime':connectorCount>covered?'missing_lease':endpoint?.ok?'ok':'missing_runtime'
 
     map.set(row.agent_id, {
       agent_id: row.agent_id,
@@ -104,9 +111,9 @@ export async function fetchBotStatusFromDb(client: Client, options:{inspect?:Hos
       active_claim_count: parseCount(row.active_claim_count),
       health_state: observed ? (claims>0?'busy_active':'healthy') : 'unknown',
       active_connector_count: parseCount(row.active_connector_count),
-      runtime_linked_connector_count: observed ? parseCount(row.active_connector_count) : 0,
-      active_endpoint_lease_count: endpoint?.ok ? 1 : 0,
-      endpoint_lease_state: endpoint?.ok ? 'ok' : 'missing_runtime',
+      runtime_linked_connector_count: linked,
+      active_endpoint_lease_count: endpoint?.ok ? Math.max(connectorCount?0:1,covered) : 0,
+      endpoint_lease_state: coverageState,
       endpoint_lease_expires_at: null,
       endpoint_lease_heartbeat_at: null,
     })

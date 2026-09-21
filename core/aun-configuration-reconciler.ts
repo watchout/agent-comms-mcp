@@ -14,6 +14,7 @@ import {
   createConfigurationRestartRequest,
   listPendingConfigurationEvents,
   markConfigurationEventDelivered,
+  supersedeConfigurationEvents,
   readConfigurationDesiredState,
   recordConfigurationReconcileResult,
   verifyConfigurationRestartExecutionClaim,
@@ -97,6 +98,7 @@ export interface ConfigurationDesiredStateStore {
   listPendingEvents(limit: number): Promise<AunConfigurationOutboxEvent[]>
   listDueDesiredAgents(limit: number, minObservedAgeMs: number): Promise<string[]>
   markEventDelivered(event: AunConfigurationOutboxEvent, lease: ControlPlaneLease): Promise<boolean>
+  supersedePendingEvents(desired: AunConfigurationDesiredState, lease: ControlPlaneLease, limit: number): Promise<number>
   recordReconcileResult(state: AunConfigurationReconcileState): Promise<boolean>
   createRestartRequest(input: AunConfigurationRestartRequest): Promise<string>
   listen?(callback: (event: { agentId: string; desiredRevision: number; desiredDigest: string }) => void): Promise<void>
@@ -121,6 +123,7 @@ export interface ConfigurationReconcileResult {
   reasonCodes: string[]
   eventDelivered: boolean
   freshNativeReadback: boolean
+  supersededEventCount?: number
 }
 
 export interface ConfigurationRestartExecutionStore {
@@ -275,6 +278,13 @@ export class DbConfigurationDesiredStateStore implements ConfigurationDesiredSta
       agentId:event.agentId,desiredRevision:event.desiredRevision,desiredDigest:event.desiredDigest,
       leaseId:lease.lease_id,fencingToken:lease.fencing_token,holderAgentId:lease.holder_agent_id,
       holderRuntimeInstanceId:lease.holder_runtime_instance_id})
+  }
+  supersedePendingEvents(desired:AunConfigurationDesiredState,lease:ControlPlaneLease,limit:number) {
+    return supersedeConfigurationEvents(this.db,{
+      agentId:desired.agentId,desiredRevision:desired.desiredRevision,desiredDigest:desired.desiredDigest,
+      leaseId:lease.lease_id,fencingToken:lease.fencing_token,holderAgentId:lease.holder_agent_id,
+      holderRuntimeInstanceId:lease.holder_runtime_instance_id,
+    },limit)
   }
   recordReconcileResult(state:AunConfigurationReconcileState) {return recordConfigurationReconcileResult(this.db,state)}
   createRestartRequest(input: AunConfigurationRestartRequest) { return createConfigurationRestartRequest(this.db, input) }
@@ -472,6 +482,7 @@ export class AunConfigurationReconciler {
       result.desiredDigest = desired.desiredDigest
 
       if (!await fenceValid()) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['FENCE_INVALID_BEFORE_RENDER'] }
+      result.supersededEventCount = await this.store.supersedePendingEvents(desired, lease, CONFIGURATION_RECONCILER_BATCH_LIMIT)
       const candidate = await this.projections.render({ desired })
       result.candidateDigest = candidate.candidateDigest
       const validation = await this.projections.validate(candidate)

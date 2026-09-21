@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { createHostRuntimeObserver, inspectHostRuntime, type HostRuntimeObservation } from '../../core/host-runtime-observer'
+import { createHostRuntimeObserver, createNativeHostRuntimeObserver, inspectHostRuntime, type HostRuntimeObservation } from '../../core/host-runtime-observer'
 import { durableMemoryMetadata, durableRuntimeMetadata } from '../../core/runtime-durable-data'
 import { heartbeatRuntimeInstance } from '../../core/runtime-heartbeat'
 import { bindRuntimeEndpoint, resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
@@ -140,4 +140,90 @@ describe('NP changed-input effect and authority regressions',()=>{
    expect((saved.queue_scope as any).queue_ids.includes(2)).toBe(false)
    expect(()=>durableMemoryMetadata({...raw,queue_scope:{...raw.queue_scope,unknown_restriction:'only one'}})).toThrow('BYPASS_SCOPE_UNSUPPORTED_CONSTRAINT')
  })
+})
+
+
+describe('NP host enumeration churn',()=>{
+  for(const factory of [createHostRuntimeObserver,createNativeHostRuntimeObserver]) {
+    for(const scenario of ['unrelated_exited','unrelated_unreadable','target_exited','target_changed','invalid_pid_readback'] as const) {
+      test(`${factory.name}: ${scenario} distinguishes disappearance from missing authority`,()=>{
+        let targetReads=0,confirmations=0
+        const observer=factory({host:()=> 'host',canonical:p=>p,wall:()=>Date.parse('2026-09-21T00:00:10Z'),monotonic:()=>0,
+          processStart:()=> '2026-09-21T00:00:00Z',
+          run(command,args){
+            expect(command==='ps'||command==='lsof').toBe(true)
+            if(args.join(' ')==='-axo pid=,ppid=,command=')return '300 1 bun /other/server.ts\n200 100 bun /fixture/server.ts\n100 1 /fixture/codex'
+            if(args.join(' ')==='-axo pid=') {
+              confirmations++
+              if(scenario==='invalid_pid_readback')return 'invalid'
+              return scenario==='unrelated_unreadable'?'100 200 300':scenario==='target_exited'?'100':'100 200'
+            }
+            const pid=args[args.indexOf('-p')+1]
+            if(args[0]==='eww') {
+              if(pid==='300')throw Object.assign(new Error('candidate exited'),{status:1})
+              if(pid==='200') {
+                targetReads++
+                if(scenario==='target_exited'||(scenario==='target_changed'&&targetReads===2))throw Object.assign(new Error('holder exited'),{status:1})
+                return `bun /fixture/server.ts AGENT_ID=seat AGENT_COM_RUNTIME_INSTANCE_ID=${id} AGENT_COM_EXPECTED_AGENT_ID=seat AGENT_COM_WORKSPACE=/fixture AGENT_COM_RUNTIME_SESSION=session`
+              }
+              return '/fixture/codex CODEX_THREAD_ID=session'
+            }
+            if(args.includes('lstart='))return '2026-09-21T00:00:00Z'
+            if(args.includes('cwd'))return 'p200\nn/fixture'
+            if(command==='lsof')return 'p200\nn127.0.0.1:32100'
+            throw new Error('unexpected fixture operation')
+          },
+        })
+        const result=observer({agentId:'seat'})
+        expect(confirmations).toBeGreaterThan(0)
+        if(scenario==='unrelated_exited') {
+          expect(result.reasonCode).toBe('OBSERVED')
+          expect(result.observations).toHaveLength(1)
+          expect(result.observations[0].runtime_instance_id).toBe(id)
+          expect(result.observations[0].process_id).toBe(200)
+        } else {
+          expect(result.observations).toEqual([])
+          expect(result.reasonCode).toBe(scenario==='target_exited'?'NO_LIVE_RUNTIME':'HOST_OBSERVATION_UNAVAILABLE')
+        }
+      })
+    }
+  }
+})
+
+
+describe('NP HTTP transport socket roles', () => {
+  for (const factory of [createHostRuntimeObserver, createNativeHostRuntimeObserver]) {
+    for (const [label, config, sockets, expected] of [
+      ['explicit MCP', 'AGENT_COMMS_PORT=8801', 'n*:8801\nn127.0.0.1:32100', 'OBSERVED'],
+      ['default MCP', 'EXPECTED_BOTS=seat', 'n*:8800\nn127.0.0.1:32100', 'OBSERVED'],
+      ['undeclared listener', '', 'n*:8801\nn127.0.0.1:32100', 'SOCKET_OWNER_AMBIGUOUS'],
+      ['extra runtime', 'AGENT_COMMS_PORT=8801', 'n*:8801\nn127.0.0.1:32100\nn127.0.0.1:32101', 'SOCKET_OWNER_AMBIGUOUS'],
+      ['MCP alone', 'AGENT_COMMS_PORT=8801', 'n*:8801', 'SOCKET_OWNER_AMBIGUOUS'],
+      ['invalid port', 'AGENT_COMMS_PORT=8801oops', 'n*:8801\nn127.0.0.1:32100', 'SOCKET_OWNER_AMBIGUOUS'],
+      ['configuration alone', 'AGENT_COMMS_PORT=8801', 'n127.0.0.1:32100', 'OBSERVED'],
+    ]) {
+      test(`${factory.name}: ${label}`, () => {
+        const inspector = factory({host: () => 'host', canonical: value => value,
+          wall: () => Date.parse('2026-09-21T00:00:10Z'), monotonic: () => 0,
+          processStart: () => '2026-09-21T00:00:00Z',
+          run(command, args) {
+            if (args.join(' ') === '-axo pid=,ppid=,command=') return '200 100 bun /fixture/server.ts\n100 1 /fixture/codex'
+            if (args[0] === 'eww') return args.includes('200')
+              ? `bun /fixture/server.ts AGENT_ID=seat AGENT_COM_RUNTIME_INSTANCE_ID=${id} AGENT_COM_EXPECTED_AGENT_ID=seat AGENT_COM_WORKSPACE=/fixture AGENT_COM_RUNTIME_SESSION=session ${config}`
+              : '/fixture/codex CODEX_THREAD_ID=session'
+            if (args.includes('lstart=')) return '2026-09-21T00:00:00Z'
+            if (args.includes('cwd')) return 'p200\nn/fixture'
+            if (command === 'lsof') return `p200\n${sockets}`
+            throw new Error('unexpected operation')
+          },
+        })
+        const result = inspector({agentId: 'seat'})
+        expect(result.reasonCode).toBe(expected)
+        if (expected === 'OBSERVED') {
+          expect(result.observations).toHaveLength(1)
+          expect(result.observations[0].port).toBe(32100)
+        } else expect(result.observations).toEqual([])
+      })
+    }
+  }
 })

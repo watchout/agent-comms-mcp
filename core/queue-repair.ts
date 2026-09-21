@@ -256,17 +256,7 @@ export async function closeObsoletePendingQueueRows(
           RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
                     b.status AS before_status,
                     left(mq.payload, 180) AS content
-       ),
-       affected_agents AS (
-         SELECT DISTINCT agent_id FROM closed
-       ),
-       agent_active_state AS (
-         SELECT a.agent_id,
-                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
-           FROM agents a
-           JOIN affected_agents aa ON aa.agent_id = a.agent_id
-       ),
-       refreshed_agents AS (SELECT agent_id FROM affected_agents)
+       )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM closed
         ORDER BY created_at ASC
@@ -343,17 +333,7 @@ export async function reclaimExpiredQueueClaims(
           RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
                     b.status AS before_status,
                     left(mq.payload, 180) AS content
-       ),
-       affected_agents AS (
-         SELECT DISTINCT agent_id FROM reclaimed
-       ),
-       agent_active_state AS (
-         SELECT a.agent_id,
-                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
-           FROM agents a
-           JOIN affected_agents aa ON aa.agent_id = a.agent_id
-       ),
-       refreshed_agents AS (SELECT agent_id FROM affected_agents)
+       )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM reclaimed
         ORDER BY created_at ASC

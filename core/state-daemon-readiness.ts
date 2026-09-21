@@ -1,3 +1,4 @@
+import { resolveSeatProvider } from './seat-runtime-selection'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -12,7 +13,6 @@ import {
 import type { BotStatusDbRow, QueueWakeState } from './bot-status-db'
 import { evaluateAutomaticProcessingEligibility } from './communication-authority'
 import { automaticProcessingInputsFromAgent } from './state-daemon'
-import { defaultConfigPort } from './ports/config-port'
 import { validateStateDaemonCanaryOverlayEnv } from './state-daemon/launchagent'
 
 const DEFAULT_LABEL = 'com.agent-comms.state-daemon'
@@ -219,9 +219,9 @@ export interface QueueWakeSmokeOptions {
 
 interface SmokeAgentRow {
   agent_id: string
-  runtime: string | null
-  status: string | null
-  metadata: unknown
+  agent_type: string
+  profile_enabled: boolean | number
+  disabled_at: string | null
   last_wake_attempt_at: string | Date | null
 }
 
@@ -301,10 +301,6 @@ function envEnabled(raw: string | null | undefined): boolean {
   if (!raw) return false
   const normalized = raw.trim().toLowerCase()
   return normalized === '1' || normalized === 'true' || normalized === 'yes'
-}
-
-function isInactiveStatus(status: string | null): boolean {
-  return status === 'disabled' || status === 'offline' || status === 'retired'
 }
 
 function xmlKeyValue(xml: string, key: string): string | null {
@@ -649,17 +645,15 @@ function buildSmokeReportBase(opts: Required<Pick<QueueWakeSmokeOptions, 'mode' 
 
 async function loadSmokeSafety(db: DbAdapter, agentId: string): Promise<QueueWakeSmokeReport['safety']> {
   const agents = await db.query<SmokeAgentRow>(
-    `SELECT agent_id, agent_type, runtime, status, metadata, last_wake_attempt_at
+    `SELECT agent_id, agent_type, profile_enabled, disabled_at, last_wake_attempt_at
        FROM agents
       WHERE agent_id = $1`,
     [agentId],
   )
   if (agents.length === 0) return emptySmokeSafety(agentId)
   const agent = agents[0]
-  const metadata = parseJsonObject(agent.metadata)
-  const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
-    ? metadata.tmux_session.trim()
-    : null
+  const provider = await resolveSeatProvider(db,{agentId})
+  const tmuxSession = provider.ok ? provider.observation?.session_name ?? null : null
   const counts = await db.query<QueueCountRow>(
     `SELECT
        COUNT(id) FILTER (WHERE status = 'pending') AS pending_count,
@@ -673,13 +667,11 @@ async function loadSmokeSafety(db: DbAdapter, agentId: string): Promise<QueueWak
   const pendingCount = parseCount(counts[0]?.pending_count)
   const activeClaimCount = parseCount(counts[0]?.active_claim_count)
   const blockers: string[] = []
-  const runtime = agent.runtime ?? null
-  const status = agent.status ?? null
+  const runtime = provider.ok ? provider.provider : null
+  const status = provider.ok ? 'online' : null
   const humanHit = (agent as { agent_type?: string | null }).agent_type === 'human'
   if (humanHit) blockers.push('target agent is agent_type=human; human seats are excluded from automatic processing')
-  if (isInactiveStatus(status)) blockers.push(`target agent status is ${status}`)
-  if (runtime !== defaultConfigPort.getDefaultRuntime()) blockers.push(`target runtime is ${runtime ?? 'null'}, expected ${defaultConfigPort.getDefaultRuntime()}`)
-  if (!tmuxSession) blockers.push('target agent is missing metadata.tmux_session')
+  if (!(agent.profile_enabled === true || agent.profile_enabled === 1) || agent.disabled_at) blockers.push('target profile is disabled')
   if (pendingCount > 0) blockers.push(`target already has ${pendingCount} pending row(s)`)
   if (activeClaimCount > 0) blockers.push(`target already has ${activeClaimCount} active claim(s)`)
   return {

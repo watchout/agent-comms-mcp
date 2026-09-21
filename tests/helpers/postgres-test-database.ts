@@ -62,7 +62,7 @@ function runDatabaseCommand(
   databaseName: string,
 ): void {
   const args = command === 'dropdb'
-    ? [`--maintenance-db=${maintenanceUrl}`, '--if-exists', databaseName]
+    ? [`--maintenance-db=${maintenanceUrl}`, '--if-exists', '--force', databaseName]
     : [`--maintenance-db=${maintenanceUrl}`, databaseName]
   const result = Bun.spawnSync([command, ...args], { stdout: 'pipe', stderr: 'pipe' })
   if (result.exitCode !== 0) {

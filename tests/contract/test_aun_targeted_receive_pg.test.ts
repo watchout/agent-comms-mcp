@@ -1,3 +1,6 @@
+import {nonpersistHostFixture} from '../helpers/nonpersist-host-fixture'
+import {heartbeatRuntimeInstance} from '../../core/runtime-heartbeat'
+import {randomUUID} from 'node:crypto'
 /**
  * Postgres regression coverage for targeted receive (`aun receive --queue-id`
  * and `aun next --queue-id`, which share the receiveTargeted claim path).
@@ -31,6 +34,8 @@ function pgEnv(agentId: string, extra: Record<string, string> = {}): NodeJS.Proc
 
 describe('targeted receive against real Postgres (lock shape regression)', () => {
   let pg: Client
+  const hosts:Awaited<ReturnType<typeof nonpersistHostFixture>>[]=[]
+  async function readyHost(agentId:string){const host=await nonpersistHostFixture(randomUUID(),agentId);hosts.push(host);await heartbeatRuntimeInstance(pg,{agentId,runtimeInstanceId:host.runtimeId,processId:host.endpoint.pid,port:host.endpoint.port,endpointUri:`http://127.0.0.1:${host.endpoint.port}`,checkoutPath:host.dir})}
 
   beforeAll(async () => {
     pg = await openClient()
@@ -38,12 +43,14 @@ describe('targeted receive against real Postgres (lock shape regression)', () =>
 
   afterAll(async () => {
     if (pg) {
-      await cleanAll(pg)
+      while(hosts.length)await hosts.pop()!.close()
+    await cleanAll(pg)
       await pg.end()
     }
   })
 
   beforeEach(async () => {
+    while(hosts.length)await hosts.pop()!.close()
     await cleanAll(pg)
   })
 
@@ -56,6 +63,7 @@ describe('targeted receive against real Postgres (lock shape regression)', () =>
       last_seen_at: new Date(),
       tmux_session: `${agent}-session`,
     })
+    await readyHost(agent)
     const queueId = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const r = await receiveTargeted({
@@ -97,6 +105,7 @@ describe('targeted receive against real Postgres (lock shape regression)', () =>
       last_seen_at: new Date(),
       tmux_session: `${agent}-session`,
     })
+    await readyHost(agent)
     const queueId = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const r = await receiveTargeted({

@@ -1,3 +1,5 @@
+import {nonpersistHostFixture} from '../helpers/nonpersist-host-fixture'
+import {heartbeatRuntimeInstance} from '../../core/runtime-heartbeat'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync, spawn, type ChildProcess } from 'node:child_process'
 import { resolve, join } from 'node:path'
@@ -26,6 +28,7 @@ const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 const AGENT_ID = `test-wake-pg-${randomUUID().slice(0, 8)}`
 const SESSION = `discord-${AGENT_ID}`
+let currentHost:Awaited<ReturnType<typeof nonpersistHostFixture>>|undefined
 
 function tmuxHas(session: string): boolean {
   return spawnSync('tmux', ['has-session', '-t', session], {
@@ -78,6 +81,7 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
   })
 
   afterAll(async () => {
+    await currentHost?.close()
     if (daemon && daemon.pid && !daemon.killed) {
       try { daemon.kill('SIGKILL') } catch {}
     }
@@ -93,6 +97,8 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
           `DELETE FROM agent_messages WHERE id = $1`,
           [insertedMessageId],
         )
+        await client.query(`DELETE FROM control_plane_leases WHERE holder_agent_id=$1`,[AGENT_ID])
+        await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`,[AGENT_ID])
         await client.query(`DELETE FROM agents WHERE agent_id = $1`, [AGENT_ID])
       } catch {}
     }
@@ -139,11 +145,13 @@ dbDescribe('test_0 wake_daemon PG (PR #232 cycle 2, §4.1 PG/SQLite 両 pass)', 
     const messageId = randomUUID()
     insertedMessageId = messageId
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
-       VALUES ($1, $1, 'dev', 'claude-code', 'online', jsonb_build_object('tmux_session', $2::text), true)
+      `INSERT INTO agents (agent_id, display_name, agent_type, metadata, profile_enabled)
+       VALUES ($1, $1, 'dev', '{}'::jsonb, true)
        ON CONFLICT (agent_id) DO UPDATE SET metadata = EXCLUDED.metadata, profile_enabled = true`,
-      [AGENT_ID, SESSION],
+      [AGENT_ID],
     )
+    currentHost=await nonpersistHostFixture(randomUUID(),AGENT_ID,SESSION)
+    await heartbeatRuntimeInstance(client,{agentId:AGENT_ID,runtimeInstanceId:currentHost.runtimeId,processId:currentHost.endpoint.pid,port:currentHost.endpoint.port,endpointUri:`http://127.0.0.1:${currentHost.endpoint.port}`,checkoutPath:currentHost.dir})
     await client.query(
       `INSERT INTO agent_messages (id, channel_id, author_id, content, message_type, metadata, source, direction, role)
        VALUES ($1::uuid, 'pr232-cycle2-pg-probe', 'pg-probe-author', 'pg wake probe', 'chat', '{}'::jsonb, 'agent-comms', 'inbound', 'agent')`,

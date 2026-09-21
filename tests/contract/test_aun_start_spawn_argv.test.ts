@@ -33,7 +33,7 @@ describe('test_aun_start_spawn_argv — 4 frozen flags + user pass-through', () 
     home = mkdtempSync(join(tmpdir(), 'aun-start-argv-'))
     argvLog = join(home, 'argv.log')
     migrateSqlite(join(home,'fixture.db'))
-    const db=new Database(join(home,'fixture.db'));db.exec("INSERT INTO agents(agent_id,display_name,agent_type,runtime,status,profile_enabled,runtime_engine_preference) VALUES('fixture-seat','Fixture','dev','TUI','idle',1,'codex')");db.close()
+    const db=new Database(join(home,'fixture.db'));db.exec("INSERT INTO agents(agent_id, display_name, agent_type, profile_enabled) VALUES('fixture-seat', 'Fixture', 'dev', 1)");db.close()
     mockClaudeBin = join(home, 'mock-claude')
     writeFileSync(mockClaudeBin, `#!/usr/bin/env bash
 # Dump every arg, one per line, then exit 0 — replaces the real claude

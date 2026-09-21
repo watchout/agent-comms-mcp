@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { createReadyNativeRuntimeWithDb, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 const fixtureHomes:string[]=[]
+const nativeEnvs=new Map<string,NodeJS.ProcessEnv>()
+afterAll(async()=>{await stopNativeFixtures();for(const home of fixtureHomes)rmSync(home,{recursive:true,force:true})})
 import { join, dirname } from 'node:path'
 import { resetAutoSkipPatternsCache } from '../../config/auto-skip-patterns'
 
@@ -54,25 +56,12 @@ async function seedMemoryReadyAgent(client: Client, agentId: string, agentType =
   await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = $1`, [agentId])
   await client.query(`DELETE FROM control_plane_leases WHERE holder_agent_id = $1`, [agentId])
   await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
-  await client.query(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port,
-        metadata, profile_revision, profile_source, home_directory)
-     VALUES ($1, $1, $2, 'mcp', 'idle', $3, $4::jsonb, 1, 'legacy', $5)
-     ON CONFLICT (agent_id) DO UPDATE SET
-       agent_type = EXCLUDED.agent_type,
-       runtime = EXCLUDED.runtime,
-       status = EXCLUDED.status,
-       channel_port = EXCLUDED.channel_port,
-       metadata = EXCLUDED.metadata,
-       profile_revision = 1,
-       profile_source = 'legacy',
-       home_directory = EXCLUDED.home_directory`,
-    [agentId, agentType, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
-  )
+  await client.query(`INSERT INTO agents(agent_id,display_name,agent_type,metadata,profile_revision,profile_source)
+    VALUES($1,$1,$2,'{}',1,'legacy') ON CONFLICT(agent_id) DO UPDATE SET
+      agent_type=EXCLUDED.agent_type,metadata=EXCLUDED.metadata,profile_revision=1,profile_source='legacy'`,[agentId,agentType])
   const home=mkdtempSync(join(tmpdir(),'drain-native-'));fixtureHomes.push(home)
   const db=new PgAdapter(DATABASE_URL!)
-  try { await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId) }
+  try { const fixture=await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId);nativeEnvs.set(agentId,{...fixture.env,CODEX_HOME:home,PATH:fixture.cliPath+':'+process.env.PATH,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId}) }
   finally {await db.close()}
 
 }
@@ -102,6 +91,7 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
   function runDrainHook(limit: number | null = null): { stdout: string; stderr: string; status: number | null } {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
+      ...nativeEnvs.get(TEST_AGENT),
       AGENT_ID: TEST_AGENT,
       DATABASE_URL: DATABASE_URL!,
     }
@@ -262,7 +252,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
       )
     }
 
-    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL! }
+    const env = { ...process.env as Record<string, string>, ...nativeEnvs.get(agentId), AGENT_ID: agentId, DATABASE_URL: DATABASE_URL! }
     // Strip any inherited overrides so the role default is what the
     // runner falls back to.
     delete env.AGENT_COMMS_DRAIN_LIMIT
@@ -318,12 +308,10 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
       )
     }
     const overrideKey = `AGENT_COMMS_DRAIN_LIMIT_${agentId.replace(/-/g, '_').toUpperCase()}`
-    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL!, [overrideKey]: '2' }
+    const env = { ...process.env as Record<string, string>, ...nativeEnvs.get(agentId), AGENT_ID: agentId, DATABASE_URL: DATABASE_URL!, [overrideKey]: '2' }
     const r = spawnSync('bun', [RUNNER], { env, encoding: 'utf-8' })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('drained=2')
     await cleanupMemoryReadyAgent(client, agentId)
   })
 })
-
-afterAll(async()=>{await stopNativeFixtures();for(const home of fixtureHomes)rmSync(home,{recursive:true,force:true})})

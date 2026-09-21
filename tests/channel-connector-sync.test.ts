@@ -16,25 +16,21 @@ async function withSyncDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> 
     const seed = new Database(dbPath)
     seed.prepare(
       `INSERT INTO agents (
-         agent_id, display_name, agent_type, cli_type, status,
+         agent_id, display_name, agent_type,
          provider_token_source_ref, expected_provider_identity, metadata
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(
       'hotel-dev',
       'Hotel Dev',
       'dev',
-      'TUI',
-      'idle',
       'local-env:DISCORD_TOKEN_HOTEL_DEV',
       JSON.stringify({ provider: 'discord', subject_id: '123456789012345678' }),
       JSON.stringify({ discord_id: '123456789012345678' }),
     )
-    seed.prepare("INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status) VALUES (?, ?, ?, ?, ?)").run(
+    seed.prepare("INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, ?)").run(
       'other-dev',
       'Other Dev',
       'dev',
-      'TUI',
-      'idle',
     )
     seed.prepare("INSERT INTO channels (id, name, members) VALUES (?, ?, ?)").run(
       'hotel-channel',

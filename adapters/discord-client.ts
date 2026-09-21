@@ -74,7 +74,7 @@ export async function refreshAgentCache(): Promise<string[]> {
   const queryFn = db
     ? async () => {
         const r = await db.query(
-          "SELECT agent_id FROM agents WHERE status != 'disabled' ORDER BY agent_id",
+          "SELECT agent_id FROM agents WHERE COALESCE(profile_enabled,true)=true AND disabled_at IS NULL ORDER BY agent_id",
         ).catch(() => ({ rows: [] as any[] }))
         return r.rows.map((row: any) => row.agent_id as string)
       }

@@ -9,6 +9,7 @@ export const contractRef='https://github.com/watchout/agent-comms-mcp/issues/940
 export async function configurationContractFixture() {
   const f=await fixture('postgres',false)
   await f.apply();await f.exec(restartSql)
+  await f.exec(readFileSync(join(repo,'db/migrations/2026-09-22-configuration-outbox-supersession.up.sql'),'utf8'))
   const url=new URL(process.env.AGENT_COM_TEST_DATABASE_URL!);url.pathname='/'+f.name
   const db=new PgAdapter(url.href)
   await insert(f,'agents',{agent_id:'cfg-fixture',display_name:'configuration fixture',agent_type:'bot',profile_enabled:true,

@@ -965,7 +965,7 @@ export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryRe
     throw new Error('MEMORY_NATIVE_CURRENT_RUNTIME_MISMATCH')
   }
   const endpoint = await resolveRuntimeEndpoint(db, {agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,now,inspect:input.inspect})
-  if (!endpoint.ok || !endpoint.endpoint || !endpoint.endpoint.processId) throw new Error('MEMORY_NATIVE_ENDPOINT_UNAVAILABLE')
+  if (!endpoint.ok || !endpoint.endpoint || !endpoint.endpoint.processId) throw new Error(`MEMORY_NATIVE_ENDPOINT_UNAVAILABLE:${endpoint.code}`)
   const observed = (input.observeProvider ?? observeSeatProvider)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
     processId:endpoint.endpoint.processId,sessionName:runtime.session_name,workspace:runtime.checkout_path,now})
   const saved = parseObject(parseObject(runtime.metadata).provider_observation)
@@ -985,6 +985,6 @@ export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryRe
     valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
   }))
   const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
-  if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}`)
+  if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}:${String(gate.details?.code ?? 'NO_DETAIL')}`)
   return recorded
 }

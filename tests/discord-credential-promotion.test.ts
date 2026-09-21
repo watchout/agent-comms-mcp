@@ -45,14 +45,7 @@ function seedDeliveryFixture(options: {
   const db = new Database(dbPath)
   try {
     db.prepare(`
-      INSERT INTO agents (
-        agent_id,
-        display_name,
-        agent_type,
-        status,
-        provider_token_source_ref,
-        expected_provider_identity
-      ) VALUES (?, ?, 'dev', 'idle', 'local-env:TEST_DISCORD_TOKEN', ?)
+      INSERT INTO agents (agent_id, display_name, agent_type, provider_token_source_ref, expected_provider_identity) VALUES (?, ?, 'dev', 'local-env:TEST_DISCORD_TOKEN', ?)
     `).run(agentId, agentId, JSON.stringify({ provider: 'discord', subject_id: providerSubjectId }))
     db.prepare(`INSERT INTO channels (id, name, members) VALUES (?, ?, ?)`)
       .run(channelId, channelId, JSON.stringify([agentId]))
