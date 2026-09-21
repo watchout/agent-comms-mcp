@@ -147,5 +147,7 @@ next_action:
 |---|---|---:|---:|---:|---:|---:|---|
 '''.replace('SOURCE_HEAD_PLACEHOLDER',head)
 for r in runs:main+=f"| {r['name']} | `{r['source_head'][:8]}` | {r['pass']} | {r['fail']} | {r['filtered']} | {r['errors']} | {r['assertions']} | [{r['name']}.log]({r['name']}.log) |\n"
+if (out/'NATIVE-RECHECK.md').exists():
+ main+='\n'+(out/'NATIVE-RECHECK.md').read_text()
 (out/'RETURN.md').write_text(main)
 print('validated final source manifest',len(final_manifest),'files;',len(runs),'raw runs; 47 failures mapped')
