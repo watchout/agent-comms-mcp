@@ -15,10 +15,10 @@ import {
   listPendingConfigurationEvents,
   markConfigurationEventDelivered,
   readConfigurationDesiredState,
-  recordConfigurationObservedState,
+  recordConfigurationReconcileResult,
   verifyConfigurationRestartExecutionClaim,
   type AunConfigurationDesiredState,
-  type AunConfigurationObservedState,
+  type AunConfigurationReconcileState,
   type AunConfigurationOutboxEvent,
   type AunConfigurationRestartRequest,
   type AunConfigurationRestartExecutionClaimInput,
@@ -61,7 +61,6 @@ export interface ConfigurationRollbackResult {
 }
 
 export interface ConfigurationEffectAuthorization {
-  hostId: string
   agentId: string
   desiredRevision: number
   desiredDigest: string
@@ -79,8 +78,7 @@ export function configurationEffectAuthorizationDigest(
 
 export interface ConfigurationProjectionPort {
   render(input: {
-    hostId: string
-    desired: AunConfigurationDesiredState
+      desired: AunConfigurationDesiredState
   }): Promise<AunConfigurationCandidate>
   validate(candidate: AunConfigurationCandidate): Promise<{ ok: boolean; reasonCodes: string[] }>
   applyFenced(
@@ -97,17 +95,16 @@ export interface ConfigurationProjectionPort {
 export interface ConfigurationDesiredStateStore {
   readDesired(agentId: string): Promise<AunConfigurationDesiredState | null>
   listPendingEvents(limit: number): Promise<AunConfigurationOutboxEvent[]>
-  listDueDesiredAgents(hostId: string, limit: number, minObservedAgeMs: number): Promise<string[]>
-  markEventDelivered(event: AunConfigurationOutboxEvent): Promise<boolean>
-  readObserved(hostId: string, agentId: string): Promise<AunConfigurationObservedState | null>
-  recordObserved(state: AunConfigurationObservedState): Promise<boolean>
+  listDueDesiredAgents(limit: number, minObservedAgeMs: number): Promise<string[]>
+  markEventDelivered(event: AunConfigurationOutboxEvent, lease: ControlPlaneLease): Promise<boolean>
+  recordReconcileResult(state: AunConfigurationReconcileState): Promise<boolean>
   createRestartRequest(input: AunConfigurationRestartRequest): Promise<string>
   listen?(callback: (event: { agentId: string; desiredRevision: number; desiredDigest: string }) => void): Promise<void>
   unlisten?(): Promise<void>
 }
 
 export interface ConfigurationLeasePort {
-  acquire(hostId: string): Promise<ControlPlaneLease | null>
+  acquire(agentId: string): Promise<ControlPlaneLease | null>
   heartbeat(lease: ControlPlaneLease): Promise<boolean>
   verify(lease: ControlPlaneLease): Promise<boolean>
   release(lease: ControlPlaneLease): Promise<void>
@@ -175,10 +172,10 @@ export async function executeApprovedConfigurationRestart(
     throw new Error('RESTART_EXECUTION_NOT_AUTHORIZED')
   }
   const claim = await store.claim({
-    requestId, hostId: candidate.hostId, agentId: candidate.agentId,
+    requestId, agentId: candidate.agentId,
     toRevision: candidate.desiredRevision, toDigest: candidate.desiredDigest,
-    candidateDigest: candidate.candidateDigest,
-    rollbackArtifactDigest: candidate.rollbackArtifactDigest,
+    rollbackReleaseCommit: candidate.rollbackReleaseCommit,
+    rollbackReleaseTree: candidate.rollbackReleaseTree,
     exactReleaseCommit: candidate.releaseCommit, exactReleaseTree: candidate.releaseTree,
     exactControlRefs: candidate.controlRefs, executionLeaseId: execution.lease.lease_id,
     executionFencingToken: execution.lease.fencing_token,
@@ -200,7 +197,7 @@ export async function executeApprovedConfigurationRestart(
       requestId: claim.requestId, executionAttempt: claim.executionAttempt,
       executionLeaseId: claim.executionLeaseId,
       executionFencingToken: claim.executionFencingToken,
-      candidateDigest: claim.candidateDigest, status, reasonCode,
+      releaseCommit: claim.exactReleaseCommit,releaseTree:claim.exactReleaseTree,rollbackReleaseCommit:claim.rollbackReleaseCommit,rollbackReleaseTree:claim.rollbackReleaseTree,status, reasonCode,
     })
     const terminalReceiptRecorded = await store.complete(
       claim, { status, terminalReceiptDigest, reasonCode },
@@ -244,32 +241,19 @@ export async function executeApprovedConfigurationRestart(
   )
 }
 
-function observedFrom(
-  hostId: string,
-  desired: AunConfigurationDesiredState,
-  candidate: AunConfigurationCandidate,
-  lease: ControlPlaneLease,
-  readback: ConfigurationProjectionReadback,
-  status: AunConfigurationStatus,
-  reasonCodes: string[],
-): AunConfigurationObservedState {
-  return {
-    hostId,
-    agentId: desired.agentId,
-    observedRevision: desired.desiredRevision,
-    observedDesiredDigest: desired.desiredDigest,
-    candidateDigest: candidate.candidateDigest,
-    releaseCommit: desired.releaseCommit,
-    releaseTree: desired.releaseTree,
-    providerNativeDigest: readback.providerNativeDigest,
-    launchagentPlistDigest: readback.launchagentPlistDigest,
-    launchctlEnvironmentDigest: readback.launchctlEnvironmentDigest,
-    runtimeIdentityDigest: readback.runtimeIdentityDigest,
-    reconcileStatus: status,
-    driftReasonCodes: [...new Set([...reasonCodes, ...readback.driftReasonCodes])].sort(),
-    leaseId: lease.lease_id,
-    fencingToken: lease.fencing_token,
-  }
+function reconcileStateFrom(
+  desired:AunConfigurationDesiredState,
+  _candidate:AunConfigurationCandidate,
+  lease:ControlPlaneLease,
+  readback:ConfigurationProjectionReadback,
+  status:AunConfigurationStatus,
+  reasonCodes:string[],
+):AunConfigurationReconcileState {
+  return {agentId:desired.agentId,desiredRevision:desired.desiredRevision,desiredDigest:desired.desiredDigest,
+    releaseCommit:desired.releaseCommit,releaseTree:desired.releaseTree,reconcileStatus:status,
+    driftReasonCodes:[...new Set([...reasonCodes,...readback.driftReasonCodes])].sort(),
+    leaseId:lease.lease_id,fencingToken:lease.fencing_token,holderAgentId:lease.holder_agent_id,
+    holderRuntimeInstanceId:lease.holder_runtime_instance_id}
 }
 
 export class DbConfigurationDesiredStateStore implements ConfigurationDesiredStateStore {
@@ -277,50 +261,22 @@ export class DbConfigurationDesiredStateStore implements ConfigurationDesiredSta
 
   readDesired(agentId: string) { return readConfigurationDesiredState(this.db, agentId) }
   listPendingEvents(limit: number) { return listPendingConfigurationEvents(this.db, limit) }
-  async listDueDesiredAgents(hostId: string, limit: number, minObservedAgeMs: number): Promise<string[]> {
-    const rows = await this.db.query<{ agent_id: string }>(
-      `SELECT a.agent_id
-         FROM agents a
-         LEFT JOIN aun_configuration_observed_state o
-           ON o.host_id = $1 AND o.agent_id = a.agent_id
-        WHERE a.desired_revision IS NOT NULL AND a.desired_digest IS NOT NULL
-          AND (o.observed_at IS NULL
-            OR o.observed_at <= now() - ($3::bigint * interval '1 millisecond'))
-        ORDER BY a.desired_revision ASC, a.agent_id ASC
-        LIMIT $2`,
-      [hostId, limit, minObservedAgeMs],
-    )
-    return rows.map((row) => String(row.agent_id))
+  async listDueDesiredAgents(limit:number,minObservedAgeMs:number):Promise<string[]> {
+    const rows=await this.db.query<{agent_id:string}>(`SELECT a.agent_id FROM agents a
+      LEFT JOIN LATERAL (SELECT max(created_at) AS completed_at FROM audit_log
+        WHERE event_type='configuration.reconciled' AND agent_id=a.agent_id) completed ON true
+      WHERE a.desired_revision IS NOT NULL AND a.desired_digest IS NOT NULL
+        AND (completed.completed_at IS NULL OR completed.completed_at<=clock_timestamp()-($2::bigint * interval '1 millisecond'))
+      ORDER BY completed.completed_at ASC NULLS FIRST,a.agent_id ASC LIMIT $1`,[limit,minObservedAgeMs])
+    return rows.map(row=>String(row.agent_id))
   }
-  markEventDelivered(event: AunConfigurationOutboxEvent) {
-    return markConfigurationEventDelivered(this.db, event.eventId, event.desiredRevision, event.desiredDigest)
+  markEventDelivered(event:AunConfigurationOutboxEvent,lease:ControlPlaneLease) {
+    return markConfigurationEventDelivered(this.db,event.eventId,event.desiredRevision,event.desiredDigest,{
+      agentId:event.agentId,desiredRevision:event.desiredRevision,desiredDigest:event.desiredDigest,
+      leaseId:lease.lease_id,fencingToken:lease.fencing_token,holderAgentId:lease.holder_agent_id,
+      holderRuntimeInstanceId:lease.holder_runtime_instance_id})
   }
-  async readObserved(hostId: string, agentId: string): Promise<AunConfigurationObservedState | null> {
-    const row = await this.db.queryOne<any>(
-      `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
-              release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
-              launchctl_environment_digest, runtime_identity_digest, reconcile_status,
-              drift_reason_codes, lease_id, fencing_token, observed_at
-         FROM aun_configuration_observed_state WHERE host_id = $1 AND agent_id = $2`,
-      [hostId, agentId],
-    )
-    if (!row) return null
-    const reasons = typeof row.drift_reason_codes === 'string'
-      ? JSON.parse(row.drift_reason_codes)
-      : row.drift_reason_codes
-    return {
-      hostId: String(row.host_id), agentId: String(row.agent_id),
-      observedRevision: Number(row.observed_revision), observedDesiredDigest: String(row.observed_desired_digest),
-      candidateDigest: String(row.candidate_digest), releaseCommit: String(row.release_commit),
-      releaseTree: String(row.release_tree), providerNativeDigest: String(row.provider_native_digest),
-      launchagentPlistDigest: String(row.launchagent_plist_digest),
-      launchctlEnvironmentDigest: String(row.launchctl_environment_digest),
-      runtimeIdentityDigest: String(row.runtime_identity_digest), reconcileStatus: row.reconcile_status,
-      driftReasonCodes: Array.isArray(reasons) ? reasons.map(String) : [],
-      leaseId: String(row.lease_id), fencingToken: Number(row.fencing_token), observedAt: row.observed_at,
-    }
-  }
-  recordObserved(state: AunConfigurationObservedState) { return recordConfigurationObservedState(this.db, state) }
+  recordReconcileResult(state:AunConfigurationReconcileState) {return recordConfigurationReconcileResult(this.db,state)}
   createRestartRequest(input: AunConfigurationRestartRequest) { return createConfigurationRestartRequest(this.db, input) }
   async listen(callback: (event: { agentId: string; desiredRevision: number; desiredDigest: string }) => void): Promise<void> {
     if (!this.db.listen) return
@@ -348,10 +304,10 @@ export class DbConfigurationLeasePort implements ConfigurationLeasePort {
     private readonly holderRuntimeInstanceId: string | null,
   ) {}
 
-  async acquire(hostId: string): Promise<ControlPlaneLease | null> {
+  async acquire(agentId: string): Promise<ControlPlaneLease | null> {
     const acquired = await acquireControlPlaneLease(this.db, {
       scopeType: 'runtime_instance',
-      scopeId: `configuration-reconciler:${hostId}`,
+      scopeId: `configuration-reconciler:${agentId}`,
       purpose: 'maintenance',
       ttlMs: CONFIGURATION_RECONCILER_LEASE_TTL_MS,
       holderAgentId: this.holderAgentId,
@@ -398,13 +354,10 @@ export class AunConfigurationReconciler {
   private readonly inFlight = new Map<string, Promise<ConfigurationReconcileResult>>()
 
   constructor(
-    private readonly hostId: string,
     private readonly store: ConfigurationDesiredStateStore,
     private readonly leases: ConfigurationLeasePort,
     private readonly projections: ConfigurationProjectionPort,
-  ) {
-    if (!hostId.trim()) throw new Error('HOST_ID_REQUIRED')
-  }
+  ) {}
 
   async start(): Promise<void> {
     if (this.started) throw new Error('CONFIGURATION_RECONCILER_ALREADY_STARTED')
@@ -456,7 +409,7 @@ export class AunConfigurationReconciler {
       let dueAgents: string[]
       try {
         dueAgents = await this.store.listDueDesiredAgents(
-          this.hostId, remaining, CONFIGURATION_RECONCILER_SWEEP_MS,
+          remaining, CONFIGURATION_RECONCILER_SWEEP_MS,
         )
       } catch {
         if (results.length === 0) {
@@ -502,7 +455,7 @@ export class AunConfigurationReconciler {
       candidateDigest: null, status, applyCount: 0, restartRequestId: null,
       reasonCodes, eventDelivered: false, freshNativeReadback: false,
     })
-    const lease = await this.leases.acquire(this.hostId).catch(() => null)
+    const lease = await this.leases.acquire(agentId).catch(() => null)
     if (!lease) return base('RECONCILING', ['LEASE_UNAVAILABLE'])
     let heartbeatValid = true
     const heartbeat = setInterval(() => {
@@ -519,7 +472,7 @@ export class AunConfigurationReconciler {
       result.desiredDigest = desired.desiredDigest
 
       if (!await fenceValid()) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['FENCE_INVALID_BEFORE_RENDER'] }
-      const candidate = await this.projections.render({ hostId: this.hostId, desired })
+      const candidate = await this.projections.render({ desired })
       result.candidateDigest = candidate.candidateDigest
       const validation = await this.projections.validate(candidate)
       if (!validation.ok) {
@@ -528,11 +481,11 @@ export class AunConfigurationReconciler {
         if (!await fenceValid()) {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['FENCE_INVALID_BEFORE_OBSERVED'] }
         }
-        const recorded = await this.store.recordObserved(observedFrom(
-          this.hostId, desired, candidate, lease, readback, 'DRIFTED', validation.reasonCodes,
+        const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+          desired, candidate, lease, readback, 'DRIFTED', validation.reasonCodes,
         ))
         if (!recorded) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
-        if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+        if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
         return { ...result, status: 'DRIFTED', reasonCodes: validation.reasonCodes }
       }
 
@@ -542,28 +495,27 @@ export class AunConfigurationReconciler {
         || current.desiredDigest !== desired.desiredDigest) {
         const readback = await this.projections.readback(candidate)
         result.freshNativeReadback = true
-        const recorded = await this.store.recordObserved(observedFrom(
-          this.hostId, desired, candidate, lease, readback, 'NO_GO_STALE_CANDIDATE', ['STALE_BEFORE_APPLY'],
+        const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+          desired, candidate, lease, readback, 'NO_GO_STALE_CANDIDATE', ['STALE_BEFORE_APPLY'],
         ))
         if (!recorded) {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
         }
-        if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+        if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
         return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['STALE_BEFORE_APPLY'] }
       }
 
-      const before = await this.store.readObserved(this.hostId, agentId)
       const nativeBefore = await this.projections.readback(candidate)
       result.freshNativeReadback = true
       if (nativeBefore.matchesCandidate) {
         if (!await fenceValid()) {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['FENCE_INVALID_BEFORE_OBSERVED'] }
         }
-        const recorded = await this.store.recordObserved(observedFrom(
-          this.hostId, desired, candidate, lease, nativeBefore, 'READY', [],
+        const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+          desired, candidate, lease, nativeBefore, 'READY', [],
         ))
         if (!recorded) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
-        if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+        if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
         return { ...result, status: 'READY', reasonCodes: [] }
       }
       if (candidate.restartRequired) {
@@ -574,13 +526,12 @@ export class AunConfigurationReconciler {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['STALE_BEFORE_RESTART_REQUEST'] }
         }
         result.restartRequestId = await this.store.createRestartRequest({
-          hostId: this.hostId, agentId, fromRevision: before?.observedRevision ?? null,
-          fromDigest: before?.observedDesiredDigest ?? null, toRevision: desired.desiredRevision,
-          toDigest: desired.desiredDigest, candidateDigest: candidate.candidateDigest,
-          rollbackArtifactDigest: candidate.rollbackArtifactDigest,
+          agentId,fromRevision:null,fromDigest:null,toRevision:desired.desiredRevision,
+          toDigest:desired.desiredDigest,rollbackReleaseCommit:candidate.rollbackReleaseCommit,
+          rollbackReleaseTree:candidate.rollbackReleaseTree,
           exactReleaseCommit: candidate.releaseCommit, exactReleaseTree: candidate.releaseTree,
           exactControlRefs: candidate.controlRefs, leaseId: lease.lease_id,
-          fencingToken: lease.fencing_token, restartBudget: 1,
+          fencingToken: lease.fencing_token, restartBudget: 1,holderAgentId:lease.holder_agent_id,holderRuntimeInstanceId:lease.holder_runtime_instance_id,
         }).catch(() => null)
         if (!result.restartRequestId) {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['RESTART_REQUEST_FENCE_REJECTED'] }
@@ -588,17 +539,17 @@ export class AunConfigurationReconciler {
         if (!await fenceValid()) {
           return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['FENCE_INVALID_BEFORE_OBSERVED'] }
         }
-        const recorded = await this.store.recordObserved(observedFrom(
-          this.hostId, desired, candidate, lease, nativeBefore,
+        const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+          desired, candidate, lease, nativeBefore,
           'DEGRADED_APPROVAL_REQUIRED', ['PROTECTED_RESTART_REQUIRED'],
         ))
         if (!recorded) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
-        if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+        if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
         return { ...result, status: 'DEGRADED_APPROVAL_REQUIRED', reasonCodes: ['PROTECTED_RESTART_REQUIRED'] }
       }
 
       const effectAuthorization: ConfigurationEffectAuthorization = {
-        hostId: this.hostId, agentId, desiredRevision: desired.desiredRevision,
+        agentId, desiredRevision: desired.desiredRevision,
         desiredDigest: desired.desiredDigest, leaseId: lease.lease_id,
         fencingToken: lease.fencing_token,
         verifyCurrent: async () => {
@@ -644,11 +595,11 @@ export class AunConfigurationReconciler {
         const status: AunConfigurationStatus = rollback.ok ? 'NO_GO_PARTIAL_APPLY' : 'NO_GO_ROLLBACK'
         const reasons = [applied.reasonCode ?? 'APPLY_FAILED', ...(rollback.ok ? [] : [rollback.reasonCode ?? 'ROLLBACK_FAILED'])]
         if (await fenceValid()) {
-          const recorded = await this.store.recordObserved(observedFrom(
-            this.hostId, desired, candidate, lease, afterFailure, status, reasons,
+          const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+            desired, candidate, lease, afterFailure, status, reasons,
           ))
           if (!recorded) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
-          if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+          if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
         }
         return { ...result, status, reasonCodes: reasons }
       }
@@ -663,11 +614,11 @@ export class AunConfigurationReconciler {
       }
       const finalStatus: AunConfigurationStatus = nativeAfter.matchesCandidate ? 'READY' : 'DRIFTED'
       const finalReasons = nativeAfter.matchesCandidate ? [] : ['NATIVE_READBACK_MISMATCH']
-      const recorded = await this.store.recordObserved(observedFrom(
-        this.hostId, desired, candidate, lease, nativeAfter, finalStatus, finalReasons,
+      const recorded = await this.store.recordReconcileResult(reconcileStateFrom(
+        desired, candidate, lease, nativeAfter, finalStatus, finalReasons,
       ))
       if (!recorded) return { ...result, status: 'NO_GO_STALE_CANDIDATE', reasonCodes: ['OBSERVED_FENCE_REJECTED'] }
-      if (event) result.eventDelivered = await this.store.markEventDelivered(event)
+      if (event) result.eventDelivered = await this.store.markEventDelivered(event, lease)
       return { ...result, status: finalStatus, reasonCodes: finalReasons }
     } catch (error) {
       return {

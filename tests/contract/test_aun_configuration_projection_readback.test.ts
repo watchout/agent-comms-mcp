@@ -26,7 +26,7 @@ test('manual projection tamper is detected and never back-propagates to DB desir
       fenceVerifiedAtCommit: await authorization.verifyCurrent(),
     }
   }
-  const [result] = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).sweepOnce()
+  const [result] = await new AunConfigurationReconciler(store, new FakeLease(), port).sweepOnce()
   expect(result.status).toBe('DRIFTED')
   expect(store.observed?.reconcileStatus).toBe('DRIFTED')
   expect(store.desired).toEqual(original)

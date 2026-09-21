@@ -15,6 +15,16 @@ claim owner/token/expiry, logical runtime UUID/FK, lease/fence and history remai
 durable. The DB remains the authority for those durable facts; a visible process
 or socket alone never grants permission to execute work.
 
+The [D-CFG-1 / D-S0-1 contract](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5759277196)
+(body SHA256 `01f2259457e1b5c605a500c1db474bcaf374d5d9f0ab48a4e57192914e01a82b`)
+binds configuration leases to existing `agent_id`, keeps observed-state INSERTs
+denied and uses desired-outbox delivery as durable reconcile completion. Restart
+authority stores logical release/rollback commit and tree, never hostname or
+physical artifact digests. Provider-free S0 requires current exact-holder lease,
+fresh OS observation and durable build identity; its logical marker lives in
+non-worker lease metadata and never requires an LLM provider. The dependent spec
+defines the amendment and AC-CFG-1..5 / AC-S0-1..3 acceptance.
+
 D1–D4 were adopted by the [owner](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755364993)
 (raw SHA256 `8414bb149e2a8b9aee4fb62b87f11d6109d5bc9bf9beb67019e282e21bcc1791`).
 The [bounded implementation handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755382588)

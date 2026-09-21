@@ -8,7 +8,7 @@ test('an older concurrent revision cannot apply and the latest applies at most o
   const store = new FakeStore(latest)
   store.desiredReads = [oldDesired, latest]
   const port = new FakeProjection()
-  const reconciler = new AunConfigurationReconciler('host-a', store, new FakeLease(), port)
+  const reconciler = new AunConfigurationReconciler(store, new FakeLease(), port)
   const stale = await reconciler.reconcileAgent('misell', eventFixture(oldDesired))
   expect(stale).toMatchObject({ status: 'NO_GO_STALE_CANDIDATE', applyCount: 0 })
   const applied = await reconciler.reconcileAgent('misell', eventFixture(latest))

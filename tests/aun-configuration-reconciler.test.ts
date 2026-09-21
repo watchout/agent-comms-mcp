@@ -14,7 +14,7 @@ import {
   AUN_CONFIGURATION_EVENT_TYPE,
   computeDesiredDigest,
   type AunConfigurationDesiredState,
-  type AunConfigurationObservedState,
+  type AunConfigurationReconcileState,
   type AunConfigurationOutboxEvent,
   type AunConfigurationRestartRequest,
 } from '../core/aun-configuration-desired-state'
@@ -45,7 +45,7 @@ export function desiredFixture(revision = 1, overrides: Partial<AunConfiguration
 
 export function candidateFixture(desired = desiredFixture(), restartRequired = false): AunConfigurationCandidate {
   return buildAunConfigurationCandidate({
-    hostId: 'host-a', desired,
+    desired,
     externalRoot: {
       databaseLocatorRef: 'env:DATABASE_URL', databaseCredentialRef: 'env:DATABASE_URL',
       releaseCommit: COMMIT, releaseTree: TREE, controlRefs: [CONTROL],
@@ -95,7 +95,7 @@ export class FakeStore implements ConfigurationDesiredStateStore {
   desiredReads: AunConfigurationDesiredState[] = []
   events: AunConfigurationOutboxEvent[] = []
   dueAgentIds: string[] = []
-  observed: AunConfigurationObservedState | null = null
+  observed: AunConfigurationReconcileState | null = null
   restarts: AunConfigurationRestartRequest[] = []
   delivered: string[] = []
   unavailable = false
@@ -118,8 +118,7 @@ export class FakeStore implements ConfigurationDesiredStateStore {
     this.events = this.events.filter((value) => value.eventId !== event.eventId)
     return true
   }
-  async readObserved(): Promise<AunConfigurationObservedState | null> { return this.observed }
-  async recordObserved(value: AunConfigurationObservedState): Promise<boolean> { this.observed = value; return true }
+  async recordReconcileResult(value: AunConfigurationReconcileState): Promise<boolean> { this.observed = value; return true }
   async createRestartRequest(input: AunConfigurationRestartRequest): Promise<string> {
     this.restarts.push(input)
     return `restart-${input.toRevision}`
@@ -132,7 +131,7 @@ export class FakeLease implements ConfigurationLeasePort {
   valid = true
   lease: ControlPlaneLease = {
     lease_id: '11111111-1111-4111-8111-111111111111', lease_scope_type: 'runtime_instance',
-    lease_scope_id: 'configuration-reconciler:host-a', lease_purpose: 'maintenance',
+    lease_scope_id: 'configuration-reconciler:misell', lease_purpose: 'maintenance',
     holder_agent_id: 'codex-aun', holder_runtime_instance_id: null, holder_connector_instance_id: null,
     fencing_token: 1, status: 'active', acquired_at: new Date(), heartbeat_at: new Date(),
     expires_at: new Date(Date.now() + 45_000), released_at: null, metadata: {},
@@ -156,7 +155,7 @@ export class FakeProjection implements ConfigurationProjectionPort {
   beforeApplyCommit: ((authorization: ConfigurationEffectAuthorization) => void | Promise<void>) | null = null
   beforeRollbackCommit: ((authorization: ConfigurationEffectAuthorization) => void | Promise<void>) | null = null
 
-  async render({ desired }: { hostId: string; desired: AunConfigurationDesiredState }) {
+  async render({ desired }: { desired: AunConfigurationDesiredState }) {
     if (this.renderDelay) await this.renderDelay
     return candidateFixture(desired, this.restartRequired)
   }
@@ -208,19 +207,19 @@ describe('AUN configuration reconciler', () => {
     const event = eventFixture(store.desired)
     const lease = new FakeLease()
     const port = new FakeProjection()
-    const result = await new AunConfigurationReconciler('host-a', store, lease, port).reconcileAgent('misell', event)
+    const result = await new AunConfigurationReconciler(store, lease, port).reconcileAgent('misell', event)
     expect(result).toMatchObject({ status: 'READY', applyCount: 1, eventDelivered: true, freshNativeReadback: true })
     expect(port.applyCalls).toBe(1)
     expect(port.readbackCalls).toBe(2)
     expect(lease.verifyCalls).toBe(4)
-    expect(store.observed?.observedRevision).toBe(1)
+    expect(store.observed?.desiredRevision).toBe(1)
   })
 
   test('an equal second run performs zero mutations and still fresh-readbacks', async () => {
     const store = new FakeStore()
     const port = new FakeProjection()
     port.readbackMatches = true
-    const result = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).reconcileAgent('misell')
+    const result = await new AunConfigurationReconciler(store, new FakeLease(), port).reconcileAgent('misell')
     expect(result).toMatchObject({ status: 'READY', applyCount: 0, freshNativeReadback: true })
     expect(port.applyCalls).toBe(0)
     expect(port.readbackCalls).toBe(1)
@@ -230,7 +229,7 @@ describe('AUN configuration reconciler', () => {
     const store = new FakeStore()
     store.desiredReads = [desiredFixture(1), desiredFixture(2)]
     const port = new FakeProjection()
-    const result = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port)
+    const result = await new AunConfigurationReconciler(store, new FakeLease(), port)
       .reconcileAgent('misell', eventFixture(desiredFixture(1)))
     expect(result.status).toBe('NO_GO_STALE_CANDIDATE')
     expect(result.applyCount).toBe(0)
@@ -242,7 +241,7 @@ describe('AUN configuration reconciler', () => {
     const lease = new FakeLease()
     const port = new FakeProjection()
     port.beforeApplyCommit = () => { lease.valid = false }
-    const result = await new AunConfigurationReconciler('host-a', store, lease, port).reconcileAgent('misell')
+    const result = await new AunConfigurationReconciler(store, lease, port).reconcileAgent('misell')
     expect(result).toMatchObject({
       status: 'NO_GO_STALE_CANDIDATE', applyCount: 0,
       reasonCodes: ['ADAPTER_EFFECT_FENCE_REJECTED'],
@@ -258,7 +257,7 @@ describe('AUN configuration reconciler', () => {
     const port = new FakeProjection()
     port.applyResult = { ok: false, mutated: true, partial: true, reasonCode: 'PARTIAL' }
     port.beforeApplyCommit = () => { lease.valid = false }
-    const result = await new AunConfigurationReconciler('host-a', store, lease, port).reconcileAgent('misell')
+    const result = await new AunConfigurationReconciler(store, lease, port).reconcileAgent('misell')
     expect(result).toMatchObject({
       status: 'NO_GO_STALE_CANDIDATE', applyCount: 0,
       reasonCodes: ['ADAPTER_EFFECT_FENCE_REJECTED'],
@@ -271,8 +270,8 @@ describe('AUN configuration reconciler', () => {
     const store = new FakeStore()
     const event = eventFixture(store.desired)
     store.desiredReads = [desiredFixture(1), desiredFixture(2)]
-    store.recordObserved = async () => false
-    const result = await new AunConfigurationReconciler('host-a', store, new FakeLease(), new FakeProjection())
+    store.recordReconcileResult = async () => false
+    const result = await new AunConfigurationReconciler(store, new FakeLease(), new FakeProjection())
       .reconcileAgent('misell', event)
     expect(result).toMatchObject({ status: 'NO_GO_STALE_CANDIDATE', eventDelivered: false })
     expect(result.reasonCodes).toEqual(['OBSERVED_FENCE_REJECTED'])
@@ -285,7 +284,7 @@ describe('AUN configuration reconciler', () => {
     store.events = [event]
     const port = new FakeProjection()
     port.render = async () => { throw new Error('synthetic raw detail must not escape') }
-    const results = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).sweepOnce()
+    const results = await new AunConfigurationReconciler(store, new FakeLease(), port).sweepOnce()
     expect(results).toHaveLength(1)
     expect(results[0]).toMatchObject({
       status: 'DRIFTED', eventDelivered: false,
@@ -303,7 +302,7 @@ describe('AUN configuration reconciler', () => {
     const port = new FakeProjection()
     port.applyResult = { ok: false, mutated: true, partial: true, reasonCode: 'PARTIAL' }
     port.rollbackResult = { ok: false, reasonCode: 'ROLLBACK_FAILED' }
-    const reconciler = new AunConfigurationReconciler('host-a', store, new FakeLease(), port)
+    const reconciler = new AunConfigurationReconciler(store, new FakeLease(), port)
     const result = await reconciler.reconcileAgent('misell', event)
     expect(result.status).toBe('NO_GO_ROLLBACK')
     expect(result.eventDelivered).toBe(true)
@@ -319,7 +318,7 @@ describe('AUN configuration reconciler', () => {
     const port = new FakeProjection()
     let release!: () => void
     port.renderDelay = new Promise<void>((resolve) => { release = resolve })
-    const reconciler = new AunConfigurationReconciler('host-a', store, new FakeLease(), port)
+    const reconciler = new AunConfigurationReconciler(store, new FakeLease(), port)
     const first = reconciler.reconcileAgent('misell')
     const second = reconciler.reconcileAgent('misell')
     release()
@@ -345,7 +344,7 @@ describe('AUN configuration reconciler', () => {
       const port = new FakeProjection()
       let release!: () => void
       port.renderDelay = new Promise<void>((resolve) => { release = resolve })
-      const running = new AunConfigurationReconciler('host-a', new FakeStore(), lease, port).reconcileAgent('misell')
+      const running = new AunConfigurationReconciler(new FakeStore(), lease, port).reconcileAgent('misell')
       for (let attempt = 0; attempt < 5 && !tick; attempt++) await Promise.resolve()
       expect(scheduledMs).toBe(CONFIGURATION_RECONCILER_HEARTBEAT_MS)
       tick?.()

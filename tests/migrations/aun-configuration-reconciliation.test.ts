@@ -9,7 +9,7 @@ import {
   configurationRestartReceiptAuthorizationDocument,
   createConfigurationRestartRequest,
   normalizeDesiredStateRow,
-  recordConfigurationObservedState,
+  recordConfigurationReconcileResult,
   verifyConfigurationRestartExecutionClaim,
 } from '../../core/aun-configuration-desired-state'
 import { acquireControlPlaneLease, releaseControlPlaneLease } from '../../core/control-plane-leases'
@@ -21,6 +21,8 @@ const downPath = join(import.meta.dir, '../../db/migrations/2026-07-26-aun-confi
 const up = readFileSync(upPath, 'utf8')
 const down = readFileSync(downPath, 'utf8')
 const diagnosticsUp = readFileSync(join(import.meta.dir, '../../db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql'), 'utf8')
+const nonpersistUp = readFileSync(join(import.meta.dir,'../../db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql'),'utf8')
+const restartUp = readFileSync(join(import.meta.dir,'../../db/migrations/2026-09-21-runtime-observation-restart-contract.up.sql'),'utf8')
 const diagnosticsDown = readFileSync(join(import.meta.dir, '../../db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql'), 'utf8')
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
 const receiptSecret = 'fixture-restart-receipt-hmac-secret'
@@ -125,13 +127,14 @@ describe('AUN configuration reconciliation migration', () => {
       db = new PgAdapter(databaseUrl)
       await db.execute(up)
       await db.execute(diagnosticsUp)
+      await db.execute(nonpersistUp)
+      await db.execute(restartUp)
       const firstSchemaDigest = await configurationSchemaSnapshot(db)
 
       await db.execute(
         `INSERT INTO agents (
-           agent_id, display_name, agent_type, runtime, profile_enabled,
-           runtime_engine_preference, home_directory, channel_port, desired_control_refs
-         ) VALUES ('acm887-incomplete', 'Incomplete fixture', 'bot', 'TUI', true, 'codex', '/tmp/incomplete', 8899, '[1]'::jsonb)`,
+           agent_id, display_name, agent_type, profile_enabled, desired_control_refs
+         ) VALUES ('acm887-incomplete', 'Incomplete fixture', 'bot', true, '[1]'::jsonb)`,
       )
       const incomplete = await db.queryOne<any>(
         `SELECT desired_revision, desired_digest FROM agents WHERE agent_id = 'acm887-incomplete'`,
@@ -143,14 +146,13 @@ describe('AUN configuration reconciliation migration', () => {
 
       await db.execute(
         `INSERT INTO agents (
-           agent_id, display_name, agent_type, runtime, profile_enabled,
-           runtime_engine_preference, home_directory, channel_port,
+           agent_id, display_name, agent_type, profile_enabled,
            provider_token_source_ref, expected_provider_identity, ordinary_projection
-         ) VALUES ($1,$2,'bot','TUI',true,'codex',$3,8801,$4,$5::jsonb,$6::jsonb)`,
+         ) VALUES ($1,$2,'bot',true,$3,$4::jsonb,$5::jsonb)`,
         [
-          'acm887-fixture', 'ACM887 fixture', '/tmp/acm887-fixture', 'secret-ref:test/provider',
+          'acm887-fixture', 'ACM887 fixture', 'secret-ref:test/provider',
           '{"account_id":"fixture"}',
-          '{"provider_repo_root":"/tmp/provider","provider_config_root":"/tmp/provider-config","daemon_checkout":"/tmp/daemon","weight":1.0,"😀":"astral","":"private-use"}',
+          '{"weight":1.0,"😀":"astral","":"private-use"}',
         ],
       )
       const first = await db.queryOne<any>('SELECT * FROM agents WHERE agent_id = $1', ['acm887-fixture'])
@@ -162,7 +164,7 @@ describe('AUN configuration reconciliation migration', () => {
       )
       expect(firstEvents?.count).toBe('1')
 
-      await db.execute(`UPDATE agents SET channel_port = 8802 WHERE agent_id = $1`, ['acm887-fixture'])
+      await expect(db.execute(`UPDATE agents SET channel_port = 8802 WHERE agent_id = $1`, ['acm887-fixture'])).rejects.toThrow('PERSISTENCE_FORBIDDEN')
       const second = await db.queryOne<any>('SELECT * FROM agents WHERE agent_id = $1', ['acm887-fixture'])
       const secondDesired = normalizeDesiredStateRow(second)
       expect(secondDesired.desiredRevision).toBe(firstDesired.desiredRevision)
@@ -198,37 +200,28 @@ describe('AUN configuration reconciliation migration', () => {
       expect(String(afterRejectedSecret?.desired_digest)).toBe(disabledDesired.desiredDigest)
 
       const lease = await acquireControlPlaneLease(db, {
-        scopeType: 'runtime_instance', scopeId: 'configuration-reconciler:fixture-host',
+        scopeType: 'runtime_instance', scopeId: 'configuration-reconciler:acm887-fixture',
         purpose: 'maintenance', ttlMs: 45_000, holderAgentId: 'acm887-fixture',
         holderRuntimeInstanceId: null,
       })
       expect(lease.ok).toBe(true)
       if (!lease.ok) throw new Error('fixture lease unavailable')
       const observed = {
-        hostId: 'fixture-host', agentId: 'acm887-fixture',
-        observedRevision: disabledDesired.desiredRevision,
-        observedDesiredDigest: disabledDesired.desiredDigest,
-        candidateDigest: 'c'.repeat(64), releaseCommit: disabledDesired.releaseCommit,
-        releaseTree: disabledDesired.releaseTree, providerNativeDigest: '1'.repeat(64),
-        launchagentPlistDigest: '2'.repeat(64), launchctlEnvironmentDigest: '3'.repeat(64),
-        runtimeIdentityDigest: '4'.repeat(64), reconcileStatus: 'DRIFTED' as const,
-        driftReasonCodes: ['FIXTURE'], leaseId: lease.lease.lease_id,
-        fencingToken: lease.lease.fencing_token,
+        agentId:'acm887-fixture',desiredRevision:disabledDesired.desiredRevision,desiredDigest:disabledDesired.desiredDigest,
+        releaseCommit:disabledDesired.releaseCommit,releaseTree:disabledDesired.releaseTree,reconcileStatus:'DRIFTED' as const,
+        driftReasonCodes:['FIXTURE'],leaseId:lease.lease.lease_id,fencingToken:lease.lease.fencing_token,
+        holderAgentId:'acm887-fixture',holderRuntimeInstanceId:null,
       }
-      expect(await recordConfigurationObservedState(db, {
-        ...observed,
-        observedRevision: secondDesired.desiredRevision,
-        observedDesiredDigest: secondDesired.desiredDigest,
-      })).toBe(false)
-      expect(await recordConfigurationObservedState(db, { ...observed, hostId: 'wrong-host' })).toBe(false)
-      expect(await recordConfigurationObservedState(db, observed)).toBe(true)
+      expect(await recordConfigurationReconcileResult(db,{...observed,desiredRevision:secondDesired.desiredRevision,desiredDigest:secondDesired.desiredDigest})).toBe(false)
+      expect(await recordConfigurationReconcileResult(db,{...observed,holderAgentId:'wrong-holder'})).toBe(false)
+      expect(await recordConfigurationReconcileResult(db,observed)).toBe(true)
       const restartInput = {
-        hostId: 'fixture-host', agentId: 'acm887-fixture', fromRevision: secondDesired.desiredRevision,
-        fromDigest: secondDesired.desiredDigest, toRevision: disabledDesired.desiredRevision,
-        toDigest: disabledDesired.desiredDigest, candidateDigest: 'c'.repeat(64),
-        rollbackArtifactDigest: 'd'.repeat(64), exactReleaseCommit: disabledDesired.releaseCommit,
-        exactReleaseTree: disabledDesired.releaseTree, exactControlRefs: disabledDesired.controlRefs,
-        leaseId: lease.lease.lease_id, fencingToken: lease.lease.fencing_token, restartBudget: 1 as const,
+        agentId:'acm887-fixture',fromRevision:secondDesired.desiredRevision,fromDigest:secondDesired.desiredDigest,
+        toRevision:disabledDesired.desiredRevision,toDigest:disabledDesired.desiredDigest,
+        rollbackReleaseCommit:'c'.repeat(40),rollbackReleaseTree:'d'.repeat(40),
+        exactReleaseCommit:disabledDesired.releaseCommit,exactReleaseTree:disabledDesired.releaseTree,exactControlRefs:disabledDesired.controlRefs,
+        leaseId:lease.lease.lease_id,fencingToken:lease.lease.fencing_token,restartBudget:1 as const,
+        holderAgentId:'acm887-fixture',holderRuntimeInstanceId:null,
       }
       await expect(createConfigurationRestartRequest(db, {
         ...restartInput, fencingToken: lease.lease.fencing_token + 1,
@@ -237,18 +230,17 @@ describe('AUN configuration reconciliation migration', () => {
       expect(restartRequestId).toMatch(/^[0-9a-f-]{36}$/)
       expect((await db.queryOne<{ count: string }>(
         `SELECT count(*)::text AS count FROM aun_configuration_restart_requests
-          WHERE host_id = $1 AND agent_id = $2 AND lease_id = $3 AND fencing_token = $4`,
-        ['fixture-host', 'acm887-fixture', lease.lease.lease_id, lease.lease.fencing_token],
+          WHERE agent_id = $1 AND lease_id = $2 AND fencing_token = $3`,
+        ['acm887-fixture', lease.lease.lease_id, lease.lease.fencing_token],
       ))?.count).toBe('1')
 
       await db.execute(
         `INSERT INTO agents (
-           agent_id, display_name, agent_type, runtime, profile_enabled,
-           runtime_engine_preference, home_directory, channel_port
-         ) VALUES ('codex-cto', 'CTO fixture', 'bot', 'TUI', true, 'codex', '/tmp/codex-cto', 8898)`,
+           agent_id, display_name, agent_type, profile_enabled
+         ) VALUES ('codex-cto', 'CTO fixture', 'bot', true)`,
       )
       const ctoLease = await acquireControlPlaneLease(db, {
-        scopeType: 'runtime_instance', scopeId: 'configuration-restart:fixture-host:acm887-fixture',
+        scopeType: 'runtime_instance', scopeId: 'configuration-restart:acm887-fixture',
         purpose: 'maintenance', ttlMs: 45_000, holderAgentId: 'codex-cto',
         holderRuntimeInstanceId: null,
       })
@@ -260,10 +252,10 @@ describe('AUN configuration reconciliation migration', () => {
       const receiptChannelId = 'aun-configuration-fixture'
       const signedReceipt = signedRestartReceipt({
         channelId: receiptChannelId, requestId: restartRequestId,
-        hostId: restartInput.hostId, agentId: restartInput.agentId,
+        agentId: restartInput.agentId,
         toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
-        candidateDigest: restartInput.candidateDigest,
-        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
+        rollbackReleaseTree: restartInput.rollbackReleaseTree,
         exactReleaseCommit: restartInput.exactReleaseCommit,
         exactReleaseTree: restartInput.exactReleaseTree,
         exactControlRefs: restartInput.exactControlRefs,
@@ -298,10 +290,10 @@ describe('AUN configuration reconciliation migration', () => {
         [restartRequestId, ownerDecisionRef, ctoReceiptRef],
       )
       const executionInput = {
-        requestId: restartRequestId, hostId: restartInput.hostId, agentId: restartInput.agentId,
+        requestId: restartRequestId, agentId: restartInput.agentId,
         toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
-        candidateDigest: restartInput.candidateDigest,
-        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
+        rollbackReleaseTree: restartInput.rollbackReleaseTree,
         exactReleaseCommit: restartInput.exactReleaseCommit,
         exactReleaseTree: restartInput.exactReleaseTree,
         exactControlRefs: restartInput.exactControlRefs,
@@ -313,7 +305,7 @@ describe('AUN configuration reconciliation migration', () => {
         ...executionInput, executorAgentId: 'wrong-executor',
       })).toBeNull()
       expect(await claimApprovedConfigurationRestartExecution(db, {
-        ...executionInput, candidateDigest: 'f'.repeat(64),
+        ...executionInput, rollbackReleaseCommit: 'f'.repeat(40),
       })).toBeNull()
       const executionClaim = await claimApprovedConfigurationRestartExecution(db, executionInput)
       expect(executionClaim).not.toBeNull()
@@ -326,9 +318,14 @@ describe('AUN configuration reconciliation migration', () => {
         status: 'EXECUTED', terminalReceiptDigest: '9'.repeat(64), reasonCode: null,
       })).toBe(false)
 
-      const expiredRequestId = await createConfigurationRestartRequest(db, {
-        ...restartInput, candidateDigest: 'e'.repeat(64),
-      })
+      const nextRestartRequest=async(label:string)=>{
+        await db!.execute("UPDATE agents SET ordinary_projection=ordinary_projection || $2::jsonb WHERE agent_id=$1",[restartInput.agentId,JSON.stringify({receipt_case:label})])
+        const current=normalizeDesiredStateRow(await db!.queryOne('SELECT * FROM agents WHERE agent_id=$1',[restartInput.agentId]))
+        restartInput.toRevision=current.desiredRevision;restartInput.toDigest=current.desiredDigest
+        executionInput.toRevision=current.desiredRevision;executionInput.toDigest=current.desiredDigest
+        return createConfigurationRestartRequest(db!,restartInput)
+      }
+      const expiredRequestId = await nextRestartRequest('expired')
       await db.execute(
         `UPDATE aun_configuration_restart_requests
             SET status = 'APPROVED', owner_decision_ref = 'github:owner-decision:expired',
@@ -338,40 +335,35 @@ describe('AUN configuration reconciliation migration', () => {
         [expiredRequestId],
       )
       expect(await claimApprovedConfigurationRestartExecution(db, {
-        ...executionInput, requestId: expiredRequestId, candidateDigest: 'e'.repeat(64),
+        ...executionInput, requestId: expiredRequestId,
       })).toBeNull()
 
-      const rejectedRequestId = await createConfigurationRestartRequest(db, {
-        ...restartInput, candidateDigest: 'd'.repeat(64),
-      })
+      const rejectedRequestId = await nextRestartRequest('rejected')
       await db.execute(
         `UPDATE aun_configuration_restart_requests SET status = 'REJECTED' WHERE request_id = $1`,
         [rejectedRequestId],
       )
       expect(await claimApprovedConfigurationRestartExecution(db, {
-        ...executionInput, requestId: rejectedRequestId, candidateDigest: 'd'.repeat(64),
+        ...executionInput, requestId: rejectedRequestId,
       })).toBeNull()
 
       for (const receiptCase of [
-        { label: 'forged-signature', candidateDigest: '7'.repeat(64), forgedSignature: true },
-        { label: 'wrong-active-function', candidateDigest: '8'.repeat(64), activeFunction: 'implementation_executor' },
+        { label: 'forged-signature', forgedSignature: true },
+        { label: 'wrong-active-function', activeFunction: 'implementation_executor' },
         {
           label: 'expired-valid-signature',
-          candidateDigest: '6'.repeat(64),
           timestamp: Math.floor(Date.now() / 1000) - 301,
         },
       ]) {
-        const requestId = await createConfigurationRestartRequest(db, {
-          ...restartInput, candidateDigest: receiptCase.candidateDigest,
-        })
+        const requestId = await nextRestartRequest(receiptCase.label)
         const decisionRef = `github:owner-decision:${receiptCase.label}`
         const messageId = randomUUID()
         const receipt = signedRestartReceipt({
           channelId: receiptChannelId, requestId,
-          hostId: restartInput.hostId, agentId: restartInput.agentId,
+          agentId: restartInput.agentId,
           toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
-          candidateDigest: receiptCase.candidateDigest,
-          rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+          rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
+          rollbackReleaseTree: restartInput.rollbackReleaseTree,
           exactReleaseCommit: restartInput.exactReleaseCommit,
           exactReleaseTree: restartInput.exactReleaseTree,
           exactControlRefs: restartInput.exactControlRefs,
@@ -393,7 +385,7 @@ describe('AUN configuration reconciliation migration', () => {
           [requestId, decisionRef, `aun:agent-message:${messageId}`],
         )
         expect(await claimApprovedConfigurationRestartExecution(db, {
-          ...executionInput, requestId, candidateDigest: receiptCase.candidateDigest,
+          ...executionInput, requestId, rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
         })).toBeNull()
         expect(await db.queryOne<{ status: string; execution_attempts: number }>(
           `SELECT status, execution_attempts FROM aun_configuration_restart_requests WHERE request_id = $1`,
@@ -407,29 +399,25 @@ describe('AUN configuration reconciliation migration', () => {
       })
       await db.execute(
         `INSERT INTO agents (
-           agent_id, display_name, agent_type, runtime, profile_enabled,
-           runtime_engine_preference, home_directory, channel_port
-         ) VALUES ('other-agent', 'Ineligible fixture', 'bot', 'TUI', true, 'codex', '/tmp/other-agent', 8897)`,
+           agent_id, display_name, agent_type, profile_enabled
+         ) VALUES ('other-agent', 'Ineligible fixture', 'bot', true)`,
       )
       const otherLease = await acquireControlPlaneLease(db, {
-        scopeType: 'runtime_instance', scopeId: 'configuration-restart:fixture-host:acm887-fixture',
+        scopeType: 'runtime_instance', scopeId: 'configuration-restart:acm887-fixture',
         purpose: 'maintenance', ttlMs: 45_000, holderAgentId: 'other-agent',
         holderRuntimeInstanceId: null,
       })
       expect(otherLease.ok).toBe(true)
       if (!otherLease.ok) throw new Error('ineligible fixture lease unavailable')
-      const ineligibleCandidateDigest = 'b'.repeat(64)
-      const ineligibleRequestId = await createConfigurationRestartRequest(db, {
-        ...restartInput, candidateDigest: ineligibleCandidateDigest,
-      })
+      const ineligibleRequestId = await nextRestartRequest('ineligible')
       const ineligibleReceiptMessageId = randomUUID()
       const ineligibleOwnerDecisionRef = 'github:owner-decision:ineligible-fixture'
       const ineligibleReceipt = signedRestartReceipt({
         channelId: receiptChannelId, requestId: ineligibleRequestId,
-        hostId: restartInput.hostId, agentId: restartInput.agentId,
+        agentId: restartInput.agentId,
         toRevision: restartInput.toRevision, toDigest: restartInput.toDigest,
-        candidateDigest: ineligibleCandidateDigest,
-        rollbackArtifactDigest: restartInput.rollbackArtifactDigest,
+        rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
+        rollbackReleaseTree: restartInput.rollbackReleaseTree,
         exactReleaseCommit: restartInput.exactReleaseCommit,
         exactReleaseTree: restartInput.exactReleaseTree,
         exactControlRefs: restartInput.exactControlRefs,
@@ -453,7 +441,7 @@ describe('AUN configuration reconciliation migration', () => {
       )
       const ineligibleExecutionInput = {
         ...executionInput, requestId: ineligibleRequestId,
-        candidateDigest: ineligibleCandidateDigest,
+        rollbackReleaseCommit: restartInput.rollbackReleaseCommit,
         executionLeaseId: otherLease.lease.lease_id,
         executionFencingToken: otherLease.lease.fencing_token,
       }
@@ -474,7 +462,7 @@ describe('AUN configuration reconciliation migration', () => {
 
       await expect(db.execute(down)).rejects.toThrow('refusing to drop nonempty AUN configuration reconciliation evidence')
       await db.execute(`DELETE FROM aun_configuration_restart_requests WHERE agent_id = $1`, ['acm887-fixture'])
-      await db.execute(`DELETE FROM aun_configuration_observed_state WHERE host_id = $1 AND agent_id = $2`, ['fixture-host', 'acm887-fixture'])
+      expect((await db.queryOne<any>('SELECT count(*)::int n FROM aun_configuration_observed_state'))?.n).toBe(0)
       await db.execute(`DELETE FROM aun_configuration_desired_outbox WHERE agent_id IN ($1, $2, $3, $4)`, ['acm887-fixture', 'acm887-incomplete', 'codex-cto', 'other-agent'])
       await releaseControlPlaneLease(db, {
         leaseId: lease.lease.lease_id, fencingToken: lease.lease.fencing_token,
@@ -485,6 +473,8 @@ describe('AUN configuration reconciliation migration', () => {
       await db.execute(down)
       await db.execute(up)
       await db.execute(diagnosticsUp)
+      await db.execute(nonpersistUp)
+      await db.execute(restartUp)
       expect(await configurationSchemaSnapshot(db)).toEqual(firstSchemaDigest)
     } finally {
       if (priorAuthSecret === undefined) delete process.env.AGENT_COMMS_SECRET

@@ -28,7 +28,7 @@ import { Client } from 'pg'
 import { admissionBindingFromEnv } from '../core/queue-admission'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
@@ -942,20 +942,19 @@ async function readNativeReleaseIdentity(checkoutRoot: string): Promise<NativeRe
 class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   constructor(private readonly db: PgAdapter) {}
 
-  async render(input: { hostId: string; desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
-    const projection = input.desired.ordinaryProjection
-    const providerRepoRoot = typeof projection.provider_repo_root === 'string' ? projection.provider_repo_root.trim() : ''
-    const daemonCheckout = typeof projection.daemon_checkout === 'string' ? projection.daemon_checkout.trim() : ''
-    if (!providerRepoRoot || !daemonCheckout) throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
+  async render(input: { desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
+    // Source location comes from this exact invoked release, never saved target
+    // runtime paths. validate() checks its commit/tree against desired release.
+    const providerRepoRoot=resolve(import.meta.dir,'..')
+    const daemonCheckout=providerRepoRoot
     const observedRuntime=await resolveConfigurationRuntime(this.db,input.desired.agentId,process.env as Record<string,string>,providerRepoRoot)
     return buildDefaultAunConfigurationCandidate({
       observedRuntime,
-      hostId: input.hostId,
       desired: input.desired,
       databaseLocatorRef: process.env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
       databaseCredentialRef: process.env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
       bunPath: Bun.which('bun') ?? process.execPath,
-      serverEntry: 'server.ts',
+      serverEntry: 'entrypoints/runtime.ts',
       providerRepoRoot: resolve(providerRepoRoot),
       providerConfigRoot: observedRuntime.providerConfigRoot,
       daemonCheckout: resolve(daemonCheckout),
@@ -1194,7 +1193,6 @@ export async function main(): Promise<void> {
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(
-        process.env.AUN_HOST_ID?.trim() || hostname(),
         new DbConfigurationDesiredStateStore(configurationDb),
         new DbConfigurationLeasePort(
           configurationDb,

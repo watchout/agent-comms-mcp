@@ -30,7 +30,7 @@ function input(overrides: Partial<BuildAunConfigurationCandidateInput> = {}): Bu
   } satisfies AunConfigurationDesiredState
   desired.desiredDigest = computeDesiredDigest(desired)
   return {
-    hostId: 'host-a', desired,
+    desired,
     externalRoot: {
       databaseLocatorRef: 'env:DATABASE_URL', databaseCredentialRef: 'env:DATABASE_URL',
       releaseCommit: COMMIT, releaseTree: TREE, controlRefs: [CONTROL],
@@ -68,7 +68,7 @@ function input(overrides: Partial<BuildAunConfigurationCandidateInput> = {}): Bu
 describe('AUN immutable configuration candidate', () => {
   test('default generated bridge requests OS port zero despite an old desired profile port',()=>{
     const fixture=input()
-    const candidate=buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,
+    const candidate=buildDefaultAunConfigurationCandidate({desired:fixture.desired,
       observedRuntime:{observation:{schema_version:'seat-provider-observation/v1',agent_id:'misell',host_id:'host-a',runtime_instance_id:'current',process_id:12,provider_pid:13,
         provider_started_at:new Date(Date.now()-1000).toISOString(),provider:'claude',workspace:'/new-host/misell',session_name:'new-session',observed_at:new Date().toISOString(),source:'process_ancestry',verified:true},
         providerHome:'/new-home',providerConfigRoot:'/new-home/.claude',port:19001,leaseId:'lease-current',fencingToken:2},
@@ -93,7 +93,7 @@ describe('AUN immutable configuration candidate', () => {
       const observedRuntime={observation:{schema_version:'seat-provider-observation/v1' as const,agent_id:'misell',host_id:'host-a',runtime_instance_id:'current',process_id:12,provider_pid:13,
         provider_started_at:new Date(Date.now()-1000).toISOString(),provider:'claude' as const,workspace,session_name:'s',observed_at:new Date().toISOString(),source:'process_ancestry' as const,verified:true as const},
         providerHome:root,providerConfigRoot:root,port:19001,leaseId:'lease',fencingToken:1}
-      const candidate=buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,observedRuntime,
+      const candidate=buildDefaultAunConfigurationCandidate({desired:fixture.desired,observedRuntime,
         providerConfigRoot:root,providerRepoRoot:release,daemonCheckout:release,bunPath:process.execPath,serverEntry:'server.ts',daemonEntry:'daemon.ts',databaseLocatorRef:'env:DATABASE_URL',databaseCredentialRef:'env:DATABASE_URL'})
       const child=Bun.spawnSync([candidate.providerMcp.command,...candidate.providerMcp.args],{cwd:root,env:{PATH:process.env.PATH},stdout:'pipe',stderr:'pipe'})
       expect(child.exitCode).toBe(0)
@@ -107,7 +107,7 @@ describe('AUN immutable configuration candidate', () => {
   })
   test('ordinary projection without fresh runtime facts cannot fall back to desired preference',()=>{
     const fixture=input()
-    expect(()=>buildDefaultAunConfigurationCandidate({hostId:fixture.hostId,desired:fixture.desired,
+    expect(()=>buildDefaultAunConfigurationCandidate({desired:fixture.desired,
       providerConfigRoot:fixture.providerMcp.providerConfigRoot,providerRepoRoot:fixture.providerMcp.checkoutRoot,
       daemonCheckout:fixture.launchAgent.workingDirectory,bunPath:'/bin/bun',serverEntry:'server.ts',daemonEntry:'bin/state-daemon.ts',
       databaseLocatorRef:'env:DATABASE_URL',databaseCredentialRef:'env:DATABASE_URL'} as any)).toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')

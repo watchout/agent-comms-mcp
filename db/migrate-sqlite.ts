@@ -1060,6 +1060,7 @@ export function migrateSqlite(dbPath?: string): void {
     payload TEXT NOT NULL DEFAULT '{}'
   )`)
   applyRuntimeObservationNonpersistenceSqlite(db)
+  applyConfigurationRestartLogicalSqlite(db)
   db.close()
   console.log(`SQLite migration complete: ${path}`)
 }
@@ -1339,11 +1340,14 @@ export function applyRuntimeObservationNonpersistenceSqlite(db: Database): void 
       if(sequence)db.query('UPDATE sqlite_sequence SET seq=? WHERE name=?').run(sequence.seq,table)
     }
     exec('DROP TRIGGER IF EXISTS trg_agents_runtime_after_insert')
-    for(const [table,contract] of Object.entries(runtimeObservationGuardContract) as Array<[string,any]>) {
+    for(const [table,baseContract] of Object.entries(runtimeObservationGuardContract) as Array<[string,any]>) {
       if(!hasTable(table))continue
+      const contract=table==='aun_configuration_restart_requests'&&exists(table,'rollback_release_commit')
+        ? {...baseContract,deny_insert:false,values:{rollback_release_commit:'sha1',rollback_release_tree:'sha1'}}:baseContract
       for(const op of ['INSERT','UPDATE']) {
         const old=op==='INSERT'?'NULL':'OLD',bad:string[]=[]
         if(contract.deny_insert&&op==='INSERT')bad.push('1')
+        if(table==='aun_configuration_restart_requests'&&exists(table,'rollback_release_commit')&&op==='INSERT')bad.push('NEW.rollback_release_commit IS NULL OR NEW.rollback_release_tree IS NULL')
         for(const column of contract.physical) if(exists(table,column))bad.push(op==='INSERT'?`(NEW.${ident(column)} IS NOT NULL ${table==='agents'&&column==='channel_port'?'AND NEW.channel_port <> 0':''})`:`NEW.${ident(column)} IS NOT OLD.${ident(column)}`)
         for(const [column,spec] of Object.entries(contract.json))if(exists(table,column)) {
           const strict=jsonViolation(column,'NEW',old,spec)
@@ -1372,6 +1376,57 @@ export function applyRuntimeObservationNonpersistenceSqlite(db: Database): void 
     if(db.inTransaction)db.exec('ROLLBACK')
     throw error
   } finally {db.exec(`PRAGMA foreign_keys=${foreignKeys?1:0}`)}
+}
+
+/** D-CFG-1 applies only when this existing optional configuration table exists. */
+export function applyConfigurationRestartLogicalSqlite(db:Database):void {
+  const table='aun_configuration_restart_requests'
+  const old=db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as {sql:string}|null
+  if(!old)return
+  const fields=db.query(`PRAGMA table_info(${table})`).all() as Array<{name:string}>
+  if(!fields.some(f=>f.name==='host_id'))return
+  if(db.inTransaction)throw new Error('AUN_NONPERSISTENCE_REQUIRES_TOP_LEVEL_TRANSACTION')
+  const enabled=(db.query('PRAGMA foreign_keys').get() as any).foreign_keys
+  const exec=(sql:string)=>{assertDestructiveMigrationAllowed(sql);db.exec(sql)}
+  exec('PRAGMA foreign_keys=OFF')
+  try {
+    exec('BEGIN IMMEDIATE')
+    if(db.query(`SELECT 1 FROM ${table} GROUP BY agent_id,to_revision,to_digest HAVING count(*)>1`).get())throw new Error('AUN_CONFIGURATION_LOGICAL_RESTART_CONFLICT')
+    const name=table+'__aun_logical_upgrade'
+    if(db.query('SELECT 1 FROM sqlite_master WHERE name=?').get(name))throw new Error('AUN_NONPERSISTENCE_REBUILD_NAME_COLLISION')
+    const objects=db.query("SELECT name,sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL").all(table) as Array<{name:string;sql:string}>
+    let create=old.sql.replace(/^(CREATE TABLE(?: IF NOT EXISTS)?)\s+(?:"[^"]+"|\w+)/i,`$1 ${name}`)
+      .replace(/UNIQUE\s*\(\s*host_id\s*,\s*agent_id\s*,\s*to_revision\s*,\s*to_digest\s*,\s*candidate_digest\s*\)/ig,'UNIQUE(agent_id,to_revision,to_digest)')
+      .replace(/\bhost_id\s+TEXT\s*(?:NOT NULL)?\s*,/i,'')
+      .replace(/(\b(?:candidate_digest|rollback_artifact_digest)\s+TEXT)\s+NOT NULL/ig,'$1')
+    if(/\bhost_id\b/i.test(create))throw new Error('AUN_CONFIGURATION_HOST_CONSTRAINT_UNSUPPORTED')
+    exec(create)
+    exec(`ALTER TABLE ${name} ADD COLUMN rollback_release_commit TEXT`)
+    exec(`ALTER TABLE ${name} ADD COLUMN rollback_release_tree TEXT`)
+    const columns=fields.filter(f=>f.name!=='host_id').map(f=>'"'+f.name.replaceAll('"','""')+'"').join(',')
+    const before=db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()
+    exec(`INSERT INTO ${name}(rowid,${columns}) SELECT rowid,${columns} FROM ${table}`)
+    if(JSON.stringify(before)!==JSON.stringify(db.query(`SELECT ${columns} FROM ${name} ORDER BY rowid`).all()))throw new Error('AUN_NONPERSISTENCE_ROW_COPY_MISMATCH')
+    exec(`DROP TABLE ${table}`)
+    exec(`ALTER TABLE ${name} RENAME TO ${table}`)
+    for(const item of objects) {
+      if(item.name.startsWith('aun_np_'))continue
+      if(/\bhost_id\b/i.test(item.sql))throw new Error('AUN_CONFIGURATION_HOST_CONSTRAINT_UNSUPPORTED')
+      exec(item.sql)
+    }
+    exec(`CREATE UNIQUE INDEX IF NOT EXISTS aun_configuration_restart_logical_unique ON ${table}(agent_id,to_revision,to_digest)`)
+    for(const op of ['INSERT','UPDATE']) {
+      const physical=['candidate_digest','rollback_artifact_digest'].filter(c=>fields.some(f=>f.name===c))
+        .map(c=>op==='INSERT'?`NEW.${c} IS NOT NULL`:`NEW.${c} IS NOT OLD.${c}`)
+      const release=['rollback_release_commit','rollback_release_tree'].map(c=>`(NEW.${c} IS ${op==='INSERT'?'NULL':'NOT OLD.'+c} AND NEW.${c} IS NULL)`)
+      const invalid=['rollback_release_commit','rollback_release_tree'].map(c=>`(NEW.${c} IS NOT NULL AND (length(NEW.${c})<>40 OR NEW.${c} GLOB '*[^0-9a-f]*'))`)
+      exec(`CREATE TRIGGER aun_np_${table}_${op.toLowerCase()} AFTER ${op} ON ${table}
+        WHEN ${[...physical,...release,...invalid].join(' OR ')} BEGIN SELECT RAISE(ABORT,'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN'); END`)
+    }
+    if(db.query('PRAGMA foreign_key_check').all().length)throw new Error('AUN_NONPERSISTENCE_FOREIGN_KEY_CHECK_FAILED')
+    exec('COMMIT')
+  }catch(error){if(db.inTransaction)db.exec('ROLLBACK');throw error}
+  finally{db.exec(`PRAGMA foreign_keys=${enabled?1:0}`)}
 }
 
 if (import.meta.main) {

@@ -18,8 +18,8 @@ export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:
   const endpoint=await resolveRuntimeEndpoint(db,{agentId})
   const o=selected.observation
   if(!selected.ok||!o||!endpoint.endpoint||endpoint.endpoint.runtimeInstanceId!==o.runtime_instance_id) throw new Error('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
-  const root=await readObservedProviderRoot(dependencies.run ?? (async(command,args)=>{
-    try {return {exitCode:0,stdout:execFileSync(command,args,{encoding:'utf8',timeout:3000})}}catch{return {exitCode:1,stdout:''}}
+  const root=await readObservedProviderRoot(dependencies.run ?? (async(command,args,options)=>{
+    try {return {exitCode:0,stdout:execFileSync(command,args,{encoding:'utf8',timeout:3000,cwd:options.cwd,env:options.env})}}catch{return {exitCode:1,stdout:''}}
   }),{pid:o.provider_pid,startedAt:o.provider_started_at,provider:o.provider,cwd,env})
   if(!root?.home) throw new Error('CONFIGURATION_CURRENT_ACCOUNT_ROOT_UNAVAILABLE')
   return {observation:o,providerHome:root.home,providerConfigRoot:root.root,port:endpoint.endpoint.port,
@@ -27,15 +27,15 @@ export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:
 }
 export function configurationRuntimeIdentity(value:ObservedConfigurationRuntime) {
   const o=value.observation
-  return {agentId:o.agent_id,runtimeInstanceId:o.runtime_instance_id,hostId:o.host_id,provider:o.provider,
+  return {agentId:o.agent_id,runtimeInstanceId:o.runtime_instance_id,provider:o.provider,
     providerPid:o.provider_pid,providerStartedAt:o.provider_started_at,workspace:o.workspace,
     providerHome:value.providerHome,providerConfigRoot:value.providerConfigRoot,port:value.port,
     leaseId:value.leaseId,fencingToken:value.fencingToken}
 }
-function validateObservedRuntime(value:ObservedConfigurationRuntime,agentId:string,hostId:string) {
+function validateObservedRuntime(value:ObservedConfigurationRuntime,agentId:string) {
   const o=value.observation,age=Date.now()-Date.parse(o.observed_at)
   if(o.schema_version!=='seat-provider-observation/v1'||o.verified!==true||o.source!=='process_ancestry'
-    ||o.agent_id!==agentId||o.host_id!==hostId||!['codex','claude'].includes(o.provider)||!o.runtime_instance_id
+    ||o.agent_id!==agentId||!['codex','claude'].includes(o.provider)||!o.runtime_instance_id
     ||!Number.isInteger(o.provider_pid)||o.provider_pid<2||!Number.isFinite(Date.parse(o.provider_started_at))
     ||!Number.isFinite(age)||age<0||age>1_800_000||!isAbsolute(o.workspace)||!isAbsolute(value.providerHome)
     ||!isAbsolute(value.providerConfigRoot)||!Number.isInteger(value.port)||value.port<1||!value.leaseId||value.fencingToken<1)
@@ -91,7 +91,6 @@ export interface AunConfigurationRollbackEnvelope {
 export interface AunConfigurationCandidate {
   runtimeSelection?:ReturnType<typeof configurationRuntimeIdentity>
   schemaVersion: 'aun-configuration-candidate/v1'
-  hostId: string
   agentId: string
   desiredRevision: number
   desiredDigest: string
@@ -104,25 +103,27 @@ export interface AunConfigurationCandidate {
   runtimeRegistration: RuntimeRegistrationProjection
   rollback: AunConfigurationRollbackEnvelope
   rollbackArtifactDigest: string
+  rollbackReleaseCommit: string
+  rollbackReleaseTree: string
   restartRequired: boolean
   candidateDigest: string
 }
 
 export interface BuildAunConfigurationCandidateInput {
   observedRuntime?:ObservedConfigurationRuntime
-  hostId: string
   desired: AunConfigurationDesiredState
   externalRoot: AunConfigurationExternalRoot
   providerMcp: ProviderMcpProjection
   launchAgent: LaunchAgentProjection
   runtimeRegistration: RuntimeRegistrationProjection
   rollback: AunConfigurationRollbackEnvelope
+  rollbackReleaseCommit?: string
+  rollbackReleaseTree?: string
   restartRequired: boolean
 }
 
 export interface BuildDefaultAunConfigurationCandidateInput {
   observedRuntime:ObservedConfigurationRuntime
-  hostId: string
   desired: AunConfigurationDesiredState
   databaseLocatorRef: string
   databaseCredentialRef: string
@@ -133,6 +134,8 @@ export interface BuildDefaultAunConfigurationCandidateInput {
   daemonCheckout: string
   daemonEntry: string
   rollback?: AunConfigurationRollbackEnvelope
+  rollbackReleaseCommit?: string
+  rollbackReleaseTree?: string
   restartRequired?: boolean
 }
 
@@ -159,7 +162,6 @@ export function candidateEnvelopeWithoutDigest(
 export function buildAunConfigurationCandidate(
   input: BuildAunConfigurationCandidateInput,
 ): AunConfigurationCandidate {
-  if (!input.hostId.trim()) throw new Error('HOST_ID_REQUIRED')
   const desiredDigest = computeDesiredDigest(input.desired)
   if (desiredDigest !== input.desired.desiredDigest) throw new Error('DESIRED_DIGEST_MISMATCH')
   if (input.externalRoot.releaseCommit !== input.desired.releaseCommit
@@ -180,7 +182,7 @@ export function buildAunConfigurationCandidate(
     throw new Error('ENROLLMENT_PROJECTION_MISMATCH')
   }
   if(input.observedRuntime) {
-    validateObservedRuntime(input.observedRuntime,input.desired.agentId,input.hostId)
+    validateObservedRuntime(input.observedRuntime,input.desired.agentId)
     if(input.providerMcp.provider!==input.observedRuntime.observation.provider || input.providerMcp.providerHome!==input.observedRuntime.providerHome
       ||input.providerMcp.providerConfigRoot!==input.observedRuntime.providerConfigRoot) throw new Error('PROVIDER_CURRENT_RUNTIME_MISMATCH')
   } else if (input.providerMcp.providerHome !== input.desired.canonicalHome) throw new Error('PROVIDER_HOME_MISMATCH')
@@ -220,10 +222,13 @@ export function buildAunConfigurationCandidate(
     throw new Error('SUPERVISOR_PROJECTION_MISMATCH')
   }
 
+  const hasRollback = Object.values(input.rollback).some(value=>value!==null)
+  const rollbackReleaseCommit = input.rollbackReleaseCommit ?? (hasRollback ? '' : input.desired.releaseCommit)
+  const rollbackReleaseTree = input.rollbackReleaseTree ?? (hasRollback ? '' : input.desired.releaseTree)
+  if(!/^[0-9a-f]{40}$/.test(rollbackReleaseCommit)||!/^[0-9a-f]{40}$/.test(rollbackReleaseTree))throw new Error('ROLLBACK_RELEASE_IDENTITY_REQUIRED')
   const rollbackArtifactDigest = configurationDigest(input.rollback)
   const withoutDigest: Omit<AunConfigurationCandidate, 'candidateDigest'> = {
     schemaVersion: 'aun-configuration-candidate/v1',
-    hostId: input.hostId,
     agentId: input.desired.agentId,
     desiredRevision: input.desired.desiredRevision,
     desiredDigest: input.desired.desiredDigest,
@@ -237,6 +242,8 @@ export function buildAunConfigurationCandidate(
     runtimeRegistration: input.runtimeRegistration,
     rollback: input.rollback,
     rollbackArtifactDigest,
+    rollbackReleaseCommit,
+    rollbackReleaseTree,
     restartRequired: input.restartRequired,
   }
   assertNoRawSecrets({
@@ -253,7 +260,7 @@ export function buildDefaultAunConfigurationCandidate(
   input: BuildDefaultAunConfigurationCandidateInput,
 ): AunConfigurationCandidate {
   if(!input.observedRuntime) throw new Error('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
-  validateObservedRuntime(input.observedRuntime,input.desired.agentId,input.hostId)
+  validateObservedRuntime(input.observedRuntime,input.desired.agentId)
   const provider = input.observedRuntime.observation.provider
   const commonRefs = {
     AGENT_ID: `literal:${input.desired.agentId}`,
@@ -262,7 +269,6 @@ export function buildDefaultAunConfigurationCandidate(
   }
   return buildAunConfigurationCandidate({
     observedRuntime:input.observedRuntime,
-    hostId: input.hostId,
     desired: input.desired,
     externalRoot: {
       databaseLocatorRef: input.databaseLocatorRef,
@@ -313,6 +319,8 @@ export function buildDefaultAunConfigurationCandidate(
       supervisorIdentity: input.desired.supervisorIdentity,
     },
     rollback: input.rollback ?? { providerMcp: null, launchAgent: null, runtimeRegistration: null },
+    rollbackReleaseCommit:input.rollbackReleaseCommit,
+    rollbackReleaseTree:input.rollbackReleaseTree,
     restartRequired: input.restartRequired ?? true,
   })
 }

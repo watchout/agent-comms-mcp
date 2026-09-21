@@ -74,7 +74,7 @@ The durable workspace binding identifies the logical repository/project, not an 
 
 Continuous native configuration generation also requires fresh same-seat runtime
 and account-root observations plus the matching logical authority lease. These
-physical observations remain request-local and are not persisted into a candidate,
+physical observations remain request-local and are not persisted into a durable candidate,
 outbox or DB receipt. Desired provider,
 physical home/workspace and channel port remain historical diagnostics. Generated
 bridge intent is port 0; runtime readback compares the actual bound port. Stable
@@ -102,6 +102,63 @@ legacy rows remain untouched and unavailable to strict readers. Reapplying the
 migration is a no-op. The paired down migration rejects populated stable-format
 history with `AUN_DESIRED_FORMAT_ROLLBACK_INCOMPATIBLE`; application must explicitly
 cover this shared format transition, separately from any target seat restart.
+
+### D-CFG-1 / D-S0-1 — Published logical authority amendment
+
+The [arc contract](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5759277196)
+(body SHA256 `01f2259457e1b5c605a500c1db474bcaf374d5d9f0ab48a4e57192914e01a82b`)
+is implemented under the [remaining -003 handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5759655462)
+(body SHA256 `ede285301f047e43d77b15cceb767dd786b4be2a51a2cdc0782bba51f6afe256`).
+It preserves adopted D1–D4 and supersedes pending configuration/S0 judgments.
+No deployment ID or additional lease scope type is introduced.
+
+Configuration identity is enrolled `agent_id`. Maintenance leases use existing
+`runtime_instance` scope type with `configuration-reconciler:<agent_id>` or
+`configuration-restart:<agent_id>` scope IDs. Neither hostname nor `AUN_HOST_ID`,
+including aliases/digests, enters the candidate, lease or DB. Host identity is
+limited to request-local observations/diagnostics.
+
+`aun_configuration_observed_state` retains history and denies new INSERTs.
+Reconcile and bootstrap READY/IDEMPOTENT_READY use fresh runtime/account and
+native configuration readback, never that table. Existing desired-outbox
+`delivered_at` and logical event/audit represent durable completion, still
+requiring exact desired revision/digest and current holder/fence. B3 calls the
+ordinary profile writer with stable enrollment fields only and updates the same
+logical release handoff for both new and existing enabled profiles. Its rollback
+restores only the logical fields it changed, preserves physical history and
+retains audit history. Account-root process-start reads must use the observer's
+explicit UTC/C locale; local timezone cannot reinterpret `ps lstart` values.
+
+Restart requests retain logical request/seat/revision/digest, exact release
+commit/tree/control refs, lease/fence, restart budget, owner decision and CTO
+receipt refs. Remove `host_id`; prohibit new candidate/rollback artifact digests;
+use `rollback_release_commit` / `rollback_release_tree`. The unique key becomes
+`(agent_id,to_revision,to_digest)`. Existing owner expiry, execution lease/fence,
+attempt limits and terminal history remain authority controls. Reject conflicting
+pre-existing logical keys atomically rather than deleting a request. Legacy
+physical digest bytes may remain unread history; they cannot authorize a new
+restart. Owner approval, authenticated CTO receipt, exact release and current
+execution fence remain required immediately before restart/rollback effects.
+
+Provider-free S0 requires all three: active unexpired exact-holder lease with
+current fence; fresh same-seat/runtime process/start/held-socket observation;
+durable build identity from `commit_sha`, `metadata.source_commit` and
+`metadata.source_tree`. It reads none of `runtime_engine`, `status`, `stopped_at`,
+`last_seen_at`, `checkout_path` or configuration observed-state history.
+Implementation uses existing non-worker `maintenance` lease metadata
+`native_runtime_kind: deterministic-s0` as the logical marker. This is explicit
+enrollment, never inferred from an OS/provider name. The shared host observer
+checks UUID, process start, current workspace and socket within the existing
+3-second deadline without requiring LLM ancestry or generating a provider name.
+Missing build/lease/observation, changed fence or ambiguous holders denies
+selection/dispatch; no historical fallback exists.
+
+Acceptance requires positive and negative observations for AC-CFG-1..5 and
+AC-S0-1..3, plus NP11's single compatible release B3/start/restart/claim recovery.
+The prior intermittent native refusal may close with either an identified cause
+and reproducer, or retained non-reproduction evidence plus assertions monitoring
+every admission/denial; the latter does not identify the historical cause.
+NP12/live application and independent cycle-2 approval remain separate.
 
 ## NP — Non-persistence boundary, discovery and compatible cutover (R08 reuse)
 

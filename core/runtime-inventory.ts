@@ -1,4 +1,5 @@
-import { type HostRuntimeInspector, type HostRuntimeObservation } from './host-runtime-observer'
+import { type HostRuntimeInspector, type HostRuntimeObservation, type NativeHostRuntimeInspector } from './host-runtime-observer'
+import { resolveNativeRuntimeAuthority, NATIVE_RUNTIME_KIND } from './runtime-native-authority'
 import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './git-checkout-evidence'
 import { resolveSeatProvider, selectObservedProvider } from './seat-runtime-selection'
 import type { DbAdapter } from './db'
@@ -155,6 +156,7 @@ export type RuntimeInventoryReport = {
 }
 
 export interface V2NativeFrozenSetReadOptions {
+  nativeInspect?: NativeHostRuntimeInspector
   inspect?: HostRuntimeInspector
   nowMs?: number
   maxHeartbeatAgeMs?: number
@@ -207,7 +209,7 @@ export async function readV2NativeFrozenEnabledSet(
   const nowMs = options.nowMs ?? Date.now()
   const maxAgeMs = options.maxHeartbeatAgeMs ?? 15 * 60_000
   const rows = await db.query<any>(
-    `SELECT agent_id, profile_revision, runtime_engine_preference, metadata,
+    `SELECT agent_id, profile_revision, metadata,
             profile_enabled, disabled_at, agent_type
        FROM agents
       ORDER BY agent_id`,
@@ -226,6 +228,16 @@ export async function readV2NativeFrozenEnabledSet(
 
   const result: V2NativeMeshFrozenAgentV1[] = []
   for (const agent of selected) {
+    const native=await resolveNativeRuntimeAuthority(db,{agentId:String(agent.agent_id),inspect:options.nativeInspect})
+    if(native.ok && native.observation) {
+      result.push({agent_id:String(agent.agent_id),profile_revision:String(agent.profile_revision),
+        runtime_engine:NATIVE_RUNTIME_KIND,runtime_instance_id:native.runtimeInstanceId!,
+        runtime_checkout_root:native.observation.workspace,runtime_checkout_sha:native.sourceCommit!})
+      continue
+    }
+    if(native.code!=='NATIVE_AUTHORITY_ABSENT') {
+      throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} ${native.code}`)
+    }
     // LLM membership is resolved from logical authority and current OS state.
     // No saved PID/path/status/provider or reader's ambient checkout supplies it.
     const selectedProvider = await resolveSeatProvider(db, {agentId:String(agent.agent_id), inspect:options.inspect})
@@ -242,40 +254,7 @@ export async function readV2NativeFrozenEnabledSet(
         runtime_checkout_root:observed.workspace, runtime_checkout_sha:checkout.commit_sha})
       continue
     }
-    // Existing provider-free S0 fixtures retain their distinct contract. This
-    // compatibility branch never authorizes an LLM from saved observations.
-    // Its replacement with logical S0 deployment proof remains needs:arc.
-    const runtimes = await db.query<any>(
-      `SELECT runtime_instance_id, runtime_engine, checkout_path, commit_sha,
-              status, stopped_at, last_seen_at
-         FROM agent_runtime_instances
-        WHERE agent_id = $1
-        ORDER BY started_at DESC`,
-      [agent.agent_id],
-    )
-    const live = runtimes.filter(runtime => {
-      const seen = parseTimestampMs(runtime.last_seen_at)
-      return runtime.runtime_engine === 'deterministic-s0' && runtime.stopped_at === null
-        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
-        && seen !== null && nowMs - seen <= maxAgeMs
-    })
-    if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
-    const runtime = live[0]
-    const engine = 'deterministic-s0'
-    const instanceId = normalizeString(runtime.runtime_instance_id)
-    const checkoutRoot = normalizeString(runtime.checkout_path)
-    const checkoutSha = normalizeString(runtime.commit_sha)
-    if (!engine || !instanceId || !checkoutRoot || !checkoutSha || !/^[0-9a-f]{40}$/.test(checkoutSha)) {
-      throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
-    }
-    result.push({
-      agent_id: String(agent.agent_id),
-      profile_revision: String(agent.profile_revision),
-      runtime_engine: engine,
-      runtime_instance_id: instanceId,
-      runtime_checkout_root: checkoutRoot,
-      runtime_checkout_sha: checkoutSha,
-    })
+    throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} current runtime unavailable`)
   }
   return result
 }

@@ -76,6 +76,9 @@ test('NP07/08 normal daemon pending path re-reads real native original on privat
     expect(JSON.stringify(proof.metadata)).not.toContain(home)
     expect(JSON.stringify(proof.metadata)).not.toContain('native_delivery')
     expect(tmux.sentKeys).toEqual([]); expect(tmux.restarts).toEqual([])
+    // Monitor every real inspection, including negative-path probes. Unexpected
+    // transient refusal fails this test; it is never retried into a green result.
+    expect(observerReasons.filter(reason=>!['OBSERVED','OBSERVATION_TIMEOUT'].includes(reason))).toEqual([])
     // Runner boundary is a recorder: this proves admission, not LLM execution or finalization.
     console.log(JSON.stringify({case: 'native-scheduler-admission', native_reads: reads, dispatched: calls.length,
       denied: 3, provider_invocations: 0, observer_calls: inspections}))

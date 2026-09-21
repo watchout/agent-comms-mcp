@@ -1,4 +1,4 @@
-import { copyFileSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, realpathSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -8,7 +8,8 @@ export async function nonpersistHostFixture(runtimeId = randomUUID(), agentId = 
   copyFileSync(process.execPath,join(dir,'codex'))
   writeFileSync(join(dir,'server.ts'),"const s=Bun.serve({port:0,hostname:'127.0.0.1',fetch:()=>new Response('synthetic')});console.log(JSON.stringify({pid:process.pid,port:s.port}));")
   writeFileSync(join(dir,'provider.ts'),`const child=Bun.spawn([${JSON.stringify(process.execPath)},${JSON.stringify(join(dir,'server.ts'))}],{cwd:process.cwd(),env:process.env,stdout:'inherit',stderr:'inherit'});process.on('SIGTERM',()=>{child.kill();process.exit(0)});await child.exited;`)
-  const env={PATH:process.env.PATH!,LANG:'C',TMPDIR:dir,AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,
+  mkdirSync(join(dir,'.codex'))
+  const env={HOME:dir,CODEX_HOME:join(dir,'.codex'),PATH:process.env.PATH!,LANG:'C',TMPDIR:dir,AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,
     AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:dir,AGENT_COM_RUNTIME_SESSION:`session-${agentId}`}
   const child=Bun.spawn([join(dir,'codex'),join(dir,'provider.ts')],{cwd:dir,env,stdout:'pipe',stderr:'pipe'})
   const reader=child.stdout.getReader()
