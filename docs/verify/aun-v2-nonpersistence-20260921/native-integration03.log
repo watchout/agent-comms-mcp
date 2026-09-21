@@ -1,0 +1,20 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-NyiTsU/aun.db
+957 |     session_name: runtime.session_name, port: endpoint.endpoint.port, checkout_path: runtime.checkout_path,
+958 |     checkout_commit_sha: runtime.commit_sha, completed_at: input.receipt.completed_at,
+959 |     valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
+960 |   }))
+961 |   const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
+962 |   if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}`)
+                                ^
+error: MEMORY_NATIVE_ORDINARY_GATE_FAILED:stale_runtime_restore
+      at recordVerifiedNativeRuntimeMemoryReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:962:27)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:28:11)
+(fail) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [2215.40ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [2.28s]

@@ -1,4 +1,4 @@
-import { sameHostRuntime, type HostRuntimeObservation } from '../host-runtime-observer'
+import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector, type HostRuntimeObservation } from '../host-runtime-observer'
 import { observeSeatProvider, resolveSeatProvider } from '../seat-runtime-selection'
 /**
  * StateDaemon — queue-state-driven dispatch supervisor (Issue #323, spec v0.6).
@@ -237,7 +237,7 @@ export function automaticProcessingInputsFromAgent(
 
 export async function evaluateStateDaemonAutomaticProcessingEligibility(
   db: Pick<DBClient, 'query'>,
-  input: { agentId: string; channelId: string | null },
+  input: { agentId: string; channelId: string | null; inspect?:HostRuntimeInspector },
 ): Promise<AutomaticProcessingEligibilityVerdict> {
   const agentRows = await db.query<AgentRow & { agent_type?: string | null }>(
     `SELECT agent_id, agent_type, runtime, runtime_engine_preference, status,
@@ -255,7 +255,7 @@ export async function evaluateStateDaemonAutomaticProcessingEligibility(
     )
     channelMember = parseChannelMembers(channelRows.rows[0]?.members).includes(input.agentId)
   }
-  const current = agent ? await resolveSeatProvider(db,{agentId:input.agentId}) : null
+  const current = agent ? await resolveSeatProvider(db,{agentId:input.agentId,inspect:input.inspect}) : null
   return evaluateAutomaticProcessingEligibility(automaticProcessingInputsFromAgent(agent ? {...agent,observed_runtime_provider:current?.ok?current.provider:null}:null, channelMember))
 }
 
@@ -306,10 +306,12 @@ export class StateDaemon {
   private githubWorkPullerInFlight: Promise<void> | null = null
   private readonly intervalHandles: ReturnType<typeof setInterval>[] = []
 
+  private readonly runtimeInspector: HostRuntimeInspector
   private readonly providerObserver: typeof observeSeatProvider
 
-  constructor(deps: StateDaemonDeps & {providerObserver?: typeof observeSeatProvider}) {
+  constructor(deps: StateDaemonDeps & {providerObserver?: typeof observeSeatProvider; runtimeInspector?:HostRuntimeInspector}) {
     this.providerObserver = deps.providerObserver ?? observeSeatProvider
+    this.runtimeInspector=deps.runtimeInspector ?? inspectHostRuntime
     this.db = deps.db
     this.pgListen = deps.pgListen
     this.tmux = deps.tmux
@@ -800,7 +802,7 @@ export class StateDaemon {
     sql += this.queueWorkResidueExclusionClause(params, 'mq')
     const { rows } = await this.dbQuery<{ agent_id: string; channel_id: string | null }>(sql, params)
     for (const pair of rows) {
-      const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
+      const verdict = await evaluateStateDaemonAutomaticProcessingEligibility(this.db, {inspect:this.runtimeInspector,
         agentId: pair.agent_id,
         channelId: pair.channel_id ?? null,
       })
@@ -915,9 +917,9 @@ export class StateDaemon {
     const candidates=await this.dbQuery<any>(select,params)
     let refreshed=0,skipped=0
     for(const claim of candidates.rows) {
-      const observed=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id})
+      const observed=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
       if(!observed.observation || observed.observation.runtime_instance_id!==String(claim.claimed_runtime_instance_id)) {skipped++;continue}
-      const verified=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id})
+      const verified=await resolveSeatProvider({query:(sql,values)=>this.dbQuery(sql,values)}, {agentId:claim.agent_id,inspect:this.runtimeInspector})
       if(!verified.observation || !sameHostRuntime(observed.observation as HostRuntimeObservation,verified.observation as HostRuntimeObservation)) {skipped++;continue}
       const result=await this.dbQuery(`UPDATE message_queue SET claim_expires_at=CURRENT_TIMESTAMP+($1 || ' seconds')::interval,
         last_heartbeat_at=CURRENT_TIMESTAMP WHERE id=$2 AND agent_id=$3 AND claimed_by=$3 AND claimed_at=$4
@@ -936,7 +938,7 @@ export class StateDaemon {
   private async observedAgent<T extends AgentRow>(agent:T|null,now:Date):Promise<(T & {observed_runtime_provider:string|null})|null> {
     if(!agent) return null
     const selected=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)},
-      {agentId:agent.agent_id,now,observe:this.providerObserver})
+      {agentId:agent.agent_id,now,inspect:this.runtimeInspector})
     return {...agent,observed_runtime_provider:selected.ok?selected.provider:null,
       runtime:selected.ok?selected.provider:null,status:selected.ok?'online':'unknown',
       tmux_session:selected.observation?.session_name ?? null,last_seen_at:selected.observation?new Date(selected.observation.observed_at):null}
@@ -1082,7 +1084,7 @@ export class StateDaemon {
   private async checkAutomaticProcessingEligibility(
     row: QueueRow,
   ): Promise<AutomaticProcessingEligibilityVerdict> {
-    return evaluateStateDaemonAutomaticProcessingEligibility(this.db, {
+    return evaluateStateDaemonAutomaticProcessingEligibility(this.db, {inspect:this.runtimeInspector,
       agentId: row.agent_id,
       channelId: row.channel_id ?? null,
     })
@@ -2033,7 +2035,7 @@ export class StateDaemon {
     }
 
     const now = this.clock.now()
-    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, observe:this.providerObserver})
+    const providerSelection = await resolveSeatProvider({query: (sql, params) => this.dbQuery(sql, params)}, {agentId: row.agent_id, now, inspect:this.runtimeInspector})
     if (!providerSelection.ok) {
       this.metrics.inc('state_daemon_wake_actions_total', {result: providerSelection.code})
       return false
@@ -2184,7 +2186,7 @@ export class StateDaemon {
       )
       return false
     }
-    const finalProvider=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)}, {agentId:row.agent_id})
+    const finalProvider=await resolveSeatProvider({query:(sql,params)=>this.dbQuery(sql,params)}, {agentId:row.agent_id,inspect:this.runtimeInspector})
     if(!providerSelection.observation || !finalProvider.observation || !sameHostRuntime(
       providerSelection.observation as HostRuntimeObservation,finalProvider.observation as HostRuntimeObservation)) {
       this.metrics.inc('state_daemon_wake_actions_total',{result:'runtime_changed_before_invocation'})

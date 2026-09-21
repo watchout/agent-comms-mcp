@@ -1,3 +1,4 @@
+import type { HostRuntimeInspector } from '../core/host-runtime-observer'
 #!/usr/bin/env bun
 import { resolveSeatProvider } from '../core/seat-runtime-selection'
 /**
@@ -370,41 +371,17 @@ export type QueueWorkRuntimeWorkspaceDb = {
 }
 
 export async function resolveQueueWorkRuntimeWorkspace(
-  db: QueueWorkRuntimeWorkspaceDb,
-  agentId: string,
-): Promise<string> {
-  const result = await db.query<{
-    agent_id: string
-    runtime_workspace: string | null
-  }>(
-    `SELECT a.agent_id,
-            COALESCE(workspace.local_path, NULLIF(a.canonical_workspace, ''), NULLIF(a.home_directory, '')) AS runtime_workspace
-       FROM agents a
-       LEFT JOIN LATERAL (
-         SELECT w.local_path
-           FROM agent_workspace_bindings b
-           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
-          WHERE b.agent_id = a.agent_id
-            AND b.active = true
-          ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
-          LIMIT 1
-       ) workspace ON true
-      WHERE a.agent_id = $1
-        AND a.profile_enabled = true
-        AND a.disabled_at IS NULL`,
-    [agentId],
-  )
-  if (result.rows.length !== 1) {
-    throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  db:QueueWorkRuntimeWorkspaceDb,agentId:string,options:{inspect?:HostRuntimeInspector}={},
+):Promise<string> {
+  const row=await db.query<{agent_id:string}>(`SELECT agent_id FROM agents WHERE agent_id=$1
+    AND profile_enabled=true AND disabled_at IS NULL`,[agentId])
+  if(row.rows.length!==1)throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  const current=await resolveSeatProvider(db,{agentId,inspect:options.inspect})
+  const observed=current.observation?.workspace
+  if(!current.ok || !observed || !isAbsolute(observed) || !existsSync(observed) || !statSync(observed).isDirectory()) {
+    throw new Error('QUEUE_WORK_CURRENT_WORKSPACE_UNAVAILABLE')
   }
-  const configured = result.rows[0]?.runtime_workspace?.trim() ?? ''
-  if (!configured || !isAbsolute(configured)) {
-    throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
-  }
-  if (!existsSync(configured) || !statSync(configured).isDirectory()) {
-    throw new Error(`queue-work runtime workspace does not exist as a directory for ${agentId}: ${configured}`)
-  }
-  return realpathSync(configured)
+  return realpathSync(observed)
 }
 
 export type QueueWorkRuntimeSelection =
@@ -424,7 +401,7 @@ export function queueWorkRuntimeForPreference(preference: unknown): QueueWorkRun
 export async function resolveQueueWorkRuntimeForAgent(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
-  observationOptions: Pick<Parameters<typeof resolveSeatProvider>[1], 'observe' | 'hostId' | 'now'> = {},
+  observationOptions: Pick<Parameters<typeof resolveSeatProvider>[1], 'observe' | 'inspect' | 'hostId' | 'now'> = {},
 ): Promise<QueueWorkRuntimeSelection> {
   const selection = await resolveSeatProvider(db, {agentId,...observationOptions})
   if (!selection.ok) return selection.code === 'PROVIDER_UNSUPPORTED' ? 'runtime-preference-unsupported' : 'runtime-preference-required'

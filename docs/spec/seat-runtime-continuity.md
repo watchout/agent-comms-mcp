@@ -1,6 +1,8 @@
 # Seat runtime continuity — bounded amendment
 
-Status: PROPOSED AUN v2.0.0 non-persistence delta; D1–D4 disposition and independent review of this exact revision are pending. Product implementation, tests and application are NOT_RUN for this delta. The earlier CH-SEAT-CONTINUITY-IMPLEMENT-20260913-001 admission applies only to its historical subject.
+Status: ADOPTED D1–D4 on 2026-09-21; implementation and source tests are in progress. NP12 applied acceptance remains NOT_RUN. The earlier CH-SEAT-CONTINUITY-IMPLEMENT-20260913-001 admission applies only to its historical subject.
+
+Owner adoption: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755364993 (raw SHA256 `8414bb149e2a8b9aee4fb62b87f11d6109d5bc9bf9beb67019e282e21bcc1791`). Implementation scope: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755382588 (raw SHA256 `26e3a3ff050f1522948abc03704d116e4296e27122ec8e5e80744c5f340c82a0`). Adoption does not certify this implementation or grant activation.
 Current delta baseline: `9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`, tree `9a002f1baf49fcbc8ac8f91db83165db3489a093`. Original continuity baseline: `0f772883db6f3b50772d3e4b82ce47795091f0a9` (historical; use the exact original source reference below for provenance).
 Author: `codex-cto/restore_inventory`, `control_artifact_author`; later SC3 implementation executor. SC1/SC2 integration maker: `codex-cto/restore_executor`. Maker history is retained; neither maker provides the independent gate. This two-file v2 delta is authored by `codex-cto/execution_guide_review`, `control_artifact_author`; the 9d7 implementation maker remains Work and repo ownership remains codex-aun. This author does not independently gate this delta.
 
@@ -207,10 +209,7 @@ All readers and writers change in the same compatible release:
 | `bin/aun/bootstrap.ts`, `bin/aun/start.ts`, `bin/aun/run-queue-work.ts`, `scripts/restart-bot.sh`, `scripts/sync-mcp-config.sh` | Supply pre-exec UUID/explicit intent at existing launch boundaries; all callers share observer/selector; no local fixed seat/path/port contract | NP04/05/06 |
 | `db/migrate.ts`, `db/migrate-sqlite.ts`, new versioned migrations; every affected DB serializer | Logical anchors and optional physical fields, FK-preserving cutover, positive durable allowlists, legacy/mixed-writer guards | NP01/02/10/11 |
 
-This table is a source-backed implementation scope proposal, not permission to
-edit these paths now. A follow-on exact handoff must enumerate actual affected
-paths including serializers; it must not pretend the old four-path subset closes
-all sinks. Current claim authority remains necessary even when host observation
+The table is implemented under the exact 2026-09-21 handoff above, with the DB and bootstrap work split into named isolated branches. It does not imply that all paths or assertions are complete. The final evidence matrix records code coverage, actual test results and gaps separately. Current claim authority remains necessary even when host observation
 succeeds. Renewal is scoped to exact work/holder/fence and fresh same-holder proof,
 never a bulk inference from `agents.status`; observing a replacement does not
 renew, clear or inherit its predecessor's claim. E7 shared slots, deferral metrics,
@@ -282,10 +281,10 @@ next exact handoff, without reducing whole-release required checks.
 
 | Decision | Recommended proposal | Alternative and impact | Current disposition |
 |---|---|---|---|
-| D1 | Pre-exec immutable runtime UUID + existing per-call host inspection, fresh-reader proof | Preserve post-start-only UUID/unbound launches: an independent reader cannot safely locate that runtime without another transport; do not substitute DB physical discovery or invent a new daemon | NOT_ADOPTED; explicit launch-contract judgment required |
-| D2 | Cover all AUN-owned DB sinks and copied receipts; keep original Was/Kusabi receipt contract separately scoped | Include the original memory-product store too: requires a separate concrete cross-product design/implementation scope; no global completion claim until then | NOT_ADOPTED; AUN-only boundary must be explicit |
-| D3 | Explicit intent when no live provider; remove DB historical-provider fallback | Retain `SELECTED_HISTORY`: conflicts with literal non-persistence and can select an obsolete provider; would require an explicit changed owner requirement | NOT_ADOPTED; cold-start contract judgment required |
-| D4 | Retain old data, guard new writes, allow only compatible rollback | Restore a physical-writing old release/remove guard: violates non-persistence; requires an exact exceptional recovery disposition, never automatic F522 | NOT_ADOPTED; recovery boundary judgment required |
+| D1 | Pre-exec immutable runtime UUID + existing per-call host inspection, fresh-reader proof | Preserve post-start-only UUID/unbound launches: an independent reader cannot safely locate that runtime without another transport; do not substitute DB physical discovery or invent a new daemon | ADOPTED by owner 5755364993; valid-UUID reuse rejection still requires implementation evidence |
+| D2 | Cover all AUN-owned DB sinks and copied receipts; keep original Was/Kusabi receipt contract separately scoped | Include the original memory-product store too: requires a separate concrete cross-product design/implementation scope; no global completion claim until then | ADOPTED by owner 5755364993; original memory-product DB is outside this AUN change |
+| D3 | Explicit intent when no live provider; remove DB historical-provider fallback | Retain `SELECTED_HISTORY`: conflicts with literal non-persistence and can select an obsolete provider; would require an explicit changed owner requirement | ADOPTED by owner 5755364993; no historical-provider fallback |
+| D4 | Retain old data, guard new writes, allow only compatible rollback | Restore a physical-writing old release/remove guard: violates non-persistence; requires an exact exceptional recovery disposition, never automatic F522 | ADOPTED by owner 5755364993; compatible rollback still requires actual evidence |
 
 The CTO collects these four exact judgments together; document authoring and
 unrelated authorized work continue. No generic acknowledgment restarts a stopped

@@ -1,0 +1,8 @@
+{
+  "url": "postgresql://fixture@localhost/aun_np_test?host=%2Fvar%2Ffolders%2Fh5%2Fmpl2kfxj2qxbx4984qvywgd80000gn%2FT%2Faun-np-pg-x9x9u1j0%2Fsocket",
+  "observed_at": "2026-09-21T05:08:28.102074+00:00",
+  "exit_code": 0,
+  "stdout": "aun_np_test|fixture|/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket|\n",
+  "reason": "psql accepts old empty-host URI but WHATWG URL rejects it; localhost syntax with explicit unix socket retains private-only connection",
+  "old_url": "postgresql://fixture@/aun_np_test?host=/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket"
+}

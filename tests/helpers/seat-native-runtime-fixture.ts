@@ -1,4 +1,4 @@
-import { copyFileSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { symlinkSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
@@ -58,7 +58,7 @@ export async function nativeHostFixture(home:string,workspace:string,agent:strin
   const was = await nativeFixtureSource()
   const node=execFileSync('which',['node'],{encoding:'utf8'}).trim()
   const modules=join(was,'dist'),sdk=join(was,'node_modules/@modelcontextprotocol/sdk/dist/esm')
-  const fixtureProvider=join(home,'codex');copyFileSync(node,fixtureProvider)
+  const fixtureProvider=join(home,'codex');symlinkSync(realpathSync(node),fixtureProvider)
   const holder=join(home,'server.ts'),memory=join(home,'native-memory.mjs'),hook=join(home,'native-hook.mjs'),host=join(home,'native-host.mjs'),report=join(home,'native-host.json')
   const memoryEnv={TZ:'UTC',AGENT_MEMORY_DB_TYPE:'sqlite',AGENT_MEMORY_DB_PATH:join(home,'memory.db'),AGENT_MEMORY_AGENT_ID:agent,AGENT_MEMORY_PROJECT:project}
   writeFileSync(holder,"const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:()=>new Response('fixture')});console.log(JSON.stringify({pid:process.pid,port:server.port}));")
@@ -97,15 +97,15 @@ export async function nativeHostFixture(home:string,workspace:string,agent:strin
     import {observeNativeProcess} from ${JSON.stringify(join(modules,'native-context-delivery.js'))};
     const store=new SqliteStore(process.env.AGENT_MEMORY_DB_PATH);await store.initialize();
     await store.saveTaskState({agent_id:${JSON.stringify(agent)},project:${JSON.stringify(project)},task:'Continue the stable seat task',status:'in_progress',progress:'checkpoint',next_steps:'Run the next bounded fixture step'});await store.close();
-    const children=[];process.on('exit',()=>children.forEach(c=>c.kill()));process.on('SIGTERM',()=>process.exit(0));
+    console.error('fixture:store-ready');const children=[];process.on('exit',()=>children.forEach(c=>c.kill()));process.on('SIGTERM',()=>process.exit(0));
     const env={...process.env,FIXTURE_PROVIDER_PID:String(process.pid)};
     const held=spawn(${JSON.stringify(process.execPath)},[${JSON.stringify(holder)}],{cwd:${JSON.stringify(workspace)},env:{...env,AGENT_ID:${JSON.stringify(agent)},AGENT_COM_EXPECTED_AGENT_ID:${JSON.stringify(agent)},CODEX_THREAD_ID:${JSON.stringify(session)}},stdio:['ignore','pipe','inherit']});children.push(held);
     const endpoint=await new Promise((resolve,reject)=>{held.stdout.once('data',d=>resolve(JSON.parse(String(d))));held.once('error',reject)});
-    const native=spawn(process.execPath,[${JSON.stringify(hook)}],{cwd:${JSON.stringify(workspace)},env,stdio:['ignore','pipe','inherit']});children.push(native);
+    console.error('fixture:endpoint-ready');const native=spawn(process.execPath,[${JSON.stringify(hook)}],{cwd:${JSON.stringify(workspace)},env,stdio:['ignore','pipe','inherit']});children.push(native);
     let content='';native.stdout.on('data',d=>{content+=d.toString()});
     await new Promise((resolve,reject)=>native.on('exit',code=>code===0?resolve():reject(new Error('native hook failed'))));
     if(${JSON.stringify(mode)}==='accepted'&&(!content.includes('Continue the stable seat task')||!content.includes('Run the next bounded fixture step')))throw new Error('actual host input missing');
-    const connected=spawn(process.execPath,[${JSON.stringify(memory)}],{cwd:${JSON.stringify(workspace)},env,stdio:['pipe','pipe','inherit']});children.push(connected);
+    console.error('fixture:hook-complete');const connected=spawn(process.execPath,[${JSON.stringify(memory)}],{cwd:${JSON.stringify(workspace)},env,stdio:['pipe','pipe','inherit']});children.push(connected);
     const ready=${JSON.stringify(join(home,'native-mcp-ready-'))}+connected.pid;
     for(let i=0;!existsSync(ready)&&i<200;i++){if(connected.exitCode!==null)throw new Error('connected native MCP initialization failed');await new Promise(resolve=>setTimeout(resolve,25))}
     if(!existsSync(ready))throw new Error('connected native MCP initialization timeout');
@@ -114,7 +114,7 @@ export async function nativeHostFixture(home:string,workspace:string,agent:strin
   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
   nativeHosts.push(child)
   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
-  if(!existsSync(report))throw new Error('native fixture startup timeout')
+  if(!existsSync(report))throw new Error('native fixture startup timeout: '+readFileSync(join(home,'native-host.err'),'utf8'))
   const observed=JSON.parse(readFileSync(report,'utf8'))
   const observeProvider:typeof observeSeatProvider=(input)=>{
     const ppid=Number(execFileSync('ps',['-p',String(input.processId),'-o','ppid='],{encoding:'utf8'}).trim())

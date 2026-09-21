@@ -198,7 +198,7 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
         && Number(row.authority_live)===1 && Number(row.fencing_token)===Number(before?.fencing_token)).length!==1) return unavailable()
     }
   }catch{return unavailable()}
-  return selectSeatProvider({...input,live,history:[],allowHistory:false,now:input.now ?? new Date()})
+  return selectSeatProvider({...input,live,history:[],allowHistory:false,now:new Date()})
 }
 
 /** Verify the target host's connected memory child, not a repaired private lookup child. */

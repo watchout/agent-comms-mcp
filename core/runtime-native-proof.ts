@@ -8,9 +8,9 @@ export async function readCurrentNativeProof(input:{agentId:string;project:strin
   observation:HostRuntimeObservation}):Promise<SeatContextReceipt> {
   const o=input.observation
   const run=async(command:string,args:string[],options:any)=>{
-    try {return {exitCode:0,stdout:execFileSync(command,args,{encoding:'utf8',cwd:options.cwd,
+    try {return {exitCode:0,stderr:'',stdout:execFileSync(command,args,{encoding:'utf8',cwd:options.cwd,
       env:options.env,timeout:Math.min(options.timeoutMs ?? 3000,10000),stdio:['ignore','pipe','ignore']})}}
-    catch {return {exitCode:1,stdout:''}}
+    catch {return {exitCode:1,stdout:'',stderr:''}}
   }
   const minimal:Record<string,string>={PATH:process.env.PATH ?? '/usr/bin:/bin',LANG:'C'}
   const root=await readObservedProviderRoot(run,{pid:o.provider_pid,startedAt:o.provider_started_at,

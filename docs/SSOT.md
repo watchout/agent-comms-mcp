@@ -6,7 +6,7 @@
 > **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
 Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
-The proposed AUN v2.0.0 amendment in that spec replaces physical runtime/endpoint
+The owner-adopted AUN v2.0.0 amendment in that spec replaces physical runtime/endpoint
 DB registration and historical-provider selection with current OS/process/socket
 observation plus durable logical identity and authority. Provider/port/physical
 path/PID/liveness observations are not newly persisted in any AUN-owned DB sink,
@@ -15,15 +15,14 @@ claim owner/token/expiry, logical runtime UUID/FK, lease/fence and history remai
 durable. The DB remains the authority for those durable facts; a visible process
 or socket alone never grants permission to execute work.
 
-This is a **proposed design delta, not implemented behavior** at baseline
-`9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`. The [current author handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5754173816)
-(raw SHA256 `9dd8bd107e3e8338685201bcfea7cef9b2ac85290032944804182278941636d9`)
-authorizes only these two docs files. The spec records the existing R08 proposal,
-12 positive/negative fixture commitments and four still-pending design choices:
-pre-exec UUID, AUN-owned copies versus original memory-product receipts,
-explicit cold launch intent, and legacy retention with compatible-only rollback.
-No proposal review or document commit adopts these choices or authorizes migration,
-merge, release, restart, DB/queue mutation or product implementation.
+D1–D4 were adopted by the [owner](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755364993)
+(raw SHA256 `8414bb149e2a8b9aee4fb62b87f11d6109d5bc9bf9beb67019e282e21bcc1791`).
+The [bounded implementation handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755382588)
+(raw SHA256 `26e3a3ff050f1522948abc03704d116e4296e27122ec8e5e80744c5f340c82a0`)
+authorizes source changes and isolated tests. The amendment was not implemented
+at baseline `9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`; current source/tests are
+in progress and NP12 application remains unperformed. Neither design adoption nor
+this source branch grants live migration, merge, release, restart or queue effects.
 
 After applicable design disposition and cutover, previous physical-runtime
 persistence/DB liveness clauses in this document and dependent specs describe
