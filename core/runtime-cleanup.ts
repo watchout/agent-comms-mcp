@@ -679,18 +679,13 @@ async function auditCleanupTarget(db: DbAdapter, target: RuntimeCleanupTarget, p
     [
       'runtime.cleanup_target',
       target.agent_id,
-      target.target_id,
+      target.runtime_instance_id ?? target.agent_id ?? 'unbound',
       JSON.stringify({
-        plan_hash: planHashValue,
         dry_run: dryRun,
         classification: target.classification,
         risk: target.risk,
-        pid: target.pid,
-        port: target.port,
-        tmux_session: target.tmux_session,
         runtime_instance_id: target.runtime_instance_id,
-        evidence: target.evidence,
-        actions: target.actions,
+        action_kinds: target.actions.map(action=>action.kind),
       }),
       'default',
     ],
@@ -717,14 +712,7 @@ export async function executeRuntimeCleanup(
     if (executable.length === 0) continue
     for (const action of executable) {
       if (action.kind === 'stop_runtime' && action.runtime_instance_id) {
-        await db.execute(
-          `UPDATE agent_runtime_instances
-              SET status = 'stopped',
-                  stopped_at = COALESCE(stopped_at, NOW())
-            WHERE runtime_instance_id = $1
-              AND stopped_at IS NULL`,
-          [action.runtime_instance_id],
-        )
+        throw new Error('RUNTIME_CLEANUP_REQUIRES_FRESH_OWNED_PROCESS_AND_NO_WORK')
       } else if (action.kind === 'kill_process' && action.pid) {
         if (!options.killProcess) throw new Error(`KILL_PROCESS_DEPENDENCY_MISSING: ${action.pid}`)
         await options.killProcess(action.pid)
@@ -742,9 +730,8 @@ export async function executeRuntimeCleanup(
     [
       'runtime.cleanup_execute',
       null,
-      report.plan_hash,
+      'runtime.cleanup',
       JSON.stringify({
-        plan_hash: report.plan_hash,
         executable_actions: report.summary.executable_actions,
         cleanup_targets: report.summary.cleanup_targets,
         unknown_risk_targets: report.summary.unknown_risk_targets,

@@ -1,3 +1,4 @@
+import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { realpathSync, statSync } from 'node:fs'
@@ -5,7 +6,7 @@ import { isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { parseProcessList, type ProcessSnapshot } from './tmux-runtime-inspector'
 
-/** Observations live in agent_runtime_instances.metadata, never in a second registry. */
+/** Physical observations are request-local and must never be persisted. */
 export type SeatProvider = 'codex' | 'claude'
 export interface SeatProviderObservation {
   schema_version: 'seat-provider-observation/v1'
@@ -157,46 +158,39 @@ export function selectSeatProvider(input: {
   const current = selectObservedProvider(live.length ? [live[0].provider] : [], input.intent)
   if (current.ok) return {...current,observation:live[0] ?? null}
   if (current.code !== 'PROVIDER_MISSING') return current
-  if (input.allowHistory) {
-    const history = (input.history ?? []).filter(o => qualified(o, input.agentId, now, input.maxHistoryAgeMs ?? 86_400_000)) as SeatProviderObservation[]
-    history.sort((a,b) => Date.parse(b.observed_at) - Date.parse(a.observed_at))
-    if (history.length) {
-      const latest = history.filter(o => o.observed_at === history[0].observed_at)
-      if (new Set(latest.map(o => `${o.provider}:${o.runtime_instance_id}`)).size > 1) return result('PROVIDER_AMBIGUOUS')
-      return result('SELECTED_HISTORY', history[0].provider, history[0])
-    }
-  }
+  // D3: historical DB observations never choose the current provider.
   return result('PROVIDER_MISSING')
 }
 type SelectionDb = { query: (sql: string, params?: any[]) => Promise<any> }
 export async function resolveSeatProvider(db: SelectionDb, input: {
   agentId: string; intent?: string | null; allowHistory?: boolean; now?: Date; hostId?: string
-  observe?: typeof observeSeatProvider
+  observe?: typeof observeSeatProvider; inspect?: HostRuntimeInspector
 }): Promise<SeatProviderSelection> {
-  const read = await db.query(`SELECT runtime_instance_id, agent_id, host_id, process_id, session_name,
-    checkout_path, status, last_seen_at, metadata FROM agent_runtime_instances
-    WHERE agent_id = $1 AND runtime_kind = 'local_process' ORDER BY last_seen_at DESC`, [input.agentId])
-  const rows = Array.isArray(read) ? read : read.rows
-  const now = input.now ?? new Date()
-  const live: SeatProviderObservation[] = []
-  const history: SeatProviderObservation[] = []
-  let unresolvedCurrent=false
-  for (const row of rows) {
-    let metadata: any = {}
-    try { metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata ?? {} } catch {}
-    const prior = metadata.provider_observation
-    if (prior && prior.agent_id === input.agentId && prior.runtime_instance_id === String(row.runtime_instance_id)
-      && prior.host_id === row.host_id && prior.process_id === Number(row.process_id)) history.push(prior)
-    const age=now.getTime()-new Date(row.last_seen_at).getTime()
-    if (!['running','active'].includes(row.status) || !Number.isFinite(age) || age<0 || age>1_800_000) continue
-    if(row.host_id !== (input.hostId ?? hostname())) {unresolvedCurrent=true;continue}
-    const observed = (input.observe ?? observeSeatProvider)({agentId: input.agentId, runtimeInstanceId: String(row.runtime_instance_id),
-      processId: Number(row.process_id), sessionName: row.session_name, workspace: row.checkout_path, hostId: row.host_id, now})
-    if (observed) live.push(observed)
-    else unresolvedCurrent=true
+  const unavailable = (): SeatProviderSelection => ({ok:false,provider:null,observation:null,code:'PROVIDER_MISSING'})
+  // DB contributes logical identity/authority only. A DB failure never becomes a cold launch.
+  let anchors: any[]
+  try {
+    const read=await db.query(`SELECT r.runtime_instance_id, r.agent_id, r.runtime_kind,
+      l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token,
+      CASE WHEN l.status = 'active' AND l.expires_at > CURRENT_TIMESTAMP THEN 1 ELSE 0 END AS authority_live
+      FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
+      ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
+        AND l.lease_purpose = 'worker' AND l.status = 'active'
+      WHERE r.agent_id = $1 AND r.runtime_kind = 'local_process'`, [input.agentId])
+    anchors=Array.isArray(read)?read:read.rows
+  } catch {return unavailable()}
+  const observed=(input.inspect ?? inspectHostRuntime)({agentId:input.agentId,expectedHost:input.hostId})
+  if(!['OBSERVED','NO_LIVE_RUNTIME'].includes(observed.reasonCode)) return unavailable()
+  const live:SeatProviderObservation[]=[]
+  for(const observation of observed.observations) {
+    const matches=anchors.filter(row=>String(row.runtime_instance_id)===observation.runtime_instance_id
+      && row.agent_id===input.agentId && row.holder_agent_id===input.agentId
+      && String(row.holder_runtime_instance_id)===observation.runtime_instance_id
+      && Number(row.authority_live)===1 && Number(row.fencing_token)>0)
+    if(matches.length!==1) return unavailable()
+    live.push(observation)
   }
-  if(unresolvedCurrent) return {ok:false,provider:null,observation:null,code:'PROVIDER_MISSING'}
-  return selectSeatProvider({...input, live, history, now})
+  return selectSeatProvider({...input,live,history:[],allowHistory:false,now:input.now ?? new Date()})
 }
 
 /** Verify the target host's connected memory child, not a repaired private lookup child. */

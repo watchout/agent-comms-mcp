@@ -143,7 +143,7 @@ async function recordIdentityAudit(
     `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
      VALUES ('runtime.memory_ready_identity', $1, $2, COALESCE($3::jsonb, '{}'::jsonb), 'default')
      RETURNING id`,
-    [input.agentId, input.target, JSON.stringify({ code: input.code, ...input.details })],
+    [input.agentId, input.target, JSON.stringify({ code: input.code })],
   ).catch(() => [])
   return inserted.length === 1
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { resolveSeatProvider, readObservedProviderRoot, normalizeSeatProvider, type SeatProvider } from '../../core/seat-runtime-selection'
 import { SqliteAdapter, PgAdapter } from '../../core/db'
 /**
@@ -126,6 +127,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   const errors: string[] = []
   const driftWarnings: string[] = []
   const env = {...(opts.env ?? process.env)}
+  const runtimeInstanceId = randomUUID()
   const agentId = opts.agentId ?? env.AGENT_ID
   if (!agentId) return {ok:false,argv:[],driftWarnings,spawned:false,errors:['SEAT_ID_REQUIRED']}
   const db = opts.db ?? (env.AGENT_COM_DB === 'sqlite'
@@ -213,8 +215,9 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
     const project = explicitProject || [...sameSeatProjects][0]
     if (!project) throw new StartSpawnError('SEAT_MEMORY_PROJECT_REQUIRED')
     config.mcpServers[bridgeName]={...previous,command:env.AGENT_COMMS_BUN_COMMAND || process.execPath,
-      args:['run',resolve(import.meta.dir,'../../server.ts')],env:{...previous.env,
+      args:['run',resolve(import.meta.dir,'../../entrypoints/runtime.ts')],env:{...previous.env,
         AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,AGENT_COM_WORKSPACE:workspace,
+        AGENT_COM_RUNTIME_INSTANCE_ID:runtimeInstanceId,
         AGENT_MEMORY_PROJECT:project,WEBHOOK_PORT:'0',AUN_WEBHOOK_PORT:'0',
         AGENT_COM_RUNTIME_HEARTBEAT_DISABLED:'0',AGENT_COMMS_TTL_SWEEP_DISABLED:'1',
         ...(env.AGENT_COM_RUNTIME_SESSION ? {AGENT_COM_RUNTIME_SESSION:env.AGENT_COM_RUNTIME_SESSION}: {})}}
@@ -225,6 +228,7 @@ export async function start(opts: StartOptions = {}): Promise<StartResult> {
   const argv = buildStartArgv({...opts,env,runtime:provider!,mcpConfig:config})
 
   const launchEnv:Record<string,string>={...accountEnv,AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,
+    AGENT_COM_RUNTIME_INSTANCE_ID:runtimeInstanceId,
     AGENT_MEMORY_AGENT_ID:agentId,AGENT_MEMORY_PROJECT:config.mcpServers.aun?.env.AGENT_MEMORY_PROJECT ?? config.mcpServers['agent-comms']?.env.AGENT_MEMORY_PROJECT,
     AGENT_COM_WORKSPACE:workspace,WEBHOOK_PORT:'0',AUN_WEBHOOK_PORT:'0'}
   for(const key of ['HOME','CODEX_HOME','CLAUDE_CONFIG_DIR','AGENT_COM_RUNTIME_SESSION']) if(env[key]!==undefined) launchEnv[key]=env[key]!

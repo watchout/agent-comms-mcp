@@ -20,7 +20,7 @@ sync_mcp_config() {
   local state_dir="/Users/yuji/.claude/channels/${session}"
   local repo_root
   repo_root="$(cd "${SCRIPT_DIR}/.." && pwd)"
-  local server_path="${AGENT_COMMS_SERVER_PATH:-${repo_root}/server.ts}"
+  local server_path="${AGENT_COMMS_SERVER_PATH:-${repo_root}/entrypoints/runtime.ts}"
   local database_url="${AGENT_COMMS_DATABASE_URL:-postgresql:///agent_comms?host=/tmp}"
 
   if [ ! -f "$mcp_json" ]; then
@@ -63,7 +63,7 @@ sync_mcp_config() {
       ac.args = ['run', desiredServer];
       changed = true;
     } else {
-      const idx = ac.args.findIndex((value) => typeof value === 'string' && value.endsWith('/server.ts'));
+      const idx = ac.args.findIndex((value) => typeof value === 'string' && (value.endsWith('/server.ts') || value.endsWith('/entrypoints/runtime.ts')));
       if (idx >= 0) {
         if (ac.args[idx] !== desiredServer) {
           ac.args[idx] = desiredServer;

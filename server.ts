@@ -273,8 +273,10 @@ function loadConfig(): Config {
 
 const config = loadConfig()
 const AGENT_ID = config.agent_id
-const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
-process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
+const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim()
+if (!RUNTIME_INSTANCE_ID || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(RUNTIME_INSTANCE_ID)) {
+  throw new Error('RUNTIME_UUID_PREEXEC_REQUIRED')
+}
 const RUNTIME_HEARTBEAT_DISABLED = process.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED === '1'
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
@@ -1230,27 +1232,25 @@ async function registerAgent(): Promise<void> {
   // existing keys not in $5 are preserved. This is what protects discord_id
   // when a bot's local config does not include it.
   await client.query(
-    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-     VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
+    `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+     VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
      ON CONFLICT (agent_id) DO UPDATE SET
-       display_name = $2, agent_type = $3, runtime = $4,
-       status = 'online', last_seen_at = now(),
-       metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
-    [AGENT_ID, config.agent.display_name, config.agent.agent_type, config.agent.runtime,
-     config.agent.metadata ? JSON.stringify(config.agent.metadata) : null]
+       display_name = $2, agent_type = $3,
+       metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)`,
+    [AGENT_ID, config.agent.display_name, config.agent.agent_type,
+     null]
   )
   process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
   await heartbeatRuntimeEvidence(client)
 
   // pg_notify: agent.online + audit_log
   await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' }))
-  await writeAuditLog('agent.online', AGENT_ID, AGENT_ID, { runtime: config.agent.runtime })
+  // Runtime liveness is transient; do not copy it to audit history.
 
   // Heartbeat every 5 minutes
   heartbeatInterval = setInterval(async () => {
     const c = await tryGetDb()
     if (c) {
-      await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
       await heartbeatAgentStatus(c, AGENT_ID).catch(() => {})
       await heartbeatRuntimeEvidence(c)
     }
@@ -1311,14 +1311,6 @@ async function unregisterAgent(): Promise<void> {
   const client = await tryGetDb()
   if (client) {
     await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid})
-    await client.query(
-      `UPDATE agent_runtime_instances
-          SET status = 'stopped',
-              stopped_at = now(),
-              last_seen_at = now()
-        WHERE runtime_instance_id = $1`,
-      [RUNTIME_INSTANCE_ID],
-    ).catch(() => {})
     const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
       agentId: AGENT_ID,
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -2212,14 +2204,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // so the EXISTS predicate is guaranteed true; we still go through
       // the CASE WHEN derivation so every agents.status writer in this
       // PR uses the same one-line idempotent shape.
-      await client.query(
-        `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-           status_updated_at = now()
-         WHERE agent_id = $1`,
-        [agentId],
-      )
+      // Busy/idle is composed from current claims at read time (D2).
       // PR-0 (Issue #287) cycle 8 — single cursor writer per spec §4.8.1
       // (CTO judgment 2026-05-01, auditor cycle 7 axis 1/2/4/5 BLOCK fix).
       // Both `inbox` and `next` cursor advances now go through
@@ -2888,14 +2873,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // busy. EXISTS-derive guarantees observability (sender-feedback /
     // heartbeat / bot_status all read agents.status) keeps tracking
     // the true state.
-    await txClient.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
+    // Closing a claim does not persist a liveness snapshot (D2).
 
     // spec §4.2 step 8 (reordered after 9-11 per Behavioral FAIL B2) — enqueue
     // outbound for each part. Resolution of channel_external_id is per-
@@ -3867,14 +3845,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // rows back to 'pending', the agent may still hold OTHER
         // active claims that are not orphaned; EXISTS-derive keeps
         // those visible.
-        await client.query(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [targetAgent],
-        )
+        // Reclaimed queue state is authoritative; agent liveness is observed.
         await client.query('COMMIT')
         return {
           content: [{
@@ -5104,9 +5075,9 @@ if (MULTI_BOT_MODE) {
           const client = await tryGetDb()
           if (client) {
             await client.query(
-              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
-               VALUES ($1, 'default', $1, 'dev', 'claude-code', 'online', now(), now())
-               ON CONFLICT (agent_id) DO UPDATE SET status = 'online', last_seen_at = now()`,
+              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, registered_at)
+               VALUES ($1, 'default', $1, 'dev', now())
+               ON CONFLICT (agent_id) DO NOTHING`,
               [botId]
             )
             await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
@@ -5447,7 +5418,7 @@ const shutdown = async () => {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
       }).catch(() => false)
       if (markedOffline) {
-      await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+      // Disconnect is observed, not persisted as agent authority.
       }
     }
   }

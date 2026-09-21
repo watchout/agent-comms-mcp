@@ -1,3 +1,6 @@
+import { readCurrentNativeProof } from './runtime-native-proof'
+import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
+import { durableMemoryMetadata } from './runtime-durable-data'
 import { createHash } from 'node:crypto'
 import { observeSeatProvider } from './seat-runtime-selection'
 import { resolveRuntimeEndpoint } from './runtime-endpoint'
@@ -475,12 +478,12 @@ CREATE TABLE IF NOT EXISTS runtime_memory_ready_evidence (
   runtime_instance_id TEXT NOT NULL,
   profile_revision INTEGER,
   profile_source TEXT,
-  session_name TEXT NOT NULL,
-  port INTEGER NOT NULL,
+  session_name TEXT,
+  port INTEGER,
   expected_agent_id TEXT NOT NULL,
   checkout_path TEXT,
   checkout_commit_sha TEXT,
-  recovery_command TEXT NOT NULL,
+  recovery_command TEXT,
   result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
   failure_reason TEXT,
   completed_at TIMESTAMPTZ NOT NULL,
@@ -507,12 +510,12 @@ CREATE TABLE IF NOT EXISTS runtime_memory_ready_evidence (
   runtime_instance_id TEXT NOT NULL,
   profile_revision INTEGER,
   profile_source TEXT,
-  session_name TEXT NOT NULL,
-  port INTEGER NOT NULL,
+  session_name TEXT,
+  port INTEGER,
   expected_agent_id TEXT NOT NULL,
   checkout_path TEXT,
   checkout_commit_sha TEXT,
-  recovery_command TEXT NOT NULL,
+  recovery_command TEXT,
   result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
   failure_reason TEXT,
   completed_at TEXT NOT NULL,
@@ -534,7 +537,7 @@ export async function recordRuntimeMemoryReadyEvidence(
   db: RuntimeMemoryReadyDb,
   input: RuntimeMemoryReadyEvidenceInput,
 ): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
-  const metadata = JSON.stringify(input.metadata ?? {})
+  const metadata = JSON.stringify(durableMemoryMetadata(input.metadata))
   const completedAt = normalizeDateIso(input.completed_at) ?? input.completed_at
   const validUntil = normalizeDateIso(input.valid_until) ?? input.valid_until
   const rows = await queryRows<{ id: string | number }>(
@@ -556,16 +559,16 @@ export async function recordRuntimeMemoryReadyEvidence(
       input.runtime_instance_id,
       input.profile_revision ?? null,
       input.profile_source ?? null,
-      input.session_name,
-      input.port,
+      null,
+      null,
       input.expected_agent_id,
-      input.checkout_path ?? null,
+      null,
       input.checkout_commit_sha ?? null,
-      input.recovery_command,
+      null,
       input.result_status,
       input.failure_reason ?? null,
       completedAt,
-      input.evidence_path ?? null,
+      null,
       input.evidence_log_id ?? null,
       validUntil,
       input.source,
@@ -587,7 +590,7 @@ export async function recordRuntimeMemoryReadyEvidence(
         result_status: input.result_status,
         source: input.source,
         evidence_id: evidenceId,
-        evidence_path: input.evidence_path ?? null,
+        
         evidence_log_id: input.evidence_log_id ?? null,
       }),
     ],
@@ -609,6 +612,8 @@ export async function evaluateRuntimeMemoryReadyGate(
     policy?: RuntimeMemoryReadyPolicy
     requested_runtime_kind?: string
     selected_bootstrap_receipt?: SealedBootstrapRuntimeReceipt | null
+    inspect?: HostRuntimeInspector
+    readNativeProof?: typeof readCurrentNativeProof
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -655,6 +660,7 @@ export async function evaluateRuntimeMemoryReadyGate(
       agentId: input.agent_id,
       requestedRuntimeKind: input.requested_runtime_kind?.trim() || 'local_process',
       selectedBootstrapReceipt: input.selected_bootstrap_receipt,
+      inspect: input.inspect,
       now,
       policy,
     })
@@ -767,20 +773,7 @@ export async function evaluateRuntimeMemoryReadyGate(
       expected_agent_id: expectedAgentId,
     })
   }
-  const evidenceSession = normalizeText(evidence.session_name)
-  if (currentRuntime.session_name && evidenceSession !== currentRuntime.session_name) {
-    return fail(withEvidence, 'session_mismatch', {
-      evidence_session_name: evidenceSession,
-      runtime_session_name: currentRuntime.session_name,
-    })
-  }
-  const evidencePort = normalizeNumber(evidence.port)
-  if (currentRuntime.port !== null && evidencePort !== currentRuntime.port) {
-    return fail(withEvidence, 'port_mismatch', {
-      evidence_port: evidencePort,
-      runtime_port: currentRuntime.port,
-    })
-  }
+  // Legacy stored session/port/path observations are history, never admission inputs.
   const evidenceRevision = normalizeNumber(evidence.profile_revision)
   if (currentRuntime.profile_revision !== null && evidenceRevision !== null && evidenceRevision !== currentRuntime.profile_revision) {
     return fail(withEvidence, 'profile_revision_mismatch', {
@@ -793,13 +786,6 @@ export async function evaluateRuntimeMemoryReadyGate(
     return fail(withEvidence, 'profile_source_mismatch', {
       evidence_profile_source: evidenceProfileSource,
       runtime_profile_source: currentRuntime.profile_source,
-    })
-  }
-  const evidenceCheckoutPath = normalizeText(evidence.checkout_path)
-  if (currentRuntime.checkout_path && evidenceCheckoutPath && evidenceCheckoutPath !== currentRuntime.checkout_path) {
-    return fail(withEvidence, 'checkout_path_mismatch', {
-      evidence_checkout_path: evidenceCheckoutPath,
-      runtime_checkout_path: currentRuntime.checkout_path,
     })
   }
   const evidenceCommit = normalizeText(evidence.checkout_commit_sha)
@@ -823,7 +809,16 @@ export async function evaluateRuntimeMemoryReadyGate(
   }
 
   if (evidence.result_status !== 'bypassed') {
-    const receipt = parseObject(evidence.metadata).seat_context_receipt
+    const observation = parseObject(selectedRuntime.metadata).provider_observation
+    let receipt: SeatContextReceipt
+    try {
+      receipt=await (input.readNativeProof ?? readCurrentNativeProof)({agentId:expectedAgentId,project:input.project,
+        runtimeInstanceId:currentRuntime.runtime_instance_id,observation})
+    } catch {return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_NATIVE_ORIGINAL_READ_REQUIRED'})}
+    const proof=parseObject(parseObject(evidence.metadata).seat_context_proof)
+    if(proof.agent_id!==expectedAgentId || proof.project!==input.project || proof.runtime_instance_id!==currentRuntime.runtime_instance_id
+      || proof.pack_id!==receipt.pack_id || proof.work_digest!==receipt.work_digest
+      || proof.invocation_digest!==receipt.invocation_digest) return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_LOGICAL_PROOF_MISMATCH'})
     if (!validateSeatContextReceipt(receipt, {
       agentId: expectedAgentId, project: input.project,
       runtimeInstanceId: currentRuntime.runtime_instance_id,
@@ -859,9 +854,11 @@ export async function evaluateRuntimeMemoryReadyGate(
       : normalizeText(selectedRuntime.metadata.mcp_runtime_instance_id)
     if (!endpointRuntimeId) return fail(withEvidence, 'endpoint_unavailable', { code: 'MCP_RUNTIME_BINDING_MISSING' })
     const endpoint = await resolveRuntimeEndpoint(db, {
-      agentId: input.agent_id, runtimeInstanceId: endpointRuntimeId, now,
+      agentId: input.agent_id, runtimeInstanceId: endpointRuntimeId, now, inspect:input.inspect,
     })
-    if (!endpoint.ok || !endpoint.endpoint || endpoint.endpoint.port !== currentRuntime.port) {
+    if (!endpoint.ok || !endpoint.endpoint || endpoint.endpoint.port !== currentRuntime.port
+      || endpoint.endpoint.processId !== parseObject(selectedRuntime.metadata).provider_observation?.process_id
+      || endpoint.endpoint.checkoutPath !== currentRuntime.checkout_path) {
       return fail(withEvidence, 'endpoint_unavailable', { code: endpoint.code })
     }
   } catch { return fail(withEvidence, 'endpoint_unavailable', { code: 'RUNTIME_ENDPOINT_READ_FAILED' }) }
