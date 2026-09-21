@@ -6,9 +6,37 @@
 > **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
 Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
-Provider preference and profile port are legacy hints. Current provider ancestry,
-held OS endpoint ownership and its existing runtime lease govern operation;
-current-host native context delivery governs memory-ready. Physical provider/home/workspace/port diagnostics are excluded from the canonical desired digest; the exact legacy-format transition and incompatible rollback guard are defined in that spec.
+The proposed AUN v2.0.0 amendment in that spec replaces physical runtime/endpoint
+DB registration and historical-provider selection with current OS/process/socket
+observation plus durable logical identity and authority. Provider/port/physical
+path/PID/liveness observations are not newly persisted in any AUN-owned DB sink,
+including metadata and copied receipts. Identity, permissions, messages/tasks,
+claim owner/token/expiry, logical runtime UUID/FK, lease/fence and history remain
+durable. The DB remains the authority for those durable facts; a visible process
+or socket alone never grants permission to execute work.
+
+This is a **proposed design delta, not implemented behavior** at baseline
+`9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`. The [current author handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5754173816)
+(raw SHA256 `9dd8bd107e3e8338685201bcfea7cef9b2ac85290032944804182278941636d9`)
+authorizes only these two docs files. The spec records the existing R08 proposal,
+12 positive/negative fixture commitments and four still-pending design choices:
+pre-exec UUID, AUN-owned copies versus original memory-product receipts,
+explicit cold launch intent, and legacy retention with compatible-only rollback.
+No proposal review or document commit adopts these choices or authorizes migration,
+merge, release, restart, DB/queue mutation or product implementation.
+
+After applicable design disposition and cutover, previous physical-runtime
+persistence/DB liveness clauses in this document and dependent specs describe
+legacy behavior only; they cannot authorize physical snapshots or fallback to
+old provider/port/status. All affected writers/readers and subordinate operational
+specs must be reconciled as one compatible implementation. Existing legacy rows,
+FKs and claims are preserved; deleting them or restoring an incompatible physical
+writer (including an unverified F522 fallback) does not satisfy non-persistence.
+Current-host native context delivery still governs memory-ready; original
+Kusabi/Wasurezu storage is not silently declared compliant by an AUN-only change.
+Physical diagnostics stay excluded from desired digest/revision/outbox. The
+existing legacy-format transition and incompatible-down guard remain distinct
+from this proposed non-persistence migration and require their own exact evidence.
 
 The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
 and seat continuity. Provider and endpoint observations do not replace the immutable
@@ -56,7 +84,7 @@ identity / runtime / workspace / connector / channel routing / queue /
 state-daemon / audit に関わる変更は、MVP / v1 / v2 のいずれのフェーズゲートを
 進めるのかを明示してから実装する。
 
-正常化MVPは、人間がDiscordやtmuxを見て判断する状態では完了としない。DB正本、
+正常化MVPは、人間がDiscordやtmuxを見て判断する状態では完了としない。永続identity/権限/仕事のDB正本と、現在のOS/process/socket観測、
 deterministic CLI output、CI、provider delivery evidence、audit evidenceにより
 `aun doctor --strict` 相当で機械判定できる状態を完了条件とする。
 
