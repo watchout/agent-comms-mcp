@@ -261,18 +261,38 @@ endpoint authority; it does not renew another process's lease or update profile
 liveness columns. All expiry conditions use advancing database wall time, not
 PostgreSQL's transaction-start `CURRENT_TIMESTAMP`.
 
-On 64-bit macOS, the MCP process start is read afresh with `proc_pidinfo`, including
-microseconds; `ps lstart` seconds alone cannot distinguish a same-second UUID
-replay. Missing kernel evidence denies observation. A grant rounded to
-milliseconds cannot establish ownership of a later sub-millisecond start.
-On a platform using second-resolution `ps lstart`, the observation retains
-that precision (no fractional seconds). Authority must be acquired at or after
-the exclusive upper bound of that observed second; a timestamp inside the
-second cannot prove ownership. First acquisition may wait at most one second
-for that boundary, then re-read the database clock and the current OS holder.
-Renewal never advances the original acquisition time. The same-second replay
-negative is required on Linux as well as macOS; neither result proves clock
-skew safety across different hosts.
+The [D-OWN-1 decision](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5773292758)
+(body SHA256 `8849fb477a9cd9efff9947fb979e6a6b95d14197470b0c70fe2fcacc8b8805f4`)
+defines ownership using exactly four conditions:
+
+1. Request-local observation has the anchor's runtime UUID, with exactly one match.
+2. The scoped lease is active and unexpired, with the matching holder and current fence
+   (worker for MCP; the existing D-S0-1 maintenance authority for native S0).
+3. The operation freshly reobserves the same holder identity and fence immediately
+   before an irreversible effect. PID/start/socket equality compares observations
+   within that operation; it never compares process start to lease acquisition time.
+4. The existing partial unique index permits only one active lease per scope/purpose.
+
+Time is used for freshness and lease expiry only. Neither a `ps lstart` interval nor
+macOS microsecond process-start precision proves ownership. Resolve and heartbeat
+must not compare process start with `acquired_at`, and acquisition must not wait for
+an inferred ownership time window. Renewal retains its original acquisition time.
+
+A replacement reusing a UUID is rejected at **startup acquisition**, not by a
+resolve-time clock heuristic. It must hold its bound socket, commit its own exact
+logical UUID/lease, reobserve the same holder/PID/start/socket, and only then publish
+the endpoint and start work. MCP transports, the shared startup listeners/sweepers
+and inbox GC start only after this acquisition barrier. Disabling runtime heartbeat
+is a typed startup failure, not permission to start without a lease. A reused logical UUID is never upserted into ownership;
+a failed acquisition ends in a typed startup failure with endpoint publications 0
+and work 0. Its predecessor's logical lease and history remain unchanged.
+
+**Known design limit:** a launcher violating D1 by reusing a UUID while an old lease
+is still active cannot be distinguished from that old incarnation by observation
+alone. The mitigations are a new UUID for every exec and acquisition refusal before
+publication/work. A copied process-held lease receipt is not a new acquisition.
+No physical tuple or its digest is stored to conceal this limit, and it is not a
+deviation-ledger exception.
 
 Cleanup's transient plan binds the entire observed holder identity (excluding the
 sampling timestamp). Before an effect it checks the same holder, zero active or
@@ -381,7 +401,11 @@ command/environment, per-assertion results and raw evidence digest.
 | NP01 | AUN2-03; NP1/NP3 all sinks | Extend `tests/runtime-heartbeat.test.ts`; add `tests/contract/test_runtime_observation_nonpersistence.test.ts` (absent at 9d7). Startup→renew→readiness→configuration→error→stop→restart: SQL+params recorder and isolated DB readback show new physical/provider writes 0, including nested/copy sinks; deliberately injected old writer is rejected |
 | NP02 | AUN2-04/07; durable identity/FK | Extend `tests/seat-runtime-continuity.test.ts`, `tests/queue-work.test.ts`: seeded identity/project/message/claim owner-token-expiry/fence/history digests equal before/after replacement; old runtime rows/FKs unchanged; new UUID cannot replay or finalize old attempt |
 | NP03 | AUN2-05; SC2 exact ordering | Extend `tests/norm-022-runtime-endpoint-lease.test.ts`: held port-0 sockets distinct; bind/commit/fresh holder order recorded; before/unknown commit usable endpoint/invoke count 0; only owned failed socket closed |
-| NP04 | AUN2-06/07; fresh identity | Extend `tests/runtime-current-resolver.test.ts`: wrong seat/host/cwd/PID start, PID reuse, duplicate holder, forged UUID and revoked/expired fence each yield dispatch 0; identity changed between observe/effect is rejected |
+| NP04-a | D-OWN-1; unique UUID | UUID mismatch or multiple matching observations cannot adopt the anchor |
+| NP04-b | D-OWN-1; current authority | Expired lease, noncurrent fence or wrong holder cannot adopt the anchor |
+| NP04-c | D-OWN-1; startup ordering | Actual replacement reusing a valid UUID cannot acquire its worker lease: typed startup failure, endpoint publications 0, work 0, old lease unchanged; same fixture passes standalone and full suite |
+| NP04-d | D-OWN-1; effect boundary | Identity or fence changes on pre-effect reobservation yield effects 0 |
+| NP04-e | D-OWN-1; no interval ownership | No resolve decision compares process start to lease acquired_at; varying acquisition time alone does not change selection. Existing wrong seat/host/cwd and malformed UUID checks remain |
 | NP05 | D3; SC1 cold provider | Extend `tests/seat-runtime-continuity.test.ts`: no-live+no-intent with tempting DB history gives launch 0; explicit valid intent selects exact provider; conflicting live intent rejects; native S0 stays provider-free |
 | NP06 | D1; fresh-reader discovery | Extend `tests/norm-022-runtime-endpoint-lease.test.ts`: new independent reader discovers held socket from pre-exec UUID/OS+logical lease without runtime physical rows or prior process cache; reader restart discards observation; unbound UUID rejects |
 | NP07 | D2; AUN2-10/11 | Extend `tests/runtime-memory-ready.test.ts` / `tests/seat-context-recovery.test.ts`: genuine original native receipt re-read; wrong project/PID-start/provider/pipe/expiry denies; saved ready row alone never admits; AUN DB copied physical payload count 0 |

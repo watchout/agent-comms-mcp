@@ -343,7 +343,7 @@ function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[])
   return runtimeHeartbeatPending
 }
 async function performRuntimeHeartbeat(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
-  if (RUNTIME_HEARTBEAT_DISABLED) return
+  if (RUNTIME_HEARTBEAT_DISABLED) throw new Error('RUNTIME_AUTHORITY_DISABLED')
 
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
@@ -1782,7 +1782,6 @@ function gc() {
   for (const [k, v] of rateCounts) if (now - v.since > 60_000) rateCounts.delete(k)
   for (const [h, t] of recentHashes) if (now - t > DUPLICATE_WINDOW_MS) recentHashes.delete(h)
 }
-setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
 // Spec v5 §1.4 instructions for bots that connect via claude/channel.
@@ -4904,6 +4903,19 @@ async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, u
 }
 
 let httpServer: ReturnType<typeof createServer> | null = null
+
+// D-OWN-1 / SC-2: no transport, shared startup worker or inbox cleanup may
+// race a failed UUID/lease acquisition. The held bridge itself returns 503
+// until publish() commits and reobserves the exact holder.
+try {
+  await postConnect()
+} catch (error) {
+  bridgeServer.stop(true)
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : 'unavailable'
+  process.stderr.write(`agent-comms: runtime startup failed: ${error}; cause=${cause}\n`)
+  process.exit(1)
+}
+setInterval(gc, GC_INTERVAL_MS)
 
 if (MULTI_BOT_MODE) {
   httpServer = createServer(async (req, res) => {

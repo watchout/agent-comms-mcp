@@ -1,4 +1,3 @@
-import { authorityAcquiredAfterStart } from './process-start-time'
 import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
@@ -171,7 +170,7 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
   const unavailable = (): SeatProviderSelection => ({ok:false,provider:null,observation:null,code:'PROVIDER_MISSING'})
   // DB contributes logical identity/authority only. A DB failure never becomes a cold launch.
   const authoritySql=`SELECT r.runtime_instance_id, r.agent_id, r.runtime_kind,
-      l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token, l.lease_id, l.acquired_at,
+      l.holder_agent_id, l.holder_runtime_instance_id, l.fencing_token, l.lease_id,
       CASE WHEN l.status = 'active' AND l.expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
       FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
       ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
@@ -187,8 +186,7 @@ export async function resolveSeatProvider(db: SelectionDb, input: {
     const matches=anchors.filter(row=>String(row.runtime_instance_id)===observation.runtime_instance_id
       && row.agent_id===input.agentId && row.holder_agent_id===input.agentId
       && String(row.holder_runtime_instance_id)===observation.runtime_instance_id
-      && Number(row.authority_live)===1 && Number(row.fencing_token)>0
-      && authorityAcquiredAfterStart(row.acquired_at,observation.process_started_at))
+      && Number(row.authority_live)===1 && Number(row.fencing_token)>0)
     if(matches.length!==1) return unavailable()
     live.push(observation)
   }

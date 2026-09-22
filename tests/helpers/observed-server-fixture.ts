@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto'
 
 const servers:Array<{child:ChildProcess;home:string}>=[]
 /** Actual server under a harmless provider-shaped process; never calls an LLM. */
-export function spawnObservedServer(repo:string,env:NodeJS.ProcessEnv):ChildProcess {
+export function spawnObservedServer(repo:string,env:NodeJS.ProcessEnv,runtimeId=randomUUID()):ChildProcess {
   const home=realpathSync(mkdtempSync(join(tmpdir(),'http-mcp-host-')))
   const node=realpathSync(execFileSync('which',['node'],{encoding:'utf8'}).trim()),provider=join(home,'codex')
   symlinkSync(node,provider)
@@ -17,7 +17,7 @@ export function spawnObservedServer(repo:string,env:NodeJS.ProcessEnv):ChildProc
     server.on('exit',code=>process.exit(code??0));process.on('exit',()=>server.kill('SIGTERM'));
   `)
   const child=spawn(provider,[script],{cwd:repo,env:{...env,HOME:home,CODEX_HOME:home,
-    AGENT_COM_RUNTIME_INSTANCE_ID:randomUUID(),AGENT_COM_WORKSPACE:repo,AGENT_COM_RUNTIME_SESSION:'http-fixture',CODEX_THREAD_ID:'http-fixture'},
+    AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:repo,AGENT_COM_RUNTIME_SESSION:'http-fixture',CODEX_THREAD_ID:'http-fixture'},
     stdio:['ignore','ignore','pipe']})
   let diagnostic='';child.stderr?.on('data',chunk=>{diagnostic=(diagnostic+chunk).slice(-2000)})
   child.on('exit',code=>{if(code && code!==0)process.stderr.write(`HTTP fixture startup exit=${code}\n${diagnostic}\n`)})

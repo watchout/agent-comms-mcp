@@ -1,4 +1,3 @@
-import { authorityAcquiredAfterStart } from './process-start-time'
 import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -356,7 +355,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     metadata,
   }
   const anchors=await rows<any>(db,`SELECT CAST(r.runtime_instance_id AS TEXT) AS runtime_instance_id,
-    r.agent_id,r.runtime_kind,r.metadata,l.holder_agent_id,l.holder_runtime_instance_id,l.fencing_token,l.acquired_at,
+    r.agent_id,r.runtime_kind,r.metadata,l.holder_agent_id,l.holder_runtime_instance_id,l.fencing_token,
     CASE WHEN l.status = 'active' AND l.expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
     FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
       ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
@@ -372,7 +371,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
     const o=matches[0]
     let authority=anchor
     if(requestedRuntimeKind==='bootstrap_bound_provider') {
-      const holders=await rows<any>(db,`SELECT holder_agent_id,holder_runtime_instance_id,fencing_token,acquired_at,
+      const holders=await rows<any>(db,`SELECT holder_agent_id,holder_runtime_instance_id,fencing_token,
         CASE WHEN status = 'active' AND expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
         FROM control_plane_leases WHERE lease_scope_type = 'runtime_instance' AND lease_scope_id = $1
           AND lease_purpose = 'worker' AND status = 'active'`,[id])
@@ -380,8 +379,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
       authority=holders[0]
     }
     if(Number(authority.authority_live)!==1 || authority.holder_agent_id!==input.agentId
-      || String(authority.holder_runtime_instance_id)!==id || Number(authority.fencing_token)<1
-      || !authorityAcquiredAfterStart(authority.acquired_at,o.process_started_at)) continue
+      || String(authority.holder_runtime_instance_id)!==id || Number(authority.fencing_token)<1) continue
     runtimeRows.push({...anchor,runtime_engine:o.provider,session_name:o.session_name,port:o.port,checkout_path:o.workspace,
       commit_sha:text(metadata.source_commit),started_at:o.process_started_at,last_seen_at:o.observed_at,status:'active',
       metadata:{...metadata,source:'fresh_host_observation',provider_observation:o}})

@@ -5,12 +5,12 @@ import { test, expect } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { fixture, insert } from '../helpers/runtime-observation-nonpersistence-db-fixture'
 import { nonpersistHostFixture } from '../helpers/nonpersist-host-fixture'
+import { runtimeStartupFixture } from '../helpers/runtime-startup-fixture'
+import { spawnObservedServer,closeObservedServers } from '../helpers/observed-server-fixture'
 import { buildRuntimeInventoryReport } from '../../core/runtime-inventory'
 import { heartbeatRuntimeInstance } from '../../core/runtime-heartbeat'
-import { evaluateRuntimeMemoryReadyGate } from '../../core/runtime-memory-ready'
 import { inspectHostRuntime } from '../../core/host-runtime-observer'
-import { processStartUpperBoundMs } from '../../core/process-start-time'
-import { resolveRuntimeEndpoint, releaseRuntimeEndpoint } from '../../core/runtime-endpoint'
+import { bindRuntimeEndpoint, resolveRuntimeEndpoint, releaseRuntimeEndpoint } from '../../core/runtime-endpoint'
 
 async function setup() {
   const f=await fixture('postgres',true)
@@ -34,12 +34,9 @@ test('NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with 
   expect((await heartbeatRuntimeInstance(x.db,x.input,{lease})).endpoint_lease_id).toBe(lease.leaseId)
   const anchor=(await x.f.query('SELECT * FROM agent_runtime_instances'))[0]
   for(const key of ['process_id','port','host_id','checkout_path','runtime_engine','status','started_at'])expect(anchor[key]).toBeNull()
-  // A genuine live process carrying a valid former incarnation UUID cannot use
-  // an authority grant that precedes this process. No malformed UUID shortcut.
-  const started=inspectHostRuntime({agentId:x.host.agentId}).observations[0].process_started_at
-  const earlierSameSecond=new Date(Math.floor(Date.parse(started)/1000)*1000).toISOString()
-  await x.f.query('UPDATE control_plane_leases SET acquired_at=$1',[earlierSameSecond])
-  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})).ok).toBe(false)
+  // D-OWN-1: acquisition time is history, never incarnation proof.
+  await x.f.query("UPDATE control_plane_leases SET acquired_at='2000-01-01T00:00:00Z'")
+  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})).ok).toBe(true)
  }finally{await x.close()}
 },30000)
 
@@ -56,7 +53,7 @@ test('NP03 lease-write failure rolls back the new logical anchor; only the owned
  }finally{await x.close()}
 },30000)
 
-test('second-resolution OS start acquisition waits for a provable grant and preserves renewal time',async()=>{
+test('NP04-e second-resolution OS start never gates acquisition or renewal by a time interval',async()=>{
  const x=await setup();try {
   const inspect:typeof inspectHostRuntime=input=>{
    const actual=inspectHostRuntime(input)
@@ -65,12 +62,18 @@ test('second-resolution OS start acquisition waits for a provable grant and pres
   const started=inspect({agentId:x.host.agentId}).observations[0].process_started_at
   const acquired=await heartbeatRuntimeInstance(x.db,x.input,{inspect})
   const before=(await x.f.query('SELECT acquired_at FROM control_plane_leases'))[0].acquired_at
-  expect(new Date(before).getTime()).toBeGreaterThanOrEqual(processStartUpperBoundMs(started))
+  expect(Number.isFinite(new Date(before).getTime())).toBe(true)
   expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect})).ok).toBe(true)
   await heartbeatRuntimeInstance(x.db,x.input,{inspect,lease:{leaseId:acquired.endpoint_lease_id!,fencingToken:acquired.endpoint_lease_fencing_token}})
   expect((await x.f.query('SELECT acquired_at FROM control_plane_leases'))[0].acquired_at).toEqual(before)
-  await x.f.query('UPDATE control_plane_leases SET acquired_at=$1',[new Date(processStartUpperBoundMs(started)-1)])
-  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect})).ok).toBe(false)
+  const lease={leaseId:acquired.endpoint_lease_id!,fencingToken:acquired.endpoint_lease_fencing_token}
+  // Both sides of the historical boundary, including a future grant timestamp.
+  for(const timestamp of [new Date(Date.parse(started)-1000),new Date(Date.parse(started)+1000),new Date('2100-01-01')]) {
+    await x.f.query('UPDATE control_plane_leases SET acquired_at=$1',[timestamp])
+    expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect})).ok).toBe(true)
+    expect((await heartbeatRuntimeInstance(x.db,x.input,{inspect,lease})).endpoint_lease_id).toBe(lease.leaseId)
+    expect((await x.f.query('SELECT acquired_at FROM control_plane_leases'))[0].acquired_at).toEqual(timestamp)
+  }
  }finally{await x.close()}
 },30000)
 
@@ -153,36 +156,41 @@ test('NP04/06 inventory uses fresh host fields; release requires the acquisition
 },30000)
 
 
-test('NP04 valid UUID replay in a different actual process/workspace denies resolve, admission and renewal with the old lease surviving',async()=>{
- const x=await setup();let oldClosed=false;let replacement:Awaited<ReturnType<typeof nonpersistHostFixture>>|undefined
+test('NP04 valid UUID replay in a different actual process/workspace fails typed startup with endpoint publication 0 and work 0',async()=>{
+ const f=await fixture('postgres',true),agentId=`np-startup-${randomUUID()}`,runtimeId=randomUUID()
+ let original:Awaited<ReturnType<typeof runtimeStartupFixture>>|undefined,replacement:typeof original
  try {
-  const acquired=await heartbeatRuntimeInstance(x.db,x.input)
-  const lease={leaseId:acquired.endpoint_lease_id!,fencingToken:acquired.endpoint_lease_fencing_token}
-  const before=await x.f.query('SELECT * FROM control_plane_leases')
-  await x.host.close();oldClosed=true
-  const replacementSpawnEarliest=Date.now()
-  replacement=await nonpersistHostFixture(x.host.runtimeId,x.host.agentId)
-  const replacementReady=Date.now()
-  expect(replacement.endpoint.pid).not.toBe(x.host.endpoint.pid)
-  expect(replacement.dir).not.toBe(x.host.dir)
-  const resolution=await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})
-  // Sample only after resolution, so diagnostics cannot age the replacement
-  // past the boundary that the immediate replay assertion is exercising.
-  const observation=inspectHostRuntime({agentId:x.host.agentId}).observations[0]
-  console.log(JSON.stringify({case:'NP04-immediate-replay-diagnostic',replacement_spawn_earliest_ms:replacementSpawnEarliest,replacement_ready_ms:replacementReady,
-    acquired_at:before[0].acquired_at,original_pid:x.host.endpoint.pid,replacement_pid:replacement.endpoint.pid,
-    original_workspace:x.host.dir,replacement_workspace:replacement.dir,resolution,observation,
-    linux:process.platform==='linux'?{pid_stat:readFileSync(`/proc/${replacement.endpoint.pid}/stat`,'utf8'),uptime:readFileSync('/proc/uptime','utf8'),
-      btime:readFileSync('/proc/stat','utf8').split('\n').find(line=>line.startsWith('btime '))}:null}))
-  expect(resolution.ok).toBe(false)
-  let nativeReads=0
-  expect((await evaluateRuntimeMemoryReadyGate(x.db,{agent_id:x.host.agentId,project:'fixture-project',readNativeProof:async()=>{nativeReads++;throw new Error('must not read')}})).ok).toBe(false)
-  expect(nativeReads).toBe(0)
-  const replay={...x.input,processId:replacement.endpoint.pid,port:replacement.endpoint.port,endpointUri:`http://127.0.0.1:${replacement.endpoint.port}`,checkoutPath:replacement.dir}
-  await expect(heartbeatRuntimeInstance(x.db,replay)).rejects.toThrow('UUID_ALREADY_REGISTERED')
-  await expect(heartbeatRuntimeInstance(x.db,replay,{lease})).rejects.toThrow('INCARNATION_CHANGED')
-  expect(await x.f.query('SELECT * FROM control_plane_leases')).toEqual(before)
- }finally{await replacement?.close();if(!oldClosed)await x.host.close();await x.f.close()}
+  await insert(f,'agents',{agent_id:agentId,display_name:'startup fixture',agent_type:'dev'})
+  original=await runtimeStartupFixture({agentId,runtimeId,databaseUrl:f.databaseUrl})
+  expect(original.report.status).toBe('READY')
+  expect(original.report.prepublishStatus).toBe(503)
+  expect(original.report.publications).toBe(1)
+  expect(original.report.work).toBe(0)
+  expect(original.report.events.indexOf('socket-bound')).toBeLessThan(original.report.events.indexOf('COMMIT'))
+  expect(original.report.events.indexOf('COMMIT')).toBeLessThan(original.report.events.indexOf('reauthorized'))
+  expect(original.report.events.indexOf('reauthorized')).toBeLessThan(original.report.events.indexOf('endpoint-published'))
+  const before=await f.query('SELECT * FROM control_plane_leases')
+  expect(before).toHaveLength(1)
+  expect(before[0].status).toBe('active')
+  await original.close()
+  replacement=await runtimeStartupFixture({agentId,runtimeId,databaseUrl:f.databaseUrl})
+  console.log(JSON.stringify({case:'NP04-startup-replay-D-OWN-1',original:original.report,replacement:replacement.report,old_lease:before[0]}))
+  expect(replacement.report.pid).not.toBe(original.report.pid)
+  expect(replacement.dir).not.toBe(original.dir)
+  expect(replacement.report.runtimeInstanceId).toBe(runtimeId)
+  expect(replacement.report.status).toBe('STARTUP_FAILED')
+  expect(replacement.report.errors).toEqual(['RUNTIME_ENDPOINT_REGISTRATION_FAILED','RUNTIME_UUID_ALREADY_REGISTERED'])
+  expect(replacement.report.acquisitions).toBe(1)
+  expect(replacement.report.prepublishStatus).toBe(503)
+  expect(replacement.report.publications).toBe(0)
+  expect(replacement.report.work).toBe(0)
+  expect(replacement.report.events).toContain('ROLLBACK')
+  expect(replacement.report.events).not.toContain('COMMIT')
+  expect(await replacement.child.exited).toBe(1)
+  await expect(fetch(`http://127.0.0.1:${replacement.report.port}`)).rejects.toThrow()
+  expect(await f.query('SELECT * FROM control_plane_leases')).toEqual(before)
+  expect(await f.query('SELECT runtime_instance_id FROM agent_runtime_instances')).toEqual([{runtime_instance_id:runtimeId}])
+ }finally{await replacement?.close();await original?.close();await f.close()}
 },30000)
 
 
@@ -203,3 +211,113 @@ test('NP02/04 SQLite ordinary acquisition, renewal and release use the same phys
   for(const row of await f.query('SELECT process_id,port,status FROM agent_runtime_instances'))expect(row).toEqual({process_id:null,port:null,status:null})
  }finally{await adapter.close();await host.close();await f.close()}
 },30000)
+
+
+test('NP04-a/b unique observed UUID and current lease holder are required',async()=>{
+ const x=await setup();try {
+  await heartbeatRuntimeInstance(x.db,x.input)
+  const actual=inspectHostRuntime({agentId:x.host.agentId})
+  for(const observations of [actual.observations.map(o=>({...o,runtime_instance_id:randomUUID()})),[...actual.observations,...actual.observations]]) {
+    expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect:()=>({...actual,observations})})).ok).toBe(false)
+  }
+  for(const patch of [{authority_live:0},{holder_agent_id:'wrong-agent'},{holder_runtime_instance_id:randomUUID()},{fencing_token:0}]) {
+    const changed={async query(sql:string,args?:any[]){const result=await x.db.query(sql,args);return {rows:result.rows.map(r=>({...r,...patch}))}}}
+    expect((await resolveRuntimeEndpoint(changed,{agentId:x.host.agentId})).ok).toBe(false)
+  }
+  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})).ok).toBe(true)
+  const before=await x.f.query('SELECT * FROM control_plane_leases')
+  await expect(x.f.query(`INSERT INTO control_plane_leases
+    (lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at,metadata)
+    SELECT $1,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token+1,status,expires_at,metadata
+    FROM control_plane_leases`,[randomUUID()])).rejects.toThrow('idx_control_plane_leases_active_scope')
+  expect(await x.f.query('SELECT * FROM control_plane_leases')).toEqual(before)
+  await x.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()-interval '1 second'")
+  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})).ok).toBe(false)
+ }finally{await x.close()}
+},30000)
+
+test('NP04-d pre-effect identity or fence change prevents the published endpoint handler from running',async()=>{
+ const x=await setup();let endpoint:ReturnType<typeof bindRuntimeEndpoint>|undefined
+ try {
+  await heartbeatRuntimeInstance(x.db,x.input)
+  let mode='stable',reads=0,observations=0,effects=0
+  const db={async query(sql:string,args?:any[]){
+    const result=await x.db.query(sql,args)
+    return mode==='fence' && ++reads===2?{rows:result.rows.map(r=>({...r,fencing_token:Number(r.fencing_token)+1}))}:result
+  }}
+  const inspect:typeof inspectHostRuntime=input=>{
+    const result=inspectHostRuntime(input)
+    return mode==='identity' && ++observations===2?{...result,observations:result.observations.map(o=>({...o,process_id:o.process_id+1}))}:result
+  }
+  endpoint=bindRuntimeEndpoint({port:0,fetch:()=>{effects++;return new Response('effect')},async authorize(){
+    reads=0;observations=0
+    return (await resolveRuntimeEndpoint(db,{agentId:x.host.agentId,inspect})).ok
+  }})
+  await endpoint.publish(async()=>{})
+  for(const change of ['identity','fence']) {
+    mode=change
+    expect((await fetch(endpoint.endpointUri)).status).toBe(503)
+    expect(effects).toBe(0)
+  }
+  mode='stable';expect((await fetch(endpoint.endpointUri)).status).toBe(200);expect(effects).toBe(1)
+ }finally{endpoint?.server.stop(true);await x.close()}
+},30000)
+
+test('NP04-e resolve paths do not read acquired_at or call process-start interval ownership helpers',()=>{
+ for(const name of ['runtime-endpoint','runtime-current-resolver','seat-runtime-selection','runtime-native-authority']) {
+  const source=readFileSync(join(import.meta.dir,'../../core',name+'.ts'),'utf8')
+  expect(source).not.toMatch(/acquired_at|authorityAcquiredAfterStart|processStartUpperBoundMs/)
+ }
+ expect(readFileSync(join(import.meta.dir,'../../core/runtime-heartbeat.ts'),'utf8')).not.toMatch(/authorityAcquiredAfterStart|processStartUpperBoundMs/)
+})
+
+
+test('NP04-c actual server UUID replay exits before transports, shared startup and queued work',async()=>{
+ const f=await fixture('postgres',true),agentId=`np-server-${randomUUID()}`,runtimeId=randomUUID()
+ let original:Awaited<ReturnType<typeof runtimeStartupFixture>>|undefined
+ try {
+  await insert(f,'agents',{agent_id:agentId,display_name:agentId,agent_type:'dev'})
+  original=await runtimeStartupFixture({agentId,runtimeId,databaseUrl:f.databaseUrl})
+  expect(original.report.status).toBe('READY')
+  await original.close()
+  const messageId=randomUUID()
+  await insert(f,'agent_messages',{id:messageId,author_id:agentId,content:'owned pending fixture',message_type:'chat'})
+  await insert(f,'message_queue',{agent_id:agentId,message_id:messageId,payload:'{}',status:'pending'})
+  const beforeLease=await f.query('SELECT * FROM control_plane_leases'),beforeWork=await f.query('SELECT * FROM message_queue')
+  for(const disabled of [false,true]) {
+  const server=spawnObservedServer(join(import.meta.dir,'../..'),{PATH:process.env.PATH!,LANG:'C',
+    AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,AGENT_COMMS_CONFIG:join(original.dir,'absent.json'),
+    DATABASE_URL:f.databaseUrl,AGENT_COM_DB:'postgres',AGENT_COM_PG_NOTIFY:'false',
+    AGENT_COMMS_TTL_SWEEP_DISABLED:'1',AGENT_COM_LEGACY_DISCORD_GATEWAY:'0',DISCORD_BOT_TOKEN:'',
+    AGENT_COM_RUNTIME_HEARTBEAT_DISABLED:disabled?'1':'0'},runtimeId)
+  let stderr='';server.stderr!.on('data',chunk=>{stderr+=String(chunk)})
+  const code=await new Promise<number|null>((resolve,reject)=>{
+    const timer=setTimeout(()=>{server.kill('SIGTERM');reject(Error('REPLAY_SERVER_DID_NOT_STOP'))},15000)
+    server.once('exit',code=>{clearTimeout(timer);resolve(code)})
+  })
+  console.log(JSON.stringify({case:'NP04-actual-server-startup',authority_disabled:disabled,exit_code:code,stderr,pending_before:beforeWork.length,
+    pending_after:(await f.query('SELECT * FROM message_queue')).length}))
+  expect(code).toBe(1)
+  expect(stderr).toContain(disabled?'runtime startup failed: Error: RUNTIME_AUTHORITY_DISABLED':
+    'runtime startup failed: Error: RUNTIME_ENDPOINT_REGISTRATION_FAILED; cause=RUNTIME_UUID_ALREADY_REGISTERED')
+  expect(stderr).not.toContain('SSE server listening')
+  expect(stderr).not.toContain('legacy Discord WebSocket disabled')
+  expect(await f.query('SELECT * FROM control_plane_leases')).toEqual(beforeLease)
+  expect(await f.query('SELECT * FROM message_queue')).toEqual(beforeWork)
+  const port=Number(/bridge listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(stderr)?.[1])
+  expect(port).toBeGreaterThan(0)
+  await expect(fetch(`http://127.0.0.1:${port}`)).rejects.toThrow()
+  }
+ }finally{await closeObservedServers();await original?.close();await f.close()}
+},30000)
+
+test('NP04-c server startup acquisition precedes every transport and background work entry',()=>{
+ const source=readFileSync(join(import.meta.dir,'../../server.ts'),'utf8')
+ const barrier=source.indexOf('try {\n  await postConnect()\n} catch (error)')
+ expect(barrier).toBeGreaterThan(0)
+ for(const entry of ['setInterval(gc, GC_INTERVAL_MS)','httpServer = createServer',';(async () => {\n  // Start pg_notify listener','mcp.connect(transport)']) {
+  expect(source.indexOf(entry)).toBeGreaterThan(barrier)
+ }
+ const registration=source.slice(source.indexOf('async function registerAgent()'),source.indexOf('async function unregisterAgent()'))
+ expect(registration.indexOf('await heartbeatRuntimeEvidence(client)')).toBeLessThan(registration.indexOf('pollingDriver.start(AGENT_ID'))
+})

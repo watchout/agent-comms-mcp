@@ -1,4 +1,3 @@
-import { authorityAcquiredAfterStart } from './process-start-time'
 import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { hostname } from 'node:os'
 
@@ -43,7 +42,7 @@ export async function resolveRuntimeEndpoint(db: RuntimeEndpointDb, input: {
 }): Promise<RuntimeEndpointResolution> {
   const fail=(code:string):RuntimeEndpointResolution=>({ok:false,code,endpoint:null})
   const authoritySql=`SELECT r.runtime_instance_id,r.agent_id,r.runtime_kind,
-      l.lease_id,l.fencing_token,l.holder_agent_id,l.holder_runtime_instance_id,l.acquired_at,
+      l.lease_id,l.fencing_token,l.holder_agent_id,l.holder_runtime_instance_id,
       CASE WHEN l.status = 'active' AND l.expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
       FROM agent_runtime_instances r JOIN control_plane_leases l
         ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
@@ -59,8 +58,7 @@ export async function resolveRuntimeEndpoint(db: RuntimeEndpointDb, input: {
     const matches=rows.filter(r=>String(r.runtime_instance_id)===o.runtime_instance_id && r.agent_id===input.agentId
       && r.runtime_kind==='local_process' && r.holder_agent_id===input.agentId
       && String(r.holder_runtime_instance_id)===o.runtime_instance_id && Number(r.authority_live)===1
-      && Number.isSafeInteger(Number(r.fencing_token)) && Number(r.fencing_token)>0
-      && authorityAcquiredAfterStart(r.acquired_at,o.process_started_at))
+      && Number.isSafeInteger(Number(r.fencing_token)) && Number(r.fencing_token)>0)
     if(matches.length!==1) return fail('RUNTIME_ENDPOINT_HOLDER_UNVERIFIED')
     const r=matches[0]
     eligible.push({runtimeInstanceId:o.runtime_instance_id,agentId:input.agentId,hostId:o.host_id,port:o.port,

@@ -26,7 +26,8 @@ export function processStartUpperBoundMs(startedAt: string): number {
     /[1-9]/.test(fractional.slice(3))?1:0)
 }
 
-/** A grant inside a coarse observation interval cannot prove ownership. */
+/** Historical fixture interval arithmetic only. D-OWN-1 forbids using this
+ * comparison as runtime ownership proof; production authority paths do not call it. */
 export function authorityAcquiredAfterStart(acquiredAt: unknown, startedAt: string): boolean {
   const acquired=acquiredAt instanceof Date?acquiredAt.getTime():Date.parse(String(acquiredAt))
   const upperStart=processStartUpperBoundMs(startedAt)

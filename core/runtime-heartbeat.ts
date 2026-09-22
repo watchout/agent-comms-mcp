@@ -1,4 +1,3 @@
-import { authorityAcquiredAfterStart, processStartUpperBoundMs } from './process-start-time'
 import { durableRuntimeMetadata } from './runtime-durable-data'
 import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
@@ -250,11 +249,10 @@ async function heartbeatRuntimeEndpointLease(
   input: RuntimeHeartbeatInput,
   holderConnectorInstanceId: string | null,
   expectedLease?: RuntimeHeartbeatOptions['lease'],
-  processStartedAt?: string,
 ): Promise<EndpointLeaseHeartbeatResult | null> {
   const ttlMs = runtimeEndpointLeaseTtlMs()
   const clock = await db.query('SELECT clock_timestamp() AS database_now')
-  let now = new Date(clock.rows[0]?.database_now)
+  const now = new Date(clock.rows[0]?.database_now)
   if (!Number.isFinite(now.getTime())) throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
   const metadata = JSON.stringify(durableRuntimeMetadata())
 
@@ -273,17 +271,8 @@ async function heartbeatRuntimeEndpointLease(
   if (expectedLease) {
     if (!active || String(active.lease_id) !== expectedLease.leaseId
       || Number(active.fencing_token) !== expectedLease.fencingToken) throw new Error('RUNTIME_ENDPOINT_FENCE_CHANGED')
-    if(!processStartedAt || !authorityAcquiredAfterStart(active.acquired_at,processStartedAt))throw new Error('RUNTIME_ENDPOINT_INCARNATION_CHANGED')
   } else if (active) throw new Error('RUNTIME_UUID_ALREADY_REGISTERED')
 
-  if (!active && processStartedAt && !authorityAcquiredAfterStart(now,processStartedAt)) {
-    const waitMs=processStartUpperBoundMs(processStartedAt)-now.getTime()
-    if(!Number.isFinite(waitMs) || waitMs<0 || waitMs>1000)throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
-    await Bun.sleep(waitMs+1)
-    const confirmed=await db.query('SELECT clock_timestamp() AS database_now')
-    now=new Date(confirmed.rows[0]?.database_now)
-    if(!authorityAcquiredAfterStart(now,processStartedAt))throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
-  }
   const heartbeatAt = dbTimestamp(now)
   const expiresAt = dbTimestamp(new Date(now.getTime() + ttlMs))
   if (active && ((active.holder_agent_id && active.holder_agent_id !== input.agentId)
@@ -480,7 +469,7 @@ export async function heartbeatRuntimeInstance(
 
   const preLease=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
   if(preLease.reasonCode!=='OBSERVED' || preLease.observations.length!==1 || !sameHostRuntime(held[0],preLease.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
-  endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null,options.lease,held[0].process_started_at)
+  endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null,options.lease)
   if(!endpointLease) throw new Error('RUNTIME_ENDPOINT_LEASE_UNCONFIRMED')
   const preCommit=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
   if(preCommit.reasonCode!=='OBSERVED' || preCommit.observations.length!==1 || !sameHostRuntime(held[0],preCommit.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')

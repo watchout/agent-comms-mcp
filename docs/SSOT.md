@@ -15,6 +15,14 @@ claim owner/token/expiry, logical runtime UUID/FK, lease/fence and history remai
 durable. The DB remains the authority for those durable facts; a visible process
 or socket alone never grants permission to execute work.
 
+The [D-OWN-1 ownership amendment](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5773292758)
+(body SHA256 `8849fb477a9cd9efff9947fb979e6a6b95d14197470b0c70fe2fcacc8b8805f4`)
+uses unique UUID matching, current scoped lease/holder/fence, request-local
+reobservation before effects and DB-enforced lease uniqueness. Process-start and
+lease-acquisition times do not prove ownership. UUID reuse fails at startup
+acquisition before endpoint publication or work. The dependent spec records the
+observation-only limitation and the revised NP04-a..e acceptance.
+
 The [D-CFG-1 / D-S0-1 contract](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5759277196)
 (body SHA256 `01f2259457e1b5c605a500c1db474bcaf374d5d9f0ab48a4e57192914e01a82b`)
 binds configuration leases to existing `agent_id`, keeps observed-state INSERTs

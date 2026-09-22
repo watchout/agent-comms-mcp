@@ -1,6 +1,8 @@
+import { fixture, type Fixture } from '../helpers/runtime-observation-nonpersistence-db-fixture'
+import { spawnObservedServer,closeObservedServers } from '../helpers/observed-server-fixture'
 import {randomUUID} from 'node:crypto'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { spawnSync, spawn, type ChildProcess } from 'node:child_process'
+import { spawnSync, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -21,7 +23,6 @@ import { Database } from 'bun:sqlite'
 // under test is the `uq_agent_messages_discord_id` partial unique index.
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
-const SERVER = join(REPO_ROOT, 'server.ts')
 const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 const AGENT_ID = 'test-dual-run-bot'
 const DISCORD_MSG_ID = 'MSG_DUAL_RUN_X'
@@ -61,8 +62,10 @@ async function killAndWait(proc: ChildProcess): Promise<void> {
 describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge gate)', () => {
   let tmpDir: string
   let dbPath: string
+  let authority: Fixture
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    authority=await fixture('postgres',true)
     tmpDir = mkdtempSync(join(tmpdir(), 'test6-dual-'))
     dbPath = join(tmpDir, 'test6.db')
     const migrateResult = spawnSync('bun', [MIGRATE], {
@@ -75,7 +78,9 @@ describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge 
     }
   })
 
-  afterAll(() => {
+  afterAll(async () => {
+    await closeObservedServers()
+    await authority?.close()
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
@@ -91,11 +96,9 @@ describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge 
       const portB = 19880 + Math.floor(Math.random() * 100)
       const portA = 19980 + Math.floor(Math.random() * 100)
       // (b) Spawn subprocess B with env=0 first (fast path, no Discord connect)
-      procB = spawn('bun', [SERVER], {
-        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '0', WEBHOOK_PORT: String(portB) },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: REPO_ROOT,
-      })
+      procB = spawnObservedServer(REPO_ROOT, { ...baseEnv(dbPath), AGENT_COM_DB:'postgres', DATABASE_URL:authority.databaseUrl,
+        AGENT_COM_RUNTIME_HEARTBEAT_DISABLED:'0', AGENT_COMMS_TTL_SWEEP_DISABLED:'1',
+        AGENT_COM_LEGACY_DISCORD_GATEWAY:'0', WEBHOOK_PORT:String(portB) })
       let bStderr = ''
       procB.stderr!.on('data', (d: Buffer) => { bStderr += d.toString() })
 
@@ -107,11 +110,9 @@ describe('test_6 migration_dual_run (PR #1, spec v3 contract_test test_6, merge 
       expect(bDisabled).toBe(true)
 
       // (a) Spawn subprocess A with env=1 (legacy path enters, fake token → non-fatal fail)
-      procA = spawn('bun', [SERVER], {
-        env: { ...baseEnv(dbPath), AGENT_COM_LEGACY_DISCORD_GATEWAY: '1', WEBHOOK_PORT: String(portA) },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: REPO_ROOT,
-      })
+      procA = spawnObservedServer(REPO_ROOT, { ...baseEnv(dbPath), AGENT_COM_DB:'postgres', DATABASE_URL:authority.databaseUrl,
+        AGENT_COM_RUNTIME_HEARTBEAT_DISABLED:'0', AGENT_COMMS_TTL_SWEEP_DISABLED:'1',
+        AGENT_COM_LEGACY_DISCORD_GATEWAY:'1', WEBHOOK_PORT:String(portA) })
       let aStderr = ''
       procA.stderr!.on('data', (d: Buffer) => { aStderr += d.toString() })
 
