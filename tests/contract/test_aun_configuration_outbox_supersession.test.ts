@@ -121,29 +121,44 @@ test('supersession preserves current desired, holder, runtime, scope, fence and 
 }, 30000)
 
 test('outbox lock wait beyond lease expiry supersedes zero rows', async () => {
-  const s = await configurationContractFixture()
+  const s = await configurationContractFixture(), monitor = new PgAdapter(s.url.href)
   try {
     const current = await advance(s, 2), lease = (await s.leases.acquire(current.agentId))!
-    await s.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '250 milliseconds' WHERE lease_id=$1", [lease.lease_id])
+    await monitor.query('SELECT 1')
+    const [expiry] = await s.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '5 seconds' WHERE lease_id=$1 RETURNING expires_at", [lease.lease_id])
     await s.f.exec('BEGIN')
     await s.f.query('SELECT event_id FROM aun_configuration_desired_outbox WHERE desired_revision<$1 FOR UPDATE', [current.desiredRevision])
+    const waitSql = "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'WITH authority AS MATERIALIZED%'"
+    // PG activity snapshots are transaction-local. Deliberately prime the lock
+    // holder's snapshot before the contender starts; monitor remains autocommit.
+    const beforeWait = await s.f.query(waitSql)
     const pending = supersedeConfigurationEvents(s.db, authority(current, lease))
     let settled = false
     void pending.then(() => { settled = true }, () => { settled = true })
     const deadline = Date.now() + 2000
     let waits = 0
     while (Date.now() < deadline) {
-      waits = (await s.f.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'WITH authority AS MATERIALIZED%' ")).length
+      waits = (await monitor.query(waitSql)).length
       if (waits) break
       await Bun.sleep(10)
     }
     expect(waits).toBe(1)
-    await Bun.sleep(500)
+    const cachedWaits = (await s.f.query(waitSql)).length
+    let expired = false
+    const expiryDeadline = Date.now() + 10000
+    while (Date.now() < expiryDeadline) {
+      expired = Boolean((await monitor.query<{expired:boolean}>('SELECT clock_timestamp()>$1::timestamptz AS expired',[expiry.expires_at]))[0].expired)
+      if(expired)break
+      await Bun.sleep(20)
+    }
+    expect(expired).toBe(true)
+    console.log(JSON.stringify({case:'outbox-lock-observation',before_waits:beforeWait.length,cached_waits:cachedWaits,
+      fresh_waits:waits,expired_at_release:expired,pending_settled:settled,lease_expires_at:expiry.expires_at}))
     expect(settled).toBe(false)
     await s.f.exec('COMMIT')
     expect(await pending).toBe(0)
     expect((await s.f.query('SELECT event_id FROM aun_configuration_desired_outbox WHERE superseded_at IS NOT NULL'))).toEqual([])
-  } finally { await s.f.exec('ROLLBACK'); await s.close() }
+  } finally { await s.f.exec('ROLLBACK'); await monitor.close(); await s.close() }
 }, 30000)
 
 test('bounded retirement is idempotent under concurrent callers and migration preserves terminal history', async () => {

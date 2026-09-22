@@ -293,7 +293,7 @@ test('NP04-c actual server UUID replay exits before transports, shared startup a
   let stderr='';server.stderr!.on('data',chunk=>{stderr+=String(chunk)})
   const code=await new Promise<number|null>((resolve,reject)=>{
     const timer=setTimeout(()=>{server.kill('SIGTERM');reject(Error('REPLAY_SERVER_DID_NOT_STOP'))},15000)
-    server.once('exit',code=>{clearTimeout(timer);resolve(code)})
+    server.once('close',code=>{clearTimeout(timer);resolve(code)})
   })
   console.log(JSON.stringify({case:'NP04-actual-server-startup',authority_disabled:disabled,exit_code:code,stderr,pending_before:beforeWork.length,
     pending_after:(await f.query('SELECT * FROM message_queue')).length}))

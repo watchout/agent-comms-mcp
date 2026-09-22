@@ -1,6 +1,6 @@
 /** Runs only inside runtimeStartupFixture's private synthetic provider process. */
 import { Client } from 'pg'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync,renameSync } from 'node:fs'
 import { bindRuntimeEndpoint, resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
 import { heartbeatRuntimeInstance } from '../../core/runtime-heartbeat'
 
@@ -22,8 +22,9 @@ const endpoint=bindRuntimeEndpoint({port:0,fetch:()=>{work++;return new Response
 events.push('socket-bound')
 const prepublishStatus=(await fetch(endpoint.endpointUri)).status
 function report(status:string,errors:string[]=[]) {
-  writeFileSync(process.env.AUN_STARTUP_RESULT!,JSON.stringify({status,errors,pid:process.pid,port:endpoint.port,
+  writeFileSync(process.env.AUN_STARTUP_RESULT!+'.tmp',JSON.stringify({status,errors,pid:process.pid,port:endpoint.port,
     workspace:process.cwd(),runtimeInstanceId,publications,work,acquisitions,prepublishStatus,events}))
+  renameSync(process.env.AUN_STARTUP_RESULT!+'.tmp',process.env.AUN_STARTUP_RESULT!)
 }
 try {
   await client.connect()

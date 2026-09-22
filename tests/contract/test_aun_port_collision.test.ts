@@ -111,8 +111,10 @@ describe('test_aun_port_collision — held OS endpoint and owner isolation', () 
     expect(resolved.endpoint).toMatchObject({ runtimeInstanceId: row.runtime_instance_id, port: row.port, fencingToken: 2 })
     for (const mismatch of [
       { holder_agent_id:'foreign-seat' },{ holder_runtime_instance_id:'previous-runtime' },
-      { authority_live:0 },{ fencing_token:0 },{ acquired_at:'2026-09-12T00:00:00Z' },
+      { authority_live:0 },{ fencing_token:0 },
     ])expect((await resolveRows([{...row,...mismatch}],row)).ok).toBe(false)
+    // D-OWN-1: historical acquisition time is not ownership evidence.
+    expect((await resolveRows([{...row,acquired_at:'2026-09-12T00:00:00Z'}],row)).ok).toBe(true)
     // Legacy physical columns and copied metadata are irrelevant to current authority.
     expect((await resolveRows([{...row,runtime_status:'stopped',host_id:'old-host',lease_metadata:{port:1}}],row)).ok).toBe(true)
     expect((await resolveRows([])).endpoint).toBeNull()
