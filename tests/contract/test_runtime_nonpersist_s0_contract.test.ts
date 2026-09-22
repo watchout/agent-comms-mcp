@@ -3,11 +3,16 @@ import { fixture,insert } from '../helpers/runtime-observation-nonpersistence-db
 import { nativeProcessFixture } from '../helpers/native-process-fixture'
 import { acquireControlPlaneLease } from '../../core/control-plane-leases'
 import { PgAdapter } from '../../core/db/pg-adapter'
-import { inspectNativeHostRuntime } from '../../core/host-runtime-observer'
+import { inspectNativeHostRuntime,sameNativeHostRuntime } from '../../core/host-runtime-observer'
 import { resolveNativeRuntimeAuthority,NATIVE_RUNTIME_KIND } from '../../core/runtime-native-authority'
+import {authorityAcquiredAfterStart,processStartUpperBoundMs} from '../../core/process-start-time'
 import { readV2NativeFrozenEnabledSet } from '../../core/runtime-inventory'
 
-async function setup() {
+async function setup(coarseClock=false) {
+  const inspect=(input:{agentId:string})=>{
+    const observed=inspectNativeHostRuntime(input)
+    return coarseClock?{...observed,observations:observed.observations.map(o=>({...o,process_started_at:o.process_started_at.replace(/\.\d+Z$/,'Z')}))}:observed
+  }
   const f=await fixture('postgres',true)
   const url=new URL(process.env.AGENT_COM_TEST_DATABASE_URL!);url.pathname='/'+f.name
   const db=new PgAdapter(url.href),hosts:Array<Awaited<ReturnType<typeof nativeProcessFixture>>>=[]
@@ -18,12 +23,21 @@ async function setup() {
         profile_class_source_sha256:'01f2259457e1b5c605a500c1db474bcaf374d5d9f0ab48a4e57192914e01a82b',profile_class_plan_sha256:'b'.repeat(64)})})
     await insert(f,'agent_runtime_instances',{runtime_instance_id:host.runtimeId,agent_id:host.agentId,runtime_kind:'local_process',commit_sha:'a'.repeat(40),
       metadata:JSON.stringify({schema_version:'aun-runtime-nonpersistence/v1',source_commit:'a'.repeat(40),source_tree:'b'.repeat(40)})})
+    const first=inspect({agentId:host.agentId})
+    if(first.reasonCode!=='OBSERVED'||first.observations.length!==1)throw new Error('NATIVE_FIXTURE_OBSERVATION_FAILED')
+    const now=(await db.query<{now:string}>('SELECT clock_timestamp() AS now'))[0].now
+    const waitMs=processStartUpperBoundMs(first.observations[0].process_started_at)-new Date(now).getTime()
+    if(!Number.isFinite(waitMs)||waitMs>1000)throw new Error('NATIVE_FIXTURE_START_CLOCK_UNAVAILABLE')
+    if(waitMs>0)await Bun.sleep(waitMs+1)
+    const after=inspect({agentId:host.agentId})
+    if(after.reasonCode!=='OBSERVED'||after.observations.length!==1||!sameNativeHostRuntime(first.observations[0],after.observations[0]))throw new Error('NATIVE_FIXTURE_HOLDER_CHANGED')
     const lease=await acquireControlPlaneLease(db,{scopeType:'runtime_instance',scopeId:host.runtimeId,purpose:'maintenance',ttlMs:60000,
       holderAgentId:host.agentId,holderRuntimeInstanceId:host.runtimeId,metadata:{native_runtime_kind:NATIVE_RUNTIME_KIND}})
     if(!lease.ok)throw new Error('NATIVE_FIXTURE_LEASE_FAILED')
+    expect(authorityAcquiredAfterStart(lease.lease.acquired_at,first.observations[0].process_started_at)).toBe(true)
     return {host,lease:lease.lease}
   }
-  return {f,db,enroll,hosts,async close(){for(const host of hosts)await host.close();await db.close();await f.close()}}
+  return {f,db,enroll,hosts,inspect,async close(){for(const host of hosts)await host.close();await db.close();await f.close()}}
 }
 
 test('AC-S0-1 native selection uses logical build + lease + real socket; physical history is never queried',async()=>{
@@ -44,10 +58,10 @@ test('AC-S0-1 native selection uses logical build + lease + real socket; physica
 },30000)
 
 test('AC-S0-2 expire, changed fence and actual replacement deny S0 dispatch with no history fallback',async()=>{
-  const s=await setup()
+  const s=await setup(true)
   try {
     const {host,lease}=await s.enroll();let calls=0
-    const dispatch=async(db=s.db)=>{const proof=await resolveNativeRuntimeAuthority(db,{agentId:host.agentId});if(proof.ok)calls++;return proof}
+    const dispatch=async(db=s.db)=>{const proof=await resolveNativeRuntimeAuthority(db,{agentId:host.agentId,inspect:s.inspect});if(proof.ok)calls++;return proof}
     expect((await dispatch()).ok).toBe(true);expect(calls).toBe(1)
     await s.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE lease_id=$1",[lease.lease_id])
     expect((await dispatch()).code).toBe('NATIVE_AUTHORITY_UNAVAILABLE');expect(calls).toBe(1)

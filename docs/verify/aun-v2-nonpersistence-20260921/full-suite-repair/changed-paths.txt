@@ -39,6 +39,7 @@ docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/RUNS.md
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/changed-paths.txt
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/original-448-classification.json
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/public-23-classification.json
+docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/public-4-classification.json
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/regression-denominators.json
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/repair-evidence.tar.xz
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/repair-runs-manifest.json
@@ -105,6 +106,7 @@ tests/contract/test_routing_v3_stage_a.test.ts
 tests/contract/test_routing_v3_stage_b_e2e.test.ts
 tests/contract/test_runtime_nonpersist_authority.test.ts
 tests/contract/test_runtime_nonpersist_configuration_contract.test.ts
+tests/contract/test_runtime_nonpersist_s0_contract.test.ts
 tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts
 tests/contract/test_runtime_observation_nonpersistence.test.ts
 tests/contract/test_seed_workspace_identity.test.ts

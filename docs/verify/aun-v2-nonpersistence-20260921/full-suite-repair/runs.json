@@ -33,7 +33,7 @@
     "assertions": 501,
     "reported_tests": 119,
     "raw_file": "simple-fixtures-v1.log",
-    "changed_source_count_since_run": 185
+    "changed_source_count_since_run": 186
   },
   {
     "version": "fixture-contracts-v2",
@@ -64,7 +64,7 @@
     "assertions": 743,
     "reported_tests": 75,
     "raw_file": "fixture-contracts-v2.log",
-    "changed_source_count_since_run": 182
+    "changed_source_count_since_run": 183
   },
   {
     "version": "fixture-contracts-v3",
@@ -93,7 +93,7 @@
     "assertions": 743,
     "reported_tests": 69,
     "raw_file": "fixture-contracts-v3.log",
-    "changed_source_count_since_run": 179
+    "changed_source_count_since_run": 180
   },
   {
     "version": "cli-logical-v2",
@@ -120,7 +120,7 @@
     "assertions": 405,
     "reported_tests": 53,
     "raw_file": "cli-logical-v2.log",
-    "changed_source_count_since_run": 179
+    "changed_source_count_since_run": 180
   },
   {
     "version": "np-guard-v1",
@@ -148,7 +148,7 @@
     "assertions": 110,
     "reported_tests": 12,
     "raw_file": "np-guard-v1.log",
-    "changed_source_count_since_run": 179
+    "changed_source_count_since_run": 180
   },
   {
     "version": "cli-logical-v3",
@@ -175,7 +175,7 @@
     "assertions": 427,
     "reported_tests": 53,
     "raw_file": "cli-logical-v3.log",
-    "changed_source_count_since_run": 178
+    "changed_source_count_since_run": 179
   },
   {
     "version": "queue-authority-v1",
@@ -204,7 +204,7 @@
     "assertions": 122,
     "reported_tests": 26,
     "raw_file": "queue-authority-v1.log",
-    "changed_source_count_since_run": 175
+    "changed_source_count_since_run": 176
   },
   {
     "version": "cli-logical-v4",
@@ -231,7 +231,7 @@
     "assertions": 469,
     "reported_tests": 53,
     "raw_file": "cli-logical-v4.log",
-    "changed_source_count_since_run": 174
+    "changed_source_count_since_run": 175
   },
   {
     "version": "daemon-native-v1",
@@ -259,7 +259,7 @@
     "assertions": 0,
     "reported_tests": 19,
     "raw_file": "daemon-native-v1.log",
-    "changed_source_count_since_run": 174
+    "changed_source_count_since_run": 175
   },
   {
     "version": "daemon-native-v2",
@@ -287,7 +287,7 @@
     "assertions": 8,
     "reported_tests": 40,
     "raw_file": "daemon-native-v2.log",
-    "changed_source_count_since_run": 174
+    "changed_source_count_since_run": 175
   },
   {
     "version": "inventory-v1",
@@ -314,7 +314,7 @@
     "assertions": 49,
     "reported_tests": 11,
     "raw_file": "inventory-v1.log",
-    "changed_source_count_since_run": 172
+    "changed_source_count_since_run": 173
   },
   {
     "version": "daemon-native-v3",
@@ -342,7 +342,7 @@
     "assertions": 122,
     "reported_tests": 40,
     "raw_file": "daemon-native-v3.log",
-    "changed_source_count_since_run": 170
+    "changed_source_count_since_run": 171
   },
   {
     "version": "caller-native-v1",
@@ -371,7 +371,7 @@
     "assertions": 215,
     "reported_tests": 50,
     "raw_file": "caller-native-v1.log",
-    "changed_source_count_since_run": 170
+    "changed_source_count_since_run": 171
   },
   {
     "version": "daemon-native-v4",
@@ -399,7 +399,7 @@
     "assertions": 161,
     "reported_tests": 40,
     "raw_file": "daemon-native-v4.log",
-    "changed_source_count_since_run": 167
+    "changed_source_count_since_run": 168
   },
   {
     "version": "caller-native-v2",
@@ -429,7 +429,7 @@
     "assertions": 272,
     "reported_tests": 62,
     "raw_file": "caller-native-v2.log",
-    "changed_source_count_since_run": 164
+    "changed_source_count_since_run": 165
   },
   {
     "version": "wrappers-v1",
@@ -459,7 +459,7 @@
     "assertions": 167,
     "reported_tests": 40,
     "raw_file": "wrappers-v1.log",
-    "changed_source_count_since_run": 160
+    "changed_source_count_since_run": 161
   },
   {
     "version": "daemon-native-v5",
@@ -486,7 +486,7 @@
     "assertions": 574,
     "reported_tests": 199,
     "raw_file": "daemon-native-v5.log",
-    "changed_source_count_since_run": 160
+    "changed_source_count_since_run": 161
   },
   {
     "version": "lifecycle-v1",
@@ -514,7 +514,7 @@
     "assertions": 156,
     "reported_tests": 34,
     "raw_file": "lifecycle-v1.log",
-    "changed_source_count_since_run": 159
+    "changed_source_count_since_run": 160
   },
   {
     "version": "registry-v1",
@@ -548,7 +548,7 @@
     "assertions": 261,
     "reported_tests": 73,
     "raw_file": "registry-v1.log",
-    "changed_source_count_since_run": 156
+    "changed_source_count_since_run": 157
   },
   {
     "version": "full-local-v1",
@@ -578,7 +578,7 @@
     "assertions": 16527,
     "reported_tests": 3272,
     "raw_file": "full-local-v1.log",
-    "changed_source_count_since_run": 156
+    "changed_source_count_since_run": 157
   },
   {
     "version": "memory-cleanup-v1",
@@ -607,7 +607,7 @@
     "assertions": 67,
     "reported_tests": 18,
     "raw_file": "memory-cleanup-v1.log",
-    "changed_source_count_since_run": 156
+    "changed_source_count_since_run": 157
   },
   {
     "version": "memory-status-v2",
@@ -638,7 +638,7 @@
     "assertions": 131,
     "reported_tests": 22,
     "raw_file": "memory-status-v2.log",
-    "changed_source_count_since_run": 153
+    "changed_source_count_since_run": 154
   },
   {
     "version": "memory-status-v3",
@@ -667,7 +667,7 @@
     "assertions": 91,
     "reported_tests": 16,
     "raw_file": "memory-status-v3.log",
-    "changed_source_count_since_run": 150
+    "changed_source_count_since_run": 151
   },
   {
     "version": "native-diagnostics-v1",
@@ -696,7 +696,7 @@
     "assertions": 165,
     "reported_tests": 28,
     "raw_file": "native-diagnostics-v1.log",
-    "changed_source_count_since_run": 148
+    "changed_source_count_since_run": 149
   },
   {
     "version": "daemon-observation-v1",
@@ -726,7 +726,7 @@
     "assertions": 253,
     "reported_tests": 52,
     "raw_file": "daemon-observation-v1.log",
-    "changed_source_count_since_run": 148
+    "changed_source_count_since_run": 149
   },
   {
     "version": "enumeration-churn-v1",
@@ -755,7 +755,7 @@
     "assertions": 209,
     "reported_tests": 32,
     "raw_file": "enumeration-churn-v1.log",
-    "changed_source_count_since_run": 147
+    "changed_source_count_since_run": 148
   },
   {
     "version": "remaining-fixtures-v1",
@@ -786,7 +786,7 @@
     "assertions": 126,
     "reported_tests": 35,
     "raw_file": "remaining-fixtures-v1.log",
-    "changed_source_count_since_run": 142
+    "changed_source_count_since_run": 143
   },
   {
     "version": "port-claude-v1",
@@ -814,7 +814,7 @@
     "assertions": 115,
     "reported_tests": 22,
     "raw_file": "port-claude-v1.log",
-    "changed_source_count_since_run": 140
+    "changed_source_count_since_run": 141
   },
   {
     "version": "n1-drain-v2",
@@ -842,7 +842,7 @@
     "assertions": 73,
     "reported_tests": 21,
     "raw_file": "n1-drain-v2.log",
-    "changed_source_count_since_run": 139
+    "changed_source_count_since_run": 140
   },
   {
     "version": "bootstrap-drain-v1",
@@ -870,7 +870,7 @@
     "assertions": 0,
     "reported_tests": 0,
     "raw_file": "bootstrap-drain-v1.log",
-    "changed_source_count_since_run": 139
+    "changed_source_count_since_run": 140
   },
   {
     "version": "small-remaining-v1",
@@ -903,7 +903,7 @@
     "assertions": 1584,
     "reported_tests": 423,
     "raw_file": "small-remaining-v1.log",
-    "changed_source_count_since_run": 139
+    "changed_source_count_since_run": 140
   },
   {
     "version": "bootstrap-v2",
@@ -930,7 +930,7 @@
     "assertions": 153,
     "reported_tests": 17,
     "raw_file": "bootstrap-v2.log",
-    "changed_source_count_since_run": 138
+    "changed_source_count_since_run": 139
   },
   {
     "version": "selfkick-v1",
@@ -958,7 +958,7 @@
     "assertions": 37,
     "reported_tests": 15,
     "raw_file": "selfkick-v1.log",
-    "changed_source_count_since_run": 136
+    "changed_source_count_since_run": 137
   },
   {
     "version": "bootstrap-v3",
@@ -988,7 +988,7 @@
     "assertions": 469,
     "reported_tests": 70,
     "raw_file": "bootstrap-v3.log",
-    "changed_source_count_since_run": 135
+    "changed_source_count_since_run": 136
   },
   {
     "version": "workspace-v1",
@@ -1016,7 +1016,7 @@
     "assertions": 0,
     "reported_tests": 2,
     "raw_file": "workspace-v1.log",
-    "changed_source_count_since_run": 134
+    "changed_source_count_since_run": 135
   },
   {
     "version": "workspace-selfkick-v2",
@@ -1045,7 +1045,7 @@
     "assertions": 72,
     "reported_tests": 22,
     "raw_file": "workspace-selfkick-v2.log",
-    "changed_source_count_since_run": 134
+    "changed_source_count_since_run": 135
   },
   {
     "version": "bootstrap-v4",
@@ -1072,7 +1072,7 @@
     "assertions": 257,
     "reported_tests": 17,
     "raw_file": "bootstrap-v4.log",
-    "changed_source_count_since_run": 133
+    "changed_source_count_since_run": 134
   },
   {
     "version": "static-v1",
@@ -1100,7 +1100,7 @@
     "assertions": 1545,
     "reported_tests": 395,
     "raw_file": "static-v1.log",
-    "changed_source_count_since_run": 131
+    "changed_source_count_since_run": 132
   },
   {
     "version": "bootstrap-v5",
@@ -1129,7 +1129,7 @@
     "assertions": 306,
     "reported_tests": 39,
     "raw_file": "bootstrap-v5.log",
-    "changed_source_count_since_run": 129
+    "changed_source_count_since_run": 130
   },
   {
     "version": "daemon-current-v1",
@@ -1159,7 +1159,7 @@
     "assertions": 1489,
     "reported_tests": 269,
     "raw_file": "daemon-current-v1.log",
-    "changed_source_count_since_run": 129
+    "changed_source_count_since_run": 130
   },
   {
     "version": "http-v1",
@@ -1187,7 +1187,7 @@
     "assertions": 26,
     "reported_tests": 19,
     "raw_file": "http-v1.log",
-    "changed_source_count_since_run": 128
+    "changed_source_count_since_run": 129
   },
   {
     "version": "fullsmoke-v1",
@@ -1216,7 +1216,7 @@
     "assertions": 135,
     "reported_tests": 26,
     "raw_file": "fullsmoke-v1.log",
-    "changed_source_count_since_run": 126
+    "changed_source_count_since_run": 127
   },
   {
     "version": "bootstrap-v6",
@@ -1244,7 +1244,7 @@
     "assertions": 282,
     "reported_tests": 17,
     "raw_file": "bootstrap-v6.log",
-    "changed_source_count_since_run": 126
+    "changed_source_count_since_run": 127
   },
   {
     "version": "http-v2",
@@ -1273,7 +1273,7 @@
     "assertions": 0,
     "reported_tests": 2,
     "raw_file": "http-v2.log",
-    "changed_source_count_since_run": 124
+    "changed_source_count_since_run": 125
   },
   {
     "version": "http-v3",
@@ -1301,7 +1301,7 @@
     "assertions": 0,
     "reported_tests": 1,
     "raw_file": "http-v3.log",
-    "changed_source_count_since_run": 124
+    "changed_source_count_since_run": 125
   },
   {
     "version": "http-observer-v1",
@@ -1329,7 +1329,7 @@
     "assertions": 0,
     "reported_tests": 1,
     "raw_file": "http-observer-v1.log",
-    "changed_source_count_since_run": 124
+    "changed_source_count_since_run": 125
   },
   {
     "version": "bootstrap-v7",
@@ -1357,7 +1357,7 @@
     "assertions": 179,
     "reported_tests": 17,
     "raw_file": "bootstrap-v7.log",
-    "changed_source_count_since_run": 124
+    "changed_source_count_since_run": 125
   },
   {
     "version": "http-observer-v2",
@@ -1385,7 +1385,7 @@
     "assertions": 0,
     "reported_tests": 1,
     "raw_file": "http-observer-v2.log",
-    "changed_source_count_since_run": 124
+    "changed_source_count_since_run": 125
   },
   {
     "version": "http-v4",
@@ -1415,7 +1415,7 @@
     "assertions": 245,
     "reported_tests": 55,
     "raw_file": "http-v4.log",
-    "changed_source_count_since_run": 121
+    "changed_source_count_since_run": 122
   },
   {
     "version": "daemon-v2",
@@ -1447,7 +1447,7 @@
     "assertions": 260,
     "reported_tests": 54,
     "raw_file": "daemon-v2.log",
-    "changed_source_count_since_run": 121
+    "changed_source_count_since_run": 122
   },
   {
     "version": "d1-diagnostic-v1",
@@ -1475,7 +1475,7 @@
     "assertions": 0,
     "reported_tests": 1,
     "raw_file": "d1-diagnostic-v1.log",
-    "changed_source_count_since_run": 121
+    "changed_source_count_since_run": 122
   },
   {
     "version": "bootstrap-v8",
@@ -1504,7 +1504,7 @@
     "assertions": 653,
     "reported_tests": 45,
     "raw_file": "bootstrap-v8.log",
-    "changed_source_count_since_run": 56
+    "changed_source_count_since_run": 57
   },
   {
     "version": "d1-http-v1",
@@ -1535,7 +1535,7 @@
     "assertions": 127,
     "reported_tests": 24,
     "raw_file": "d1-http-v1.log",
-    "changed_source_count_since_run": 56
+    "changed_source_count_since_run": 57
   },
   {
     "version": "diagnosis-v1",
@@ -1565,7 +1565,7 @@
     "assertions": 112,
     "reported_tests": 31,
     "raw_file": "diagnosis-v1.log",
-    "changed_source_count_since_run": 56
+    "changed_source_count_since_run": 57
   },
   {
     "version": "diagnosis-v2",
@@ -1597,7 +1597,7 @@
     "assertions": 196,
     "reported_tests": 54,
     "raw_file": "diagnosis-v2.log",
-    "changed_source_count_since_run": 51
+    "changed_source_count_since_run": 52
   },
   {
     "version": "remaining-v1",
@@ -1639,7 +1639,7 @@
     "assertions": 685,
     "reported_tests": 99,
     "raw_file": "remaining-v1.log",
-    "changed_source_count_since_run": 51
+    "changed_source_count_since_run": 52
   },
   {
     "version": "native-workspace-v3",
@@ -1669,7 +1669,7 @@
     "assertions": 453,
     "reported_tests": 36,
     "raw_file": "native-workspace-v3.log",
-    "changed_source_count_since_run": 47
+    "changed_source_count_since_run": 48
   },
   {
     "version": "full-local-v2",
@@ -1700,7 +1700,7 @@
     "assertions": 17901,
     "reported_tests": 3332,
     "raw_file": "full-local-v2.log",
-    "changed_source_count_since_run": 47
+    "changed_source_count_since_run": 48
   },
   {
     "version": "remaining-v2",
@@ -1737,7 +1737,7 @@
     "assertions": 414,
     "reported_tests": 82,
     "raw_file": "remaining-v2.log",
-    "changed_source_count_since_run": 39
+    "changed_source_count_since_run": 40
   },
   {
     "version": "remaining-v3",
@@ -1771,7 +1771,7 @@
     "assertions": 578,
     "reported_tests": 105,
     "raw_file": "remaining-v3.log",
-    "changed_source_count_since_run": 35
+    "changed_source_count_since_run": 36
   },
   {
     "version": "remaining-v4",
@@ -1805,7 +1805,7 @@
     "assertions": 1257,
     "reported_tests": 52,
     "raw_file": "remaining-v4.log",
-    "changed_source_count_since_run": 31
+    "changed_source_count_since_run": 32
   },
   {
     "version": "remaining-v5",
@@ -1836,7 +1836,7 @@
     "assertions": 169,
     "reported_tests": 13,
     "raw_file": "remaining-v5.log",
-    "changed_source_count_since_run": 27
+    "changed_source_count_since_run": 28
   },
   {
     "version": "full-local-v3",
@@ -1868,7 +1868,7 @@
     "assertions": 18153,
     "reported_tests": 3352,
     "raw_file": "full-local-v3.log",
-    "changed_source_count_since_run": 25,
+    "changed_source_count_since_run": 26,
     "changed_source_paths_since_run": [
       "bin/aun/bootstrap.ts",
       "core/aun-configuration-desired-state.ts",
@@ -1889,6 +1889,7 @@
       "tests/contract/test_aun_configuration_outbox_supersession.test.ts",
       "tests/contract/test_queue_bounded_admission_postgres.test.ts",
       "tests/contract/test_runtime_nonpersist_authority.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
       "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
       "tests/helpers/configuration-contract-fixture.ts",
       "tests/helpers/seat-native-runtime-fixture.ts",
@@ -1932,7 +1933,7 @@
     "assertions": 843,
     "reported_tests": 166,
     "raw_file": "regression1-final-repair.log",
-    "changed_source_count_since_run": 25,
+    "changed_source_count_since_run": 26,
     "changed_source_paths_since_run": [
       "bin/aun/bootstrap.ts",
       "core/aun-configuration-desired-state.ts",
@@ -1953,6 +1954,7 @@
       "tests/contract/test_aun_configuration_outbox_supersession.test.ts",
       "tests/contract/test_queue_bounded_admission_postgres.test.ts",
       "tests/contract/test_runtime_nonpersist_authority.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
       "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
       "tests/helpers/configuration-contract-fixture.ts",
       "tests/helpers/seat-native-runtime-fixture.ts",
@@ -1994,7 +1996,7 @@
     "assertions": 308,
     "reported_tests": 59,
     "raw_file": "regression2-final-repair.log",
-    "changed_source_count_since_run": 25,
+    "changed_source_count_since_run": 26,
     "changed_source_paths_since_run": [
       "bin/aun/bootstrap.ts",
       "core/aun-configuration-desired-state.ts",
@@ -2015,6 +2017,7 @@
       "tests/contract/test_aun_configuration_outbox_supersession.test.ts",
       "tests/contract/test_queue_bounded_admission_postgres.test.ts",
       "tests/contract/test_runtime_nonpersist_authority.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
       "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
       "tests/helpers/configuration-contract-fixture.ts",
       "tests/helpers/seat-native-runtime-fixture.ts",
@@ -2051,7 +2054,7 @@
     "assertions": 25,
     "reported_tests": 8,
     "raw_file": "sender-clock-v1.log",
-    "changed_source_count_since_run": 23,
+    "changed_source_count_since_run": 24,
     "changed_source_paths_since_run": [
       "bin/aun/bootstrap.ts",
       "core/aun-configuration-desired-state.ts",
@@ -2071,6 +2074,7 @@
       "tests/contract/test_aun_configuration_outbox_supersession.test.ts",
       "tests/contract/test_queue_bounded_admission_postgres.test.ts",
       "tests/contract/test_runtime_nonpersist_authority.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
       "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
       "tests/helpers/configuration-contract-fixture.ts",
       "tests/helpers/seat-native-runtime-fixture.ts",
@@ -2107,7 +2111,7 @@
     "assertions": 131,
     "reported_tests": 38,
     "raw_file": "sender-behavior-v1.log",
-    "changed_source_count_since_run": 22
+    "changed_source_count_since_run": 23
   },
   {
     "version": "outbox-cycle3-v1",
@@ -2163,7 +2167,7 @@
     "assertions": 147,
     "reported_tests": 23,
     "raw_file": "outbox-cycle3-v2.log",
-    "changed_source_count_since_run": 14
+    "changed_source_count_since_run": 15
   },
   {
     "version": "outbox-cycle3-v3",
@@ -2196,7 +2200,7 @@
     "assertions": 148,
     "reported_tests": 23,
     "raw_file": "outbox-cycle3-v3.log",
-    "changed_source_count_since_run": 13
+    "changed_source_count_since_run": 14
   },
   {
     "version": "cycle3-final",
@@ -2238,7 +2242,7 @@
     "assertions": 776,
     "reported_tests": 83,
     "raw_file": "cycle3-final.log",
-    "changed_source_count_since_run": 13
+    "changed_source_count_since_run": 14
   },
   {
     "version": "cycle3-boundary-final",
@@ -2267,7 +2271,7 @@
     "assertions": 62,
     "reported_tests": 5,
     "raw_file": "cycle3-boundary-final.log",
-    "changed_source_count_since_run": 12
+    "changed_source_count_since_run": 13
   },
   {
     "version": "bootstrap-history-final",
@@ -2298,7 +2302,7 @@
     "assertions": 11,
     "reported_tests": 1,
     "raw_file": "bootstrap-history-final.log",
-    "changed_source_count_since_run": 12
+    "changed_source_count_since_run": 13
   },
   {
     "version": "public23-clock-diagnostic",
@@ -2331,7 +2335,7 @@
     "assertions": 1,
     "reported_tests": 1,
     "raw_file": "public23-clock-diagnostic.log",
-    "changed_source_count_since_run": 6
+    "changed_source_count_since_run": 7
   },
   {
     "version": "public23-native-fixed",
@@ -2366,7 +2370,7 @@
     "assertions": 20,
     "reported_tests": 4,
     "raw_file": "public23-native-fixed.log",
-    "changed_source_count_since_run": 5
+    "changed_source_count_since_run": 6
   },
   {
     "version": "public23-corrected-v1",
@@ -2404,7 +2408,7 @@
     "assertions": 974,
     "reported_tests": 87,
     "raw_file": "public23-corrected-v1.log",
-    "changed_source_count_since_run": 3
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-bounded-b5-v2",
@@ -2438,7 +2442,7 @@
     "assertions": 63,
     "reported_tests": 4,
     "raw_file": "public23-bounded-b5-v2.log",
-    "changed_source_count_since_run": 2
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-ordinary-v3",
@@ -2471,7 +2475,7 @@
     "assertions": 10,
     "reported_tests": 2,
     "raw_file": "public23-ordinary-v3.log",
-    "changed_source_count_since_run": 2
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-regression1-final-repair",
@@ -2508,7 +2512,7 @@
     "assertions": 843,
     "reported_tests": 166,
     "raw_file": "public23-regression1-final-repair.log",
-    "changed_source_count_since_run": 2
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-regression2-final-repair",
@@ -2543,7 +2547,7 @@
     "assertions": 308,
     "reported_tests": 59,
     "raw_file": "public23-regression2-final-repair.log",
-    "changed_source_count_since_run": 2
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-ordinary-v4",
@@ -2576,7 +2580,7 @@
     "assertions": 18,
     "reported_tests": 2,
     "raw_file": "public23-ordinary-v4.log",
-    "changed_source_count_since_run": 2
+    "changed_source_count_since_run": 4
   },
   {
     "version": "public23-ordinary-v5",
@@ -2609,7 +2613,7 @@
     "assertions": 30,
     "reported_tests": 2,
     "raw_file": "public23-ordinary-v5.log",
-    "changed_source_count_since_run": 1
+    "changed_source_count_since_run": 3
   },
   {
     "version": "public23-authority-final",
@@ -2643,7 +2647,7 @@
     "assertions": 406,
     "reported_tests": 35,
     "raw_file": "public23-authority-final.log",
-    "changed_source_count_since_run": 1
+    "changed_source_count_since_run": 3
   },
   {
     "version": "public23-native-final",
@@ -2678,6 +2682,168 @@
     "assertions": 84,
     "reported_tests": 5,
     "raw_file": "public23-native-final.log",
+    "changed_source_count_since_run": 2
+  },
+  {
+    "version": "public4-fixtures-v1",
+    "source_unchanged": true,
+    "command": [
+      "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+      "--no-env-file",
+      "test",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+      "--timeout",
+      "30000"
+    ],
+    "private_database_name": "fullrepair_public4_fixtures_v1_51266112_test",
+    "node_version": "v24.20.0",
+    "node_exit_code": 0,
+    "source_manifest_sha256": "a960a1d81ce41e4f175d385708297588e3e04e477724b6a7a94ab20d3ec90075",
+    "source_head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+    "working_diff_sha256": "8140c49f6a6c96b13e560325b2d50858eba6694fd802997b63f6d901b56afc1c",
+    "started_at": "2026-09-22T00:35:02.983530+00:00",
+    "ended_at": "2026-09-22T00:37:15.723224+00:00",
+    "exit_code": 1,
+    "log_sha256": "332378170d0d12b5b3683f9f03fcfdca0e6c60f43853c1284d1256867f1d4fc9",
+    "pass": 25,
+    "fail": 1,
+    "skip": 0,
+    "filtered": 0,
+    "errors": 0,
+    "assertions": 461,
+    "reported_tests": 26,
+    "raw_file": "public4-fixtures-v1.log",
+    "changed_source_count_since_run": 1
+  },
+  {
+    "version": "public4-fixtures-v2",
+    "source_unchanged": true,
+    "command": [
+      "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+      "--no-env-file",
+      "test",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+      "--timeout",
+      "30000"
+    ],
+    "private_database_name": "fullrepair_public4_fixtures_v2_b90f0079_test",
+    "node_version": "v24.20.0",
+    "node_exit_code": 0,
+    "source_manifest_sha256": "e4d2225ff0faa0053c0bc35aab123d43f2967f7e1642f9cbb9f84d50022b7655",
+    "source_head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+    "working_diff_sha256": "b37a813793e49b6fcfac68601316cce738a5492fe4307a908d5549c34f2e19ac",
+    "started_at": "2026-09-22T00:38:35.412312+00:00",
+    "ended_at": "2026-09-22T00:40:20.709686+00:00",
+    "exit_code": 0,
+    "log_sha256": "0f7f9c9b48cad0804d76ca533ba4f1f35dbd4125c7efd9126a2efbaef52cfdf0",
+    "pass": 26,
+    "fail": 0,
+    "skip": 0,
+    "filtered": 0,
+    "errors": 0,
+    "assertions": 435,
+    "reported_tests": 26,
+    "raw_file": "public4-fixtures-v2.log",
+    "changed_source_count_since_run": 1
+  },
+  {
+    "version": "public4-incremental-independent",
+    "source_unchanged": true,
+    "command": [
+      "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+      "--no-env-file",
+      "test",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "--test-name-pattern",
+      "preserves release and digest binding",
+      "--timeout",
+      "30000"
+    ],
+    "private_database_name": "fullrepair_public4_incremental_indep_ea4a0c09_test",
+    "node_version": "v24.20.0",
+    "node_exit_code": 0,
+    "source_manifest_sha256": "e4d2225ff0faa0053c0bc35aab123d43f2967f7e1642f9cbb9f84d50022b7655",
+    "source_head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+    "working_diff_sha256": "b37a813793e49b6fcfac68601316cce738a5492fe4307a908d5549c34f2e19ac",
+    "started_at": "2026-09-22T00:40:39.818688+00:00",
+    "ended_at": "2026-09-22T00:40:59.853772+00:00",
+    "exit_code": 1,
+    "log_sha256": "867934d2e8e4a6d32030e97f90ab731a7a59791b8a891f33606b331b3372ffca",
+    "pass": 0,
+    "fail": 1,
+    "skip": 0,
+    "filtered": 22,
+    "errors": 0,
+    "assertions": 13,
+    "reported_tests": 1,
+    "raw_file": "public4-incremental-independent.log",
+    "changed_source_count_since_run": 1
+  },
+  {
+    "version": "public4-incremental-independent-v2",
+    "source_unchanged": true,
+    "command": [
+      "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+      "--no-env-file",
+      "test",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "--test-name-pattern",
+      "preserves release and digest binding",
+      "--timeout",
+      "30000"
+    ],
+    "private_database_name": "fullrepair_public4_incremental_indep_f6f140e9_test",
+    "node_version": "v24.20.0",
+    "node_exit_code": 0,
+    "source_manifest_sha256": "a126d029632387e01fee4c699d5930fe3f03e23b7f58eb386f76a6b8024459ed",
+    "source_head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+    "working_diff_sha256": "0162b58bfee84c6b6f4d63d648e9ea44a48e82519dfa9ff3f6c63fd937945aa4",
+    "started_at": "2026-09-22T00:41:36.614404+00:00",
+    "ended_at": "2026-09-22T00:41:59.866526+00:00",
+    "exit_code": 0,
+    "log_sha256": "e8bfe03860a66430e9d58a7d0b4b0b7ab44c35968a46bfd934db4bc9a0d9b9ca",
+    "pass": 1,
+    "fail": 0,
+    "skip": 0,
+    "filtered": 22,
+    "errors": 0,
+    "assertions": 15,
+    "reported_tests": 1,
+    "raw_file": "public4-incremental-independent-v2.log",
+    "changed_source_count_since_run": 0
+  },
+  {
+    "version": "public4-fixtures-final",
+    "source_unchanged": true,
+    "command": [
+      "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+      "--no-env-file",
+      "test",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+      "--timeout",
+      "30000"
+    ],
+    "private_database_name": "fullrepair_public4_fixtures_final_dbe0688b_test",
+    "node_version": "v24.20.0",
+    "node_exit_code": 0,
+    "source_manifest_sha256": "a126d029632387e01fee4c699d5930fe3f03e23b7f58eb386f76a6b8024459ed",
+    "source_head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+    "working_diff_sha256": "0162b58bfee84c6b6f4d63d648e9ea44a48e82519dfa9ff3f6c63fd937945aa4",
+    "started_at": "2026-09-22T00:42:17.274535+00:00",
+    "ended_at": "2026-09-22T00:44:06.307480+00:00",
+    "exit_code": 0,
+    "log_sha256": "e83852b0d7d83254fc853fcb685c3e5d91459a4100c446f0264f9afc9d7c0ee0",
+    "pass": 26,
+    "fail": 0,
+    "skip": 0,
+    "filtered": 0,
+    "errors": 0,
+    "assertions": 437,
+    "reported_tests": 26,
+    "raw_file": "public4-fixtures-final.log",
     "changed_source_count_since_run": 0
   }
 ]

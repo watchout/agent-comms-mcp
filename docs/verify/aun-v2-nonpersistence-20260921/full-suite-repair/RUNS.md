@@ -88,3 +88,8 @@ Raw Bun counts; selected passes are separate from full-suite acceptance. Earlier
 | public23-ordinary-v5 | 2 | 0 | 0 | 0 | 13 | 30 | 0 |
 | public23-authority-final | 35 | 0 | 0 | 0 | 0 | 406 | 0 |
 | public23-native-final | 5 | 0 | 0 | 0 | 52 | 84 | 0 |
+| public4-fixtures-v1 | 25 | 1 | 0 | 0 | 0 | 461 | 1 |
+| public4-fixtures-v2 | 26 | 0 | 0 | 0 | 0 | 435 | 0 |
+| public4-incremental-independent | 0 | 1 | 0 | 0 | 22 | 13 | 1 |
+| public4-incremental-independent-v2 | 1 | 0 | 0 | 0 | 22 | 15 | 0 |
+| public4-fixtures-final | 26 | 0 | 0 | 0 | 0 | 437 | 0 |

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, spyOn } from 'bun:test'
+import { beforeAll, afterAll, afterEach, describe, expect, test, spyOn } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { Database } from 'bun:sqlite'
@@ -34,11 +34,13 @@ SHIRUBE_D1_KILL_SWITCH => 1
 SHIRUBE_D1_TARGET_ALLOWLIST => []
 STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED => 0
 `
-afterEach(async () => {
+let b5FixtureActive=false
+async function cleanupFixtures() {
   await stopNativeFixtures()
   while (postgresDatabases.length) postgresDatabases.pop()!.drop()
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
-})
+}
+afterEach(async()=>{if(!b5FixtureActive)await cleanupFixtures()})
 
 describe('aun bootstrap clean-host journal', () => {
   for (const drift of ['modified', 'replaced'] as const) {
@@ -345,8 +347,11 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  for (const contractPart of ['tuple', 'incremental'] as const) {
-  test(contractPart==='tuple' ? 'B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift' : 'B5-INCREMENTAL-BINDING-001 preserves every release, agent, digest, expiry and transport rejection', async () => {
+  describe('B5 live-holder readback contracts',()=>{
+    let runPart:(part:'tuple'|'physical'|'incremental'|'evidence')=>Promise<void>
+    let closeB5:(()=>Promise<void>)|undefined
+    beforeAll(async()=>{
+      b5FixtureActive=true
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-')))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -477,9 +482,12 @@ describe('aun bootstrap clean-host journal', () => {
         observationDrift={[key]:values[column as keyof typeof values]}
       }
     }
+    closeB5=async()=>{inspection.mockRestore();await driftDb.close()}
+    runPart=async(contractPart)=>{
+    const selectedDrifts=contractPart==='tuple'?driftCases.slice(0,3):contractPart==='physical'?driftCases.slice(3):[]
     const rejectedDrifts: string[] = []
     try {
-      for (const drift of contractPart==='tuple'?driftCases:[]) {
+      for (const drift of selectedDrifts) {
         await writeReceiptTuple(drift.values)
         const outcome = await reuseRun.ports.revalidateStage!(
           {
@@ -492,7 +500,7 @@ describe('aun bootstrap clean-host journal', () => {
         expect(outcome.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
         rejectedDrifts.push(drift.id)
       }
-      expect(rejectedDrifts).toEqual((contractPart==='tuple'?driftCases:[]).map((drift) => drift.id))
+      expect(rejectedDrifts).toEqual(selectedDrifts.map((drift) => drift.id))
       await writeReceiptTuple(expectedReceipt)
       const restoredReadback = await reuseRun.ports.revalidateStage!(
         {
@@ -504,6 +512,8 @@ describe('aun bootstrap clean-host journal', () => {
       if(!restoredReadback.ok)console.error('B5_RESTORED',restoredReadback)
       expect(restoredReadback.ok).toBe(true)
 
+      const successorRepoRoot = join(home, 'successor-release')
+      mkdirSync(successorRepoRoot,{recursive:true})
       if(contractPart==='incremental') {
       const unboundSameHeadReadback = await reuseRun.ports.revalidateStage!(
         {
@@ -514,8 +524,6 @@ describe('aun bootstrap clean-host journal', () => {
       )
       expect(unboundSameHeadReadback.ok).toBe(true)
 
-      const successorRepoRoot = join(home, 'successor-release')
-      mkdirSync(successorRepoRoot)
       const incrementalReadback = await reuseRun.ports.revalidateStage!(
         {
           ...reuseRun.context,
@@ -558,6 +566,18 @@ describe('aun bootstrap clean-host journal', () => {
       expect(wrongDigestReadback.ok).toBe(false)
       expect(wrongDigestReadback.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
 
+      // A rejected successor binding must leave the original live runtime usable,
+      // both with its bound receipt and through the ordinary unbound readback.
+      for(const mutations of [[reuseRun.outcome.mutation],[]]) {
+        const recovered=await reuseRun.ports.revalidateStage!({...reuseRun.context,priorState:{mutations} as any},'B5_MEMORY_READINESS')
+        expect(recovered.ok).toBe(true)
+      }
+      const resumed=await runGate('bootstrap-10000000-0000-4000-8000-000000000005')
+      expect(resumed.outcome.ok).toBe(true)
+      expect(resumed.outcome.mutation?.rollback_payload?.runtime_instance_id).toBe(createdReceipts[0].runtime_instance_id)
+
+      }
+      if(contractPart==='evidence') {
       const wrongAgentReadback = await reuseRun.ports.revalidateStage!(
         {
           ...reuseRun.context,
@@ -619,8 +639,9 @@ describe('aun bootstrap clean-host journal', () => {
       providerTransportDrift = false
       }
     } finally {
-      inspection.mockRestore()
-      await driftDb.close()
+      providerTransportDrift=false
+      await writeReceiptTuple(expectedReceipt)
+      await driftDb.execute("UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '30 minutes' WHERE lease_id=$1",[native.runtimeId])
     }
 
     const readback = new PgAdapter(databaseUrl)
@@ -644,9 +665,15 @@ describe('aun bootstrap clean-host journal', () => {
     ].map((row) => expect.objectContaining(row)))
     if(contractPart==='incremental')expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
     else expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(4)
-  }, 30000)
-
-  }
+    }
+    },30000)
+    afterAll(async()=>{
+      try {await closeB5?.()} finally {b5FixtureActive=false;await cleanupFixtures()}
+    })
+    for(const contractPart of ['tuple','physical','incremental','evidence'] as const) {
+      test(contractPart==='tuple' ? 'B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift' : contractPart==='physical' ? 'B5-FINAL-TUPLE-READBACK-001 rejects process, port, workspace and build drift' : contractPart==='incremental' ? 'B5-INCREMENTAL-BINDING-001 preserves release and digest binding' : 'B5-INCREMENTAL-BINDING-001 preserves agent, evidence, expiry and transport rejection',async()=>runPart(contractPart),30000)
+    }
+  })
 
   async function installConfigurationFixture(db: PgAdapter, repoRoot: string) {
     for (const file of ['2026-07-26-aun-configuration-reconciliation.up.sql',
@@ -811,7 +838,8 @@ describe('aun bootstrap clean-host journal', () => {
     } finally { await db.close() }
   }, 30_000)
 
-  test('ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects', async () => {
+  for(const scenario of [{mode:'accepted',durableProject:true},{mode:'accepted',durableProject:false},{mode:'pending',durableProject:true},{mode:'absent',durableProject:true}] as const) {
+  test(`ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects: ${scenario.mode} / durable project ${scenario.durableProject}`, async () => {
     const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-native-cli-')));roots.push(home)
     const repoRoot=realpathSync(join(import.meta.dir,'../..'))
     const fixtureDb=createPostgresTestDatabase(`native_cli_${process.pid}_${Date.now()}`);postgresDatabases.push(fixtureDb)
@@ -830,7 +858,7 @@ describe('aun bootstrap clean-host journal', () => {
         outbox:await db.query('SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o ORDER BY event_id'),
         newMigration:await db.queryOne("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"),
       })
-      for(const scenario of [{mode:'accepted',durableProject:true},{mode:'accepted',durableProject:false},{mode:'pending',durableProject:true},{mode:'absent',durableProject:true}] as const) {
+      {
         const {mode,durableProject}=scenario,key=`${mode}-${durableProject}`
         const agent=`native-cli-${key}`,project='stable-cli-project',session=`session-${key}`,runtimeId=randomUUID()
         const localHome=join(home,key);mkdirSync(localHome);mkdirSync(join(localHome,'.codex'));mkdirSync(join(localHome,'bin'))
@@ -912,6 +940,8 @@ describe('aun bootstrap clean-host journal', () => {
       expect((await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"))?.function).toBe('aun_configuration_legacy_desired_document(agents)')
     } finally {await db.close()}
   },30_000)
+
+  }
 
   for (const fixture of ['sqlite-new', 'sqlite-existing', 'postgres'] as const) test(`real default ${fixture} path performs genuine MCP recovery and separate-process ordinary receive`, async () => {
     const backend = fixture === 'postgres' ? 'postgres' : 'sqlite'
