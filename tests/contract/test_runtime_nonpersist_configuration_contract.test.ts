@@ -2,7 +2,7 @@ import { test,expect } from 'bun:test'
 import { createHash,createHmac,randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
 import { configurationContractFixture,restartSql } from '../helpers/configuration-contract-fixture'
-import { nonpersistHostFixture } from '../helpers/nonpersist-host-fixture'
+import { nonpersistHostFixture, awaitFixtureAuthorityWindow } from '../helpers/nonpersist-host-fixture'
 import { fixture,insert,seed } from '../helpers/runtime-observation-nonpersistence-db-fixture'
 import { acquireControlPlaneLease } from '../../core/control-plane-leases'
 import { buildDefaultAunConfigurationCandidate,resolveConfigurationRuntime } from '../../core/aun-configuration-candidate'
@@ -14,6 +14,7 @@ import { applyConfigurationRestartLogicalSqlite,applyRuntimeObservationNonpersis
 async function currentCandidate(s:Awaited<ReturnType<typeof configurationContractFixture>>,restartRequired=false) {
   const host=await nonpersistHostFixture(randomUUID(),s.desired.agentId)
   try {
+  await awaitFixtureAuthorityWindow(host,async()=>(await s.f.query('SELECT clock_timestamp() AS now'))[0].now)
   await insert(s.f,'agent_runtime_instances',{runtime_instance_id:host.runtimeId,agent_id:host.agentId,runtime_kind:'local_process'})
   const lease=await acquireControlPlaneLease(s.db,{scopeType:'runtime_instance',scopeId:host.runtimeId,purpose:'worker',holderAgentId:host.agentId,holderRuntimeInstanceId:host.runtimeId,ttlMs:60000})
   if(!lease.ok)throw Error('fixture lease rejected')

@@ -1,3 +1,4 @@
+.github/workflows/pr-checks.yml
 adapters/discord-client.ts
 bin/aun-watchdog.ts
 bin/aun/bootstrap-adapter-codex.ts
@@ -34,6 +35,7 @@ db/migrations/2026-09-22-configuration-outbox-supersession.up.sql
 docs/SSOT.md
 docs/agent-com-message-queue-spec.md
 docs/spec/seat-runtime-continuity.md
+docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/REPRODUCIBILITY.md
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/RETURN.md
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/RUNS.md
 docs/verify/aun-v2-nonpersistence-20260921/full-suite-repair/changed-paths.txt
@@ -130,6 +132,7 @@ tests/inbound-multi-bot-fanout.test.ts
 tests/inbound-router.test.ts
 tests/integration/test_adr050_bot_starts_without_pidfile.test.ts
 tests/mcp-outbound-acl-diagnostic.test.ts
+tests/norm-022-runtime-endpoint-lease.test.ts
 tests/outbound-consumer.test.ts
 tests/owner-handoff-routing.test.ts
 tests/process-start-time.test.ts
@@ -140,6 +143,7 @@ tests/runtime-current-resolver.test.ts
 tests/runtime-inventory.test.ts
 tests/runtime-memory-ready-identity.test.ts
 tests/runtime-memory-ready-refresher.test.ts
+tests/runtime-memory-ready.test.ts
 tests/sender-feedback.test.ts
 tests/shirube-current-overlay-check.test.ts
 tests/spec-enforcement/behavioral-spec-alignment.test.ts

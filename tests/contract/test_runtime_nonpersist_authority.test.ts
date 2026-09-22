@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { test, expect } from 'bun:test'
 import { randomUUID } from 'node:crypto'
@@ -159,10 +160,21 @@ test('NP04 valid UUID replay in a different actual process/workspace denies reso
   const lease={leaseId:acquired.endpoint_lease_id!,fencingToken:acquired.endpoint_lease_fencing_token}
   const before=await x.f.query('SELECT * FROM control_plane_leases')
   await x.host.close();oldClosed=true
+  const replacementSpawnEarliest=Date.now()
   replacement=await nonpersistHostFixture(x.host.runtimeId,x.host.agentId)
+  const replacementReady=Date.now()
   expect(replacement.endpoint.pid).not.toBe(x.host.endpoint.pid)
   expect(replacement.dir).not.toBe(x.host.dir)
-  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})).ok).toBe(false)
+  const resolution=await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId})
+  // Sample only after resolution, so diagnostics cannot age the replacement
+  // past the boundary that the immediate replay assertion is exercising.
+  const observation=inspectHostRuntime({agentId:x.host.agentId}).observations[0]
+  console.log(JSON.stringify({case:'NP04-immediate-replay-diagnostic',replacement_spawn_earliest_ms:replacementSpawnEarliest,replacement_ready_ms:replacementReady,
+    acquired_at:before[0].acquired_at,original_pid:x.host.endpoint.pid,replacement_pid:replacement.endpoint.pid,
+    original_workspace:x.host.dir,replacement_workspace:replacement.dir,resolution,observation,
+    linux:process.platform==='linux'?{pid_stat:readFileSync(`/proc/${replacement.endpoint.pid}/stat`,'utf8'),uptime:readFileSync('/proc/uptime','utf8'),
+      btime:readFileSync('/proc/stat','utf8').split('\n').find(line=>line.startsWith('btime '))}:null}))
+  expect(resolution.ok).toBe(false)
   let nativeReads=0
   expect((await evaluateRuntimeMemoryReadyGate(x.db,{agent_id:x.host.agentId,project:'fixture-project',readNativeProof:async()=>{nativeReads++;throw new Error('must not read')}})).ok).toBe(false)
   expect(nativeReads).toBe(0)

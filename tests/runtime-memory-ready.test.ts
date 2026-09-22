@@ -15,7 +15,7 @@ import {
 import { seatContextDigest, type SeatContextReceipt } from '../core/seat-context-recovery'
 import { unitRuntimeId, unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
 import type { HostRuntimeObservation } from '../core/host-runtime-observer'
-import { nonpersistHostFixture } from './helpers/nonpersist-host-fixture'
+import { nonpersistHostFixture, awaitFixtureAuthorityWindow } from './helpers/nonpersist-host-fixture'
 import { memoryReadyBootstrap } from '../bin/aun/memory-ready'
 
 let tmp: string
@@ -634,6 +634,7 @@ describe('runtime memory-ready evidence gate', () => {
   test('SQLite dry-run reads a clean rollback-journal database without file or journal changes', async () => {
     await seedRuntime('wasurezu',39120)
     const host=await nonpersistHostFixture(unitRuntimeId('runtime-wasurezu'),'wasurezu');actualHosts.push(host)
+    await awaitFixtureAuthorityWindow(host,async()=>(await db.queryOne<any>('SELECT clock_timestamp() AS now')).now)
     await db.execute("UPDATE control_plane_leases SET acquired_at=clock_timestamp()")
     const cleanPath=join(tmp,'clean.db')
     await db.execute('VACUUM INTO $1',[cleanPath])

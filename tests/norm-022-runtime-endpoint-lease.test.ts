@@ -1,4 +1,4 @@
-import { nonpersistHostFixture } from './helpers/nonpersist-host-fixture'
+import { nonpersistHostFixture, awaitFixtureAuthorityWindow } from './helpers/nonpersist-host-fixture'
 import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
@@ -55,6 +55,11 @@ async function withNorm022Db<T>(fn: (ctx: { dbPath: string; ids: FixtureIds }) =
     migrateSqlite(dbPath)
     const ids = seedRuntimeEndpointFixture(dbPath)
     host = await nonpersistHostFixture(ids.runtimeId,ids.agentId)
+    await awaitFixtureAuthorityWindow(host,async()=>{
+      const clockDb=new Database(dbPath)
+      try{return (clockDb.query("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS now").get() as {now:string}).now}
+      finally{clockDb.close()}
+    })
     return await fn({ dbPath, ids })
   } finally {
     await host?.close()

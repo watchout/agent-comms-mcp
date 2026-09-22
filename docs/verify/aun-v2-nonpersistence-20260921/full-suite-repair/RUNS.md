@@ -93,3 +93,10 @@ Raw Bun counts; selected passes are separate from full-suite acceptance. Earlier
 | public4-incremental-independent | 0 | 1 | 0 | 0 | 22 | 13 | 1 |
 | public4-incremental-independent-v2 | 1 | 0 | 0 | 0 | 22 | 15 | 0 |
 | public4-fixtures-final | 26 | 0 | 0 | 0 | 0 | 437 | 0 |
+| repro-sqlite-v1 | 1 | 0 | 0 | 0 | 25 | 6 | 0 |
+| repro-norm-healthy-v1 | 1 | 0 | 0 | 0 | 10 | 2 | 0 |
+| repro-norm-multi-v1 | 1 | 0 | 0 | 0 | 10 | 3 | 0 |
+| repro-cfg1-v1 | 1 | 0 | 0 | 0 | 5 | 8 | 0 |
+| repro-cfg2-v1 | 1 | 0 | 0 | 0 | 5 | 9 | 0 |
+| repro-np04-v1 | 1 | 0 | 0 | 0 | 8 | 8 | 0 |
+| repro-four-files-v1 | 52 | 0 | 0 | 0 | 0 | 244 | 0 |

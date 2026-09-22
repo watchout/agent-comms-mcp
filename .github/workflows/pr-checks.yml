@@ -116,7 +116,8 @@ jobs:
           chmod 700 "$bounded_fixture_dir"
           printf 'AUN_BOUNDED_FIXTURE_ROOT=%s\n' "$bounded_fixture_dir" >> "$GITHUB_ENV"
           node --input-type=module > bounded-ci-subject.json <<'JS'
-          import {readFileSync} from 'node:fs';
+          import {readFileSync,createReadStream,mkdtempSync,openSync,closeSync,rmSync} from 'node:fs';
+          import {join} from 'node:path';
           import {execFileSync} from 'node:child_process';
           import {createHash} from 'node:crypto';
           const gitOptions={timeout:15000,maxBuffer:16*1024*1024};
@@ -125,12 +126,24 @@ jobs:
           const event=JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH,'utf8'));
           const tested_commit=git('rev-parse','HEAD'),candidate_head=event.pull_request?.head.sha??tested_commit;
           const base=event.pull_request?.base.sha??'0f772883db6f3b50772d3e4b82ce47795091f0a9';
+          // Preserve the complete binary diff checksum without buffering the
+          // growing raw-evidence packet in execFileSync's stdout limit.
+          const diffDir=mkdtempSync(join(process.env.RUNNER_TEMP,'aun-subject-diff-'));
+          const diffPath=join(diffDir,'subject.diff'),diffFd=openSync(diffPath,'wx',0o600);
+          let binary_diff_sha256;
+          try {
+            try {execFileSync('git',['diff','--binary','--full-index',`${base}...${candidate_head}`],{...gitOptions,stdio:['ignore',diffFd,'pipe']});}
+            finally {closeSync(diffFd);}
+            const digest=createHash('sha256');
+            for await(const chunk of createReadStream(diffPath))digest.update(chunk);
+            binary_diff_sha256=digest.digest('hex');
+          } finally {rmSync(diffDir,{recursive:true,force:true});}
           const test_files_sha256=Object.fromEntries(['admission','admission_postgres','retry','use_trace'].map(n=>{
             const p=`tests/contract/test_queue_bounded_${n}.test.ts`;return[p,sha(readFileSync(p))];
           }));
           console.log(JSON.stringify({base,candidate_head,candidate_tree:git('rev-parse',`${candidate_head}^{tree}`),tested_commit,
             tested_tree:git('rev-parse','HEAD^{tree}'),tested_parents:git('rev-list','--parents','-n1','HEAD').split(' ').slice(1),
-            binary_diff_sha256:sha(execFileSync('git',['diff','--binary','--full-index',`${base}...${candidate_head}`],gitOptions)),test_files_sha256,
+            binary_diff_sha256,test_files_sha256,
             design_raw_sha256:'ed86b14f35b97d8483bf8052dd73765732c4568a945cb6e59bc6b8b7e99ea703',
             design_canonical_sha256:'880b99e5514f9791968ba8971e9d526b59173732986c12a54e8db04413f1972e',
             run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT,scope:'TESTED_CHECKOUT_OBSERVATION',private_status:'PRIVATE_STAGE_REQUIRED'}));
@@ -195,6 +208,26 @@ jobs:
           test -f "$native_fixture_root/dist/native-context-delivery.js"
           printf 'AUN_TEST_WASUREZU_ROOT=%s\n' "$native_fixture_root" >> "$GITHUB_ENV"
 
+      - name: Verify six reproducibility cases in separate processes
+        run: |
+          set -euo pipefail
+          bun test tests/runtime-memory-ready.test.ts -t '^runtime memory-ready evidence gate SQLite dry-run reads a clean rollback-journal database without file or journal changes$' --timeout 30000 --reporter=junit --reporter-outfile=repro-sqlite.xml
+          bun test tests/norm-022-runtime-endpoint-lease.test.ts -t '^NORM-022 frozen runtime endpoint lease fixtures healthy_endpoint_lease$' --timeout 30000 --reporter=junit --reporter-outfile=repro-norm-healthy.xml
+          bun test tests/norm-022-runtime-endpoint-lease.test.ts -t '^NORM-022 frozen runtime endpoint lease fixtures multi_channel_single_runtime$' --timeout 30000 --reporter=junit --reporter-outfile=repro-norm-multi.xml
+          bun test tests/contract/test_runtime_nonpersist_configuration_contract.test.ts -t '^AC-CFG-1 fresh hostname' --timeout 30000 --reporter=junit --reporter-outfile=repro-cfg1.xml
+          bun test tests/contract/test_runtime_nonpersist_configuration_contract.test.ts -t '^AC-CFG-2 ordinary reconcile' --timeout 30000 --reporter=junit --reporter-outfile=repro-cfg2.xml
+          bun test tests/contract/test_runtime_nonpersist_authority.test.ts -t '^NP04 valid UUID replay in a different actual process/workspace' --timeout 30000 --reporter=junit --reporter-outfile=repro-np04.xml
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          files=glob.glob('repro-*.xml')
+          assert len(files)==6, files
+          for file in files:
+              cases=list(ET.parse(file).getroot().iter('testcase'))
+              executed=[c for c in cases if not any(x.tag=='skipped' for x in c)]
+              assert len(executed)==1, (file,len(executed))
+              assert not any(x.tag in ('failure','error') for c in cases for x in c), file
+          PY
+
       - name: Run full test suite
         run: bun test --timeout 30000 --reporter=junit --reporter-outfile=bounded-full.xml
 
@@ -243,6 +276,7 @@ jobs:
             bounded-ci-stage.json
             bounded-ci-subject.json
             bounded-ci-versions.txt
+            repro-*.xml
           retention-days: 7
 
   # ── Auto-merge (owner exact-head + explicit method gated) ────────────────

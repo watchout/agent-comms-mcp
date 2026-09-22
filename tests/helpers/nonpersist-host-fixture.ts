@@ -2,6 +2,26 @@ import { copyFileSync, mkdtempSync, realpathSync, mkdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { inspectHostRuntime, sameHostRuntime } from '../../core/host-runtime-observer'
+import { processStartUpperBoundMs } from '../../core/process-start-time'
+
+/** Manual logical leases must be granted after the observed holder's interval.
+ * This is deliberately separate from spawning: replacement/replay negatives
+ * must exercise the immediate new process, without an artificial delay.
+ */
+export async function awaitFixtureAuthorityWindow(host:{agentId:string;runtimeId:string;endpoint:{pid:number}},readDatabaseClock:()=>Promise<unknown>) {
+  const inspect=()=>inspectHostRuntime({agentId:host.agentId,runtimeInstanceId:host.runtimeId})
+  const before=inspect()
+  if(before.reasonCode!=='OBSERVED'||before.observations.length!==1||before.observations[0].process_id!==host.endpoint.pid)throw Error('FIXTURE_HOLDER_UNVERIFIED')
+  const holder=before.observations[0],upper=processStartUpperBoundMs(holder.process_started_at)
+  const clock=async()=>{const value=await readDatabaseClock();return value instanceof Date?value.getTime():Date.parse(String(value))}
+  const first=await clock(),waitMs=Math.max(0,upper-first)
+  if(!Number.isFinite(waitMs)||waitMs>1000)throw Error('FIXTURE_CLOCK_UNPROVEN')
+  if(waitMs)await Bun.sleep(waitMs)
+  const final=await clock(),after=inspect()
+  if(final<upper||!Number.isFinite(final)||after.observations.length!==1||!sameHostRuntime(holder,after.observations[0]))throw Error('FIXTURE_AUTHORITY_WINDOW_UNPROVEN')
+  console.log(JSON.stringify({case:'manual-fixture-authority-window',agent:host.agentId,pid:host.endpoint.pid,started_at:holder.process_started_at,upper_ms:upper,first_db_ms:first,final_db_ms:final,wait_ms:waitMs}))
+}
 /** Synthetic Bun executable named codex. Never launches a provider or reads an account. */
 export async function nonpersistHostFixture(runtimeId = randomUUID(), agentId = `np-${randomUUID()}`, session = `session-${agentId}`) {
   const dir=realpathSync(mkdtempSync(join(tmpdir(),'aun-np-host-')))
