@@ -54,6 +54,13 @@ export const EVENT_TYPES = [
   'runtime.predecessor_death_recorded',
   // conversation metadata
   'conversation.linked',
+  // SuiteEvent/v1 producer types (SPEC-4MCP-002 v0.2 Contract C; additive-within-version).
+  // AUN is the suite identity minting authority; these are produced ONLY through
+  // this log — no second event path (CELL-4MCP-AUN-001, #853).
+  'suite.identity.agent_upserted',
+  'suite.identity.agent_deactivated',
+  'suite.identity.agent_retired',
+  'suite.mcp_profile.aun_routing_changed',
 ] as const
 
 export type EventType = (typeof EVENT_TYPES)[number]
