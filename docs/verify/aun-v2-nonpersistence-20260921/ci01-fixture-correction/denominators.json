@@ -1,0 +1,13 @@
+{
+  "previous_public_cases": 46,
+  "current_cases": 47,
+  "all_previous_cases_retained": true,
+  "added_cases": [
+    {
+      "classname": "CI-01 source admission before protected release",
+      "name": "declared workflow delta preserves exact history and refuses undeclared mutations"
+    }
+  ],
+  "full_file_assertions": "635",
+  "full_file_duration_seconds": "59.106352"
+}

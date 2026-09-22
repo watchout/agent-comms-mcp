@@ -1172,6 +1172,20 @@ test("I6 actual workflow collector preserves a repository binary diff above 1 Mi
 },30000);
 
 
+// Only the published, exact aa91 reproducibility delta is normalized. Changed
+// commands, missing/duplicate context, or additional workflow edits still fail
+// either here or the existing complete baseline byte comparison below.
+const declaredReproWorkflow = JSON.parse(readFileSync(join(repoRoot,
+  "tests/fixtures/ci01-declared-reproducibility-workflow.json"), "utf8"));
+function undoDeclaredReproWorkflow(workflow: string): string {
+  for (const hunk of declaredReproWorkflow.hunks as Array<{before:string;after:string}>) {
+    const at=workflow.indexOf(hunk.after);
+    if(at<0 || workflow.indexOf(hunk.after,at+1)>=0)throw new Error("CI01_DECLARED_WORKFLOW_DELTA_MISMATCH");
+    workflow=workflow.slice(0,at)+hunk.before+workflow.slice(at+hunk.after.length);
+  }
+  return workflow;
+}
+
 describe("CI-01 source admission before protected release", () => {
   const sourceReady = (x: any) => {
     x.draft = false;
@@ -1304,12 +1318,46 @@ describe("CI-01 source admission before protected release", () => {
     expect(auto(workflow)).toBe(auto(baseline.stdout));
     expect(auto(workflow)).toContain("needs.layer0.result == 'success'");
     expect(auto(workflow)).toContain("--required-merge-method squash");
-    // Removing only the inserted source step and moving the original full gate
-    // back must reproduce every baseline workflow byte (events, permissions,
-    // commands, counts, runner and downstream protected checks included).
-    let restored = workflow.replace(source.text, "").replace(full.text, "");
+    // Undo only the exact declared reproducibility delta, then the original
+    // source/full placement change. All baseline bytes must still match.
+    let restored = undoDeclaredReproWorkflow(workflow).replace(source.text, "").replace(full.text, "");
     restored = restored.replace("      - name: Prepare pinned native Wasurezu fixture\n", full.text + "      - name: Prepare pinned native Wasurezu fixture\n");
     expect(restored).toBe(baseline.stdout);
+  });
+
+  test("declared workflow delta preserves exact history and refuses undeclared mutations", () => {
+    const frozen=(commit:string)=>{
+      const r=spawnSync("git",["show",commit+":"+declaredReproWorkflow.path],{cwd:repoRoot,encoding:"utf8"});
+      if(r.status!==0)throw new Error("CI01_FROZEN_WORKFLOW_UNAVAILABLE");
+      return r.stdout;
+    };
+    const before=frozen(declaredReproWorkflow.before_commit),after=frozen(declaredReproWorkflow.after_commit);
+    const hash=(text:string)=>createHash("sha256").update(text).digest("hex");
+    expect(hash(before)).toBe(declaredReproWorkflow.before_sha256);
+    expect(hash(after)).toBe(declaredReproWorkflow.after_sha256);
+    expect(undoDeclaredReproWorkflow(after)).toBe(before);
+    const changes=[
+      ["stream checksum",after.replace("binary_diff_sha256,test_files_sha256", "binary_diff_sha256:'forged',test_files_sha256")],
+      ["standalone timeout",after.replace("--reporter-outfile=repro-np04.xml", "--reporter-outfile=repro-np04.xml --timeout 60000")],
+      ["standalone moved before admission",(()=>{
+        const start=after.indexOf("      - name: Verify six reproducibility cases in separate processes\n");
+        const end=after.indexOf("      - name: Run full test suite\n",start),step=after.slice(start,end);
+        return after.slice(0,start).replace("      - name: Shirube source-admission gate\n",step+"      - name: Shirube source-admission gate\n")+after.slice(end);
+      })()],
+      ["artifact",after.replace("            repro-*.xml", "            unrelated-*.xml")],
+      ["duplicate delta",after+declaredReproWorkflow.hunks[0].after],
+      ["missing delta",before],
+      ["permissions",after.replace("contents: read", "contents: write")],
+      ["runner",after.replace("runs-on: ubuntu-latest", "runs-on: self-hosted")],
+      ["full timeout",after.replace("run: bun test --timeout 30000", "run: bun test --timeout 60000")],
+      ["auto-merge",after.replace("needs.layer0.result == 'success'", "true")],
+    ];
+    for(const [name,changed] of changes){
+      expect(changed,name).not.toBe(after);
+      let normalized:string|null=null;
+      try{normalized=undoDeclaredReproWorkflow(changed)}catch{}
+      expect(normalized,name).not.toBe(before);
+    }
   });
 
   test("CI-01 workflow delta cannot reuse previous I21 admission", () => {
