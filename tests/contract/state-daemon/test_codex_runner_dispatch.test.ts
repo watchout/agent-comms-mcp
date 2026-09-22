@@ -161,6 +161,21 @@ async function mismatchMemoryReadyRuntime(agentId: string): Promise<void> {
 }
 
 describe('state_daemon invoke_codex_runner dispatch boundary', () => {
+  test('native startup slower than the business-clock offset still reaches the actual runner', async () => {
+    enableNativeRuntimeFixtures(pg,'2026-05-18T00:00:00.000Z',1500)
+    const agent=makeAgentId('slow-native-start')
+    await seedAgent(pg,{agent_id:agent,observed_provider:'codex',runtime:'codex',tmux_session:null})
+    const id=await seedQueueRow(pg,{agent_id:agent,status:'pending',
+      message_id:'11111111-1111-4111-8111-111111111111',
+      payload:JSON.stringify({author_id:'codex-cto',content:'do work',message_type:'instruction'}),
+      created_at:fixtureDate(pg,'2026-05-18T00:00:00.000Z')})
+    const runner=new FakeCodexRunner(),h=daemon(new FakeClock(fixtureDate(pg,'2026-05-18T00:00:01.000Z')),runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({op:'INSERT',id,agent_id:agent,status:'pending',claim_expires_at:null})
+      expect(runner.invocations,JSON.stringify({metrics:h.metrics.calls,alerts:h.alert.alerts})).toHaveLength(1)
+    } finally {await h.daemon.stop()}
+  })
   test('pending idle Codex runtime invokes runner and never tmux wake', async () => {
     const agent = makeAgentId('codex-runner')
     await seedAgent(pg, { observed_provider: 'codex',

@@ -1,0 +1,590 @@
+{
+  "head": "038e14cf7b6d01c86a7c9c37fb0a16f455ef06b5",
+  "run": 35667230626,
+  "raw_counts": {
+    "pass": 3281,
+    "fail": 23,
+    "skip": 59,
+    "tests": 3363,
+    "bun_assertions": 18159,
+    "junit_assertions": 18158
+  },
+  "failures": [
+    {
+      "attributes": {
+        "name": "B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release",
+        "classname": "aun bootstrap B0-B8 state machine",
+        "time": "0.004821",
+        "file": "tests/aun-bootstrap.test.ts",
+        "line": "501",
+        "assertions": "2"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toContain(expected)\n\nExpected to contain: \"NO_GO_POST_MUTATION_READBACK\"\nReceived: [ \"NO_GO_ROLLBACK_UNVERIFIED\" ]\n"
+          },
+          "text": "AssertionError: expect(received).toContain(expected)\n\nExpected to contain: \"NO_GO_POST_MUTATION_READBACK\"\nReceived: [ \"NO_GO_ROLLBACK_UNVERIFIED\" ]\n\n      at tests/aun-bootstrap.test.ts:570:33\n"
+        }
+      ],
+      "category": "cold fixed HOME fixture",
+      "correction_paths": [
+        "tests/aun-bootstrap.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "NP11/AC-CFG-3 compatible B3 profile → managed start → fresh READY/idempotent READY → restart and claim recovery with no physical writes",
+        "classname": "",
+        "time": "2.697879",
+        "file": "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
+        "line": "13",
+        "assertions": "10"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "error",
+            "message": "column \"superseded_at\" does not exist"
+          },
+          "text": "error: column \"superseded_at\" does not exist\n      at node_modules/pg/lib/client.js:631:17\n      at processTicksAndRejections (native:7:39)\n"
+        }
+      ],
+      "category": "supersession migration omitted by historical fixture",
+      "correction_paths": [
+        "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift",
+        "classname": "aun bootstrap clean-host journal",
+        "time": "30.068285",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "348",
+        "assertions": "38"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "TimeoutError",
+            "message": "test timed out"
+          },
+          "text": null
+        }
+      ],
+      "category": "aggregate test exceeded 30 seconds",
+      "correction_paths": [
+        "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "BA-16-DEFAULT-CLAIM",
+        "classname": "",
+        "time": "0.54068",
+        "file": "tests/contract/test_queue_bounded_admission_postgres.test.ts",
+        "line": "327",
+        "assertions": "5"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "Error",
+            "message": "Command failed: /home/runner/.bun/bin/bun cli/index.ts next\n 7 |   agentId: string; queueId: string | number; ttlSeconds: number\n 8 |   runtimeInstanceId?: string; payload?: string | null\n 9 | }) {\n10 |   if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 1) throw new Error('CLAIM_TTL_INVALID')\n11 |   const resolved = await resolveRuntimeEndpoint(db, {agentId: input.agentId, runtimeInstanceId: input.runtimeInstanceId})\n12 |   if (!resolved.ok || !resolved.endpoint) throw new Error(`CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE:${resolved.code}`)\n                                                         ^\nerror: CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE:RUNTIME_ENDPOINT_UNAVAILABLE\n      at claimUnboundedRuntimeQueue (/home/runner/work/agent-comms-mcp/agent-comms-mcp/core/runtime-queue-claim.ts:12:53)\n      at async nextMessage (/home/runner/work/agent-comms-mcp/agent-comms-mcp/cli/index.ts:2656:15)\n\nBun v1.4.2 (Linux x64)\n"
+          },
+          "text": "Error: Command failed: /home/runner/.bun/bin/bun cli/index.ts next\n 7 |   agentId: string; queueId: string | number; ttlSeconds: number\n 8 |   runtimeInstanceId?: string; payload?: string | null\n 9 | }) {\n10 |   if (!Number.isSafeInteger(input.ttlSeconds) || input.ttlSeconds < 1) throw new Error('CLAIM_TTL_INVALID')\n11 |   const resolved = await resolveRuntimeEndpoint(db, {agentId: input.agentId, runtimeInstanceId: input.runtimeInstanceId})\n12 |   if (!resolved.ok || !resolved.endpoint) throw new Error(`CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE:${resolved.code}`)\n                                                         ^\nerror: CLAIM_RUNTIME_AUTHORITY_UNAVAILABLE:RUNTIME_ENDPOINT_UNAVAILABLE\n      at claimUnboundedRuntimeQueue (/home/runner/work/agent-comms-mcp/agent-comms-mcp/core/runtime-queue-claim.ts:12:53)\n      at async nextMessage (/home/runner/work/agent-comms-mcp/agent-comms-mcp/cli/index.ts:2656:15)\n\nBun v1.4.2 (Linux x64)\n\n      at genericNodeError (node:child_process:1081:13)\n      at checkExecSyncError (node:child_process:503:27)\n      at execFileSync (node:child_process:300:31)\n      at normalCli (tests/contract/test_queue_bounded_admission.test.ts:333:13)\n      at tests/contract/test_queue_bounded_admission_postgres.test.ts:59:10\n      at async fixture16 (tests/contract/test_queue_bounded_admission_postgres.test.ts:29:45)\n"
+        }
+      ],
+      "category": "ordinary fixture missing current holder",
+      "correction_paths": [
+        "tests/contract/test_queue_bounded_admission_postgres.test.ts",
+        "tests/helpers/seat-native-runtime-fixture.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "BA-16-DEFAULT-RETRY",
+        "classname": "",
+        "time": "0.608152",
+        "file": "tests/contract/test_queue_bounded_admission_postgres.test.ts",
+        "line": "327",
+        "assertions": "8"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n\n      at tests/contract/test_queue_bounded_admission_postgres.test.ts:78:23\n      at async fixture16 (tests/contract/test_queue_bounded_admission_postgres.test.ts:29:45)\n"
+        }
+      ],
+      "category": "ordinary fixture missing current holder",
+      "correction_paths": [
+        "tests/contract/test_queue_bounded_admission_postgres.test.ts",
+        "tests/helpers/seat-native-runtime-fixture.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease",
+        "classname": "",
+        "time": "1.894973",
+        "file": "tests/contract/test_runtime_nonpersist_authority.test.ts",
+        "line": "23",
+        "assertions": "13"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: false\nReceived: true\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: false\nReceived: true\n\n      at tests/contract/test_runtime_nonpersist_authority.test.ts:40:76\n"
+        }
+      ],
+      "category": "seconds treated as precise process start",
+      "correction_paths": [
+        "core/process-start-time.ts",
+        "core/host-runtime-observer.ts",
+        "core/runtime-heartbeat.ts",
+        "tests/contract/test_runtime_nonpersist_authority.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "NP04 valid UUID replay in a different actual process/workspace denies resolve, admission and renewal with the old lease surviving",
+        "classname": "",
+        "time": "0.971526",
+        "file": "tests/contract/test_runtime_nonpersist_authority.test.ts",
+        "line": "123",
+        "assertions": "3"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: false\nReceived: true\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: false\nReceived: true\n\n      at tests/contract/test_runtime_nonpersist_authority.test.ts:133:76\n"
+        }
+      ],
+      "category": "seconds treated as precise process start",
+      "correction_paths": [
+        "core/process-start-time.ts",
+        "core/host-runtime-observer.ts",
+        "core/runtime-heartbeat.ts",
+        "tests/contract/test_runtime_nonpersist_authority.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "disabled/default path preserves existing CP-40B codex-runner behavior",
+        "classname": "CP-40D host runtime adapter profile gate",
+        "time": "4.377347",
+        "file": "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+        "line": "145",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts:170:37\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "explicit host-runtime profile builds structured argv and parses fixture output into typed evidence",
+        "classname": "CP-40D host runtime adapter profile gate",
+        "time": "4.475733",
+        "file": "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+        "line": "180",
+        "assertions": "2"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts:209:43\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "an explicit profile for a different provider fails before wake reservation or invocation",
+        "classname": "CP-40D host runtime adapter profile gate",
+        "time": "4.38379",
+        "file": "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+        "line": "235",
+        "assertions": "4"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n\n      at tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts:252:69\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "unsupported flags fail closed with typed evidence and leave queue lifecycle untouched",
+        "classname": "CP-40D host runtime adapter profile gate",
+        "time": "4.339285",
+        "file": "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+        "line": "257",
+        "assertions": "4"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n\n      at tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts:289:110\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "malformed host stream is typed failure evidence and cannot close or transfer work",
+        "classname": "CP-40D host runtime adapter profile gate",
+        "time": "4.367435",
+        "file": "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts",
+        "line": "293",
+        "assertions": "3"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts:325:43\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "a pending row is invoked at most N times, then transitions to typed failed with one alert",
+        "classname": "bounded wake invocation (issue #940: no row loops forever, none is parked silently)",
+        "time": "7.733781",
+        "file": "tests/contract/state-daemon/test_wake_invocation_bounded.test.ts",
+        "line": "82",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 3\nReceived length: 2\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 3\nReceived length: 2\n\n      at tests/contract/state-daemon/test_wake_invocation_bounded.test.ts:102:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "requeue-failed reopens the row with a fresh attempt budget",
+        "classname": "bounded wake invocation (issue #940: no row loops forever, none is parked silently)",
+        "time": "4.392284",
+        "file": "tests/contract/state-daemon/test_wake_invocation_bounded.test.ts",
+        "line": "183",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_wake_invocation_bounded.test.ts:200:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "pending idle Codex runtime invokes runner and never tmux wake",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.334917",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "164",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:194:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "direct mention smoke is passed to auto-final reply without daemon ACK",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.334216",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "527",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:587:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "auto-final reply mode passes exact queue without daemon-authored ACK prose",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.290073",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "601",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:661:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "free-text no-reply instructions are delivered instead of terminalized",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.343315",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "677",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:712:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "Codex runner execution is disabled by default until operator activation",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.446265",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "823",
+        "assertions": "4"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:850:106\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "runner failure records diagnostics without terminal-failing the row",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.374634",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "856",
+        "assertions": "2"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:883:103\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "stale pending event does not invoke runner after row was already closed",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.340588",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "890",
+        "assertions": "2"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n"
+          },
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: 1\nReceived: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:933:109\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "TUI legacy profile with Codex preference invokes runner without tmux prompt injection",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "4.32107",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "973",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n"
+          },
+          "text": "AssertionError: expect(received).toHaveLength(expected)\n\nExpected length: 1\nReceived length: 0\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:1002:34\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    },
+    {
+      "attributes": {
+        "name": "human seats are ignored on pg_notify while non-human fleet rows proceed",
+        "classname": "state_daemon invoke_codex_runner dispatch boundary",
+        "time": "7.841545",
+        "file": "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts",
+        "line": "1145",
+        "assertions": "1"
+      },
+      "errors": [
+        {
+          "tag": "failure",
+          "message": {
+            "type": "AssertionError",
+            "message": "expect(received).toEqual(expected)\n\n- [\n-   \"sd-test-denied-sibling-allowed\",\n- ]\n+ []\n\n- Expected  - 3\n+ Received  + 1\n"
+          },
+          "text": "AssertionError: expect(received).toEqual(expected)\n\n- [\n-   \"sd-test-denied-sibling-allowed\",\n- ]\n+ []\n\n- Expected  - 3\n+ Received  + 1\n\n      at tests/contract/state-daemon/test_codex_runner_dispatch.test.ts:1174:56\n"
+        }
+      ],
+      "category": "business clock precedes real native receipt",
+      "correction_paths": [
+        "tests/contract/state-daemon/seed.ts",
+        "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts"
+      ]
+    }
+  ]
+}

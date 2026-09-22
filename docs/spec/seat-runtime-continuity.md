@@ -265,8 +265,14 @@ On 64-bit macOS, the MCP process start is read afresh with `proc_pidinfo`, inclu
 microseconds; `ps lstart` seconds alone cannot distinguish a same-second UUID
 replay. Missing kernel evidence denies observation. A grant rounded to
 milliseconds cannot establish ownership of a later sub-millisecond start.
-Other platforms' existing process-start observation precision remains an
-unaccepted coverage gap; the macOS fixture is not a portability certificate.
+On a platform using second-resolution `ps lstart`, the observation retains
+that precision (no fractional seconds). Authority must be acquired at or after
+the exclusive upper bound of that observed second; a timestamp inside the
+second cannot prove ownership. First acquisition may wait at most one second
+for that boundary, then re-read the database clock and the current OS holder.
+Renewal never advances the original acquisition time. The same-second replay
+negative is required on Linux as well as macOS; neither result proves clock
+skew safety across different hosts.
 
 Cleanup's transient plan binds the entire observed holder identity (excluding the
 sampling timestamp). Before an effect it checks the same holder, zero active or

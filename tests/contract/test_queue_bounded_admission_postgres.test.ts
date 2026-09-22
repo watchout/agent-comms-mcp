@@ -1,7 +1,9 @@
-import { expect } from 'bun:test'
+import { test, expect } from 'bun:test'
 import { Client } from 'pg'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { readFileSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { resolve, join } from 'node:path'
+import { PgAdapter } from '../../core/db/pg-adapter'
+import { createReadyNativeRuntimeWithDb, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 import { randomUUID, createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { admissionStatus, admissionTransition, tryBoundedClaim, readAdmissionBinding, admissionBindingFromEnv, selectBoundedOutbound } from '../../core/queue-admission'
@@ -12,11 +14,11 @@ import { sweepExpiredClaims } from '../../core/claim-ttl'
 import { receiveTargeted } from '../../bin/aun/receive'
 import { unboundedOutboundPredicate } from '../../core/queue-admission'
 
-async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>void})=>Promise<void>){
-  const endpoint=process.env.AGENT_COM_BOUNDED_PG16_TEST_DATABASE_URL
+async function ordinaryFixture(major:16|17,run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>void})=>Promise<void>){
+  const endpoint=major===16?process.env.AGENT_COM_BOUNDED_PG16_TEST_DATABASE_URL:process.env.AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL
   if(!endpoint)throw Error('BA_PG16_ENDPOINT_REQUIRED')
-  await verifyFixtureEndpoint(endpoint,16)
-  const name=`ba16_${randomUUID().replaceAll('-','').slice(0,14)}_test`
+  await verifyFixtureEndpoint(endpoint,major)
+  const name=`${major===16?'ba16':'ba'}_${randomUUID().replaceAll('-','').slice(0,14)}_test`
   const target=await boundedFixtureDatabase(name,endpoint)
   const owned=fixtureClients(name),admin=owned.client(target.databaseUrl)
   let originalError:unknown
@@ -31,7 +33,7 @@ async function fixture16(run:(f:{admin:Client;env:NodeJS.ProcessEnv;migrate:()=>
   finally{try{await owned.close();await target.drop()}catch(cleanup){throw new AggregateError([...(originalError?[originalError]:[]),cleanup],'BA_FIXTURE_CLEANUP_FAILED')}}
 }
 
-boundedTest('BA-16-MIGRATION',async()=>fixture16(async({admin,migrate})=>{
+boundedTest('BA-16-MIGRATION',async()=>ordinaryFixture(16,async({admin,migrate})=>{
   const q=(await admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('ordinary','{\"keep\":true}') RETURNING id")).rows[0]
   const before=(await admin.query('SELECT to_jsonb(q) row FROM message_queue q WHERE id=$1',[q.id])).rows[0].row
   const sql=readFileSync(resolve(candidateRoot,'db/migrations/2026-09-08-queue-bounded-admission.up.sql'),'utf8')
@@ -42,7 +44,7 @@ boundedTest('BA-16-MIGRATION',async()=>fixture16(async({admin,migrate})=>{
   expect((await admin.query("SELECT current_setting('server_version_num')::int version,current_setting('transaction_timeout',true) timeout")).rows[0]).toMatchObject({timeout:null})
 }))
 
-boundedTest('BA-16-UNSUPPORTED',async()=>fixture16(async({admin,env})=>{
+boundedTest('BA-16-UNSUPPORTED',async()=>ordinaryFixture(16,async({admin,env})=>{
   const before=(await admin.query('SELECT count(*)::int n FROM queue_admission_policies')).rows[0].n
   await expect(admin.query('SELECT public.aun_admission_prepare_lock()')).rejects.toThrow('ADMISSION_STORAGE_UNSUPPORTED')
   await expect(admin.query("SELECT public.aun_admission_prepare('{}'::jsonb)")).rejects.toThrow('ADMISSION_STORAGE_UNSUPPORTED')
@@ -52,40 +54,60 @@ boundedTest('BA-16-UNSUPPORTED',async()=>fixture16(async({admin,env})=>{
   expect(await tryBoundedClaim(admin,'qa',{dialect:'postgres',env})).toBeNull()
 }))
 
-boundedTest('BA-16-DEFAULT-CLAIM',async()=>fixture16(async f=>{
+async function withOrdinaryRuntime(f:{env:NodeJS.ProcessEnv},run:()=>Promise<void>) {
+  const home=realpathSync(mkdtempSync(join(process.env.AUN_BOUNDED_FIXTURE_ROOT!,'ba16-native-')))
+  const db=new PgAdapter(f.env.DATABASE_URL!),id=randomUUID(),agentId='ordinary-'+randomUUID()
+  try {
+    await db.execute("INSERT INTO agents(agent_id,display_name,agent_type) VALUES($1,$1,'dev')",[agentId])
+    await db.execute("UPDATE channels SET members=array_append(members,$1) WHERE id='fixture-channel'",[agentId])
+    const native=await createReadyNativeRuntimeWithDb(db,home,agentId,id)
+    Object.assign(f.env,{AGENT_ID:agentId,AGENT_COM_EXPECTED_AGENT_ID:agentId,HOME:home,CODEX_HOME:home,PATH:native.cliPath+':'+f.env.PATH,
+      AGENT_COM_RUNTIME_INSTANCE_ID:id,AGENT_COM_WORKSPACE:home,AGENT_COM_RUNTIME_SESSION:agentId+'-session',
+      AGENT_MEMORY_AGENT_ID:agentId,AGENT_MEMORY_PROJECT:'agent-comms-mcp'})
+    await run()
+  } finally {await db.close();await stopNativeFixtures();rmSync(home,{recursive:true,force:true})}
+}
+
+async function verifyOrdinaryClaim(f:{admin:Client;env:NodeJS.ProcessEnv}) {
   await seedNormalTransport(f.admin)
-  const first=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('qa','{\"content\":\"ordinary first\"}') RETURNING id")).rows[0]
-  const second=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('qa','{\"content\":\"ordinary second\"}') RETURNING id")).rows[0]
-  expect(normalCli(f as any,['next'],'qa').queue_id).toBe(String(first.id))
-  const targeted=await receiveTargeted({agentId:'qa',queueId:String(second.id),env:f.env,cwd:candidateRoot})
+  await withOrdinaryRuntime(f,async()=>{
+  const agentId=f.env.AGENT_ID!
+  const first=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES($1,'{\"content\":\"ordinary first\"}') RETURNING id",[agentId])).rows[0]
+  const second=(await f.admin.query("INSERT INTO message_queue(agent_id,payload) VALUES($1,'{\"content\":\"ordinary second\"}') RETURNING id",[agentId])).rows[0]
+  expect(normalCli(f as any,['next'],agentId).queue_id).toBe(String(first.id))
+  const targeted=await receiveTargeted({agentId,queueId:String(second.id),env:f.env,cwd:candidateRoot})
   expect(targeted.ok).toBe(true);expect(targeted.summary?.claimed?.queue_id).toBe(String(second.id))
   expect((await f.admin.query("SELECT count(*)::int n FROM message_queue WHERE status='received'")).rows[0].n).toBe(2)
   expect((await f.admin.query('SELECT count(*)::int n FROM queue_admission_tasks')).rows[0].n).toBe(0)
-}))
+  })
+}
+boundedTest('BA-16-DEFAULT-CLAIM',async()=>ordinaryFixture(16,verifyOrdinaryClaim))
 
-boundedTest('BA-16-DEFAULT-RETRY',async()=>fixture16(async f=>{
+async function verifyOrdinaryRetry(f:{admin:Client;env:NodeJS.ProcessEnv}) {
   await seedNormalTransport(f.admin)
-  const expired=(await f.admin.query("INSERT INTO message_queue(agent_id,payload,status,claimed_by,claimed_at,claim_expires_at) VALUES('qa','{}','received','qa',clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '1 minute') RETURNING id")).rows[0]
+  await withOrdinaryRuntime(f,async()=>{
+  const runtimeId=f.env.AGENT_COM_RUNTIME_INSTANCE_ID!,agentId=f.env.AGENT_ID!
+  const expired=(await f.admin.query("INSERT INTO message_queue(agent_id,payload,status,claimed_by,claimed_at,claim_expires_at) VALUES($1,'{}','received',$1,clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '1 minute') RETURNING id",[agentId])).rows[0]
   expect(await sweepExpiredClaims({dialect:'postgres',query:f.admin.query.bind(f.admin)})).toBe(1)
   expect((await f.admin.query('SELECT status,claimed_by FROM message_queue WHERE id=$1',[expired.id])).rows[0]).toEqual({status:'pending',claimed_by:null})
   await f.admin.query('DELETE FROM message_queue WHERE id=$1',[expired.id])
-  const sent=normalCli(f as any,['notify','--channel-id','fixture-channel','--mention','qa','--content','Inspect ordinary retry.'])
+  const sent=normalCli(f as any,['notify','--channel-id','fixture-channel','--mention',agentId,'--content','Inspect ordinary retry.'])
   const source='state-daemon-queue-work-scheduler'
-  Object.assign(f.env,{AUN_RECEIVE_CLAIM_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:source,AUN_QUEUE_WORK_INVOCATION_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID:'fixture'})
-  const selected=(await f.admin.query('SELECT id FROM message_queue WHERE agent_id=$1 AND message_id=$2',['qa',sent.message_id])).rows[0]
-  const received=await receiveTargeted({agentId:'qa',queueId:String(selected.id),env:f.env,cwd:candidateRoot})
+  Object.assign(f.env,{AUN_RECEIVE_CLAIM_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:source,AUN_QUEUE_WORK_INVOCATION_SOURCE:source,AUN_QUEUE_WORK_EXPECTED_RUNTIME_ID:runtimeId})
+  const selected=(await f.admin.query('SELECT id FROM message_queue WHERE agent_id=$1 AND message_id=$2',[agentId,sent.message_id])).rows[0]
+  const received=await receiveTargeted({agentId,queueId:String(selected.id),env:f.env,cwd:candidateRoot})
   fixtureEvent('BA-16-DEFAULT-RETRY','receive',{outcome:received})
   expect(received.ok).toBe(true)
   expect(received.summary?.claimed?.queue_id).toBe(String(selected.id))
   const claimed={queue_id:String(selected.id)}
-  const claimResultFence={expectedClaimSource:source,expectedRuntimeId:'fixture'}
+  const claimResultFence={expectedClaimSource:source,expectedRuntimeId:runtimeId}
   const db={dialect:'postgres' as const,query:f.admin.query.bind(f.admin)}
   let invokes=0,sends=0
-  expect((await runReceivedQueueWork(db,{queueId:claimed.queue_id,expectedClaimSource:source,invocationSource:source,requireClaimFence:true,adapter:{runtime_id:'fixture',capabilities:{},invoke:async()=>{invokes++;return fixtureResult()}}})).ok).toBe(true)
+  expect((await runReceivedQueueWork(db,{queueId:claimed.queue_id,expectedClaimSource:source,invocationSource:source,requireClaimFence:true,adapter:{runtime_id:runtimeId,capabilities:{},invoke:async()=>{invokes++;return fixtureResult()}}})).ok).toBe(true)
   const host={queue_close_mode:'sender' as const,sendReply:async(input:any)=>{
     sends++;if(sends===1)throw Error('fixture ordinary finalizer temporary failure')
     let r:any
-    try{r=normalCli(f as any,['send','--content',input.content,'--mentions',input.mention,'--queue-id',input.queue_id,'--message-id',input.message_id,'--queue-work-finalizer','--close'],'qa');fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:0,stdout:r})}
+    try{r=normalCli(f as any,['send','--content',input.content,'--mentions',input.mention,'--queue-id',input.queue_id,'--message-id',input.message_id,'--queue-work-finalizer','--close'],agentId);fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:0,stdout:r})}
     catch(error){const e=error as any;fixtureEvent('BA-16-DEFAULT-RETRY','host-child',{exit:e.status??null,stdout:sanitizeFixtureError(e.stdout??''),stderr:sanitizeFixtureError(e.stderr??e.message)});throw error}
     return {message_id:r.message_id,queue_closed:r.work_closed===true}
   }}
@@ -108,8 +130,13 @@ boundedTest('BA-16-DEFAULT-RETRY',async()=>fixture16(async f=>{
   expect(ordinary.rows[0].attempts).toBe(1)
   await f.admin.query("UPDATE outbound_queue SET status='pending',claimed_at=NULL,next_retry_at=clock_timestamp() WHERE id=$1",[out.id])
   expect((await f.admin.query('SELECT status FROM outbound_queue WHERE id=$1',[out.id])).rows[0].status).toBe('pending')
-}))
+  })
+}
+boundedTest('BA-16-DEFAULT-RETRY',async()=>ordinaryFixture(16,verifyOrdinaryRetry))
 if (stage !== 'private') {
+  // Same ordinary claim/finalizer assertions on PG17; these do not replace the PG16 cases.
+  test('ordinary runtime claim compatibility on PostgreSQL 17',()=>ordinaryFixture(17,verifyOrdinaryClaim),30000)
+  test('ordinary runtime finalizer retry compatibility on PostgreSQL 17',()=>ordinaryFixture(17,verifyOrdinaryRetry),30000)
   boundedTest('BA-17-F12-A', async () => {
     await fixture(async ({ admin, other, prepare }) => {
       const row = (await admin.query("INSERT INTO message_queue(agent_id,payload) VALUES('qa','{}') RETURNING id")).rows[0]

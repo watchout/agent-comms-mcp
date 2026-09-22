@@ -17,13 +17,13 @@ import { recordVerifiedNativeRuntimeMemoryReady } from '../../../core/runtime-me
 import type { observeSeatProvider } from '../../../core/seat-runtime-selection'
 
 type NativeFixture = Awaited<ReturnType<typeof nativeHostFixture>>
-const nativeModes = new WeakMap<Client, { epoch: number; origin: number;
+const nativeModes = new WeakMap<Client, { epoch: number; origin: number; startupDelayMs: number;
   seats: Map<string, { fixture: NativeFixture; home: string; id: string; session: string; providerVisible: boolean }> }>()
 
 /** Only the opted-in caller tests use real native evidence. Business-clock offsets
  * remain deterministic, translated near the genuine receipt's wall clock. */
-export function enableNativeRuntimeFixtures(client: Client, epoch: string): void {
-  nativeModes.set(client, { epoch: Date.parse(epoch), origin: Date.now(), seats: new Map() })
+export function enableNativeRuntimeFixtures(client: Client, epoch: string, startupDelayMs=0): void {
+  nativeModes.set(client, { epoch: Date.parse(epoch), origin: Date.now(), startupDelayMs, seats: new Map() })
 }
 export function fixtureDate(client: Client, original: Date | string): Date {
   const mode = nativeModes.get(client)
@@ -67,7 +67,9 @@ export async function refreshNativeFixtureHeartbeat(client: Client, agentId: str
 async function seedNativeRuntime(client: Client, agent: SeedAgent, session: string): Promise<void> {
   const mode = nativeModes.get(client)!
   let seat = mode.seats.get(agent.agent_id)
+  const preparing = !seat
   if (!seat) {
+    if(mode.startupDelayMs)await Bun.sleep(mode.startupDelayMs)
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'daemon-native-seat-')))
     const id = agent.runtime_instance_id ?? randomUUID()
     const fixture = await nativeHostFixture(home, home, agent.agent_id, 'agent-comms-mcp', session, 'accepted', id)
@@ -89,6 +91,9 @@ async function seedNativeRuntime(client: Client, agent: SeedAgent, session: stri
   }
   await client.query(`INSERT INTO channels (id, name, type, members) VALUES ($1, $1, 'channel', ARRAY[$2]::text[])
     ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`, [`${TEST_PREFIX}channel-${agent.agent_id}`, agent.agent_id])
+  // The business clock starts after real native setup. A slow machine must not
+  // make its genuine completed receipt appear to come from the future.
+  if(preparing)mode.origin=Date.now()
 }
 
 export const TEST_PREFIX = 'sd-test-'

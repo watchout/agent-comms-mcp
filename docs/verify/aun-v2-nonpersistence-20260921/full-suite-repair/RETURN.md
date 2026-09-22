@@ -50,9 +50,26 @@ The independent [cycle-2 review](https://github.com/watchout/agent-comms-mcp/pul
 
 Final cycle-3 boundary evidence: **5 PASS / 0 FAIL / 62 assertions**. The 101-revision probe records current revision 102, original pending 101, superseded 100, current delivered 1, false old deliveries 0, other due progress 1, remaining pending 0. Bootstrap historical-row fix: **1 PASS / 0 FAIL / 16 filtered / 11 assertions**; it is a targeted rerun, not a full-suite result.
 
-Pending at source submission: changed-head public full-suite result; independent cycle-3 audit; exact-head owner R3 decision; NP12/live application and actual trial evidence. No self-audit, approval or merge.
+Pending at this source submission: the final corrected-head public full-suite result; independent cycle-3 audit; exact-head owner R3 decision; NP12/live application and actual trial evidence. No self-audit, approval or merge.
 
 PR#958: 保持。close/merge/吸収完了宣言をしない。
 PR#963: 保持。祖先に含むがclose/mergeをしない。
 
 next_action: owner_agent=suite-lead; active_function=orchestration_controller; action=consume the changed-head public test evidence and route independent cycle-3 acceptance; delivery=#940 and PR#968 with exact input head; input_refs=this return + public run + cycle-3 routing + cycle-2 review; scope=same -003 cell and existing R3 boundaries; deliverable=independent gate result on the corrected head, followed by owner exact-head decision if accepted; completion_evidence=published independent review and owner decision; blocking=true after the authorized corrective source/test return is delivered.
+
+## Public 23-failure follow-up
+
+The first corrected-head public full run, [35667230626](https://github.com/watchout/agent-comms-mcp/actions/runs/35667230626/job/106555582176), tested `038e14cf7b6d01c86a7c9c37fb0a16f455ef06b5`: **3281 PASS / 23 FAIL / 59 SKIP / 3363 tests**, Bun **18159** assertions (JUnit root **18158**), 1045.90 seconds, Bun 1.4.2 on Linux. All raw log/artifact bytes are archived under `public-35667230626/`; `public-23-classification.json` retains every failure and its correction paths. The earlier metadata-triggered run 35666933796 stopped at source admission because this maker omitted three required PR-body headings; corrected metadata passed admission. Duplicate 35666933775 was cancelled, with full tests skipped. There was no manual retry of the failing source.
+
+Corrections after that public run:
+
+- Two UUID-replay negatives exposed a real precision defect: Linux `ps lstart` seconds had been padded into apparent milliseconds. Whole-second observations now keep their precision; authority within that interval is unproven. First acquisition waits at most one second, re-reads the DB clock and the same OS holder before commit; renewal preserves original acquisition time. Real PostgreSQL tests cover the conservative boundary and rollback on holder replacement. Darwin keeps its kernel microsecond observation.
+- Sixteen daemon failures came from the fixture business clock beginning before slow real native setup. A 1.5-second delayed startup reproduced `stale_runtime_restore`; moving the fixture clock origin to completed setup makes the actual runner invocation pass. The product receipt-time guard remains enforced.
+- NP11's historical fixture explicitly applies the new supersession migration. The existing B3/start/restart/claim recovery assertions now complete again.
+- B4 uses a private real HOME so clean-host authority reaches the intended mutation/deadline/recovery assertions.
+- B5's aggregate contract exceeded its 30-second test limit. Tuple and incremental-binding checks are separate cases with the same 30-second limit; every rejection remains. The original heartbeat-count threshold of seven remains in the incremental case; the tuple subset additionally requires four. Readback connections close before assertions so a failure does not leak into the next case.
+- PG16's ordinary claim/retry fixtures now provide genuine isolated native holders and unique logical seat IDs. The same assertions have two PG17 counterpart tests; their PASS does not replace required PG16 public execution. A self-authored setup message found during this correction was restored to the distinct requester, preserving normal routing behavior.
+
+Latest local Bun 1.4.2 results: primary regression **166/0/843 assertions** and **59/0/308**; authority/NP11/bootstrap **35/0/406**; ordinary PG17 claim/retry **2/0/30**; final native/B5/ordinary set **5/0/84** (52 filtered). These are separate selected runs, never an aggregate full-suite PASS. The diagnostic 85/2/2-error run and all intermediate failures remain in the archive and version table. The new corrected-head public full run and independent cycle-3 acceptance remain required.
+
+Updated design_judgments: coarse OS time is an uncertainty interval, not a precise birth timestamp; an authority grant must follow its conservative end, and replacement before commit aborts the transaction. This implements adopted D1 without saving process time/path/PID/provider. Outbox supersession remains logical terminal history, distinct from delivery/application. No guard, fence, product deadline, or required test is disabled.

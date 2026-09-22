@@ -17,11 +17,18 @@ export function readDarwinProcessStart(pid: number): string {
   return `${new Date(Number(seconds)*1000).toISOString().slice(0,19)}.${micros.toString().padStart(6,'0')}Z`
 }
 
-/** Grants rounded to milliseconds cannot prove they follow a later sub-ms start. */
-export function authorityAcquiredAfterStart(acquiredAt: unknown, startedAt: string): boolean {
-  const acquired=acquiredAt instanceof Date?acquiredAt.getTime():Date.parse(String(acquiredAt))
+/** Conservative end of the measured interval, without inventing precision. */
+export function processStartUpperBoundMs(startedAt: string): number {
   const started=Date.parse(startedAt)
   const fractional=/\.(\d+)Z$/.exec(startedAt)?.[1] ?? ''
-  const upperStart=started+(/[1-9]/.test(fractional.slice(3))?1:0)
+  return started+(fractional.length===0?1000:
+    fractional.length<3?10**(3-fractional.length):
+    /[1-9]/.test(fractional.slice(3))?1:0)
+}
+
+/** A grant inside a coarse observation interval cannot prove ownership. */
+export function authorityAcquiredAfterStart(acquiredAt: unknown, startedAt: string): boolean {
+  const acquired=acquiredAt instanceof Date?acquiredAt.getTime():Date.parse(String(acquiredAt))
+  const upperStart=processStartUpperBoundMs(startedAt)
   return Number.isFinite(acquired) && Number.isFinite(upperStart) && acquired>=upperStart
 }

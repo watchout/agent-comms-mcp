@@ -345,7 +345,8 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   })
 
-  test('B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift', async () => {
+  for (const contractPart of ['tuple', 'incremental'] as const) {
+  test(contractPart==='tuple' ? 'B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift' : 'B5-INCREMENTAL-BINDING-001 preserves every release, agent, digest, expiry and transport rejection', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-')))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
@@ -478,7 +479,7 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const rejectedDrifts: string[] = []
     try {
-      for (const drift of driftCases) {
+      for (const drift of contractPart==='tuple'?driftCases:[]) {
         await writeReceiptTuple(drift.values)
         const outcome = await reuseRun.ports.revalidateStage!(
           {
@@ -491,7 +492,7 @@ describe('aun bootstrap clean-host journal', () => {
         expect(outcome.reasonCodes).toContain('NO_GO_POST_MUTATION_READBACK')
         rejectedDrifts.push(drift.id)
       }
-      expect(rejectedDrifts).toEqual(driftCases.map((drift) => drift.id))
+      expect(rejectedDrifts).toEqual((contractPart==='tuple'?driftCases:[]).map((drift) => drift.id))
       await writeReceiptTuple(expectedReceipt)
       const restoredReadback = await reuseRun.ports.revalidateStage!(
         {
@@ -503,6 +504,7 @@ describe('aun bootstrap clean-host journal', () => {
       if(!restoredReadback.ok)console.error('B5_RESTORED',restoredReadback)
       expect(restoredReadback.ok).toBe(true)
 
+      if(contractPart==='incremental') {
       const unboundSameHeadReadback = await reuseRun.ports.revalidateStage!(
         {
           ...reuseRun.context,
@@ -615,6 +617,7 @@ describe('aun bootstrap clean-host journal', () => {
       )
       expect(transportMismatchReadback.ok).toBe(false)
       providerTransportDrift = false
+      }
     } finally {
       inspection.mockRestore()
       await driftDb.close()
@@ -628,6 +631,7 @@ describe('aun bootstrap clean-host journal', () => {
         WHERE agent_id = $1 ORDER BY runtime_instance_id`,
       ['b5-concurrency'],
     )
+    await readback.close()
     expect(active.filter((row) => row.runtime_kind === 'bootstrap_bound_provider')).toEqual([
       expect.objectContaining({
         runtime_instance_id: createdReceipts[0].runtime_instance_id,
@@ -638,9 +642,11 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: null },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
-    await readback.close()
+    if(contractPart==='incremental')expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
+    else expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(4)
   }, 30000)
+
+  }
 
   async function installConfigurationFixture(db: PgAdapter, repoRoot: string) {
     for (const file of ['2026-07-26-aun-configuration-reconciliation.up.sql',

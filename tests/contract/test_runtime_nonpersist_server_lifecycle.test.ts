@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -19,6 +19,7 @@ test('NP11/AC-CFG-3 compatible B3 profile → managed start → fresh READY/idem
   const logs:Array<Promise<string>>=[]
   try {
     await f.apply();await f.exec(restartSql)
+    await f.exec(readFileSync(join(import.meta.dir,'../../db/migrations/2026-09-22-configuration-outbox-supersession.up.sql'),'utf8'))
     const repoRoot=join(import.meta.dir,'../..'),repoHead=execFileSync('git',['rev-parse','HEAD'],{cwd:repoRoot,encoding:'utf8'}).trim()
     const env={PATH:process.env.PATH!,HOME:dir,CODEX_HOME:join(dir,'.codex'),TMPDIR:dir,LANG:'C',DATABASE_URL:url.href,AGENT_COM_DB:'postgres',
       AGENT_ID:agent,AGENT_COM_EXPECTED_AGENT_ID:agent,AGENT_COM_WORKSPACE:dir,AUN_BOOTSTRAP_STATE_ROOT:join(dir,'bootstrap-state')}

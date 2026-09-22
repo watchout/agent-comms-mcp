@@ -1,10 +1,10 @@
-import { readDarwinProcessStart } from '../../core/process-start-time'
+import { readDarwinProcessStart, authorityAcquiredAfterStart, processStartUpperBoundMs } from '../../core/process-start-time'
 import { symlinkSync, closeSync, existsSync, mkdirSync, chmodSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { inspectHostRuntime, createHostRuntimeObserver } from '../../core/host-runtime-observer'
+import { inspectHostRuntime, createHostRuntimeObserver, sameHostRuntime } from '../../core/host-runtime-observer'
 import { durableRuntimeMetadata } from '../../core/runtime-durable-data'
 import { PgAdapter } from '../../core/db/pg-adapter'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
@@ -155,6 +155,15 @@ export async function registerNativeFixtureRuntime(db:PgAdapter|SqliteAdapter,fi
   if(id!==fixture.runtimeId)throw new Error('FIXTURE_UUID_MUST_BE_BOUND_BEFORE_EXEC')
   const seen=fixture.inspect({agentId:agent,runtimeInstanceId:id,logicalWorkspace:workspace})
   if(seen.reasonCode!=='OBSERVED'||seen.observations.length!==1) throw new Error('fixture process observation unavailable:'+seen.reasonCode)
+  const clock=(await db.query<{database_now:string}>('SELECT clock_timestamp() AS database_now'))[0]
+  const upper=processStartUpperBoundMs(seen.observations[0].process_started_at)
+  const waitMs=upper-new Date(clock.database_now).getTime()
+  if(!Number.isFinite(waitMs)||waitMs>1000)throw new Error('FIXTURE_START_CLOCK_UNAVAILABLE')
+  if(waitMs>0)await Bun.sleep(waitMs+1)
+  const confirmed=(await db.query<{database_now:string}>('SELECT clock_timestamp() AS database_now'))[0]
+  const after=fixture.inspect({agentId:agent,runtimeInstanceId:id,logicalWorkspace:workspace})
+  if(!authorityAcquiredAfterStart(confirmed.database_now,seen.observations[0].process_started_at)
+    || after.reasonCode!=='OBSERVED'||after.observations.length!==1||!sameHostRuntime(seen.observations[0],after.observations[0]))throw new Error('FIXTURE_HOLDER_UNCONFIRMED')
   await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,runtime_engine,status,started_at,metadata)
     VALUES($1,$2,'local_process',NULL,NULL,NULL,$3) ON CONFLICT(runtime_instance_id) DO NOTHING`,
     [id,agent,JSON.stringify(durableRuntimeMetadata({source_commit:'a'.repeat(40)}))])

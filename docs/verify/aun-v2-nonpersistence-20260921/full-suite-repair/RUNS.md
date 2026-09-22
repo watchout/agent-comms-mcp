@@ -1,6 +1,6 @@
 # All local repair run versions
 
-Raw Bun counts by version. Migration setup failure has no test counts. Fixed-source status, exact commands, manifests and subsequent source differences are in runs.json; raw bytes are in repair-evidence.tar.xz.
+Raw Bun counts; selected passes are separate from full-suite acceptance. Earlier changing-tree runs are diagnostic. See runs.json for exact source manifests and commands.
 
 | Version | Pass | Fail | Skip | Error | Filtered | Assertions | Exit |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -71,9 +71,20 @@ Raw Bun counts by version. Migration setup failure has no test counts. Fixed-sou
 | regression2-final-repair | 59 | 0 | 0 | 0 | 0 | 308 | 0 |
 | sender-clock-v1 | 8 | 0 | 0 | 0 | 0 | 25 | 0 |
 | sender-behavior-v1 | 37 | 0 | 1 | 0 | 0 | 131 | 0 |
-| outbox-cycle3-v1 | — | — | — | — | — | — | 1 |
+| outbox-cycle3-v1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | outbox-cycle3-v2 | 22 | 1 | 0 | 0 | 0 | 147 | 1 |
 | outbox-cycle3-v3 | 23 | 0 | 0 | 0 | 0 | 148 | 0 |
 | cycle3-final | 82 | 1 | 0 | 0 | 0 | 776 | 1 |
 | cycle3-boundary-final | 5 | 0 | 0 | 0 | 0 | 62 | 0 |
 | bootstrap-history-final | 1 | 0 | 0 | 0 | 16 | 11 | 0 |
+| public23-clock-diagnostic | 0 | 1 | 0 | 0 | 23 | 1 | 1 |
+| public23-native-fixed | 4 | 0 | 0 | 0 | 45 | 20 | 0 |
+| public23-corrected-v1 | 85 | 2 | 0 | 2 | 0 | 974 | 1 |
+| public23-bounded-b5-v2 | 2 | 2 | 0 | 0 | 29 | 63 | 1 |
+| public23-ordinary-v3 | 0 | 2 | 0 | 0 | 13 | 10 | 1 |
+| public23-regression1-final-repair | 166 | 0 | 0 | 0 | 0 | 843 | 0 |
+| public23-regression2-final-repair | 59 | 0 | 0 | 0 | 0 | 308 | 0 |
+| public23-ordinary-v4 | 1 | 1 | 0 | 0 | 13 | 18 | 1 |
+| public23-ordinary-v5 | 2 | 0 | 0 | 0 | 13 | 30 | 0 |
+| public23-authority-final | 35 | 0 | 0 | 0 | 0 | 406 | 0 |
+| public23-native-final | 5 | 0 | 0 | 0 | 52 | 84 | 0 |

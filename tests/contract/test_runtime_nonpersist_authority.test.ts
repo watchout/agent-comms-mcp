@@ -8,6 +8,7 @@ import { buildRuntimeInventoryReport } from '../../core/runtime-inventory'
 import { heartbeatRuntimeInstance } from '../../core/runtime-heartbeat'
 import { evaluateRuntimeMemoryReadyGate } from '../../core/runtime-memory-ready'
 import { inspectHostRuntime } from '../../core/host-runtime-observer'
+import { processStartUpperBoundMs } from '../../core/process-start-time'
 import { resolveRuntimeEndpoint, releaseRuntimeEndpoint } from '../../core/runtime-endpoint'
 
 async function setup() {
@@ -51,6 +52,37 @@ test('NP03 lease-write failure rolls back the new logical anchor; only the owned
   expect(await x.f.query('SELECT * FROM agent_runtime_instances')).toEqual([])
   expect(await x.f.query('SELECT * FROM control_plane_leases')).toEqual([])
   expect(inspectHostRuntime({agentId:x.host.agentId}).observations).toHaveLength(1)
+ }finally{await x.close()}
+},30000)
+
+test('second-resolution OS start acquisition waits for a provable grant and preserves renewal time',async()=>{
+ const x=await setup();try {
+  const inspect:typeof inspectHostRuntime=input=>{
+   const actual=inspectHostRuntime(input)
+   return {...actual,observations:actual.observations.map(o=>({...o,process_started_at:new Date(Date.parse(o.process_started_at)).toISOString().slice(0,19)+'Z'}))}
+  }
+  const started=inspect({agentId:x.host.agentId}).observations[0].process_started_at
+  const acquired=await heartbeatRuntimeInstance(x.db,x.input,{inspect})
+  const before=(await x.f.query('SELECT acquired_at FROM control_plane_leases'))[0].acquired_at
+  expect(new Date(before).getTime()).toBeGreaterThanOrEqual(processStartUpperBoundMs(started))
+  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect})).ok).toBe(true)
+  await heartbeatRuntimeInstance(x.db,x.input,{inspect,lease:{leaseId:acquired.endpoint_lease_id!,fencingToken:acquired.endpoint_lease_fencing_token}})
+  expect((await x.f.query('SELECT acquired_at FROM control_plane_leases'))[0].acquired_at).toEqual(before)
+  await x.f.query('UPDATE control_plane_leases SET acquired_at=$1',[new Date(processStartUpperBoundMs(started)-1)])
+  expect((await resolveRuntimeEndpoint(x.db,{agentId:x.host.agentId,inspect})).ok).toBe(false)
+ }finally{await x.close()}
+},30000)
+
+test('holder replacement during acquisition rolls back before authority is committed',async()=>{
+ const x=await setup();try {
+  let reads=0
+  const inspect:typeof inspectHostRuntime=input=>{
+   const actual=inspectHostRuntime(input)
+   return ++reads<4?actual:{...actual,observations:actual.observations.map(o=>({...o,process_id:o.process_id+1}))}
+  }
+  await expect(heartbeatRuntimeInstance(x.db,x.input,{inspect})).rejects.toThrow('RUNTIME_CURRENT_HOLDER_CHANGED')
+  expect(await x.f.query('SELECT * FROM control_plane_leases')).toEqual([])
+  expect(await x.f.query('SELECT * FROM agent_runtime_instances')).toEqual([])
  }finally{await x.close()}
 },30000)
 

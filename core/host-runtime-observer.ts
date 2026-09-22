@@ -97,7 +97,9 @@ function hostRuntimeObserver(adapter: HostRuntimeIo, native:boolean) {
         if(field(env,'AGENT_COM_EXPECTED_AGENT_ID')!==input.agentId) return fail('SEAT_IDENTITY_MISMATCH')
         const declared=field(env,'AGENT_COM_WORKSPACE'), session=field(env,'AGENT_COM_RUNTIME_SESSION')
         if(!declared || !session) return fail('RUNTIME_IDENTITY_INCOMPLETE')
-        const processStart=()=>adapter.processStart?.(candidate.pid) ?? start(run('ps',['-p',String(candidate.pid),'-o','lstart=']))
+        // lstart reports whole seconds. Preserve that uncertainty for the
+        // authority check instead of padding it into false millisecond precision.
+        const processStart=()=>adapter.processStart?.(candidate.pid) ?? start(run('ps',['-p',String(candidate.pid),'-o','lstart='])).replace(/\.000Z$/, 'Z')
         const before=processStart()
         const cwd=run('lsof',['-a','-p',String(candidate.pid),'-d','cwd','-Fn']).split('\n').find(l=>l.startsWith('n'))?.slice(1)
         if(!cwd || adapter.canonical(cwd)!==adapter.canonical(declared)
