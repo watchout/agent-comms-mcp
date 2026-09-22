@@ -125,7 +125,7 @@ test('outbox lock wait beyond lease expiry supersedes zero rows', async () => {
   try {
     const current = await advance(s, 2), lease = (await s.leases.acquire(current.agentId))!
     await monitor.query('SELECT 1')
-    const [expiry] = await s.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '5 seconds' WHERE lease_id=$1 RETURNING expires_at", [lease.lease_id])
+    const [expiry] = await s.f.query("UPDATE control_plane_leases SET expires_at=clock_timestamp()+interval '5 seconds' WHERE lease_id=$1 RETURNING expires_at::text AS expires_at", [lease.lease_id])
     await s.f.exec('BEGIN')
     await s.f.query('SELECT event_id FROM aun_configuration_desired_outbox WHERE desired_revision<$1 FOR UPDATE', [current.desiredRevision])
     const waitSql = "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'WITH authority AS MATERIALIZED%'"
@@ -147,7 +147,7 @@ test('outbox lock wait beyond lease expiry supersedes zero rows', async () => {
     let expired = false
     const expiryDeadline = Date.now() + 10000
     while (Date.now() < expiryDeadline) {
-      expired = Boolean((await monitor.query<{expired:boolean}>('SELECT clock_timestamp()>$1::timestamptz AS expired',[expiry.expires_at]))[0].expired)
+      expired = Boolean((await monitor.query<{expired:boolean}>('SELECT clock_timestamp()>expires_at AS expired FROM control_plane_leases WHERE lease_id=$1',[lease.lease_id]))[0].expired)
       if(expired)break
       await Bun.sleep(20)
     }
