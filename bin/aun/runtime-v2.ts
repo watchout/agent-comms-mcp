@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createDbAdapter, PgAdapter, SqliteAdapter, type DbAdapter } from '../../core/db'
+import { resolveEngineTimeoutMs } from '../../core/queue-work-timeout'
 import {
   AUN_RUNTIME_V2_CLAIM_SOURCE,
   buildAunRuntimeV2Plan,
@@ -163,13 +164,6 @@ function execFileAsync(
   })
 }
 
-function positiveExecutionTimeoutMs(raw: string | undefined): number {
-  const value = Number(raw ?? '600000')
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error('AUN queue-work execution timeout must be a finite positive integer')
-  }
-  return value
-}
 
 class EchoRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'echo'
@@ -234,9 +228,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
   ) {
-    this.execution_timeout_ms = positiveExecutionTimeoutMs(
-      env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? env.AUN_QUEUE_WORK_TIMEOUT_MS,
-    )
+    this.execution_timeout_ms = resolveEngineTimeoutMs(env, 'codex')
   }
 
   async invoke(envelope: QueueWorkEnvelope, opts?: { signal?: AbortSignal }): Promise<QueueWorkResult> {
@@ -296,7 +288,7 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
   ) {
-    this.execution_timeout_ms = positiveExecutionTimeoutMs(env.AUN_QUEUE_WORK_TIMEOUT_MS)
+    this.execution_timeout_ms = resolveEngineTimeoutMs(env, 'generic')
   }
 
   async invoke(envelope: QueueWorkEnvelope, opts?: { signal?: AbortSignal }): Promise<QueueWorkResult> {

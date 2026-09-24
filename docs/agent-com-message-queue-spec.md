@@ -1657,6 +1657,7 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 - progress の定義は「**queue 系 metric family の emission**」と厳密に等価: `state_daemon_queue_work_actions_total` / `state_daemon_memory_ready_backoff_total` / `state_daemon_state_actions_total`。実装は metric sink を wrap して emission 時刻を記録する(sweep 完了や関数入口は progress ではない)
 - check は `STATE_DAEMON_SELF_LIVENESS_CHECK_INTERVAL_MS`(default 60s)ごと。**eligible pending**(shared automatic-processing eligibility を通過した fence 内 pending)が存在するのに progress が `STATE_DAEMON_SELF_LIVENESS_WEDGE_SEC`(default 600s)超停止 → strike。連続 `STATE_DAEMON_SELF_LIVENESS_MAX_STRIKES`(default 3)回で exit 判定へ
 - **strike しない条件**: eligible pending 0(暇・正当な非対象は wedge でない)/ check 自身の DB エラー(D4: 依存断は daemon の罪ではない)。gate による正当な保留は backoff metric を emit するため progress として扱われる
+- **slot-wedge signal(E7 連動)**: 全 runner slot が占有されたまま acquire/release が「**最大の正当な runner 寿命(`queueWorkRunnerTimeoutMs` = STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS / CODEX / CLAUDE の最大値、default 600s)+ wedge 猶予**」を超えて発生しない場合、queue-progress marker の鮮度に関係なく strike する。child 予算内の正当な長時間実行は決して trip しない(slot が自分の child timeout を超えて生きている = timeout 機構自体の故障の証明)。strike alert は実原因(slot 占有時間と予算)を明記する。deferral metric(`state_daemon_queue_work_backpressure_total`)は progress family の**外**
 
 **D3 — 回復の有界性(durable exit ledger)**
 
@@ -1680,6 +1681,18 @@ state-daemon は決定論スクリプトであり、合法な故障モードは�
 - DB 外の外部 effect(GitHub comment 等)は mediated writeback の冪等性契約に依存する。crash window での二重 effect を疑う場合は queue row の runner_result evidence を照合する
 
 初出 incident: 2026-08-27 18:05 JST、queue-work scheduler のみが無痕跡で沈黙し他コンポーネントは生存、外形から検知不能だった(#940)。regression: `tests/state-daemon-self-liveness.test.ts` の「D2 binding」test が本署名(非 queue metric は流れ続け queue family のみ沈黙)を固定する。
+
+### 13.5.5 Bounded concurrent runners (E7, Issue #940 definition v2)
+
+queue-work runner child の同時実行数を `STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS` で制限する。
+
+- **初期値 3 は owner 明示選択**(OD-SD-940-E7-BOUND3-ROLLOUT-20260830-001)。rollout: 配備後最初の日次配信 2 サイクルで実測最大同時数 / typed 終端率 / 排出所要時間 / output-missing / operator 介入数を publish し、R1 述語未達なら**値の変更**で見直す。rollback は bound 値変更のみ(env 除去 = 無制限回帰は禁止)
+- 上限超過の行は **pending のまま**残り次 sweep で再評価。deferral は `state_daemon_queue_work_backpressure_total{result=*_runner_concurrency_deferred}` に emit する — この metric は **§13.5.4 D2 progress family の外**(deferral は progress ではない。all-slots-hung の隠蔽防止)。試行回数・claim・行 bytes を一切消費しない
+- **Shirube D1 dispatch も同じ global slot pool に従う**(deferral は `d1_runner_concurrency_deferred`)。slot key は namespace 分離(`agent:<id>` / `d1:<queue_id>`)で衝突しない。per-agent 直列性は上限の内側で従来どおり
+- caller 会計: schedule 結果が `invoked` の時のみ acted=true / sweep `rewoken` に計上(deferral を「実行した」と数えない)
+- knob は strict env loader 経由(unset=default 3 / malformed・0・負値・少数 = **起動失敗**)
+- **timeout resolver の一本化(L2 cycle-3 F1)**: runner child の実行 timeout と daemon の slot-wedge 予算は `core/queue-work-timeout.ts` の**単一 resolver** から導出する(構造的に乖離不能)。canonical precedence は「engine 固有 > generic、各層内で AUN > STATE」: `AUN_<ENGINE>_TIMEOUT_MS > STATE_DAEMON_<ENGINE>_TIMEOUT_MS > AUN_QUEUE_WORK_TIMEOUT_MS > STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS > 600000`。slot 予算 = 全 engine 解決値の最大。旧 Claude 経路の「generic AUN が engine STATE に勝つ」逆転は本 normalization で廃止。malformed/非正値は両側で typed error(daemon = DB 接続前に起動失敗、runner = QUEUE_WORK_TIMEOUT_CONFIG_INVALID の typed 失敗)。unset は default 600000(明文 fallback)。custom runner(`runtime=command-json` の `CommandJsonRuntimeAdapter`)も同 resolver の generic 値を構築時に消費し、inline parse は runner child のどの経路にも残さない(L2 cycle-4 F1)
+- 根拠 incident: 2026-08-27 fleet 初日、無制限並列で LLM CLI 13 個が並走し 10 席超が `CODEX_OUTPUT_LAST_MESSAGE_MISSING`(#940)。日次一斉配信(毎日 2 回 × 全席)が同 burst を恒常再現するため、上限は R1(日次サイクル完走)の前提条件
 
 ### 13.6 Presence Client
 

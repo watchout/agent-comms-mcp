@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createDbAdapter } from '../../core/db'
+import { resolveEngineTimeoutMs } from '../../core/queue-work-timeout'
 import {
   QUEUE_WORK_RESULT_VERSION,
   finalizeDoneQueueWork,
@@ -664,7 +665,7 @@ class CodexExecRuntimeAdapter implements LlmRuntimeAdapter {
         cwd: this.cwd,
         env: this.env,
         input: plan.stdin,
-        timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_CODEX_TIMEOUT_MS ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+        timeout: resolveEngineTimeoutMs(this.env, 'codex'),
         maxBuffer: 1024 * 1024 * 20,
       })
       if (child.status !== 0) {
@@ -814,14 +815,7 @@ export class ClaudeCodeRuntimeAdapter implements LlmRuntimeAdapter {
       cwd: this.cwd,
       env: this.env,
       input: plan.stdin,
-      timeout: Number.parseInt(
-        this.env.AUN_QUEUE_WORK_CLAUDE_TIMEOUT_MS
-          ?? this.env.AUN_QUEUE_WORK_TIMEOUT_MS
-          ?? this.env.STATE_DAEMON_QUEUE_WORK_CLAUDE_TIMEOUT_MS
-          ?? this.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS
-          ?? '600000',
-        10,
-      ),
+      timeout: resolveEngineTimeoutMs(this.env, 'claude'),
       maxBuffer: 1024 * 1024 * 20,
     })
     if (child.status !== 0) {
@@ -860,7 +854,16 @@ class FailClosedRuntimePreferenceAdapter implements LlmRuntimeAdapter {
   }
 }
 
-class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
+/**
+ * Custom runner child (`runtime=command-json`). Its execution budget is the
+ * shared generic value from `core/queue-work-timeout.ts`, resolved once at
+ * construction: the same resolver the daemon slot-wedge budget reads, so a
+ * custom child cannot outlive what the daemon believes and a malformed
+ * `AUN_QUEUE_WORK_TIMEOUT_MS` / `STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS` is a
+ * typed `QUEUE_WORK_TIMEOUT_CONFIG_INVALID` failure before any child spawns
+ * (PR #958 L2 cycle-4 F1 — this adapter was the last inline parser).
+ */
+export class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
   runtime_id = 'command-json'
   capabilities = {
     input: 'stdin_prompt',
@@ -872,19 +875,24 @@ class CommandJsonRuntimeAdapter implements LlmRuntimeAdapter {
     supportsUsageMetadata: false,
   } as const
 
+  /** Finite wall-clock bound shared with the daemon slot budget (generic engine tier). */
+  readonly execution_timeout_ms: number
+
   constructor(
     private readonly command: string,
     private readonly args: string[],
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
-  ) {}
+  ) {
+    this.execution_timeout_ms = resolveEngineTimeoutMs(env, 'generic')
+  }
 
   async invoke(envelope: QueueWorkEnvelope): Promise<QueueWorkResult> {
     const child = await execFileAsync(this.command, this.args, {
       cwd: this.cwd,
       env: this.env,
       input: JSON.stringify(envelope) + '\n',
-      timeout: Number.parseInt(this.env.AUN_QUEUE_WORK_TIMEOUT_MS ?? '600000', 10),
+      timeout: this.execution_timeout_ms,
       maxBuffer: 1024 * 1024 * 20,
     })
     if (child.status !== 0) {

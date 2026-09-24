@@ -73,6 +73,7 @@ import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
 import { reconcileRuntimeMemoryReadyFleetIdentity } from '../core/runtime-memory-ready-identity'
 import { DEFAULT_CONFIG } from '../core/state-daemon/types'
+import { resolveQueueWorkTimeouts } from '../core/queue-work-timeout'
 import type {
   AlertSink,
   DBClient,
@@ -676,6 +677,7 @@ export function loadSelfLivenessEnvOverrides(env: NodeJS.ProcessEnv = process.en
   strict('STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', 'selfLivenessMinExitIntervalSec')
   strict('STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', 'selfLivenessExitWindowSec')
   strict('STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', 'selfLivenessMaxExitsPerWindow')
+  strict('STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS', 'queueWorkMaxConcurrentRunners')
   return { overrides, errors }
 }
 
@@ -687,6 +689,7 @@ export function validateSelfLivenessConfig(cfg: {
   selfLivenessMinExitIntervalSec: number
   selfLivenessExitWindowSec: number
   selfLivenessMaxExitsPerWindow: number
+  queueWorkMaxConcurrentRunners: number
 }): string[] {
   const errors: string[] = []
   const positive: Array<[string, number]> = [
@@ -696,6 +699,7 @@ export function validateSelfLivenessConfig(cfg: {
     ['STATE_DAEMON_SELF_LIVENESS_MIN_EXIT_INTERVAL_SEC', cfg.selfLivenessMinExitIntervalSec],
     ['STATE_DAEMON_SELF_LIVENESS_EXIT_WINDOW_SEC', cfg.selfLivenessExitWindowSec],
     ['STATE_DAEMON_SELF_LIVENESS_MAX_EXITS_PER_WINDOW', cfg.selfLivenessMaxExitsPerWindow],
+    ['STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS', cfg.queueWorkMaxConcurrentRunners],
   ]
   for (const [name, value] of positive) {
     if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
@@ -764,6 +768,8 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('budgetWarnMs', num('STATE_DAEMON_BUDGET_WARN_MS'))
   set('heartbeatIntervalMs', num('STATE_DAEMON_HEARTBEAT_INTERVAL_MS'))
   set('selfLivenessExitDisabled', bool('STATE_DAEMON_SELF_LIVENESS_EXIT_DISABLED'))
+  // STATE_DAEMON_QUEUE_WORK_MAX_CONCURRENT_RUNNERS loads via the strict
+  // loader (fail-closed on malformed values) — merged and validated in main()
   // numeric self-liveness knobs load via loadSelfLivenessEnvOverrides (strict,
   // fail-closed on malformed values) — merged and validated in main()
   set('claimTtlSec', num('STATE_DAEMON_CLAIM_TTL_SEC'))
@@ -1163,26 +1169,40 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   }
 }
 
+/**
+ * F2 (PR #958 L2): strict knob load + validation runs BEFORE any DB client
+ * construction or connect — an invalid knob must fail the process with the
+ * config error, never with an unrelated connection error first.
+ * F1 (L2 cycle-3): the slot-wedge budget comes from the SAME resolver the
+ * runner children consume (core/queue-work-timeout.ts), so daemon belief and
+ * child reality cannot diverge; malformed timeout envs fail startup here.
+ */
+export function loadValidatedStartupConfig(env: NodeJS.ProcessEnv = process.env): Partial<StateDaemonConfig> {
+  const config = loadConfig()
+  const { overrides, errors } = loadSelfLivenessEnvOverrides(env)
+  Object.assign(config, overrides)
+  const timeouts = resolveQueueWorkTimeouts(env)
+  config.queueWorkRunnerTimeoutMs = timeouts.maxLegitimateRunnerTimeoutMs
+  const merged = { ...DEFAULT_CONFIG, ...config }
+  const invariantErrors = validateSelfLivenessConfig(merged)
+  const selfLivenessErrors = [...errors, ...timeouts.errors, ...invariantErrors]
+  if (selfLivenessErrors.length > 0) {
+    throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
+  }
+  return config
+}
+
 export async function main(): Promise<void> {
   assertStateDaemonDirectEntryArgv(process.argv.slice(2))
   // Fail before DB connection, daemon construction, LISTEN, or any runtime
   // effect when a host allowlist lacks the complete Issue #917 overlay.
   assertStateDaemonDirectEntryEnv(process.env)
+  // Strict config + timeout validation (F2/F1) precedes the DB client open.
+  const config = loadValidatedStartupConfig(process.env)
   const connStr = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
   const queryClient = new Client({ connectionString: connStr })
   await queryClient.connect()
   const db = new PgClientAdapter(queryClient)
-  const config = loadConfig()
-  {
-    const { overrides, errors } = loadSelfLivenessEnvOverrides(process.env)
-    Object.assign(config, overrides)
-    const merged = { ...DEFAULT_CONFIG, ...config }
-    const invariantErrors = validateSelfLivenessConfig(merged)
-    const selfLivenessErrors = [...errors, ...invariantErrors]
-    if (selfLivenessErrors.length > 0) {
-      throw new Error(`self-liveness config invalid (fail-closed):\n${selfLivenessErrors.join('\n')}`)
-    }
-  }
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(
