@@ -7,6 +7,19 @@
 - Build handoff: #794 comment 4911246042 (owner → implementation, 2026-07-08)
 - Cutover to the running daemon is a **protected surface: owner GO required**
 
+## V2-TRIM-001: remove the one-off exact canary
+
+Under [#970](https://github.com/watchout/agent-comms-mcp/issues/970), retain
+the [7/9 demonstrated receive → worker → reply path](https://github.com/watchout/agent-comms-mcp/issues/794#issuecomment-4924913779).
+Remove `bin/aun/v2-exact-canary.ts` and its dedicated exact-tuple importer,
+claim/recovery and deterministic-no-reply worker. These existed only for
+the one-off canary; no replacement command or archived implementation is added.
+Keep the normal V1 importer until cutover, the pull-claim worker, transactional
+reply outbox, and restart/fencing acceptance tests. Future canary execution
+uses the worker for one seat under its separate cutover authorization.
+This is the first deletion slice; #970's total line/event budgets, remaining
+deletions, database-copy transcript and independent acceptance remain open.
+
 ## What this is
 
 A NEW core, decoupled from V1's mutable-status machine. State is never
