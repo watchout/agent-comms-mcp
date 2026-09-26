@@ -14,6 +14,10 @@ import {
   type FleetCheckoutDriftResult,
 } from './fleet-checkout-drift'
 import { authoritativeProfileClassification } from './profile-classification'
+import {
+  parseRuntimeProviderObservation,
+} from './runtime-current-provider-resolver'
+import type { RuntimeProviderEngine } from './runtime-heartbeat'
 
 export type BootstrapRuntimeKind = 'codex' | 'claude'
 
@@ -84,6 +88,16 @@ export type RuntimeInventoryAgent = {
   latest_runtime_instance_id: string | null
   runtime_status: string | null
   runtime_engine: string | null
+  stored_runtime_preference: string | null
+  observed_provider: RuntimeProviderEngine | null
+  host_process_class: RuntimeProviderEngine | 'service_daemon' | 'unknown' | null
+  host_process_id: number | null
+  host_process_image: string | null
+  observed_session: string | null
+  observed_workspace: string | null
+  session_match: boolean | null
+  workspace_match: boolean | null
+  provider_drift: boolean | null
   runtime_kind: string | null
   session_name: string | null
   process_id: number | null
@@ -153,6 +167,7 @@ export type RuntimeInventoryReport = {
     runtime_instances: number
     fresh_runtimes: number
     stale_runtimes: number
+    provider_drifts: number
     connectors: number
     active_connectors: number
     active_bindings: number
@@ -502,6 +517,20 @@ function normalizeString(raw: unknown): string | null {
   return value.length > 0 ? value : null
 }
 
+function normalizeProviderEngine(raw: unknown): RuntimeProviderEngine | null {
+  const value = normalizeString(raw)?.toLowerCase()
+  if (value === 'claude' || value === 'claude-code' || value === 'claude-exec') return 'claude-code'
+  if (value === 'codex' || value === 'codex-exec') return 'codex'
+  return null
+}
+
+function hostProcessClass(image: string | null, provider: RuntimeProviderEngine | null): RuntimeInventoryAgent['host_process_class'] {
+  if (provider) return provider
+  const executable = image?.replace(/\\/g, '/').split('/').at(-1)?.toLowerCase().replace(/\.exe$/, '') ?? ''
+  if (executable === 'launchd' || executable === 'systemd') return 'service_daemon'
+  return image ? 'unknown' : null
+}
+
 function isStoppedStatus(status: string | null): boolean {
   return ['stopped', 'disabled', 'offline', 'disconnected', 'failed'].includes(status ?? '')
 }
@@ -559,7 +588,8 @@ function blockerFromWarning(agentId: string, warning: string): string | null {
 async function queryAgentRows(db: DbAdapter): Promise<any[]> {
   try {
     return await db.query(
-      `SELECT agent_id, agent_type, runtime, status
+      `SELECT agent_id, agent_type, runtime, status, runtime_engine_preference,
+              home_directory, metadata
          FROM agents
         ORDER BY agent_id`,
     )
@@ -567,7 +597,8 @@ async function queryAgentRows(db: DbAdapter): Promise<any[]> {
     const message = err instanceof Error ? err.message : String(err)
     if (!/runtime/i.test(message)) throw err
     return await db.query(
-      `SELECT agent_id, agent_type, cli_type AS runtime, status
+      `SELECT agent_id, agent_type, cli_type AS runtime, status, runtime_engine_preference,
+              home_directory, metadata
          FROM agents
         ORDER BY agent_id`,
     )
@@ -663,14 +694,51 @@ export async function buildRuntimeInventoryReport(
       approvedCheckoutRoots,
     })
     const warnings = runtimeWarningsForDrift(latest, freshness, checkoutDrift)
+    const latestRuntimeId = normalizeString(latest?.runtime_instance_id)
+    const latestMetadata = metadataObject(latest?.metadata)
+    const providerObservation = latestRuntimeId
+      ? parseRuntimeProviderObservation(latestMetadata.provider_observation, {
+          agentId,
+          runtimeInstanceId: latestRuntimeId,
+        })
+      : null
+    const storedRuntimePreference = normalizeString(row.runtime_engine_preference)
+    const normalizedStoredProvider = normalizeProviderEngine(storedRuntimePreference)
+    const observedProvider = providerObservation?.provider_engine ?? null
+    const registeredMetadata = metadataObject(row.metadata)
+    const registeredSession = normalizeString(registeredMetadata.tmux_session)
+    const registeredWorkspace = normalizeString(row.home_directory)
+    const sessionMatch = providerObservation
+      ? registeredSession !== null && providerObservation.observed_session === registeredSession
+      : null
+    const workspaceMatch = providerObservation
+      ? registeredWorkspace !== null && providerObservation.observed_workspace === registeredWorkspace
+      : null
+    const providerDrift = normalizedStoredProvider && observedProvider
+      ? normalizedStoredProvider !== observedProvider
+      : null
+    if (latest && !providerObservation) warnings.push('runtime_provider_observation_missing')
+    if (providerDrift) warnings.push('runtime_provider_preference_drift')
+    if (sessionMatch === false) warnings.push('runtime_host_process_mismatch')
+    if (workspaceMatch === false) warnings.push('runtime_workspace_mismatch')
     return {
       agent_id: agentId,
       agent_status: String(row.status ?? ''),
       declared_runtime: String(row.runtime ?? ''),
       runtime_instance_count: runtimes.length,
-      latest_runtime_instance_id: latest ? String(latest.runtime_instance_id) : null,
+      latest_runtime_instance_id: latestRuntimeId,
       runtime_status: normalizeString(latest?.status),
       runtime_engine: normalizeString(latest?.runtime_engine),
+      stored_runtime_preference: storedRuntimePreference,
+      observed_provider: observedProvider,
+      host_process_class: hostProcessClass(providerObservation?.host_process_image ?? null, observedProvider),
+      host_process_id: providerObservation?.host_process_id ?? null,
+      host_process_image: providerObservation?.host_process_image ?? null,
+      observed_session: providerObservation?.observed_session ?? null,
+      observed_workspace: providerObservation?.observed_workspace ?? null,
+      session_match: sessionMatch,
+      workspace_match: workspaceMatch,
+      provider_drift: providerDrift,
       runtime_kind: normalizeString(latest?.runtime_kind),
       session_name: normalizeString(latest?.session_name),
       process_id: latest?.process_id === null || latest?.process_id === undefined ? null : Number(latest.process_id),
@@ -817,6 +885,7 @@ export async function buildRuntimeInventoryReport(
       runtime_instances: runtimeRows.length,
       fresh_runtimes: agents.filter((agent) => agent.freshness === 'fresh').length,
       stale_runtimes: agents.filter((agent) => agent.freshness === 'stale').length,
+      provider_drifts: agents.filter((agent) => agent.provider_drift === true).length,
       connectors: connectors.length,
       active_connectors: connectors.filter((connector) => connector.status === 'active').length,
       active_bindings: bindings.filter((binding) => binding.status === 'active').length,
@@ -835,13 +904,13 @@ export async function buildRuntimeInventoryReport(
 export function formatRuntimeInventoryText(report: RuntimeInventoryReport): string {
   const lines = [
     'Runtime Inventory',
-    `Agents: ${report.summary.agents}, runtime instances: ${report.summary.runtime_instances}, fresh: ${report.summary.fresh_runtimes}, stale: ${report.summary.stale_runtimes}`,
+    `Agents: ${report.summary.agents}, runtime instances: ${report.summary.runtime_instances}, fresh: ${report.summary.fresh_runtimes}, stale: ${report.summary.stale_runtimes}, provider drifts: ${report.summary.provider_drifts}`,
     `Connectors: ${report.summary.connectors}, active connectors: ${report.summary.active_connectors}, active bindings: ${report.summary.active_bindings}, policy gaps: ${report.summary.policy_gaps}`,
     '',
     'Runtime Evidence:',
   ]
   for (const agent of report.agents) {
-    lines.push(`  ${agent.agent_id}: freshness=${agent.freshness} runtime=${agent.latest_runtime_instance_id ?? '-'} commit=${agent.commit_sha ?? '-'} session=${agent.session_name ?? '-'}${agent.warnings.length ? ` warnings=${agent.warnings.join(',')}` : ''}`)
+    lines.push(`  ${agent.agent_id}: freshness=${agent.freshness} runtime=${agent.latest_runtime_instance_id ?? '-'} commit=${agent.commit_sha ?? '-'} session=${agent.session_name ?? '-'} stored_provider=${agent.stored_runtime_preference ?? '-'} observed_provider=${agent.observed_provider ?? '-'} host=${agent.host_process_class ?? '-'} session_match=${agent.session_match ?? '-'} workspace_match=${agent.workspace_match ?? '-'} drift=${agent.provider_drift ?? '-'}${agent.warnings.length ? ` warnings=${agent.warnings.join(',')}` : ''}`)
   }
   lines.push('', 'Connectors:')
   for (const connector of report.connectors) {
