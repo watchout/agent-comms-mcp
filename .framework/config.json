@@ -1,0 +1,57 @@
+{
+  "provider": {
+    "default": "claude"
+  },
+  "docs_layers": {
+    "enabled": true
+  },
+  "roles": {
+    "bindings": {
+      "architecture_owner": {
+        "type": "external",
+        "id": "todo-architecture-owner",
+        "placeholder": true
+      },
+      "l3_governance_owner": {
+        "type": "external",
+        "id": "todo-l3-governance-owner",
+        "placeholder": true
+      },
+      "implementation_lead": {
+        "type": "external",
+        "id": "todo-implementation-lead",
+        "placeholder": true
+      },
+      "reviewer": {
+        "type": "external",
+        "id": "todo-reviewer",
+        "placeholder": true
+      },
+      "auditor": {
+        "type": "external",
+        "id": "todo-auditor",
+        "placeholder": true
+      },
+      "release_owner": {
+        "type": "external",
+        "id": "todo-release-owner",
+        "placeholder": true
+      },
+      "human_approver": {
+        "type": "external",
+        "id": "todo-human-approver",
+        "placeholder": true
+      },
+      "worker_pool": {
+        "type": "local_agent",
+        "id": "dev-001"
+      }
+    }
+  },
+  "workflow": {
+    "publishPolicy": "draft_only",
+    "outputs": [
+      "local_files"
+    ]
+  }
+}
