@@ -1,9 +1,11 @@
+import * as hostObserver from '../core/host-runtime-observer'
+import {unitRuntimeObservation,unitRuntimeId} from './helpers/logical-runtime-unit-fixture'
 /**
  * ADR-029R §5 Phase 1 identity resolver — the five fail-closed negative
  * cases (binding for the spike chain per ARC review condition 3) plus the
  * positive paths. Runs against real Postgres with sd-test- isolation.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, spyOn } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,12 +20,15 @@ const WORKSPACE_ID = `${PREFIX}-ws`
 let pg: PgClient
 let db: IdentityDb
 let workspaceDir: string
+let observedWorkspace: string
 
 function declareIdentity(dir: string, agentId: string): void {
   mkdirSync(join(dir, '.agent'), { recursive: true })
   writeFileSync(join(dir, '.agent', 'identity.json'), JSON.stringify({ agent_id: agentId, project: 'idres-test' }))
 }
 
+let observationSpy:ReturnType<typeof spyOn>
+afterAll(()=>observationSpy?.mockRestore())
 beforeAll(async () => {
   pg = new PgClient({ connectionString: DATABASE_URL })
   await pg.connect()
@@ -36,16 +41,23 @@ beforeAll(async () => {
 
   workspaceDir = realpathSync(mkdtempSync(join(tmpdir(), 'idres-ws-')))
 
+  observedWorkspace=workspaceDir
+  observationSpy=spyOn(hostObserver,'inspectHostRuntime').mockImplementation(input=>({reasonCode:'OBSERVED',
+    observations:[unitRuntimeObservation(input.agentId,{workspace:observedWorkspace})]}))
   await pg.query(
-    `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status)
-     VALUES ($1, 'default', $1, 'dev', 'TUI', 'idle') ON CONFLICT (agent_id) DO NOTHING`,
+    `INSERT INTO agents (agent_id, org_id, display_name, agent_type)
+     VALUES ($1, 'default', $1, 'dev') ON CONFLICT (agent_id) DO NOTHING`,
     [AGENT],
   )
+  await pg.query(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind) VALUES($1,$2,'local_process')`,[unitRuntimeId(AGENT),AGENT])
+  await pg.query(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at)
+    VALUES($1::uuid,'runtime_instance',$1::text,'worker',$2,$1::uuid,1,'active',clock_timestamp(),clock_timestamp()+interval '1 hour')`,[unitRuntimeId(AGENT),AGENT])
+
   await pg.query(
-    `INSERT INTO agent_workspaces (workspace_id, org_id, name, workspace_type, local_path)
-     VALUES ($1, 'default', $1, 'local_path', $2)
-     ON CONFLICT (workspace_id) DO UPDATE SET local_path = EXCLUDED.local_path`,
-    [WORKSPACE_ID, workspaceDir],
+    `INSERT INTO agent_workspaces (workspace_id, org_id, name, workspace_type)
+     VALUES ($1, 'default', $1, 'project')
+     ON CONFLICT (workspace_id) DO NOTHING`,
+    [WORKSPACE_ID],
   )
   await pg.query(
     `INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
@@ -58,6 +70,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await pg.query(`DELETE FROM agent_workspace_bindings WHERE workspace_id = $1`, [WORKSPACE_ID])
   await pg.query(`DELETE FROM agent_workspaces WHERE workspace_id = $1`, [WORKSPACE_ID])
+  await pg.query('DELETE FROM control_plane_leases WHERE holder_agent_id=$1',[AGENT])
+  await pg.query('DELETE FROM agent_runtime_instances WHERE agent_id=$1',[AGENT])
   await pg.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${PREFIX}%`])
   await pg.end()
   rmSync(workspaceDir, { recursive: true, force: true })
@@ -185,5 +199,29 @@ describe('dev mode relaxation (explicitly not fleet behavior)', () => {
     })
     expect(ghost.ok).toBe(false)
     if (!ghost.ok) expect(ghost.reason).toBe('agent_not_registered')
+  })
+})
+
+
+describe('logical workspace and fresh runtime authority', () => {
+  test('copied declaration fails until the current authorized holder moves to that workspace', async () => {
+    const moved = realpathSync(mkdtempSync(join(tmpdir(),'idres-moved-')))
+    try {
+      declareIdentity(moved,AGENT)
+      writeFileSync(join(moved,'.agent/identity.json'),JSON.stringify({agent_id:AGENT,workspace_id:WORKSPACE_ID}))
+      expect((await resolveAgentIdentity(db,{cwd:moved,env:{},mode:'fleet'})).ok).toBe(false)
+      observedWorkspace=moved
+      const current=await resolveAgentIdentity(db,{cwd:moved,env:{},mode:'fleet'})
+      expect(current).toMatchObject({ok:true,agent_id:AGENT,workspace_id:WORKSPACE_ID})
+      expect((await pg.query('SELECT local_path FROM agent_workspaces WHERE workspace_id=$1',[WORKSPACE_ID])).rows[0].local_path).toBeNull()
+    } finally { observedWorkspace=workspaceDir; rmSync(moved,{recursive:true,force:true}) }
+  })
+  test('a correct declaration and visible process cannot override an expired worker lease', async () => {
+    declareIdentity(workspaceDir,AGENT)
+    const lease=(await pg.query('SELECT expires_at FROM control_plane_leases WHERE lease_id=$1',[unitRuntimeId(AGENT)])).rows[0]
+    await pg.query("UPDATE control_plane_leases SET expires_at='2000-01-01' WHERE lease_id=$1",[unitRuntimeId(AGENT)])
+    try {expect((await resolveAgentIdentity(db,{cwd:workspaceDir,env:{},mode:'fleet'})).ok).toBe(false)}
+    finally {await pg.query('UPDATE control_plane_leases SET expires_at=$2 WHERE lease_id=$1',[unitRuntimeId(AGENT),lease.expires_at])}
+    expect((await resolveAgentIdentity(db,{cwd:workspaceDir,env:{},mode:'fleet'})).ok).toBe(true)
   })
 })

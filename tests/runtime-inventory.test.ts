@@ -1,7 +1,8 @@
-import { describe, expect, test } from 'bun:test'
+import { unitRuntimeAuthority, unitRuntimeObservation, unitRuntimeId } from './helpers/logical-runtime-unit-fixture'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
@@ -11,6 +12,8 @@ import {
   generateAllAgentCommunicationManifestCandidates,
 } from '../core/runtime-inventory'
 import { allAgentCommunicationTargetSha256 } from '../core/all-agent-communication-manifest'
+import * as seatSelection from '../core/seat-runtime-selection'
+import * as checkoutEvidence from '../core/git-checkout-evidence'
 
 const APPROVED_COMMIT = '540764dbc78bcd1bd9e12b11915f9b63d08de23b'
 const OTHER_COMMIT = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -25,19 +28,26 @@ function classificationMetadata(profileClass: 'production' | 'test') {
   }
 }
 
+let observedHotelCommit = APPROVED_COMMIT
 async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'agent-comms-runtime-'))
   const dbPath = join(dir, 'agent-comms.db')
   let adapter: SqliteAdapter | null = null
+  observedHotelCommit = APPROVED_COMMIT
+  const resolver = seatSelection.resolveSeatProvider
+  const providerSpy = spyOn(seatSelection, 'resolveSeatProvider').mockImplementation((db, input) => resolver(db, {...input, inspect: target =>
+    target.agentId === 'hotel-dev' ? {reasonCode:'OBSERVED',observations:[unitRuntimeObservation(target.agentId,{workspace:'/tmp/hotel'})]}
+      : {reasonCode:'NO_LIVE_RUNTIME',observations:[]} }))
+  const gitSpy = spyOn(checkoutEvidence, 'collectGitCheckoutEvidence').mockImplementation(path => ({checkout_path:path,commit_sha:observedHotelCommit,dirty:false,status_short:'',source:'git'}))
   try {
     migrateSqlite(dbPath)
     const seed = new Database(dbPath)
     seed.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, cli_type, status)
+      INSERT INTO agents (agent_id, display_name, agent_type)
       VALUES
-        ('hotel-dev', 'Hotel Dev', 'dev', 'TUI', 'idle'),
-        ('stale-dev', 'Stale Dev', 'dev', 'TUI', 'idle'),
-        ('gap-dev', 'Gap Dev', 'dev', 'TUI', 'idle');
+        ('hotel-dev', 'Hotel Dev', 'dev'),
+        ('stale-dev', 'Stale Dev', 'dev'),
+        ('gap-dev', 'Gap Dev', 'dev');
 
       INSERT INTO channels (id, name, type, members)
       VALUES
@@ -55,17 +65,21 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
         ('wrong-owner-channel', 'hotel-dev', 'hotel-dev', '["hotel-dev", "stale-dev"]'),
         ('gap-channel', 'gap-dev', 'gap-dev', '["gap-dev"]');
 
-      INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, checkout_path, commit_sha, status, last_seen_at, metadata)
-      VALUES
-        ('runtime-hotel', 'hotel-dev', 'codex', 'local_process', 'discord-hotel', 101, '/tmp/hotel', '${APPROVED_COMMIT}', 'active', datetime('now'), '{"git_dirty":false}'),
-        ('runtime-stale', 'stale-dev', 'codex', 'local_process', 'discord-stale', 202, '/tmp/stale', '${OTHER_COMMIT}', 'active', '2020-01-01T00:00:00Z', '{"git_dirty":true}');
+      INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind)
+      VALUES ('${unitRuntimeId('hotel-dev')}','hotel-dev','local_process'),
+             ('${unitRuntimeId('stale-dev')}','stale-dev','local_process');
+      INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,
+        holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at)
+      VALUES ('${unitRuntimeId('hotel-dev')}','runtime_instance','${unitRuntimeId('hotel-dev')}','worker',
+        'hotel-dev','${unitRuntimeId('hotel-dev')}',1,'active','2026-05-08T00:00:00Z','2099-01-01T00:00:00Z'),
+        ('${unitRuntimeId('stale-dev')}','runtime_instance','${unitRuntimeId('stale-dev')}','worker',
+        'stale-dev','${unitRuntimeId('stale-dev')}',1,'active','2026-05-08T00:00:00Z','2099-01-01T00:00:00Z');
 
       INSERT INTO connector_instances
         (connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri, status, trust_status)
       VALUES
-        ('connector-hotel', 'hotel-dev', 'runtime-hotel', 'discord', 'discord://agents/hotel-dev', 'active', 'local'),
-        ('connector-stale', 'stale-dev', 'runtime-stale', 'discord', 'discord://agents/stale-dev', 'active', 'local');
+        ('connector-hotel', 'hotel-dev', '${unitRuntimeId('hotel-dev')}', 'discord', 'discord://agents/hotel-dev', 'active', 'local'),
+        ('connector-stale', 'stale-dev', '${unitRuntimeId('stale-dev')}', 'discord', 'discord://agents/stale-dev', 'active', 'local');
 
       INSERT INTO channel_connector_bindings
         (channel_binding_id, channel_id, provider, connector_instance_id, binding_role, status)
@@ -80,13 +94,14 @@ async function withRuntimeDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<
     adapter = new SqliteAdapter(dbPath)
     return await fn(adapter)
   } finally {
+    providerSpy.mockRestore(); gitSpy.mockRestore()
     await adapter?.close()
     rmSync(dir, { recursive: true, force: true })
   }
 }
 
 describe('runtime inventory', () => {
-  test('reports runtime freshness, connector linkage, and policy projection gaps', async () => {
+  test('reports fresh runtime observation, unavailable holders, connector linkage and policy gaps', async () => {
     await withRuntimeDb(async (db) => {
       const report = await buildRuntimeInventoryReport(db, {
         staleMinutes: 60,
@@ -100,10 +115,10 @@ describe('runtime inventory', () => {
       expect(report.policy.db_is_source_of_truth).toBe(true)
       expect(hotel?.freshness).toBe('fresh')
       expect(hotel?.warnings).not.toContain('runtime_commit_mismatch')
-      expect(stale?.freshness).toBe('stale')
-      expect(stale?.warnings).toContain('runtime_stale')
-      expect(stale?.warnings).toContain('runtime_commit_mismatch')
-      expect(stale?.warnings).toContain('runtime_dirty_checkout')
+      expect(stale?.freshness).toBe('unknown')
+      expect(stale?.warnings).toContain('runtime_observation_unavailable')
+      expect(stale?.warnings).toContain('no_runtime_instance')
+      expect(stale?.warnings).not.toContain('runtime_dirty_checkout')
       expect(hotelConnector?.active_binding_count).toBe(3)
       expect(report.policy_gaps).toEqual([
         {
@@ -143,8 +158,8 @@ describe('runtime inventory', () => {
           active_binding_agents: ['stale-dev'],
         },
       ])
-      expect(report.blockers).toContain('stale-dev:runtime_stale')
-      expect(report.blockers).toContain('stale-dev:runtime_dirty_checkout')
+      expect(report.blockers).toContain('stale-dev:runtime_observation_unavailable')
+      expect(report.blockers).not.toContain('stale-dev:runtime_dirty_checkout')
       expect(report.blockers).toContain('bidirectional-channel:missing_active_binding')
       expect(report.blockers).toContain('gap-channel:missing_active_binding')
       expect(report.blockers).toContain('role-gap-channel:missing_active_binding')
@@ -191,7 +206,7 @@ describe('runtime inventory', () => {
 
   test('approved commit evidence requires a full SHA match', async () => {
     await withRuntimeDb(async (db) => {
-      await db.execute(`UPDATE agent_runtime_instances SET commit_sha = '${APPROVED_COMMIT.slice(0, 3)}' WHERE runtime_instance_id = 'runtime-hotel'`)
+      observedHotelCommit = APPROVED_COMMIT.slice(0, 3)
 
       const report = await buildRuntimeInventoryReport(db, {
         staleMinutes: 60,
@@ -209,6 +224,24 @@ describe('runtime inventory', () => {
 })
 
 describe('ordinary all-agent manifest candidate inventory', () => {
+  const resolveProvider = seatSelection.resolveSeatProvider
+  let providerSpy: ReturnType<typeof spyOn>
+  let observedProvider = 'codex'
+  let observedAgent = 'dev-001'
+  beforeEach(() => {
+    observedProvider = 'codex'
+    observedAgent = 'dev-001'
+    // Keep the production resolver and ancestry/identity parser. Only its OS snapshot
+    // dependency is supplied here; no CLI process, native receipt, or provider API runs.
+    providerSpy = spyOn(seatSelection, 'resolveSeatProvider').mockImplementation((db, input) =>
+      resolveProvider(db, { ...input, inspect: target => ({reasonCode:'OBSERVED', observations:[unitRuntimeObservation(target.agentId, {
+        agent_id:target.agentId==='dev-001'?observedAgent:target.agentId,
+        provider:observedProvider as 'codex'|'claude', workspace:`/work/${target.agentId}`,
+      })]}) }),
+    )
+  })
+  afterEach(() => providerSpy.mockRestore())
+
   function fakeManifestDb(
     includeUnresolvedNewSeat = false,
     liveRuntimeEngine = 'codex',
@@ -216,6 +249,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     includeUnclassifiedSeat = false,
   ) {
     const now = '2026-07-26T00:00:00Z'
+    observedProvider = liveRuntimeEngine
     return {
       async query(sql: string, params: unknown[] = []) {
         const agentId = String(params[0] ?? '')
@@ -241,19 +275,16 @@ describe('ordinary all-agent manifest candidate inventory', () => {
         if (/FROM channels c/.test(sql)) return []
         if (/FROM agent_workspace_bindings/.test(sql)) {
           if (agentId === 'dev-001') {
-            return [{ workspace_id: 'workspace-dev-001', local_path: '/work/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
+            return [{ workspace_id: 'workspace-dev-001', local_path: '/legacy/ignored/dev-001', repo_url: 'https://github.com/watchout/agent-comms-mcp.git' }]
           }
           if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
-            return [{ workspace_id: 'workspace-contest-dev', local_path: '/work/contest-dev', repo_url: 'https://github.com/watchout/contest.git' }]
+            return [{ workspace_id: 'workspace-contest-dev', local_path: '/legacy/ignored/contest-dev', repo_url: 'https://github.com/watchout/contest.git' }]
           }
           return []
         }
         if (/FROM agent_runtime_instances/.test(sql)) {
-          if (agentId === 'dev-001') {
-            return [{ runtime_instance_id: 'runtime-1', workspace_id: 'workspace-dev-001', runtime_engine: liveRuntimeEngine, status: 'active', stopped_at: null, last_seen_at: now }]
-          }
-          if (includeProductionNameCollisionSeat && agentId === 'contest-dev') {
-            return [{ runtime_instance_id: 'runtime-contest', workspace_id: 'workspace-contest-dev', runtime_engine: 'codex', status: 'active', stopped_at: null, last_seen_at: now }]
+          if (agentId==='dev-001' || (includeProductionNameCollisionSeat && agentId==='contest-dev')) {
+            return [{...unitRuntimeAuthority(agentId),workspace_id:`workspace-${agentId}`}]
           }
           return []
         }
@@ -291,6 +322,7 @@ describe('ordinary all-agent manifest candidate inventory', () => {
       agent_id: 'dev-001',
       target_repository: 'watchout/agent-comms-mcp',
       workspace_id: 'workspace-dev-001',
+      workspace_path: '/work/dev-001',
       runtime_engine: 'codex-exec',
       runtime_profile_ref: 'agent-profile://dev-001/revision/7',
       provider_identity_ref: 'discord-identity://dev-001/identity-1',
@@ -356,13 +388,23 @@ describe('ordinary all-agent manifest candidate inventory', () => {
     expect(report.expected_agent_ids).toEqual(['dev-001'])
   })
 
-  test('profile/runtime engine mismatch fails closed instead of choosing either value', async () => {
+  test('observed Claude overrides a stale Codex profile without profile writes', async () => {
     const report = await generateAllAgentCommunicationManifestCandidates(
       fakeManifestDb(false, 'claude'),
       candidateOptions(),
     )
+    expect(report.ok).toBe(true)
+    expect(report.targets[0].runtime_engine).toBe('claude-exec')
+    expect(report.targets[0].runtime_profile_ref).toBe('agent-profile://dev-001/revision/7')
+    expect(report.blockers).toEqual([])
+  })
+
+  test('unverified provider ownership cannot fall back to the configured Codex preference', async () => {
+    const db = fakeManifestDb()
+    observedAgent = 'foreign-agent'
+    const report = await generateAllAgentCommunicationManifestCandidates(db, candidateOptions())
     expect(report.ok).toBe(false)
-    expect(report.blockers).toContain('dev-001:runtime_engine_profile_mismatch')
+    expect(report.blockers).toContain('dev-001:PROVIDER_MISSING')
     expect(report.resolved_target_count).toBe(0)
   })
 })

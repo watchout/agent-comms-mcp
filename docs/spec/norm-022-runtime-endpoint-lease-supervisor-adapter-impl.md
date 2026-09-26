@@ -5,6 +5,23 @@ Slice: NORM-022
 Status: Spec ready, pre-implementation audit next
 Created: 2026-05-27
 
+## Adopted seat continuity amendment (2026-09-21)
+
+[Seat runtime continuity](seat-runtime-continuity.md) governs this implementation.
+The managed entrypoint supplies a fresh UUID and exact seat identity before exec.
+Bind and hold a loopback socket, then atomically create the logical UUID anchor
+and fenced lease. Do not persist PID, port, path, provider or liveness. Reobserve
+the holder before publishing; unpublished or unauthorized requests execute no
+business callback. Failure closes only the owned socket.
+
+The acquiring process retains its logical lease receipt for renewal/release;
+expiry uses database wall time and exact holder/fence predicates. Cleanup checks
+fresh process identity and no active/unknown work or active lease. A mismatched
+fence, orphan listener or unproven tmux owner permits no kill. The older physical
+column descriptions below are retained legacy schema/history, not permission to
+write new observations. Current implementation/coverage is in the continuity
+spec's NP matrix.
+
 ## Problem
 
 Current local operations still mix three different concepts:
@@ -136,26 +153,16 @@ Do not store raw tokens or provider credentials in endpoint metadata.
    - connector instance
    - supervisor adapter
    - requested endpoint, or dynamic endpoint range
-2. Acquire endpoint lease:
-   - expire stale active lease atomically
-   - assign fencing token
-   - reserve endpoint before spawn where possible
-3. Start through supervisor adapter:
-   - tmux, launchd, systemd, Docker, Kubernetes, Nomad, direct process, or stdio
-4. Runtime heartbeat writes:
-   - pid/process evidence when available
-   - endpoint evidence
-   - supervisor evidence
-   - commit/check-out evidence
-5. Health probes classify:
-   - startup: process is still initializing
-   - readiness: connector can receive or send work
-   - liveness: restart or cleanup is allowed
-6. Cleanup/restart may act only when:
-   - endpoint lease is expired or revoked
-   - heartbeat is stale
-   - fencing token does not match the current holder
-   - live port owner is not the recorded process
+2. Supply a new UUID before exec; bind and hold the actual loopback socket.
+3. Atomically insert a physical-free anchor and acquire its fenced lease.
+4. Reobserve exact holder/start/workspace/socket before endpoint publication.
+   Subsequent renewal/release requires the acquiring process's logical receipt
+   and an unexpired matching holder/fence at database wall time.
+5. Health reads compose fresh observation with durable authority in memory.
+   Observer/DB failure is UNKNOWN; it cannot justify clearing work or killing.
+6. Cleanup may terminate only an exactly observed owned process with no
+   active/unknown work and no active endpoint lease. It retains logical history.
+   Fence/identity mismatch or unproven tmux scope refuses the effect.
 
 ## Supervisor Adapter Contract
 

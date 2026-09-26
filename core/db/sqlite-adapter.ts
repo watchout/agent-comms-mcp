@@ -5,6 +5,8 @@ function adaptSql(sql: string): string {
   let s = sql
   // ->> → json_extract (must run before $n replacement to avoid collision)
   s = s.replace(/(\w+)->>'\s*(\w+)'/g, (_, col, key) => `json_extract(${col}, '$.${key}')`)
+  s = s.replace(/([\w.$]+)\s*(<=|>=|<|>)\s*clock_timestamp\(\)/gi, (_m, value, op) => `julianday(${value}) ${op} julianday('now')`)
+  s = s.replace(/\bclock_timestamp\(\)/gi, "strftime('%Y-%m-%dT%H:%M:%fZ','now')")
   s = s.replace(/\bNOW\(\)/gi, "datetime('now')")
   s = s.replace(/\bTIMESTAMPTZ\b/gi, 'TEXT')
   s = s.replace(/\bJSONB\b/gi, 'TEXT')
@@ -54,11 +56,12 @@ export class SqliteAdapter implements DbAdapter {
       create: options.create ?? !options.readonly,
       readonly: options.readonly ?? false,
     })
+    // WAL initialization can contend with another process before any query.
+    this.db.exec('PRAGMA busy_timeout = 5000')
     if (!options.readonly) {
       this.db.exec('PRAGMA journal_mode = WAL')
     }
     this.db.exec('PRAGMA foreign_keys = ON')
-    this.db.exec('PRAGMA busy_timeout = 5000')
   }
 
   private prepare(sql: string, params?: any[]): { sql: string; params: any[] } {
@@ -72,7 +75,12 @@ export class SqliteAdapter implements DbAdapter {
   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
     const p = this.prepare(sql, params)
     try {
-      return this.db.prepare(p.sql).all(...p.params) as T[]
+      const statement = this.db.prepare(p.sql)
+      try {
+        return statement.all(...p.params) as T[]
+      } finally {
+        statement.finalize()
+      }
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
         return []
@@ -89,8 +97,13 @@ export class SqliteAdapter implements DbAdapter {
   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
     const p = this.prepare(sql, params)
     try {
-      const result = this.db.prepare(p.sql).run(...p.params)
-      return { rowCount: result.changes }
+      const statement = this.db.prepare(p.sql)
+      try {
+        const result = statement.run(...p.params)
+        return { rowCount: result.changes }
+      } finally {
+        statement.finalize()
+      }
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
         return { rowCount: 0 }

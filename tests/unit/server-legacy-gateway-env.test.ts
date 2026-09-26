@@ -1,16 +1,15 @@
 import { describe, it, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// PR #1 spec v3 §3 / ADR-001: parseLegacyGatewayEnv is defined in server.ts
-// (frozen §1.2, §1.4). server.ts has top-level side effects (stdio MCP
-// connect, startup IIFE) so existing convention is to avoid direct import.
-// We spawn a short-lived subprocess per case, call parseLegacyGatewayEnv
-// with the exported symbol, print the boolean result, then process.exit(0)
-// to bypass the stdio transport event-loop hold.
+// Exercise the exact exported function's source without starting an MCP.
+// SC-2 startup acquisition is intentionally fatal for an unleased import.
 const SERVER = resolve(import.meta.dir, '..', '..', 'server.ts')
+const definitions=[...readFileSync(SERVER,'utf8').matchAll(/^export function parseLegacyGatewayEnv\([^]*?^}/gm)]
+if(definitions.length!==1)throw new Error('LEGACY_GATEWAY_FUNCTION_SOURCE_AMBIGUOUS')
 
 const SNIPPET = `
-import { parseLegacyGatewayEnv } from ${JSON.stringify(SERVER)}
+${definitions[0][0]}
 const raw = process.env.PARSE_RAW === '__UNDEFINED__' ? undefined : process.env.PARSE_RAW
 const result = parseLegacyGatewayEnv(raw)
 process.stdout.write('<<RESULT>>' + JSON.stringify({ result }) + '<<END>>')

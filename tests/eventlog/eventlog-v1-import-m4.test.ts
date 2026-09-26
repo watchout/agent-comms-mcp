@@ -343,8 +343,8 @@ describe('typed notify recipient and receipt bridge', () => {
     try {
       await ensureEventLogSchema(notifyDb)
       await notifyDb.execute(
-        `INSERT INTO agents (agent_id, display_name, agent_type, status)
-         VALUES ('spec', 'spec', 'dev', 'idle'), ('ceo', 'ceo', 'ceo', 'idle')`,
+        `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ('spec', 'spec', 'dev'), ('ceo', 'ceo', 'ceo')`,
       )
       await notifyDb.execute(
         `INSERT INTO channels (id, name, members) VALUES ($1, $1, $2)`,

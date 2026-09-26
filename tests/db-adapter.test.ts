@@ -39,8 +39,8 @@ describe('SqliteAdapter', () => {
       ['test-bot', 'Test Bot', 'dev']
     )
     const result = await adapter.execute(
-      "UPDATE agents SET status = ? WHERE agent_id = ?",
-      ['idle', 'test-bot']
+      "UPDATE agents SET display_name = ? WHERE agent_id = ?",
+      ['Renamed Test Bot', 'test-bot']
     )
     expect(result.rowCount).toBe(1)
   })
@@ -251,7 +251,15 @@ describe('migrateSqlite', () => {
     ).run('legacy-profile-bot', 'Legacy Profile Bot', 'dev', 'codex', 'idle')
     legacy.close()
 
-    expect(() => migrateSqlite(legacyPath)).not.toThrow()
+    // Rebuilding the private legacy schema requires the existing destructive gate.
+    const prior = process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED
+    try {
+      process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED = '1'
+      expect(() => migrateSqlite(legacyPath)).not.toThrow()
+    } finally {
+      if (prior === undefined) delete process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED
+      else process.env.AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED = prior
+    }
 
     const db = new (require('bun:sqlite').Database)(legacyPath)
     const cols = db.prepare("PRAGMA table_info(agents)").all()
@@ -264,9 +272,10 @@ describe('migrateSqlite', () => {
     expect(names).toContain('provider_token_source_ref')
 
     const row = db.prepare(
-      "SELECT runtime, ui_id, ui_handle, registered_at, expected_provider_identity, profile_enabled, profile_source FROM agents WHERE agent_id = ?",
+      "SELECT runtime, cli_type, ui_id, ui_handle, registered_at, expected_provider_identity, profile_enabled, profile_source FROM agents WHERE agent_id = ?",
     ).get('legacy-profile-bot') as any
-    expect(row.runtime).toBe('codex')
+    expect(row.cli_type).toBe('codex') // Preserve original legacy history.
+    expect(row.runtime).toBeNull() // Do not copy a physical observation to a new column.
     expect(row.ui_id).toBe(1)
     expect(row.ui_handle).toBe('legacy-profile-bot')
     expect(row.registered_at).not.toBeNull()
@@ -296,20 +305,14 @@ describe('migrateSqlite', () => {
     expect(runtimeIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
     expect(new Set(runtimeIds).size).toBe(2)
 
-    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
-      'sqlite-foundation-pk-bot',
-      'local://sqlite-foundation-pk-bot/one',
-    )
-    db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)").run(
-      'sqlite-foundation-pk-bot',
-      'local://sqlite-foundation-pk-bot/two',
-    )
-    const endpointIds = db.prepare("SELECT endpoint_id FROM agent_endpoints WHERE agent_id = ?")
-      .all('sqlite-foundation-pk-bot')
-      .map((row: any) => row.endpoint_id)
-    expect(endpointIds).toHaveLength(2)
-    expect(endpointIds.every((id: string | null) => typeof id === 'string' && id.length > 0)).toBe(true)
-    expect(new Set(endpointIds).size).toBe(2)
+    // Endpoint insertion is retired after cutover; logical runtime UUIDs above
+    // remain writable. Preserve both rejected-write and primary-key checks.
+    for (const uri of ['local://sqlite-foundation-pk-bot/one', 'local://sqlite-foundation-pk-bot/two']) {
+      expect(() => db.prepare("INSERT INTO agent_endpoints (agent_id, endpoint_uri) VALUES (?, ?)")
+        .run('sqlite-foundation-pk-bot', uri)).toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+    }
+    expect(db.prepare("SELECT endpoint_id FROM agent_endpoints WHERE agent_id = ?")
+      .all('sqlite-foundation-pk-bot')).toHaveLength(0)
 
     db.prepare("INSERT INTO agent_identity_keys (agent_id, public_key, fingerprint) VALUES (?, ?, ?)").run(
       'sqlite-foundation-pk-bot',
@@ -366,10 +369,8 @@ describe('migrateSqlite', () => {
       'control-plane-channel',
       'Control Plane Channel',
     )
-    db.prepare("INSERT INTO agent_runtime_instances (agent_id, runtime_engine, status) VALUES (?, ?, ?)").run(
+    db.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run(
       'control-plane-bot',
-      'codex',
-      'active',
     )
     const runtime = db.prepare(
       "SELECT runtime_instance_id FROM agent_runtime_instances WHERE agent_id = ? ORDER BY started_at DESC LIMIT 1",

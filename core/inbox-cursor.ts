@@ -123,7 +123,10 @@ export interface FetchNewMessagesResult {
  * `query()` returns a `{rows}` shape so the helpers can interrogate
  * `RETURNING` output uniformly across the pg and sqlite adapters.
  */
+import { unboundedQueuePredicate } from './queue-admission'
+
 export interface ReclaimDb {
+  dialect?: 'sqlite' | 'postgres'
   query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }>
 }
 
@@ -173,6 +176,7 @@ export async function reclaimSelfOrphanedClaims(
        AND claimed_by = $1
        AND status = 'received'
        AND (claim_expires_at IS NULL OR claim_expires_at < now())
+       AND ${unboundedQueuePredicate('agent_id', db.dialect)}
      RETURNING id`,
     [agentId],
   )
@@ -184,32 +188,11 @@ export async function reclaimSelfOrphanedClaims(
   // post-reclaim claim set so callers (sender-feedback busy/idle
   // branch) see consistent state. Mirrors the pattern in next/send/
   // fail/skip/manual-reclaim handlers (server.ts:1735 / :2897).
-  await syncAgentStatusFromClaims(db, agentId)
   return rows.length
 }
 
-/**
- * PR-0 cycle 7 axis 2/3 BLOCK fix — derive `agents.status` from the
- * agent's open-claim set. Idempotent: callers should invoke after any
- * status='received' transition (claim or reclaim).
- *
- * PR-0 cycle 14 axis 1/2/3/5/6 BLOCK fix — try/catch removed.
- * `reclaimSelfOrphanedClaims` and the periodic sweepers must surface
- * a status-sync failure rather than masking it as success: a stale
- * `agents.status` causes sender-feedback's busy/idle branch to
- * misroute notifications, so the right move is fail-closed
- * propagation, not non-fatal log.
- */
-async function syncAgentStatusFromClaims(db: ReclaimDb, agentId: string): Promise<void> {
-  await db.query(
-    `UPDATE agents SET
-       status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-       status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-       status_updated_at = now()
-     WHERE agent_id = $1`,
-    [agentId],
-  )
-}
+// Queue reclaim updates durable claim authority only. Busy/idle is composed at
+// read time, so no agents.status/status_detail observation writer runs here.
 
 /**
  * Issue #287 — periodic self-reclaim sweeper. Same predicate as the
@@ -237,6 +220,7 @@ export function startSelfReclaimSweeper(
            AND status = 'received'
            AND claim_expires_at IS NOT NULL
            AND claim_expires_at < now()
+           AND ${unboundedQueuePredicate('agent_id', db.dialect)}
          RETURNING id`,
         [agentId],
       )
@@ -247,8 +231,7 @@ export function startSelfReclaimSweeper(
       // PR-0 cycle 7 axis 2/3 — derive agents.status whether or not rows
       // were reclaimed: even an idempotent zero-row sweep should leave
       // the cached agents.status in sync with the live claim set.
-      await syncAgentStatusFromClaims(db, agentId)
-    } catch (err) {
+        } catch (err) {
       // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — fail-closed instead
       // of swallowing. With self-claim excluded from the claim-TTL
       // sweep (`selfAgentId` predicate), a continuously-failing

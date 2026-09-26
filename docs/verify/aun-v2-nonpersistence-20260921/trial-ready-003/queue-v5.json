@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/queue-work.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "28b12b6a93d00c71f125cd8895815b9b4a6550c243240621f2b3860537635c05",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "b6f05df75a2fcd27e46c403555aff77ef2ba219b63e3733cd65fb4aca4f988a6",
+  "started_at": "2026-09-21T09:51:47.553008+00:00",
+  "ended_at": "2026-09-21T09:51:47.832179+00:00",
+  "exit_code": 0,
+  "log_sha256": "136ab4f4a65d80db5b0f9a61f634df9188577ca851751691e299d2c19327bc63"
+}

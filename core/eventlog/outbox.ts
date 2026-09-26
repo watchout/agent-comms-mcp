@@ -433,7 +433,7 @@ export async function dispatchOutboxOnce(
         claimEpoch: epoch,
         payload: {
           kind: permanent ? 'permanent' : 'retryable',
-          error: err instanceof Error ? err.message : String(err),
+          code: permanent ? 'DELIVERY_PERMANENT_FAILURE' : 'DELIVERY_RETRYABLE_FAILURE',
         },
       })
       if (permanent) result.failedPermanent.push(row.reply_id)

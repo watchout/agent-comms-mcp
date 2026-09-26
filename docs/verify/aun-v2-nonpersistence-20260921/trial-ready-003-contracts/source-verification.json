@@ -1,0 +1,14 @@
+{
+  "source_head": "4a69acd4351f99738389882a58644800a682d176",
+  "verified_git_blobs": 728,
+  "source_manifest_sha256": "9804212b79858df9153376f5b77c39aa6392a53422e37980570642229a013ad8",
+  "final_runs": [
+    "regression1-final",
+    "regression2-final",
+    "startup-final",
+    "config-final",
+    "integrated-final"
+  ],
+  "same_source_all_final_runs": true,
+  "uncommitted_product_diff": false
+}

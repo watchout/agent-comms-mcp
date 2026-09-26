@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_native.test.ts",
+    "tests/seat-context-recovery.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "67c25476b07d2f746f28578e9fbf91044567070f9308c3f18106c984c559bc26",
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "ad1e8c78b7674f679df02c9f94de72dfad0492a7db53494e55f6cfc76a97b16f",
+  "started_at": "2026-09-21T05:44:42.929249+00:00",
+  "ended_at": "2026-09-21T05:44:49.172554+00:00",
+  "exit_code": 0,
+  "log_sha256": "ab23e8d068be64e6e050353a00ebf50e5904b9eb529f99bc2e813873a765c83b"
+}

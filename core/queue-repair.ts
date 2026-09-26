@@ -256,32 +256,6 @@ export async function closeObsoletePendingQueueRows(
           RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
                     b.status AS before_status,
                     left(mq.payload, 180) AS content
-       ),
-       affected_agents AS (
-         SELECT DISTINCT agent_id FROM closed
-       ),
-       agent_active_state AS (
-         SELECT a.agent_id,
-                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
-           FROM agents a
-           JOIN affected_agents aa ON aa.agent_id = a.agent_id
-       ),
-       refreshed_agents AS (
-         UPDATE agents a SET
-            status = CASE
-              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'
-              WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'
-              ELSE a.status
-            END,
-            status_detail = CASE
-              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'message processing'
-              WHEN NOT aas.has_active_claims AND a.status IN ('busy', 'idle') THEN NULL
-              ELSE a.status_detail
-            END,
-            status_updated_at = now()
-           FROM agent_active_state aas
-          WHERE a.agent_id = aas.agent_id
-          RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM closed
@@ -359,32 +333,6 @@ export async function reclaimExpiredQueueClaims(
           RETURNING mq.id, mq.agent_id, mq.status, mq.message_id, mq.created_at,
                     b.status AS before_status,
                     left(mq.payload, 180) AS content
-       ),
-       affected_agents AS (
-         SELECT DISTINCT agent_id FROM reclaimed
-       ),
-       agent_active_state AS (
-         SELECT a.agent_id,
-                EXISTS(SELECT 1 FROM message_queue mq WHERE mq.claimed_by = a.agent_id AND mq.status IN ('received', 'in_progress')) AS has_active_claims
-           FROM agents a
-           JOIN affected_agents aa ON aa.agent_id = a.agent_id
-       ),
-       refreshed_agents AS (
-         UPDATE agents a SET
-            status = CASE
-              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'
-              WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'
-              ELSE a.status
-            END,
-            status_detail = CASE
-              WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'message processing'
-              WHEN NOT aas.has_active_claims AND a.status IN ('busy', 'idle') THEN NULL
-              ELSE a.status_detail
-            END,
-            status_updated_at = now()
-           FROM agent_active_state aas
-          WHERE a.agent_id = aas.agent_id
-          RETURNING a.agent_id
        )
        SELECT *, count(*) OVER ()::int AS total_count
          FROM reclaimed

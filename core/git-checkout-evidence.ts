@@ -18,6 +18,7 @@ function runGit(checkoutPath: string, args: string[]): string | null {
   try {
     return execFileSync('git', ['-C', checkoutPath, ...args], {
       encoding: 'utf8',
+      timeout: 1000,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim()
   } catch {

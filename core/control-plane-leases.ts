@@ -1,3 +1,4 @@
+import { durableRuntimeMetadata } from './runtime-durable-data'
 import { randomUUID } from 'node:crypto'
 import type { DbAdapter } from './db'
 
@@ -225,7 +226,7 @@ export async function acquireControlPlaneLease(
         fencingToken,
         dbTimestamp(now),
         dbTimestamp(expiresAt),
-        JSON.stringify(input.metadata ?? {}),
+        JSON.stringify(input.scopeType === 'runtime_instance' && purpose === 'worker' ? durableRuntimeMetadata() : input.metadata ?? {}),
       ],
     )
     const lease = await getLease(tx, leaseId)

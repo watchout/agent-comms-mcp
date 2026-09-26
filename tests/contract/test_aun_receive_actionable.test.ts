@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
+import { createReadyNativeRuntime, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
@@ -15,6 +16,7 @@ const TEST_AGENT = 'actionable-dev'
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
+let acceptedNativeEvidence: Record<string, any>
 
 function runAun(args: string[]): { status: number; stdout: string; stderr: string } {
   const r = spawnSync('bun', ['run', AUN, ...args], {
@@ -118,38 +120,18 @@ function replaceMemoryReadyEvidence(overrides: Partial<{
   completed_at: string
   valid_until: string
 }> = {}): void {
-  const row = {
-    runtime_instance_id: 'runtime-actionable-dev',
-    session_name: 'actionable-dev-session',
-    port: 39001,
-    result_status: 'ready',
-    completed_at: new Date().toISOString(),
-    valid_until: '2099-01-01T00:00:00.000Z',
-    ...overrides,
-  }
   withDb((db) => {
-    db.prepare(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = ?`).run(TEST_AGENT)
-    db.prepare(
-      `INSERT INTO runtime_memory_ready_evidence
-        (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
-         checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
-       VALUES (?, 'agent-comms-mcp', ?, 1, 'legacy', ?, ?, ?,
-         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', ?, ?,
-         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', ?, 'agent_memory_boot_recovery', '{}')`,
-    ).run(
-      TEST_AGENT,
-      row.runtime_instance_id,
-      row.session_name,
-      row.port,
-      TEST_AGENT,
-      row.result_status,
-      row.completed_at,
-      row.valid_until,
-    )
+    const row=acceptedNativeEvidence
+    if(!row)throw new Error('actual native fixture readiness missing')
+    const revised={...row,...overrides}
+    db.prepare('DELETE FROM runtime_memory_ready_evidence WHERE agent_id=?').run(TEST_AGENT)
+    const keys=Object.keys(revised)
+    db.prepare(`INSERT INTO runtime_memory_ready_evidence (${keys.join(',')}) VALUES (${keys.map(()=>'?').join(',')})`)
+      .run(...keys.map(key=>revised[key]))
   })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-actionable-'))
   dbPath = join(tmpDir, 'test.db')
   env = {
@@ -166,29 +148,24 @@ beforeEach(() => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   withDb((db) => {
     db.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, home_directory)
-        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'codex', 'idle', '{"discord_id":"999001","tmux_session":"actionable-dev-session"}', '/tmp/actionable-dev'),
-               ('codex-cto', 'codex-cto', 'dev', 'codex', 'idle', '{"discord_id":"999002"}', NULL),
-               ('auditor', 'auditor', 'auditor', 'codex', 'idle', '{}', NULL);
-      UPDATE agents SET channel_port = 39001 WHERE agent_id = '${TEST_AGENT}';
-      INSERT INTO agent_runtime_instances
-        (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-        VALUES ('runtime-actionable-dev', '${TEST_AGENT}', 'codex', 'local_process', 'actionable-dev-session', 39001, '/tmp/actionable-dev', 'test-head', 'running', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-      INSERT INTO runtime_memory_ready_evidence
-        (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
-         checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
-        VALUES ('${TEST_AGENT}', 'agent-comms-mcp', 'runtime-actionable-dev', 1, 'legacy', 'actionable-dev-session', 39001, '${TEST_AGENT}',
-         '/tmp/actionable-dev', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-         '/tmp/actionable-dev-memory-ready.json', 'sqlite-actionable-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+      INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', '{"discord_id":"999001"}'),
+               ('codex-cto', 'codex-cto', 'dev', '{"discord_id":"999002"}'),
+               ('auditor', 'auditor', 'auditor', '{}');
       INSERT INTO channels (id, name, members)
         VALUES ('actionable-ch', 'actionable-ch', '["${TEST_AGENT}","codex-cto","auditor"]');
       INSERT INTO channel_routing_policy (channel_id, primary_agent_id, outbound_allowlist, policy_source)
         VALUES ('actionable-ch', '${TEST_AGENT}', '["${TEST_AGENT}","codex-cto"]', 'receive-actionable-test');
     `)
   })
+  const native = await createReadyNativeRuntime(dbPath,tmpDir,'actionable-dev',randomUUID())
+  acceptedNativeEvidence=withDb(db=>db.prepare('SELECT * FROM runtime_memory_ready_evidence WHERE agent_id=? ORDER BY id DESC LIMIT 1').get(TEST_AGENT) as any)
+  env.PATH = native.cliPath + ':' + env.PATH
+  env.AGENT_COMMS_MEMORY_READY_PROJECT='agent-comms-mcp'
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await stopNativeFixtures()
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
@@ -469,7 +446,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
   })
 
   test('Discord chat with missing target binding fails closed without LLM classification', () => {
-    withDb((db) => db.exec(`UPDATE agents SET metadata = '{"tmux_session":"actionable-dev-session"}' WHERE agent_id = '${TEST_AGENT}'`))
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
       source: 'discord',
@@ -489,7 +466,7 @@ describe('test_aun_receive_actionable - bounded actionable selection', () => {
   })
 
   test('Discord chat with only agent-id mention metadata and missing target binding fails closed', () => {
-    withDb((db) => db.exec(`UPDATE agents SET metadata = '{"tmux_session":"actionable-dev-session"}' WHERE agent_id = '${TEST_AGENT}'`))
+    withDb((db) => db.exec(`UPDATE agents SET metadata = '{}' WHERE agent_id = '${TEST_AGENT}'`))
     const chatId = seedQueue({
       messageType: 'chat',
       source: 'discord',

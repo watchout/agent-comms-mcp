@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_scheduler_native.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "19d6eaf29c07cc4c3b19a8407e288a3e9059151e87ee04cc5ed757e4fbce86b4",
+  "source_head": "23b6f055ecc8f0971e7eed2f5546188a5a5f2fef",
+  "working_diff_sha256": "b43d9ff50f54749214dea98c754c7b74acdfba1a80a8985c0638f0dac8782e15",
+  "started_at": "2026-09-21T08:01:01.389677+00:00",
+  "ended_at": "2026-09-21T08:01:05.754024+00:00",
+  "exit_code": 0,
+  "log_sha256": "08d9f4c8a181f84dfff8a893d3e7c80eb7484cbd131784d538b76960b83deeb8"
+}

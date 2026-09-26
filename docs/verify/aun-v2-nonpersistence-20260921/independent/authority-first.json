@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts"
+  ],
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "2950c2a8c11d46e3e690517a4c1dc75e0c5d69b97504ab6d271e9013a66e9ec2",
+  "started_at": "2026-09-21T05:28:15.606857+00:00",
+  "ended_at": "2026-09-21T05:28:17.595998+00:00",
+  "exit_code": 0,
+  "log_sha256": "5e33283b5cda6266e3d7bf1b6d71793bee9121ce4c4b7f6ba7df86c98a9329e9"
+}

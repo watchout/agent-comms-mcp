@@ -17,13 +17,17 @@
  *     in this PR so send can resolve outbound targets in SQLite mode)
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { spawn, spawnSync } from 'node:child_process'
+import { createInterface } from 'node:readline'
+import { chmodSync, mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
 import { canonicalJson } from '../core/registry-identity-reconciliation'
+import { SqliteAdapter } from '../core/db/sqlite-adapter'
+import { nonpersistHostFixture } from './helpers/nonpersist-host-fixture'
+import { heartbeatRuntimeInstance } from '../core/runtime-heartbeat'
 
 const REPO_ROOT = join(import.meta.dir, '..')
 const CLI = join(REPO_ROOT, 'cli', 'index.ts')
@@ -32,6 +36,7 @@ const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
+let claimHost: Awaited<ReturnType<typeof nonpersistHostFixture>> | undefined
 
 function runCli(args: string[], extraEnv: Record<string, string> = {}): { status: number; stdout: string; stderr: string } {
   const result = spawnSync('bun', [CLI, ...args], {
@@ -62,14 +67,210 @@ beforeEach(() => {
   // Seed probe agent + channel. The CLI send tool checks channels.members,
   // so the probe agent must be listed.
   const db = new Database(dbPath)
-  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f', 'probe-f', 'dev', 'idle')`)
+  db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-f', 'probe-f', 'dev')`)
   db.exec(`INSERT INTO channels (id, name, members) VALUES ('probe-f-ch', 'probe-f-ch', '["probe-f"]')`)
   db.close()
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await claimHost?.close(); claimHost = undefined
   if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
 })
+
+async function registerCliHolder() {
+  claimHost = await nonpersistHostFixture(randomUUID(), 'probe-f')
+  const adapter = new SqliteAdapter(dbPath)
+  const db = {dialect:'sqlite' as const, async query(sql:string, params?:unknown[]) {
+    const rows=await adapter.query(sql, params); return {rows,rowCount:rows.length}
+  }}
+  try { await heartbeatRuntimeInstance(db, {agentId:'probe-f',runtimeInstanceId:claimHost.runtimeId,
+    processId:claimHost.endpoint.pid,port:claimHost.endpoint.port,
+    endpointUri:`http://127.0.0.1:${claimHost.endpoint.port}`,checkoutPath:claimHost.dir}) }
+  finally {await adapter.close()}
+  env.AGENT_COM_RUNTIME_INSTANCE_ID = claimHost.runtimeId
+}
+
+function bindLogicalWorkspace(agentId:string) {
+  const db=new Database(dbPath), id=`workspace-${agentId}`
+  try {
+    db.prepare('INSERT INTO agent_workspaces(workspace_id,name,metadata) VALUES(?,?,?)')
+      .run(id,agentId,JSON.stringify({source:'bot_profile_projector',agent_id:agentId}))
+    db.prepare("INSERT INTO agent_workspace_bindings(agent_id,workspace_id,binding_role,active) VALUES(?,?,'primary',1)").run(agentId,id)
+  } finally {db.close()}
+  return id
+}
+
+function startupProcess(source: string, path: string, mode = 'write') {
+  const child = spawn(process.execPath, ['-e', source, path, mode], {
+    cwd: REPO_ROOT, env: { PATH: process.env.PATH }, stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const events: Array<Record<string, any>> = []
+  const listeners = new Set<() => void>()
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk.toString() })
+  const lines = createInterface({ input: child.stdout })
+  lines.on('line', line => {
+    events.push(JSON.parse(line))
+    for (const notify of listeners) notify()
+  })
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', code => resolve(code))
+  })
+  const signal = (event: string) => new Promise<Record<string, any>>((resolve, reject) => {
+    const timer = setTimeout(() => { listeners.delete(check); reject(new Error(`startup ${event} timeout: ${stderr}`)) }, 8000)
+    const check = () => {
+      const found = events.find(value => value.event === event)
+      if (found) { clearTimeout(timer); listeners.delete(check); resolve(found) }
+    }
+    listeners.add(check); check()
+  })
+  return {
+    events, signal, exited, stderr: () => stderr,
+    release: () => { child.stdin.end('release\n') },
+    stop: async () => { if (child.exitCode === null) child.kill(); await exited; lines.close() },
+  }
+}
+
+const startupHolder = `
+  import { Database } from 'bun:sqlite'
+  import { createInterface } from 'node:readline'
+  const db = new Database(process.argv[1])
+  db.exec('PRAGMA journal_mode=DELETE')
+  db.exec('CREATE TABLE startup_fixture (value TEXT)')
+  db.exec("INSERT INTO startup_fixture VALUES ('retained')")
+  db.exec('BEGIN EXCLUSIVE')
+  await Bun.write(Bun.stdout, JSON.stringify({ event: 'held', at: Date.now() }) + '\\n')
+  for await (const line of createInterface({ input: process.stdin })) {
+    if (line === 'release') {
+      db.exec('COMMIT'); db.close()
+      await Bun.write(Bun.stdout, JSON.stringify({ event: 'released', at: Date.now() }) + '\\n')
+      process.exit(0)
+    }
+  }
+`
+const startupCandidate = `
+  import { SqliteAdapter } from './core/db/sqlite-adapter.ts'
+  await Bun.write(Bun.stdout, JSON.stringify({ event: 'starting', at: Date.now() }) + '\\n')
+  const started = performance.now()
+  try {
+    const readonly = process.argv[2] === 'readonly'
+    const db = new SqliteAdapter(process.argv[1], { readonly })
+    const busy = await db.query('PRAGMA busy_timeout')
+    const journal = await db.query('PRAGMA journal_mode')
+    const foreignKeys = await db.query('PRAGMA foreign_keys')
+    const rows = await db.query('SELECT value FROM startup_fixture')
+    let writeError = null
+    if (readonly) {
+      try { await db.execute("INSERT INTO startup_fixture VALUES ('forbidden')") }
+      catch (error) { writeError = error.code }
+    }
+    await db.close()
+    await Bun.write(Bun.stdout, JSON.stringify({ event: 'result', ok: true,
+      elapsed_ms: performance.now() - started, busy, journal, foreignKeys, rows, writeError }) + '\\n')
+  } catch (error) {
+    await Bun.write(Bun.stdout, JSON.stringify({ event: 'result', ok: false,
+      elapsed_ms: performance.now() - started, code: error.code, message: error.message }) + '\\n')
+  }
+  process.exit(0)
+`
+
+for (const releaseWithinBound of [true, false]) {
+  test(`SQLite startup ${releaseWithinBound ? 'waits for signalled lock release' : 'returns the still-held lock error after its existing five-second wait'}`, async () => {
+    const path = join(tmpDir, 'startup-lock.db')
+    const holder = startupProcess(startupHolder, path)
+    let candidate: ReturnType<typeof startupProcess> | undefined
+    try {
+      const held = await holder.signal('held')
+      candidate = startupProcess(startupCandidate, path)
+      await candidate.signal('starting')
+      if (releaseWithinBound) {
+        // Both process barriers were observed before this bounded hold.
+        await Bun.sleep(150)
+        expect(candidate.events.some(value => value.event === 'result')).toBe(false)
+        holder.release()
+        await holder.signal('released')
+      }
+      const result = await candidate.signal('result')
+      if (releaseWithinBound) {
+        expect(result.ok).toBe(true)
+        expect(result.elapsed_ms).toBeGreaterThanOrEqual(100)
+        expect(result.elapsed_ms).toBeLessThan(5000)
+        expect(result.busy).toEqual([{ timeout: 5000 }])
+        expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
+        expect(result.journal).toEqual([{ journal_mode: 'wal' }])
+        expect(result.rows).toEqual([{ value: 'retained' }])
+      } else {
+        expect(result.ok).toBe(false)
+        expect(result.code).toMatch(/^SQLITE_BUSY/)
+        expect(result.elapsed_ms).toBeGreaterThanOrEqual(4900)
+        // Process/clock observation margin; the configured SQLite wait stays5000.
+        expect(result.elapsed_ms).toBeLessThan(6500)
+        expect(holder.events.some(value => value.event === 'released')).toBe(false)
+        holder.release()
+        const released = await holder.signal('released')
+        expect(released.at - held.at).toBeGreaterThanOrEqual(5000)
+      }
+      expect(await candidate.exited, candidate.stderr()).toBe(0)
+      expect(await holder.exited, holder.stderr()).toBe(0)
+      console.log(JSON.stringify({ subcase: 'SQLITE-STARTUP-CONTENTION', release_within_bound: releaseWithinBound,
+        holder_events: holder.events, candidate_events: candidate.events }))
+    } finally {
+      await candidate?.stop(); await holder.stop()
+    }
+  }, 15000)
+}
+
+test('SQLite readonly startup preserves journal mode and refuses writes', async () => {
+  const path = join(tmpDir, 'startup-readonly.db')
+  const db = new Database(path)
+  db.exec('PRAGMA journal_mode=DELETE')
+  db.exec('CREATE TABLE startup_fixture (value TEXT)')
+  db.exec("INSERT INTO startup_fixture VALUES ('retained')")
+  db.close()
+  const before = createHash('sha256').update(readFileSync(path)).digest('hex')
+  const candidate = startupProcess(startupCandidate, path, 'readonly')
+  try {
+    const result = await candidate.signal('result')
+    expect(result.ok).toBe(true)
+    expect(result.busy).toEqual([{ timeout: 5000 }])
+    expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
+    expect(result.journal).toEqual([{ journal_mode: 'delete' }])
+    expect(result.rows).toEqual([{ value: 'retained' }])
+    expect(result.writeError).toBe('SQLITE_READONLY')
+    expect(await candidate.exited, candidate.stderr()).toBe(0)
+    expect(createHash('sha256').update(readFileSync(path)).digest('hex')).toBe(before)
+    expect(existsSync(path + '-wal')).toBe(false)
+    console.log(JSON.stringify({ subcase: 'SQLITE-STARTUP-READONLY', candidate_events: candidate.events, file_unchanged: true }))
+  } finally { await candidate.stop() }
+})
+
+for (const method of ['query', 'execute'] as const) {
+  test(`SQLite ${method} releases statements before close on success, failure and rollback`, async () => {
+    const path = join(tmpDir, 'statement-lifetime.db')
+    const adapter = new SqliteAdapter(path)
+    await adapter.execute('CREATE TABLE statement_fixture (value TEXT UNIQUE NOT NULL)')
+    await adapter[method]('INSERT INTO statement_fixture VALUES ($1)', ['retained'])
+    await expect(adapter[method]('INSERT INTO statement_fixture VALUES ($1)', ['retained']))
+      .rejects.toThrow()
+    await expect(adapter.transaction(async tx => {
+      await tx[method]('INSERT INTO statement_fixture VALUES ($1)', ['rolled-back'])
+      throw new Error('bounded rollback')
+    })).rejects.toThrow('bounded rollback')
+    expect(await adapter.query('SELECT value FROM statement_fixture ORDER BY value'))
+      .toEqual([{ value: 'retained' }])
+    await adapter.close()
+    const artifacts = () => ['', '-wal', '-shm'].map(suffix => ({
+      suffix, exists: existsSync(path + suffix),
+      sha256: existsSync(path + suffix) ? createHash('sha256').update(readFileSync(path + suffix)).digest('hex') : null,
+    }))
+    const afterClose = artifacts()
+    // GC must not complete deferred writes after callers have recorded a closed-DB fence.
+    Bun.gc(true)
+    await Bun.sleep(0)
+    expect(artifacts()).toEqual(afterClose)
+  })
+}
 
 /** Seed one pending message_queue row and return the UUID + queue id. */
 function seedPendingMessage(content = 'probe-content'): { messageId: string; queueId: number } {
@@ -114,7 +315,7 @@ function dbRead(sql: string, params: unknown[] = []): any[] {
 function allowOutboundAgents(...agentIds: string[]): void {
   const db = new Database(dbPath)
   try {
-    const insertAgent = db.prepare(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES (?, ?, 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    const insertAgent = db.prepare(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES (?, ?, 'dev') ON CONFLICT DO NOTHING`)
     for (const agentId of agentIds) {
       if (agentId !== 'probe-f') insertAgent.run(agentId, agentId)
     }
@@ -328,13 +529,12 @@ describe('F1 — migration emits v2.1.0 schema to SQLite', () => {
 })
 
 describe('F1b — agent profile SSOT CLI (SQLite)', () => {
-  test('profile set is dry-run by default and execute stores one editable bot profile', () => {
+  test('profile set dry-run, partial update and clear preserve logical profile identity', () => {
     const dry = runCli([
       'agent', 'profile', 'set', 'probe-f',
       '--ui-id', '1001',
       '--ui-handle', 'lead-probe',
-      '--home-directory', '~/Developer/probe-f',
-      '--runtime-engine', 'codex',
+      '--display-name', 'Probe profile',
       '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
       '--expected-provider', 'discord',
       '--expected-provider-subject', '123456789012345678',
@@ -348,20 +548,19 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       'agent', 'profile', 'set', 'probe-f',
       '--ui-id', '1001',
       '--ui-handle', 'lead-probe',
-      '--home-directory', '~/Developer/probe-f',
-      '--runtime-engine', 'codex',
+      '--display-name', 'Probe profile',
       '--token-source-ref', 'local-env:DISCORD_BOT_TOKEN',
       '--expected-provider', 'discord',
       '--expected-provider-subject', '123456789012345678',
       '--execute',
     ])
-    expect(executed.status).toBe(0)
+    expect(executed.status, executed.stderr + executed.stdout).toBe(0)
     const payload = JSON.parse(executed.stdout)
     expect(payload.profile.agent_id).toBe('probe-f')
     expect(payload.profile.ui_id).toBe(1001)
     expect(payload.profile.ui_handle).toBe('lead-probe')
-    expect(String(payload.profile.home_directory).endsWith('/Developer/probe-f')).toBe(true)
-    expect(payload.profile.runtime_engine_preference).toBe('codex')
+    expect(payload.profile.home_directory).toBeNull()
+    expect(payload.profile.runtime_engine_preference).toBeNull()
     expect(payload.profile.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
     expect(payload.profile.expected_provider_identity).toMatchObject({
       provider: 'discord',
@@ -371,28 +570,27 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const stored = dbRead(`SELECT ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref, expected_provider_identity FROM agents WHERE agent_id = 'probe-f'`)[0]
     expect(stored.ui_id).toBe(1001)
     expect(stored.ui_handle).toBe('lead-probe')
-    expect(String(stored.home_directory).endsWith('/Developer/probe-f')).toBe(true)
-    expect(stored.runtime_engine_preference).toBe('codex')
+    expect(stored.home_directory).toBeNull()
+    expect(stored.runtime_engine_preference).toBeNull()
     expect(stored.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
     expect(JSON.parse(stored.expected_provider_identity).subject_id).toBe('123456789012345678')
 
     const partial = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--runtime-engine', 'claude-code',
+      '--display-name', 'Renamed probe',
       '--execute',
     ])
     expect(partial.status).toBe(0)
-    const preserved = dbRead(`SELECT ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref FROM agents WHERE agent_id = 'probe-f'`)[0]
+    const preserved = dbRead(`SELECT ui_id, ui_handle, display_name, home_directory, runtime_engine_preference, provider_token_source_ref FROM agents WHERE agent_id = 'probe-f'`)[0]
     expect(preserved.ui_id).toBe(1001)
     expect(preserved.ui_handle).toBe('lead-probe')
-    expect(String(preserved.home_directory).endsWith('/Developer/probe-f')).toBe(true)
-    expect(preserved.runtime_engine_preference).toBe('claude-code')
+    expect(preserved.home_directory).toBeNull()
+    expect(preserved.display_name).toBe('Renamed probe')
+    expect(preserved.runtime_engine_preference).toBeNull()
     expect(preserved.provider_token_source_ref).toBe('local-env:DISCORD_BOT_TOKEN')
 
     const cleared = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', 'none',
-      '--runtime-engine', 'none',
       '--token-source-ref', 'none',
       '--expected-provider', 'none',
       '--expected-provider-subject', 'none',
@@ -416,13 +614,10 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(blocked.stderr).toContain('raw token')
   })
 
-  test('profile project is dry-run first and materializes derived workspace plus connector evidence', () => {
+  test('profile project preserves existing logical workspace and materializes connector evidence', () => {
+    const logicalWorkspace = bindLogicalWorkspace('probe-f')
     const profile = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', '~/Developer/probe-f',
-      '--channel-port', '19991',
-      '--tmux-session', 'probe-f-session',
-      '--runtime-engine', 'codex',
       '--token-source-ref', 'local-env:PROBE_DISCORD_TOKEN',
       '--expected-provider', 'discord',
       '--expected-provider-subject', '123456789012345678',
@@ -431,9 +626,9 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(profile.status).toBe(0)
     const profilePayload = JSON.parse(profile.stdout)
     expect(profilePayload.profile).toMatchObject({
-      channel_port: 19991,
-      tmux_session: 'probe-f-session',
-      runtime_engine_preference: 'codex',
+      channel_port: null,
+      tmux_session: null,
+      runtime_engine_preference: null,
     })
 
     const dry = runCli(['agent', 'profile', 'project', 'probe-f'])
@@ -441,31 +636,29 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const dryPayload = JSON.parse(dry.stdout)
     expect(dryPayload.dry_run).toBe(true)
     expect(dryPayload.projections[0].actions.map((a: any) => a.table)).toEqual([
-      'agent_workspaces',
-      'agent_workspace_bindings',
-      'agent_runtime_instances',
       'connector_instances',
       'connector_credentials',
       'agent_provider_identities',
       'agent_ui_bindings',
     ])
-    expect(dbRead(`SELECT * FROM agent_workspaces`)).toHaveLength(0)
+    expect(dbRead(`SELECT * FROM agent_workspaces`)).toHaveLength(1)
     expect(dbRead(`SELECT * FROM connector_instances`)).toHaveLength(0)
     {
       const db = new Database(dbPath)
-      db.exec(`INSERT INTO agent_runtime_instances (agent_id, runtime_engine, status) VALUES ('probe-f', 'codex', 'running')`)
+      db.prepare(`INSERT INTO agent_runtime_instances (agent_id,workspace_id) VALUES ('probe-f',?)`).run(logicalWorkspace)
       db.close()
     }
 
     const executed = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
-    expect(executed.status).toBe(0)
+    expect(executed.status, executed.stderr + executed.stdout).toBe(0)
     const payload = JSON.parse(executed.stdout)
     expect(payload.dry_run).toBe(false)
     expect(payload.ok).toBe(true)
 
     const workspaces = dbRead(`SELECT workspace_id, local_path, metadata FROM agent_workspaces`)
     expect(workspaces).toHaveLength(1)
-    expect(String(workspaces[0].local_path).endsWith('/Developer/probe-f')).toBe(true)
+    expect(workspaces[0].workspace_id).toBe(logicalWorkspace)
+    expect(workspaces[0].local_path).toBeNull()
     expect(JSON.parse(workspaces[0].metadata)).toMatchObject({
       source: 'bot_profile_projector',
       agent_id: 'probe-f',
@@ -484,7 +677,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
       {
         agent_id: 'probe-f',
         workspace_id: workspaces[0].workspace_id,
-        status: 'running',
+        status: null,
       },
     ])
     const connectors = dbRead(`SELECT connector_instance_id, agent_id, provider, connector_uri, status, metadata FROM connector_instances`)
@@ -646,7 +839,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
 
   test('worker report accepts handoff only when target owner queue row exists', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-owner', 'probe-owner', 'dev')`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('probe-f-ch', '["probe-f","probe-owner"]', 'cli-test')`)
     db.close()
@@ -681,7 +874,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
 
   test('worker report rejects handoff-only comments without false started state', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-owner', 'probe-owner', 'dev')`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('probe-f-ch', '["probe-f","probe-owner"]', 'cli-test')`)
     db.close()
@@ -712,7 +905,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
 
   test('worker report rejects owner queue evidence from a different handoff channel', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-owner', 'probe-owner', 'dev')`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-owner"]' WHERE id = 'probe-f-ch'`)
     db.exec(`INSERT INTO channels (id, name, members) VALUES ('other-ch', 'other-ch', '["probe-f","probe-owner"]')`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source) VALUES ('other-ch', '["probe-f","probe-owner"]', 'cli-test')`)
@@ -752,7 +945,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
 
   test('worker report accepts explicit relay policy handoff evidence', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-owner', 'probe-owner', 'dev', 'idle')`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-owner', 'probe-owner', 'dev')`)
     db.close()
 
     const reported = runCli([
@@ -786,10 +979,6 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     const profile = runCli([
       'agent', 'profile', 'set', 'probe-alias',
       '--ui-handle', 'lead-probe-alias',
-      '--home-directory', '~/Developer/probe-alias',
-      '--channel-port', '19993',
-      '--tmux-session', 'probe-alias-session',
-      '--runtime-engine', 'codex',
       '--execute',
     ])
     expect(profile.status).toBe(0)
@@ -799,10 +988,11 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
         `UPDATE agents
             SET metadata = ?
           WHERE agent_id = 'probe-alias'`,
-      ).run(JSON.stringify({ tmux_session: 'probe-alias-session', replaces: 'lead-probe-alias' }))
+      ).run(JSON.stringify({ replaces: 'lead-probe-alias' }))
       db.close()
     }
 
+    bindLogicalWorkspace('probe-alias')
     const dry = runCli(['agent', 'profile', 'project', 'probe-alias'])
     expect(dry.status).toBe(0)
     const dryPayload = JSON.parse(dry.stdout)
@@ -815,7 +1005,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     })
 
     const executed = runCli(['agent', 'profile', 'project', 'probe-alias', '--execute'])
-    expect(executed.status).toBe(0)
+    expect(executed.status, executed.stderr + executed.stdout).toBe(0)
     const aliases = dbRead(`SELECT alias, canonical_agent_id, new_work_allowed, reason FROM agent_aliases WHERE alias = 'lead-probe-alias'`)
     expect(aliases).toEqual([
       {
@@ -830,14 +1020,12 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
   test('profile doctor enforces one token source reference per active agent', () => {
     const first = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', '~/Developer/probe-f',
       '--token-source-ref', 'local-env:DUP_TOKEN',
       '--execute',
     ])
     expect(first.status).toBe(0)
     const second = runCli([
       'agent', 'profile', 'set', 'probe-g',
-      '--home-directory', '~/Developer/probe-g',
       '--token-source-ref', 'local-env:DUP_TOKEN',
       '--execute',
     ])
@@ -853,22 +1041,23 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     })
   })
 
-  test('profile doctor fails missing complete bot profile fields and passes after profile set', () => {
+  test('profile doctor fails missing logical identity fields and passes after profile set', () => {
+    const db = new Database(dbPath)
+    db.exec("UPDATE agents SET ui_id=0,ui_handle=' ' WHERE agent_id='probe-f'")
+    db.close()
     const failing = runCli(['agent', 'profile', 'doctor'])
     expect(failing.status).toBe(1)
     const failingPayload = JSON.parse(failing.stdout)
     expect(failingPayload.ok).toBe(false)
-    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_home_directory' })
-    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_channel_port' })
-    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_tmux_session' })
-    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_runtime_engine_preference' })
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_ui_id' })
+    expect(failingPayload.blockers).toContainEqual({ agent_id: 'probe-f', code: 'missing_ui_handle' })
+    expect(failingPayload.blockers).toHaveLength(2)
+    expect(dbRead("SELECT home_directory,channel_port,runtime FROM agents WHERE agent_id='probe-f'")[0]).toEqual({home_directory:null,channel_port:null,runtime:null})
 
     const fixed = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', '~/Developer/probe-f',
-      '--channel-port', '19992',
-      '--tmux-session', 'probe-f-session',
-      '--runtime-engine', 'codex',
+      '--ui-id', '1001',
+      '--ui-handle', 'fixed-probe',
       '--execute',
     ])
     expect(fixed.status).toBe(0)
@@ -883,20 +1072,17 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
   test('profile doctor excludes disabled and test profiles by default', () => {
     const profiled = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', '~/Developer/probe-f',
-      '--channel-port', '19992',
-      '--tmux-session', 'probe-f-session',
-      '--runtime-engine', 'codex',
       '--execute',
     ])
     expect(profiled.status).toBe(0)
     {
       const db = new Database(dbPath)
       db.exec(`
-        INSERT INTO agents (agent_id, display_name, agent_type, status, metadata, profile_enabled)
+        INSERT INTO agents (agent_id, display_name, agent_type, metadata, profile_enabled)
         VALUES
-          ('test-bot', 'test-bot', 'dev', 'idle', '{"profile_class":"test"}', 1),
-          ('disabled-bot', 'disabled-bot', 'dev', 'idle', '{}', 0)
+          ('test-bot', 'test-bot', 'dev', '{"profile_class":"test"}', 1),
+          ('disabled-bot', 'disabled-bot', 'dev', '{}', 0);
+        UPDATE agents SET ui_id=0 WHERE agent_id IN ('test-bot','disabled-bot')
       `)
       db.close()
     }
@@ -912,30 +1098,31 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(includeTest.status).toBe(1)
     expect(JSON.parse(includeTest.stdout).blockers).toContainEqual({
       agent_id: 'test-bot',
-      code: 'missing_home_directory',
+      code: 'missing_ui_id',
     })
 
     const includeDisabled = runCli(['agent', 'profile', 'doctor', '--include-disabled'])
     expect(includeDisabled.status).toBe(1)
     expect(JSON.parse(includeDisabled.stdout).blockers).toContainEqual({
       agent_id: 'disabled-bot',
-      code: 'missing_home_directory',
+      code: 'missing_ui_id',
     })
   })
 
-  test('runtime cleanup CLI is dry-run first, hash-confirmed, audited, and idempotent', () => {
+  test('runtime cleanup CLI is dry-run first, hash-confirmed, audited, and idempotent', async () => {
+    claimHost = await nonpersistHostFixture(randomUUID(), 'cleanup-disabled')
     {
       const db = new Database(dbPath)
       db.exec(`
         INSERT INTO agents
-          (agent_id, display_name, agent_type, runtime, status, metadata, channel_port, profile_enabled)
+          (agent_id, display_name, agent_type, metadata, profile_enabled)
         VALUES
-          ('cleanup-disabled', 'cleanup-disabled', 'dev', 'TUI', 'offline', '{"tmux_session":"cleanup-disabled-session","supervisor_type":"tmux"}', 29999, 0);
+          ('cleanup-disabled', 'cleanup-disabled', 'dev', '{}', 0);
 
         INSERT INTO agent_runtime_instances
-          (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id, port, status, started_at, last_seen_at)
+          (runtime_instance_id, agent_id, runtime_kind)
         VALUES
-          ('runtime-cleanup-disabled', 'cleanup-disabled', 'codex', 'local_process', 'cleanup-disabled-session', 29999, 29999, 'active', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z');
+          ('${claimHost.runtimeId}', 'cleanup-disabled', 'local_process');
       `)
       db.close()
     }
@@ -948,7 +1135,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(plan.targets).toContainEqual(expect.objectContaining({
       agent_id: 'cleanup-disabled',
       classification: 'disabled-profile-residue',
-      runtime_instance_id: 'runtime-cleanup-disabled',
+      runtime_instance_id: claimHost.runtimeId,
     }))
 
     const refused = runCli(['runtime', 'cleanup', '--execute', '--format', 'json'])
@@ -956,7 +1143,7 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
     expect(refused.stderr).toContain('PLAN_HASH_MISMATCH')
 
     const executed = runCli(['runtime', 'cleanup', '--execute', '--confirm', plan.plan_hash, '--format', 'json'])
-    expect(executed.status).toBe(0)
+    expect(executed.status, executed.stderr + executed.stdout).toBe(0)
     const executedPayload = JSON.parse(executed.stdout)
     expect(executedPayload.dry_run).toBe(false)
     expect(executedPayload.plan_hash).toBe(plan.plan_hash)
@@ -967,18 +1154,19 @@ describe('F1b — agent profile SSOT CLI (SQLite)', () => {
         JOIN audit_log al
           ON al.event_type = 'runtime.cleanup_target'
          AND al.agent_id = ari.agent_id
-       WHERE ari.runtime_instance_id = 'runtime-cleanup-disabled'
+       WHERE ari.runtime_instance_id = '${claimHost.runtimeId}'
     `)
-    expect(rows[0].status).toBe('stopped')
-    expect(rows[0].stopped_at).not.toBeNull()
+    expect(rows[0].status).toBeNull()
+    expect(rows[0].stopped_at).toBeNull()
     const detail = JSON.parse(rows[0].detail)
     expect(detail).toMatchObject({
-      plan_hash: plan.plan_hash,
-      runtime_instance_id: 'runtime-cleanup-disabled',
-      port: 29999,
-      tmux_session: 'cleanup-disabled-session',
+      runtime_instance_id: claimHost.runtimeId,
+      classification: 'disabled-profile-residue',
+      action_kinds: ['kill_process'],
     })
-    expect(detail.evidence.agent_id).toBe('cleanup-disabled')
+    expect(detail).not.toHaveProperty('port')
+    expect(detail).not.toHaveProperty('tmux_session')
+    expect(detail).not.toHaveProperty('plan_hash')
 
     const rerun = runCli(['runtime', 'cleanup', '--format', 'json'])
     expect(rerun.status).toBe(0)
@@ -1148,15 +1336,13 @@ process.stdout.write(JSON.stringify(fixtures[endpoint]))
     expect(dbRead(`SELECT * FROM audit_log WHERE event_type = 'registry.identity_reconciliation.apply'`)).toHaveLength(1)
   })
 
-  test('strict profile doctor gates active connectors on runtime endpoint leases', () => {
-    const runtimeId = randomUUID()
+  test('strict profile doctor gates active connectors on runtime endpoint leases', async () => {
+    claimHost = await nonpersistHostFixture(randomUUID(), 'probe-f')
+    const runtimeId = claimHost.runtimeId
+    const workspaceId = bindLogicalWorkspace('probe-f')
     const connectorId = randomUUID()
     const profiled = runCli([
       'agent', 'profile', 'set', 'probe-f',
-      '--home-directory', '~/Developer/probe-f',
-      '--channel-port', '19992',
-      '--tmux-session', 'probe-f-session',
-      '--runtime-engine', 'codex',
       '--execute',
     ])
     expect(profiled.status).toBe(0)
@@ -1164,9 +1350,9 @@ process.stdout.write(JSON.stringify(fixtures[endpoint]))
       const db = new Database(dbPath)
       db.prepare(
         `INSERT INTO agent_runtime_instances
-           (runtime_instance_id, agent_id, runtime_engine, status)
-         VALUES (?, 'probe-f', 'codex', 'active')`,
-      ).run(runtimeId)
+           (runtime_instance_id, agent_id,workspace_id)
+         VALUES (?, 'probe-f',?)`,
+      ).run(runtimeId,workspaceId)
       db.close()
     }
     const projected = runCli(['agent', 'profile', 'project', 'probe-f', '--execute'])
@@ -1220,9 +1406,9 @@ process.stdout.write(JSON.stringify(fixtures[endpoint]))
       db.prepare(
         `INSERT INTO control_plane_leases
            (lease_scope_type, lease_scope_id, lease_purpose, holder_agent_id,
-            holder_runtime_instance_id, holder_connector_instance_id, fencing_token, expires_at)
+            holder_runtime_instance_id, holder_connector_instance_id, fencing_token, acquired_at, expires_at)
          VALUES
-           ('runtime_instance', ?, 'worker', 'probe-f', ?, ?, 1, datetime('now', '+5 minutes'))`,
+           ('runtime_instance', ?, 'worker', 'probe-f', ?, ?, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), datetime('now', '+5 minutes'))`,
       ).run(runtimeId, runtimeId, connectorId)
       db.close()
     }
@@ -1235,6 +1421,7 @@ process.stdout.write(JSON.stringify(fixtures[endpoint]))
 })
 
 describe('F2 — agent-com next (SQLite)', () => {
+  beforeEach(registerCliHolder)
   test('pops a pending row, marks received, stamps the per-row claim, sets busy', () => {
     const { messageId, queueId } = seedPendingMessage('next test')
     const r = runCli(['next'])
@@ -1247,12 +1434,13 @@ describe('F2 — agent-com next (SQLite)', () => {
     // Issue #278 (A) segment 3d — agents.current_message_id is gone.
     // The in-flight pointer now lives on the message_queue row itself
     // via the per-row claim columns.
-    const q = dbRead(`SELECT status, claimed_by, claim_expires_at FROM message_queue WHERE id = ?`, [queueId])
+    const q = dbRead(`SELECT status, claimed_by, claim_expires_at, claimed_runtime_instance_id FROM message_queue WHERE id = ?`, [queueId])
     expect(q[0].status).toBe('received')
     expect(q[0].claimed_by).toBe('probe-f')
     expect(q[0].claim_expires_at).not.toBeNull()
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
-    expect(a[0].status).toBe('busy')
+    expect(a[0].status).toBeNull()
+    expect(q[0].claimed_runtime_instance_id).toBe(claimHost!.runtimeId)
   })
 
   test('emits {"waiting":0} with no message_id when queue is empty', () => {
@@ -1290,8 +1478,8 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
       ['codex-cto', '900000000000000003'],
     ] as const) {
       db.prepare(
-        `INSERT INTO agents (agent_id, display_name, agent_type, status, metadata)
-         VALUES (?, ?, 'dev', 'idle', ?)`,
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+         VALUES (?, ?, 'dev', ?)`,
       ).run(agentId, agentId, JSON.stringify({ discord_id: discordId }))
       db.prepare(
         `INSERT INTO agent_ui_bindings (agent_id, ui_type, ui_id, ui_handle, status)
@@ -1357,7 +1545,7 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
       '--execute',
       '--confirm', dryPayload.plan_hash,
     ])
-    expect(executed.status).toBe(0)
+    expect(executed.status, executed.stderr + executed.stdout).toBe(0)
     expect(JSON.parse(executed.stdout).summary.executed).toBe(1)
     expect(dbRead(`SELECT * FROM channel_adapters WHERE external_id = '1509299147109306508'`)).toHaveLength(1)
     expect(dbRead(`SELECT * FROM audit_log WHERE event_type = 'channel.registration_reconcile_execute'`)).toHaveLength(1)
@@ -1365,6 +1553,7 @@ describe('F1c — channel reconcile CLI (SQLite)', () => {
 })
 
 describe('F3 — agent-com send (SQLite)', () => {
+  beforeEach(registerCliHolder)
   test('queue-work finalizer replies once from an exact authorized done row', () => {
     allowOutboundAgents('probe-f', 'cto')
     const { messageId, queueId } = seedPendingMessage('queue-work finalizer input')
@@ -1708,7 +1897,7 @@ describe('F3 — agent-com send (SQLite)', () => {
       alias_resolution: false,
     })
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
-    expect(a[0].status).toBe('idle')
+    expect(a[0].status).toBeNull()
   })
 
   test('shadow control-plane stamps the outbound message and active-owner queue row', () => {
@@ -1842,7 +2031,7 @@ describe('F3 — agent-com send (SQLite)', () => {
 
   test('rejects channels.members violations before writing reply rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('cto', 'cto', 'dev') ON CONFLICT DO NOTHING`)
     db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
@@ -1876,13 +2065,14 @@ describe('F3 — agent-com send (SQLite)', () => {
 })
 
 describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #224 cycle 2)', () => {
+  beforeEach(registerCliHolder)
   // Phase 2 F cycle 2 (CTO option (a)): the CLI must fanout to each mentioned
   // recipient itself instead of delegating to pg_notify — in SQLite mode there
   // is no LISTEN-er. A recipient's message_queue must grow one row per send.
   test('probe-f → probe-f2 send enqueues a row on probe-f2.message_queue', () => {
     // Seed a second agent + add them both as channel members
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f2', 'probe-f2', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-f2', 'probe-f2', 'dev') ON CONFLICT DO NOTHING`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-f2"]' WHERE id = 'probe-f-ch'`)
     db.close()
     allowOutboundAgents('probe-f', 'probe-f2')
@@ -1914,7 +2104,7 @@ describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #2
     // to simulate a retry after the first INSERT already committed. The ON
     // CONFLICT clause must dedupe instead of throwing.
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('probe-f2', 'probe-f2', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('probe-f2', 'probe-f2', 'dev') ON CONFLICT DO NOTHING`)
     db.exec(`UPDATE channels SET members = '["probe-f","probe-f2"]' WHERE id = 'probe-f-ch'`)
     // Pre-stage a conflicting row using a known agent_messages id
     const existingMsgId = randomUUID()
@@ -1939,6 +2129,7 @@ describe('F3b — send fanout INSERTs message_queue per recipient (SQLite, PR #2
 })
 
 describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
+  beforeEach(registerCliHolder)
   test('fail sets status=failed + reason + releases the agent', () => {
     const { messageId, queueId } = seedPendingMessage('f4-fail')
     runCli(['next'])
@@ -1949,7 +2140,7 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     expect(q[0].failed_reason).toBe('SQLITE_FAIL_TEST')
     expect(q[0].done_at).not.toBeNull()
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
-    expect(a[0].status).toBe('idle')
+    expect(a[0].status).toBeNull()
   })
 
   test('skip sets status=skipped + reason (operator path)', () => {
@@ -1979,7 +2170,7 @@ describe('F4 — agent-com fail / skip / reclaim (SQLite)', () => {
     expect(q[0].status).toBe('pending')
     expect(q[0].read_at).toBeNull()
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
-    expect(a[0].status).toBe('idle')
+    expect(a[0].status).toBeNull()
   })
 })
 
@@ -2000,7 +2191,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
     const a = dbRead(`SELECT status FROM agents WHERE agent_id = 'probe-f'`)
     // notify should NOT flip the agent's busy/idle state — it stays whatever
     // it was (we seeded 'idle' in beforeEach).
-    expect(a[0].status).toBe('idle')
+    expect(a[0].status).toBeNull()
   })
 
   test('notify rejects legacy --channel before writing', () => {
@@ -2086,7 +2277,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
 
   test('notify rejects channels.members violations before writing rows while ignoring compatibility allowlist', () => {
     const db = new Database(dbPath)
-    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type, status) VALUES ('cto', 'cto', 'dev', 'idle') ON CONFLICT DO NOTHING`)
+    db.exec(`INSERT INTO agents (agent_id, display_name, agent_type) VALUES ('cto', 'cto', 'dev') ON CONFLICT DO NOTHING`)
     db.exec(`UPDATE channels SET members = '["probe-f"]' WHERE id = 'probe-f-ch'`)
     db.exec(`INSERT INTO channel_routing_policy (channel_id, outbound_allowlist) VALUES ('probe-f-ch', '["probe-f","cto"]')`)
     db.close()
@@ -2146,6 +2337,7 @@ describe('F5 — agent-com notify (SQLite)', () => {
 })
 
 describe('F5b — provider-forbidden anchored reply (SQLite)', () => {
+  beforeEach(registerCliHolder)
   test('next/send closes the internal queue lifecycle with zero outbound projection', () => {
     allowOutboundAgents('probe-f', 'cto')
     enableDiscordProjection('cto')

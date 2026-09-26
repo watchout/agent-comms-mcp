@@ -1,0 +1,25 @@
+{
+  "files": [
+    "bin/aun/receive.ts",
+    "bin/aun/run-queue-work.ts",
+    "cli/index.ts",
+    "core/inbox-cursor.ts",
+    "core/queue-work.ts",
+    "core/runtime-memory-ready.ts",
+    "server.ts",
+    "tests/agent-status-lifecycle.test.ts",
+    "tests/inbox-cursor-db-persist.test.ts",
+    "tests/inbox-cursor.test.ts",
+    "tests/norm-022-runtime-endpoint-lease.test.ts",
+    "tests/runtime-current-resolver.test.ts",
+    "tests/runtime-heartbeat.test.ts",
+    "tests/runtime-memory-ready.test.ts",
+    "core/runtime-queue-claim.ts",
+    "tests/contract/test_runtime_nonpersist_claim_cycle.test.ts",
+    "tests/contract/test_runtime_nonpersist_profile.test.ts",
+    "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts"
+  ],
+  "pass_files": 18,
+  "exit_code": 0,
+  "log_sha256": "2c7b24fa30f957bf33b4d209e77c94f49147da625ea12709ddc57efff1d7d894"
+}

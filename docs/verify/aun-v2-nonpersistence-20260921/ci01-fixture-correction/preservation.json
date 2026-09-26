@@ -1,0 +1,13 @@
+{
+  "baseline_head": "aa91e435c5ad858185e27950f9f083e6349d2f69",
+  "existing_test_code_unchanged_except_input_normalization": true,
+  "existing_assertions_unchanged": true,
+  "workflow_np04_and_contract_unchanged": {
+    ".github/workflows/pr-checks.yml": "b555e0b6ca4b8b5d08740b871f915974de410d60387570fc0ac72911c620480b",
+    "core/process-start-time.ts": "8b347b3e92b73c944846098066c530efe365eff3dbab1d8a21d6efef1be1eb8c",
+    "core/host-runtime-observer.ts": "e6e7a29924d28be4a0b17bff308edac035430f3ef3c9c65a6c8bc8473a2444cc",
+    "core/runtime-endpoint.ts": "a4abc9859a9e51af03fbd48f942b0a5e7cf4812affe6bd06abdcb8b4473b4e7a",
+    "tests/contract/test_runtime_nonpersist_authority.test.ts": "a1007232d4ea9b590376163542a5851c5eba9b62f6352492b8d9e741dc970479",
+    "docs/spec/seat-runtime-continuity.md": "8a3170743885dbf8ff20635f627c0a0b78b812e90da5daa190de5fb4f9e17bca"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "actor": "codex-cto/execution_guide_review",
+  "function": "implementation_executor",
+  "started_at": "2026-09-21T04:27:17.424702Z",
+  "deadline": "2026-09-21T06:27:17.424702Z",
+  "initial_head": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "branch": "codex/aun-v2-nonpersist-design-20260921",
+  "initial_clean": true,
+  "completion": "NP01\u201311 source and isolated functional tests with raw evidence; NP12 remains pending independent/applied acceptance"
+}

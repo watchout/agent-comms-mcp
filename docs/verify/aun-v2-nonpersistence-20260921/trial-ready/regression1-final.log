@@ -1,0 +1,560 @@
+bun test v1.3.11 (af24e281)
+
+tests/norm-022-runtime-endpoint-lease.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-xtRBLJ/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:176:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease [23.58ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-2Ai4gS/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:186:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal [19.66ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-vV7A1K/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:200:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > stale_ttl_expiry [20.18ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-m2d6q1/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:237:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > duplicate_active_lease_fenced [22.40ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > supervisor_down_fail_closed [0.17ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-Cq0Eia/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:278:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > restart_gated_by_lease_heartbeat_fencing [21.04ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-Md0zuU/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:332:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed [20.45ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-PUNYns/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:346:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime [24.64ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-AoeOFa/norm-022.db
+72 |        (agent_id, display_name, agent_type, runtime, status, metadata,
+73 |         ui_id, ui_handle, home_directory, channel_port,
+74 |         runtime_engine_preference, profile_enabled)
+75 |      VALUES
+76 |        (?, ?, 'dev', 'codex', 'idle', ?, 22022, ?, ?, 19022, 'codex', 1)`,
+77 |   ).run(
+         ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at seedRuntimeEndpointFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:77:5)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:54:17)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:389:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed [21.97ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > tmux_diagnostics_only_for_tmux_supervisor [0.07ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > non_tmux_destructive_lifecycle_fails_closed_without_tmux_evidence [0.10ms]
+
+tests/runtime-heartbeat.test.ts:
+441 | ): Promise<RuntimeHeartbeatResult> {
+442 |   const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+443 |     logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+444 |   const held=inspected.observations
+445 |   if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+446 |     || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+                                                                                              ^
+error: RUNTIME_CURRENT_HOLDER_UNVERIFIED
+      at heartbeatRuntimeInstance (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-heartbeat.ts:446:89)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:63:26)
+(fail) runtime heartbeat evidence > upserts runtime instance and connector rows from connector evidence [72.97ms]
+441 | ): Promise<RuntimeHeartbeatResult> {
+442 |   const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+443 |     logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+444 |   const held=inspected.observations
+445 |   if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+446 |     || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+                                                                                              ^
+error: RUNTIME_CURRENT_HOLDER_UNVERIFIED
+      at heartbeatRuntimeInstance (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-heartbeat.ts:446:89)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:161:26)
+(fail) runtime heartbeat evidence > does not attach existing connector rows without connector evidence [36.57ms]
+441 | ): Promise<RuntimeHeartbeatResult> {
+442 |   const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+443 |     logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+444 |   const held=inspected.observations
+445 |   if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+446 |     || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+                                                                                              ^
+error: RUNTIME_CURRENT_HOLDER_UNVERIFIED
+      at heartbeatRuntimeInstance (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-heartbeat.ts:446:89)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:227:26)
+(fail) runtime heartbeat evidence > renews an existing runtime endpoint lease on heartbeat [66.44ms]
+310 |       processId: 789,
+311 |       port: 8795,
+312 |       endpointUri: 'http://127.0.0.1:8795',
+313 |       connectorProvider: 'discord',
+314 |       connectorUri: 'discord://agents/agent-com-dev',
+315 |     })).rejects.toThrow('RUNTIME_ENDPOINT_LEASE_EXPIRED')
+                      ^
+error: expect(received).toThrow(expected)
+
+Expected substring: "RUNTIME_ENDPOINT_LEASE_EXPIRED"
+Received message: "RUNTIME_CURRENT_HOLDER_UNVERIFIED"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:315:17)
+(fail) runtime heartbeat evidence > expired runtime endpoint cannot be resurrected by its delayed heartbeat [65.22ms]
+441 | ): Promise<RuntimeHeartbeatResult> {
+442 |   const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+443 |     logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+444 |   const held=inspected.observations
+445 |   if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+446 |     || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+                                                                                              ^
+error: RUNTIME_CURRENT_HOLDER_UNVERIFIED
+      at heartbeatRuntimeInstance (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-heartbeat.ts:446:89)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:372:26)
+(fail) runtime heartbeat evidence > uses agent profile home_directory as the canonical workspace when present [64.56ms]
+441 | ): Promise<RuntimeHeartbeatResult> {
+442 |   const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+443 |     logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+444 |   const held=inspected.observations
+445 |   if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+446 |     || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+                                                                                              ^
+error: RUNTIME_CURRENT_HOLDER_UNVERIFIED
+      at heartbeatRuntimeInstance (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-heartbeat.ts:446:89)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-heartbeat.test.ts:471:26)
+(fail) runtime heartbeat evidence > registers the codex-cto MCP runtime from its seat profile without PWD or TMUX metadata [37.50ms]
+(pass) runtime heartbeat evidence > infers session name and port from runtime environment [0.14ms]
+(pass) runtime heartbeat evidence > derives stable local workspace identity from checkout path [0.13ms]
+
+tests/queue-work.test.ts:
+(pass) queue work envelope > builds a runtime envelope that forbids queue-control tools [0.39ms]
+(pass) queue work envelope > detects GitHub-backed phase handoff rows without echoing payload in planner-facing fields [0.05ms]
+(pass) queue work envelope > does not derive the reply contract from legacy no-reply fields or prose [0.03ms]
+(pass) queue work envelope > honors an explicit typed reply contract without inspecting prose [0.01ms]
+(pass) queue work envelope > detects an instruction-form evidence audit request as GitHub-backed [0.02ms]
+(pass) runReceivedQueueWork > advances received -> in_progress -> done and persists runner result [1.05ms]
+(pass) runReceivedQueueWork > codex output fallback success advances the row to done with fallback evidence [0.19ms]
+(pass) runReceivedQueueWork > expectedClaimSource leaves rows claimed by another path untouched (CLAIM_NOT_OWNED) [0.09ms]
+(pass) runReceivedQueueWork > expectedClaimSource processes rows whose receive_claim.source matches [0.14ms]
+(pass) runReceivedQueueWork > adapter failures leave the row in_progress with runner_error evidence [0.43ms]
+(pass) runReceivedQueueWork > non-ok result persistence returns its row for rows-length database adapters [0.23ms]
+(pass) runReceivedQueueWork > state-invariant typed adapter failure becomes failed immediately without retry or done evidence [0.21ms]
+(pass) runReceivedQueueWork > claude invalid MCP configuration is typed non-retryable and consumes no reclaim attempt [0.20ms]
+(pass) runReceivedQueueWork > exact claim fence prevents a stale runner from persisting done after ownership changes [0.15ms]
+(pass) runReceivedQueueWork > same-agent expiry, reclaim, and re-receive cannot persist or finalize the stale result [0.13ms]
+(pass) runReceivedQueueWork > fenced runner persists pre-invocation runtime authority and exact result claim [0.10ms]
+(pass) runReceivedQueueWork > a new fenced execution archives and clears the prior runner error before invocation [0.09ms]
+(pass) runReceivedQueueWork > exact claim fence prevents stale runner_error persistence after ownership changes [0.12ms]
+(pass) runReceivedQueueWork > claim expiry during terminal persistence prevents a stale done write [0.13ms]
+(pass) runReceivedQueueWork > claim expiry during error persistence prevents a stale runner_error write [0.16ms]
+(pass) runReceivedQueueWork > abort is a typed non-terminal outcome with no done or runner_error write [1.85ms]
+(pass) finalizeDoneQueueWork > claim/result fence blocks outbound and close for a stale same-agent result [0.84ms]
+(pass) finalizeDoneQueueWork > D1 done rows cannot close without an exact completed receipt DB fence [0.11ms]
+(pass) finalizeDoneQueueWork > holds the finalize transaction across select, reply send, and replied update [0.10ms]
+(pass) finalizeDoneQueueWork > releases the row lock for a sender-owned close and verifies exact reply readback [0.21ms]
+(pass) finalizeDoneQueueWork > persists mediated writeback receipt before sender-owned reply close [0.29ms]
+(pass) finalizeDoneQueueWork > sends the stored reply and closes done rows as replied [0.10ms]
+(pass) finalizeDoneQueueWork > rolls back without sending when a reply result has no reply sender [0.06ms]
+(pass) finalizeDoneQueueWork > closes non-reply results without calling a reply sender [0.06ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff results require a structured mediated writeback [0.02ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization delegates posting to a mediated sender [0.05ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization fails closed when mediated sender returns no posted URL [0.22ms]
+(pass) finalizeDoneQueueWork > does not terminal-close retry results until retry semantics exist [0.04ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > AUN per-engine override reaches both the child and the slot budget with the same value [0.08ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > STATE per-engine/generic overrides match between child and slot budget [0.08ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > conflicting overrides: slot budget never undercuts the largest legitimate child budget [0.02ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > canonical precedence: engine-specific beats generic; AUN beats STATE within each tier [0.02ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > malformed or non-positive timeouts are typed errors for both sides, never silent defaults [0.09ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > STATE generic timeout reaches the command-json child and equals the daemon slot budget
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > AUN generic beats STATE generic; engine-specific overrides never leak into the custom child but still raise the slot budget [0.05ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > unset generic timeout resolves to the documented default 600000 for the custom child [0.02ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > malformed STATE or AUN generic timeout is a typed QUEUE_WORK_TIMEOUT_CONFIG_INVALID failure before any child spawns [0.23ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > the resolved generic budget is the value actually enforced on the spawned child [204.23ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > bounded worker keeps the shared timeout and admission binding without receiving host credentials [15.91ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > valid timeout does not let a malformed admission binding spawn a child [0.27ms]
+
+tests/state-daemon-queue-work-scheduler.test.ts:
+(pass) disabled Shirube D1 is not wired into the production daemon
+(pass) queue-work failure reporting surfaces the failed finalizer instead of the successful runner
+(pass) queue-work runtime workspace resolves from fresh observation with enabled logical authority [2.25ms]
+(pass) queue-work runtime workspace fails closed on missing authority, relative, or absent observed paths [0.20ms]
+(pass) queue-work child env replaces daemon project with the resolved target project [0.04ms]
+(pass) state_daemon queue work scheduler boundary > verified live provider selects queue-work engines despite opposite legacy preferences [0.38ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive output becomes the exact immutable runner claim fence [0.09ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive fence rejects a different queue incarnation [0.02ms]
+(pass) state_daemon queue work scheduler boundary > valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers [4.23ms]
+(pass) state_daemon queue work scheduler boundary > D1-shaped rejection fails closed without generic routing or dispatch [0.50ms]
+(pass) state_daemon queue work scheduler boundary > duplicate pending notifications share one in-flight D1 dispatch [0.39ms]
+(pass) state_daemon queue work scheduler boundary > production D1 dispatcher uses exact fences, canonical source, finalize, and codex-exec by default [0.14ms]
+(pass) state_daemon queue work scheduler boundary > done D1 notification resumes finalization and is reported as replay [1.52ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep recovers a done D1 row without generic scheduler [2.23ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep leaves historical done D1 rows untouched while D1 is disabled [1.45ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep reclaims an expired D1 claim and dispatches it once [1.68ms]
+(pass) state_daemon queue work scheduler boundary > production-composed received not_d1 rows use the generic runner without tmux wake [1.61ms]
+(pass) state_daemon queue work scheduler boundary > invalid disabled D1 env leaves a D1-shaped row to the generic scheduler exactly once [1.47ms]
+(pass) state_daemon queue work scheduler boundary > done generic queue events resume only the stored-result finalizer [1.51ms]
+(pass) state_daemon queue work scheduler boundary > sweep resumes a stored-result finalizer after a writeback failure or restart [1.62ms]
+(pass) state_daemon queue work scheduler boundary > done finalizer sweep selects only enabled rows owned by the current scheduler [0.20ms]
+(pass) state_daemon queue work scheduler boundary > pending LLM queue events use the scheduler when runPending is configured [4.42ms]
+(pass) state_daemon queue work scheduler boundary > daemon pre-gate uses the target agent project instead of its global project [1.84ms]
+(pass) state_daemon queue work scheduler boundary > daemon passes the same target project to the direct Codex runner child [1.02ms]
+(pass) state_daemon queue work scheduler boundary > no-reply work still runs before the scheduler closes it without outbound chat [2.03ms]
+(pass) state_daemon queue work scheduler boundary > exact-fenced phase handoff canaries bypass routing hold and use pending scheduler [1.84ms]
+(pass) state_daemon queue work scheduler boundary > non-fenced phase handoff rows remain routing-held before pending scheduler [1.65ms]
+(pass) state_daemon queue work scheduler boundary > received notify for the same queue row is suppressed while pending runner is in flight [0.45ms]
+(pass) state_daemon queue work scheduler boundary > different queue rows for one agent are serialized until the active runner completes [4.68ms]
+(pass) state_daemon queue work scheduler boundary > different agents retain parallel queue-work capacity [1.79ms]
+(pass) state_daemon queue work scheduler boundary > live queue-work ids remain heartbeat-renewable past the generic claim max age [0.68ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence skips pre-existing received residue for the same allowlisted agent [1.40ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion skips policy-preserved received rows before runner invocation [1.38ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence is applied to claim heartbeat refresh SQL [0.18ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to claim heartbeat refresh SQL [0.06ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows are reclaimed to pending with recovery evidence [0.54ms]
+(pass) state_daemon queue work scheduler boundary > non-retryable runner_error is failed in place without a reclaim attempt [0.23ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows fail after the bounded reclaim cap [0.20ms]
+(pass) state_daemon queue work scheduler boundary > exact fenced canary recovery grants one control-ref-bound reclaim beyond the normal cap [0.22ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery is inert when queue-work scheduler is not configured [0.11ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery does not reclaim policy-preserved residue rows [0.13ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence is applied to sweep fetch SQL [0.04ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to sweep fetch SQL [0.23ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon loads residue exclusion ids from the governed policy file [0.50ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon fails closed on invalid manual residue exclusion ids [0.06ms]
+(pass) state_daemon queue work scheduler boundary > scheduler-owned expired rows are not reclaimed into legacy runner when scheduler is disabled [0.28ms]
+
+tests/seat-runtime-continuity.test.ts:
+(pass) SC1 stable seat provider selection > P01 target ancestry snapshots select either provider despite opposite legacy preference [0.38ms]
+(pass) SC1 stable seat provider selection > live provider root ignores caller context and rejects PID reuse, missing or conflicting evidence [0.87ms]
+(pass) SC1 stable seat provider selection > actual connected memory child must match the current provider and seat; private repaired lookup is insufficient [0.17ms]
+(pass) SC1 stable seat provider selection > P02 unknown, generic MCP, foreign seat, and multiple live owners cannot select [0.02ms]
+(pass) SC1 stable seat provider selection > P03 cold launch requires explicit intent; qualified/stale/profile-only/ambiguous history cannot launch [0.12ms]
+(pass) SC2 held OS endpoint and exact lease resolution > legacy generated port env never requests a fixed listener [0.02ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/seat-endpoint-DAu5Xy/fixture.db
+(pass) SC2 held OS endpoint and exact lease resolution > P05-P07 held binds, exact publication, same-seat replacement and foreign/stale denial [35.19ms]
+(pass) SC2 held OS endpoint and exact lease resolution > P06 registration failure closes only its own held socket [1.92ms]
+(pass) native fixture report publication > partial staging bytes are invisible until the actual publisher completes [0.71ms]
+(pass) native fixture report publication > failed partial write or publication never exposes a complete report [0.44ms]
+
+tests/runtime-current-resolver.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-m3SLVR/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:81:11)
+(fail) runtime current resolver > codex-cto sole live profile mismatch remains current and only the stale same-group row is reapable [22.62ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-XQufvO/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:151:11)
+(fail) runtime current resolver > freshest exact profile tuple is selected deterministically [20.62ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-NlcjvK/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:168:11)
+(fail) runtime current resolver > selects the newer observed location without letting the old profile tuple win [21.07ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-xZr5P6/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:199:11)
+(fail) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [28.57ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-Prcjg6/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:246:11)
+(fail) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [20.69ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-8eSmmJ/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:266:11)
+(fail) runtime current resolver > requested kind defines an independent ordinary ranking surface [22.09ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-UqYs7s/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:287:11)
+(fail) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [19.57ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-oJ39FF/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:314:11)
+(fail) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [19.16ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-H6iOjE/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:44:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:346:11)
+(fail) runtime current resolver > unknown group uses the frozen 30m/24h defaults [18.17ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-7K9j9C/test.db
+(pass) runtime current resolver > policy rejects unsupported or unsafe values [23.63ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.06ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.26ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof [0.07ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.33ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.18ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.43ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1059.61ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [804.15ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.20ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [1.62ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.50ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.12ms]
+
+23 tests failed:
+(fail) NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease [23.58ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal [19.66ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > stale_ttl_expiry [20.18ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > duplicate_active_lease_fenced [22.40ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > restart_gated_by_lease_heartbeat_fencing [21.04ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed [20.45ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime [24.64ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed [21.97ms]
+(fail) runtime heartbeat evidence > upserts runtime instance and connector rows from connector evidence [72.97ms]
+(fail) runtime heartbeat evidence > does not attach existing connector rows without connector evidence [36.57ms]
+(fail) runtime heartbeat evidence > renews an existing runtime endpoint lease on heartbeat [66.44ms]
+(fail) runtime heartbeat evidence > expired runtime endpoint cannot be resurrected by its delayed heartbeat [65.22ms]
+(fail) runtime heartbeat evidence > uses agent profile home_directory as the canonical workspace when present [64.56ms]
+(fail) runtime heartbeat evidence > registers the codex-cto MCP runtime from its seat profile without PWD or TMUX metadata [37.50ms]
+(fail) runtime current resolver > codex-cto sole live profile mismatch remains current and only the stale same-group row is reapable [22.62ms]
+(fail) runtime current resolver > freshest exact profile tuple is selected deterministically [20.62ms]
+(fail) runtime current resolver > selects the newer observed location without letting the old profile tuple win [21.07ms]
+(fail) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [28.57ms]
+(fail) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [20.69ms]
+(fail) runtime current resolver > requested kind defines an independent ordinary ranking surface [22.09ms]
+(fail) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [19.57ms]
+(fail) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [19.16ms]
+(fail) runtime current resolver > unknown group uses the frozen 30m/24h defaults [18.17ms]
+
+ 119 pass
+ 23 fail
+ 530 expect() calls
+Ran 142 tests across 7 files. [3.02s]

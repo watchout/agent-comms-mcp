@@ -396,20 +396,6 @@ export async function lifecycleTransition(
         if (updated.rowCount !== 1) {
           throw new Error(`RACE: queue_id=${queueId} changed before ${mode}`)
         }
-        await tx.execute(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(
-               SELECT 1 FROM message_queue
-                WHERE claimed_by = $1 AND status IN ('received', 'in_progress')
-             ) THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(
-               SELECT 1 FROM message_queue
-                WHERE claimed_by = $1 AND status IN ('received', 'in_progress')
-             ) THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [plan.env.AGENT_ID],
-        )
         return {
           ok: true,
           mode,

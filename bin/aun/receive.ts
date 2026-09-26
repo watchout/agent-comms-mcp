@@ -6,6 +6,9 @@
  * audit and recovery workflows do not drain unrelated FIFO work.
  */
 import { spawnSync } from 'node:child_process'
+import { claimUnboundedRuntimeQueue } from '../../core/runtime-queue-claim'
+import { resolveSeatProvider } from '../../core/seat-runtime-selection'
+import { tryBoundedClaim } from '../../core/queue-admission'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -70,6 +73,7 @@ export interface ClaimedMessage {
   claimed_by?: string
   claimed_at?: string
   claim_expires_at?: string
+  claimed_runtime_instance_id?: string
   reply_chain?: unknown[]
   presentation?: PresentationEvidence
   routing?: QueueRoutingDecisionEvidence
@@ -474,6 +478,13 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
 
   try {
     const summary = await withDb(plan.env, plan.databaseUrlCandidates, async (db) => {
+      const bounded = await tryBoundedClaim(db, plan.env.AGENT_ID, { dialect: db.dialect, env: plan.env, queueId: targetQueueId, dryRun: opts.dryRun })
+      if (bounded) return {
+        ok: true, dry_run: !!opts.dryRun, mode: 'targeted-receive' as const,
+        agent_id: plan.env.AGENT_ID, expected_agent_id: plan.env.AGENT_COM_EXPECTED_AGENT_ID,
+        queue_id: targetQueueId, selected: null, claimed: opts.dryRun ? null : bounded as ClaimedMessage,
+        waiting: 0, blocked_reason: null, observed_status: opts.dryRun ? 'pending' : 'received',
+      }
       return db.transaction<TargetedReceiveSummary>(async (tx) => {
         const row = await tx.queryOne<Record<string, unknown>>(
           `SELECT mq.id, mq.agent_id, mq.message_id, mq.payload, mq.status, mq.priority,
@@ -484,8 +495,8 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
                   am.source AS stored_source,
                   am.metadata AS stored_metadata,
                   am.input_mentions AS stored_input_mentions,
-                  a.runtime AS target_runtime,
-                  a.status AS target_status,
+                  NULL AS target_runtime,
+                  NULL AS target_status,
                   a.metadata AS target_metadata,
                   a.profile_enabled AS target_profile_enabled,
                   a.disabled_at AS target_disabled_at,
@@ -505,8 +516,9 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
 
         const payload = parsePayload(row?.payload)
         const presentation = row ? evaluatePresentationClaimability(row, payload) : null
+        const current = row ? await resolveSeatProvider(tx, {agentId:plan.env.AGENT_ID}) : null
         const selected = row ? {
-          ...normalizeQueueRow(row),
+          ...normalizeQueueRow(row, current?.ok ? current.provider : null),
           ...(presentation ? { presentation: presentation.evidence } : {}),
         } : null
         const observedStatus = selected?.status ?? null
@@ -518,38 +530,21 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
           claimed_by: string
           claimed_at: string
           claim_expires_at: string
+          claimed_runtime_instance_id: string
         } | null = null
 
         if (selected && !blockedReason && !opts.dryRun) {
           const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
           const claimSource = plan.env.AUN_RECEIVE_CLAIM_SOURCE?.trim() || null
           const claimPayload = queuePayloadWithReceiveClaim(payload, {
             source: claimSource,
             agentId: plan.env.AGENT_ID,
             queueId: targetQueueId,
           })
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2,
-                    payload = COALESCE($5, payload)
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.queue_id, plan.env.AGENT_ID, claimPayload],
-          )
-          if (update.rowCount !== 1) {
-            throw new Error(`target queue row changed before claim: queue_id=${selected.queue_id}`)
-          }
-          const claimedRow = await tx.queryOne<Record<string, unknown>>(
-            `SELECT claimed_by, claimed_at::text AS claimed_at,
-                    claim_expires_at::text AS claim_expires_at
-               FROM message_queue
-              WHERE id = $1 AND agent_id = $2 AND status = 'received'`,
-            [selected.queue_id, plan.env.AGENT_ID],
-          )
+          const claimedRow = await claimUnboundedRuntimeQueue(tx, {
+            agentId:plan.env.AGENT_ID,queueId:selected.queue_id,ttlSeconds:claimTtlSec,
+            runtimeInstanceId:plan.env.AGENT_COM_RUNTIME_INSTANCE_ID,payload:claimPayload,
+          })
           const claimedAt = normalizeDate(claimedRow?.claimed_at)
           const persistedClaimExpiresAt = normalizeDate(claimedRow?.claim_expires_at)
           if (
@@ -563,15 +558,9 @@ export async function receiveTargeted(opts: ReceiveOptions = {}): Promise<Target
             claimed_by: plan.env.AGENT_ID,
             claimed_at: claimedAt,
             claim_expires_at: persistedClaimExpiresAt,
+            claimed_runtime_instance_id: claimedRow.claimed_runtime_instance_id,
           }
-          await tx.execute(
-            `UPDATE agents SET
-               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-               status_updated_at = now()
-             WHERE agent_id = $1`,
-            [plan.env.AGENT_ID],
-          )
+
         }
 
         const waitingRow = await tx.queryOne<{ n: number | string }>(
@@ -862,7 +851,7 @@ function classifyMessageType(messageType: string): DiagnosedQueueRow['classifica
   return classifyQueueMessageType(messageType)
 }
 
-function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
+function normalizeQueueRow(row: Record<string, unknown>, runtime: string | null = null): DiagnosedQueueRow {
   const payload = parsePayload(row.payload)
   const messageType = resolveMessageType(row, payload)
   const payloadAuthor = payload.author_id
@@ -875,8 +864,8 @@ function normalizeQueueRow(row: Record<string, unknown>): DiagnosedQueueRow {
     : typeof row.stored_source === 'string' ? row.stored_source : null
   const routing = decideQueueRouting({
     target_agent_id: String(row.agent_id ?? ''),
-    target_runtime: typeof row.target_runtime === 'string' ? row.target_runtime : null,
-    target_status: typeof row.target_status === 'string' ? row.target_status : null,
+    target_runtime: runtime,
+    target_status: runtime ? 'online' : 'unknown',
     target_profile_enabled: booleanFromUnknown(row.target_profile_enabled),
     target_disabled_at: normalizeDate(row.target_disabled_at),
     target_discord_id: targetDiscordIdFromRow(row),
@@ -1045,6 +1034,7 @@ function claimedMessageFromRow(
     claimed_by: string
     claimed_at: string
     claim_expires_at: string
+    claimed_runtime_instance_id?: string
   } | null,
 ): ClaimedMessage {
   return {
@@ -1470,8 +1460,8 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
                 am.source AS stored_source,
                 am.metadata AS stored_metadata,
                 am.input_mentions AS stored_input_mentions,
-                a.runtime AS target_runtime,
-                a.status AS target_status,
+                NULL AS target_runtime,
+                NULL AS target_status,
                 a.metadata AS target_metadata,
                 a.profile_enabled AS target_profile_enabled,
                 a.disabled_at AS target_disabled_at,
@@ -1523,7 +1513,8 @@ export async function diagnoseReceive(opts: DiagnoseReceiveOptions = {}): Promis
           ORDER BY agent_id ASC`,
       )
 
-      const inspected = pendingRows.map(normalizeQueueRow)
+      const current = await resolveSeatProvider(db, {agentId:plan.env.AGENT_ID})
+      const inspected = pendingRows.map(row => normalizeQueueRow(row, current.ok ? current.provider : null))
       const typeCounts: Record<string, number> = {}
       for (const row of inspected) {
         typeCounts[row.message_type] = (typeCounts[row.message_type] ?? 0) + 1
@@ -1680,8 +1671,8 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
                   am.source AS stored_source,
                   am.metadata AS stored_metadata,
                   am.input_mentions AS stored_input_mentions,
-                  a.runtime AS target_runtime,
-                  a.status AS target_status,
+                  NULL AS target_runtime,
+                  NULL AS target_status,
                   a.metadata AS target_metadata,
                   a.profile_enabled AS target_profile_enabled,
                   a.disabled_at AS target_disabled_at,
@@ -1703,8 +1694,8 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
                   am.source AS stored_source,
                   am.metadata AS stored_metadata,
                   am.input_mentions AS stored_input_mentions,
-                  a.runtime AS target_runtime,
-                  a.status AS target_status,
+                  NULL AS target_runtime,
+                  NULL AS target_status,
                   a.metadata AS target_metadata,
                   a.profile_enabled AS target_profile_enabled,
                   a.disabled_at AS target_disabled_at,
@@ -1732,8 +1723,8 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
                   am.source AS stored_source,
                   am.metadata AS stored_metadata,
                   am.input_mentions AS stored_input_mentions,
-                  a.runtime AS target_runtime,
-                  a.status AS target_status,
+                  NULL AS target_runtime,
+                  NULL AS target_status,
                   a.metadata AS target_metadata,
                   a.profile_enabled AS target_profile_enabled,
                   a.disabled_at AS target_disabled_at,
@@ -1750,11 +1741,12 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
             LIMIT 1`,
           [plan.env.AGENT_ID],
         )
+        const current = await resolveSeatProvider(tx, {agentId:plan.env.AGENT_ID})
         const presentationByQueueId = new Map<string, ReturnType<typeof evaluatePresentationClaimability>>()
         const inspected = pendingRows.map((row) => {
           const payload = parsePayload(row.payload)
           const presentation = evaluatePresentationClaimability(row, payload)
-          const normalized = normalizeQueueRow(row)
+          const normalized = normalizeQueueRow(row, current.ok ? current.provider : null)
           presentationByQueueId.set(String(normalized.queue_id), presentation)
           return { ...normalized, presentation: presentation.evidence }
         })
@@ -1790,30 +1782,20 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           claim_expires_at: normalizeDate(activeClaimRow?.claim_expires_at),
         }
 
+        let newClaimIdentity: Awaited<ReturnType<typeof claimUnboundedRuntimeQueue>> | null = null
         if (selected.row && selectedRaw && !activeClaim.busy && !opts.dryRun) {
-          const claimTtlSec = parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-          const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
-          const update = await tx.execute(
-            `UPDATE message_queue
-                SET status = 'received',
-                    read_at = now(),
-                    claimed_by = $1,
-                    claimed_at = now(),
-                    claim_expires_at = $2
-              WHERE id = $3 AND agent_id = $4 AND status = 'pending'`,
-            [plan.env.AGENT_ID, claimExpiresAt, selected.row.queue_id, plan.env.AGENT_ID],
-          )
-          if (update.rowCount !== 1) {
-            throw new Error(`selected queue row changed before claim: queue_id=${selected.row.queue_id}`)
+          // Preserve the existing memory/presentation gates above. Once a
+          // row is selected, bounded recipients use the same policy-first
+          // claim as next/targeted/headless; never the legacy raw UPDATE.
+          const bounded = await tryBoundedClaim(tx, plan.env.AGENT_ID, {
+            dialect: db.dialect, env: plan.env, queueId: String(selected.row.queue_id),
+          })
+          if (bounded === null) {
+          newClaimIdentity = await claimUnboundedRuntimeQueue(tx, {agentId:plan.env.AGENT_ID,queueId:selected.row.queue_id,
+            ttlSeconds:parseInt(plan.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30',10),
+            runtimeInstanceId:plan.env.AGENT_COM_RUNTIME_INSTANCE_ID})
           }
-          await tx.execute(
-            `UPDATE agents SET
-               status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-               status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-               status_updated_at = now()
-             WHERE agent_id = $1`,
-            [plan.env.AGENT_ID],
-          )
+
         }
 
         const waitingRow = await tx.queryOne<{ n: number | string }>(
@@ -1823,7 +1805,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
         const waiting = Number(waitingRow?.n ?? 0)
         const activeClaimPayload = parsePayload(activeClaimRow?.payload)
         const activeClaimSelected = activeClaimRow
-          ? normalizeQueueRow(activeClaimRow)
+          ? normalizeQueueRow(activeClaimRow, current.ok ? current.provider : null)
           : null
         const activeClaimPresentation = activeClaimRow
           ? evaluatePresentationClaimability(activeClaimRow, activeClaimPayload)
@@ -1838,7 +1820,7 @@ export async function receiveActionable(opts: ActionableReceiveOptions = {}): Pr
           : null
         if (selected.row && !activeClaim.busy) {
           const payload = selectedRaw ? parsePayload(selectedRaw.payload) : {}
-          claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting)
+          claimed = opts.dryRun ? null : claimedMessageFromRow(selected.row, payload, waiting, newClaimIdentity)
         }
 
         return {
@@ -1935,8 +1917,8 @@ export async function reconcile(opts: ReconcileOptions = {}): Promise<ReconcileR
                 am.source AS stored_source,
                 am.metadata AS stored_metadata,
                 am.input_mentions AS stored_input_mentions,
-                a.runtime AS target_runtime,
-                a.status AS target_status,
+                NULL AS target_runtime,
+                NULL AS target_status,
                 a.metadata AS target_metadata,
                 a.profile_enabled AS target_profile_enabled,
                 a.disabled_at AS target_disabled_at,

@@ -1,0 +1,26 @@
+{
+  "run": 6,
+  "changed_input": "SQLite UUID requires exactly32hex+4hyphens; retained explicit zero-port compatibility per adopted stable-seat spec (positive actual ports still rejected)",
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T14:04:45.515639+09:00",
+  "finished_at": "2026-09-21T14:04:47.023822+09:00",
+  "duration_seconds": 1.508,
+  "exit_code": 0,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "source_files_sha256": {
+    "db/migrate.ts": "0659c029ae23f6d740bf899b325521728d9c3d67901e13f277511837146ee9de",
+    "db/migrate-sqlite.ts": "34acdf22c36f9a5193bd34f5b50e2e0efbf95c122396653c4ec5fc25ada04502",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql": "9e3d347e9e7a4a1aa858bd2f6f40a963bc65d6e9e56a059247f1291e436f5c0f",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts": "537c0fccbd01c1cb180fc18f6edb0792ea44e6b2a352539642cff37e14736805",
+    "tests/helpers/runtime-observation-nonpersistence-db-fixture.ts": "91d211e7dca459644a23b54da4f2fdc76903c36bc072be030ede45bb13957bd9"
+  },
+  "stdout_sha256": "e14c59f6ff2500a9a6d575634024831131e339078b55dd141f3135b21fa8c97d",
+  "stderr_sha256": "b707963e8ece73f4f615ae5b1f1757965608cd552bf0e8863b467b6e24b14ed7"
+}

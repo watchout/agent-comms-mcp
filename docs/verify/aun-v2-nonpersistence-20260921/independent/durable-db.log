@@ -1,0 +1,78 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_durable_fields.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_bd17a4f36af94848b0e55bdcd913bdbe","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP01/10 postgres typed logical columns reject an observation hidden in an allowed key [313.17ms]
+(pass) NP01/10 sqlite typed logical columns reject an observation hidden in an allowed key [81.47ms]
+(pass) NP01 machine-field serializer rejects before SQL without altering original operator text [0.39ms]
+
+tests/contract/test_runtime_observation_nonpersistence_db.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_244ed39010e34b2f99cc5671efe0751c","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"legacy-preservation","kind":"postgres","before_sha256":"280857b361be55599a7ac057e8d8758e97fb9f64d72093003fcc7cb4d24aa79a","after_sha256":"280857b361be55599a7ac057e8d8758e97fb9f64d72093003fcc7cb4d24aa79a","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+(pass) postgres runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [239.10ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_aa257efa9f1742c6a1040dc1d33b4cdc","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"guards-and-null-anchor","kind":"postgres","rejected_cases":15,"logical_audit_event_and_owner_content":"PRESERVED"}
+(pass) postgres runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [273.68ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_a5edc1f6885c4a0daf626b4f1ffaf771","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"rollback","kind":"postgres","before_sha256":"2eaf12b69867821cf7a66f1d2a29865142b34d45a1370b8ad41823ef1f093ff7","after_sha256":"2eaf12b69867821cf7a66f1d2a29865142b34d45a1370b8ad41823ef1f093ff7","schema_restored":true}
+(pass) postgres runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [225.04ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_6c0b73745ad54814a9e74a6c7f56aa30","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) postgres runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [201.66ms]
+219 | 
+220 | export function assertDestructiveMigrationAllowed(sql: string): void {
+221 |   const patterns = detectDestructivePatterns(sql)
+222 |   if (patterns.length === 0) return
+223 |   if (defaultConfigPort.getDestructiveMigrationFlagState().allowed) return
+224 |   throw new DestructiveMigrationBlockedError(
+              ^
+DestructiveMigrationBlockedError: Destructive migration blocked: ['DROP TABLE']. Set AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 to proceed (production deploy only). incident #339 anchor.
+ patterns: [ "DROP TABLE" ],
+  envName: "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED",
+
+      at assertDestructiveMigrationAllowed (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/destructive-migration-gate.ts:224:9)
+      at exec (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/migrate-sqlite.ts:1273:35)
+      at applyRuntimeObservationNonpersistenceSqlite (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/migrate-sqlite.ts:1336:7)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:55:85)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:12:12)
+(fail) sqlite runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [81.98ms]
+219 | 
+220 | export function assertDestructiveMigrationAllowed(sql: string): void {
+221 |   const patterns = detectDestructivePatterns(sql)
+222 |   if (patterns.length === 0) return
+223 |   if (defaultConfigPort.getDestructiveMigrationFlagState().allowed) return
+224 |   throw new DestructiveMigrationBlockedError(
+              ^
+DestructiveMigrationBlockedError: Destructive migration blocked: ['DROP TABLE']. Set AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 to proceed (production deploy only). incident #339 anchor.
+ patterns: [ "DROP TABLE" ],
+  envName: "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED",
+
+      at assertDestructiveMigrationAllowed (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/destructive-migration-gate.ts:224:9)
+      at exec (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/migrate-sqlite.ts:1273:35)
+      at applyRuntimeObservationNonpersistenceSqlite (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/db/migrate-sqlite.ts:1336:7)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:55:85)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:25:36)
+(fail) sqlite runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [75.32ms]
+55 |   const f=await fixture(kind);try{
+56 |    await seed(f)
+57 |    if(kind==='sqlite') {f.db!.exec('PRAGMA foreign_keys=OFF');await f.query("UPDATE outbound_queue SET claimed_runtime_instance_id='00000000-0000-0000-0000-000000000099'");f.db!.exec('PRAGMA foreign_keys=ON')}
+58 |    const before=await snapshot(f)
+59 |    if(kind==='postgres'){await expect(f.exec(upgrade.replace('COMMIT;','SELECT 1/0;\nCOMMIT;'))).rejects.toThrow('division by zero');await f.exec('ROLLBACK')}
+60 |    else await expect(f.apply()).rejects.toThrow('FOREIGN_KEY_CHECK_FAILED')
+                                             ^
+error: expect(received).toThrow(expected)
+
+Expected substring: "FOREIGN_KEY_CHECK_FAILED"
+Received message: "Destructive migration blocked: ['DROP TABLE']. Set AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 to proceed (production deploy only). incident #339 anchor."
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence_db.test.ts:60:41)
+(fail) sqlite runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [94.19ms]
+(pass) sqlite runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [72.27ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_288abfac8a08465db4c1c65ea9b96910","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) PostgreSQL old physical-writing rollback is explicitly refused [211.24ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_b8e1b3e5f23f4dcb86ef4765659e0ff3","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) desired-state trigger cannot recopy physical values; stable policy still advances once [199.20ms]
+
+ 10 pass
+ 3 fail
+ 94 expect() calls
+Ran 13 tests across 2 files. [2.17s]

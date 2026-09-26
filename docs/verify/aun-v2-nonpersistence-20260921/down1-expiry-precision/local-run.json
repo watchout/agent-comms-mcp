@@ -1,0 +1,47 @@
+{
+  "source_unchanged": true,
+  "command": [
+    "/private/tmp/aun-cycle3-bun142/bun-darwin-aarch64/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_aun_configuration_outbox_supersession.test.ts",
+    "--timeout",
+    "30000",
+    "--reporter=junit",
+    "--reporter-outfile=/tmp/aun-down1-evidence/v07-exact-db-expiry.xml"
+  ],
+  "private_database_name": "fullrepair_v07_exact_db_expiry_50a4d4f7_test",
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "5ab2fe2ad999d89c060c158ea61c8ef33f69628e33b6fa898f39d0632b627a45",
+  "source_head": "2a5270af61bbbf66f29bd7587511c05c2ea9bd29",
+  "working_diff_sha256": "7fa699e1b59e6682829b47dfefcaf8583a0a7794a57393df1ac0f50585126399",
+  "started_at": "2026-09-22T09:33:27.317820+00:00",
+  "ended_at": "2026-09-22T09:33:33.609304+00:00",
+  "exit_code": 0,
+  "log_sha256": "9e6f00467861b2a668a02ac99ab5de6442fd273f8b8ec64d60cdbd1d26559a19",
+  "junit": {
+    "name": "bun test",
+    "tests": "5",
+    "assertions": "63",
+    "failures": "0",
+    "skipped": "0",
+    "time": "6.211364"
+  },
+  "pass": 5,
+  "fail": 0,
+  "precision_probe": {
+    "identity": {
+      "db": "aun_trial_ready_test",
+      "actor": "fixture",
+      "listen": "",
+      "socket": "/private/tmp/aun-independent-pg-7i5o4k48/socket"
+    },
+    "database_expiry": "2026-09-22T00:00:00.123456Z",
+    "driver_date": "2026-09-22T00:00:00.123Z",
+    "probe_clock": "2026-09-22T00:00:00.123200Z",
+    "via_js_date": true,
+    "via_database_timestamp": false,
+    "db_writes": 0
+  }
+}

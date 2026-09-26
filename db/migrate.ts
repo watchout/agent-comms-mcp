@@ -121,8 +121,8 @@ async function migrate() {
       agent_id TEXT PRIMARY KEY,
       display_name TEXT NOT NULL,
       agent_type TEXT NOT NULL,
-      runtime TEXT NOT NULL,
-      status TEXT DEFAULT 'offline',
+      runtime TEXT,
+      status TEXT,
       last_seen_at TIMESTAMPTZ,
       registered_at TIMESTAMPTZ DEFAULT now(),
       metadata JSONB,
@@ -317,7 +317,7 @@ async function migrate() {
       runtime_instance_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
       workspace_id TEXT REFERENCES agent_workspaces(workspace_id) ON DELETE SET NULL,
-      runtime_engine TEXT NOT NULL DEFAULT 'unknown',
+      runtime_engine TEXT,
       runtime_kind TEXT NOT NULL DEFAULT 'local_process',
       host_id TEXT,
       session_name TEXT,
@@ -326,8 +326,8 @@ async function migrate() {
       checkout_path TEXT,
       commit_sha TEXT,
       endpoint_uri TEXT,
-      status TEXT NOT NULL DEFAULT 'unknown',
-      started_at TIMESTAMPTZ DEFAULT now(),
+      status TEXT,
+      started_at TIMESTAMPTZ,
       stopped_at TIMESTAMPTZ,
       last_seen_at TIMESTAMPTZ,
       metadata JSONB NOT NULL DEFAULT '{}'::jsonb
@@ -345,12 +345,12 @@ async function migrate() {
       runtime_instance_id TEXT NOT NULL,
       profile_revision INTEGER,
       profile_source TEXT,
-      session_name TEXT NOT NULL,
-      port INTEGER NOT NULL,
+      session_name TEXT,
+      port INTEGER,
       expected_agent_id TEXT NOT NULL,
       checkout_path TEXT,
       checkout_commit_sha TEXT,
-      recovery_command TEXT NOT NULL,
+      recovery_command TEXT,
       result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
       failure_reason TEXT,
       completed_at TIMESTAMPTZ NOT NULL,
@@ -1520,6 +1520,14 @@ async function migrate() {
       console.log(`Synced ${Object.keys(config.channels ?? {}).length} channel settings from config.json`)
     } catch {}
   }
+
+  // Additive opt-in library only. No recipient guard or policy is installed by
+  // migrate; dedicated owner-admitted PREPARE supplies first deny separately.
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-08-queue-bounded-admission.up.sql'), 'utf8'))
+
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-21-runtime-observation-nonpersistence.up.sql'), 'utf8'))
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-21-runtime-observation-restart-contract.up.sql'), 'utf8'))
+  await gatedQuery(client, readFileSync(join(import.meta.dir, 'migrations/2026-09-22-configuration-outbox-supersession.up.sql'), 'utf8'))
 
   console.log('Migration complete.')
   await client.end()

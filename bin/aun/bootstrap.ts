@@ -1,3 +1,8 @@
+import { inspectHostRuntime } from '../../core/host-runtime-observer'
+import { durableRuntimeMetadata } from '../../core/runtime-durable-data'
+import { readNativeSeatContextReceipt } from '../../core/seat-context-recovery'
+import { resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
+import { observeSeatMemoryBinding, observeSeatProvider, resolveSeatProvider, readObservedProviderRoot } from '../../core/seat-runtime-selection'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
@@ -14,7 +19,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { PgAdapter } from '../../core/db/pg-adapter'
@@ -27,9 +32,9 @@ import {
 import {
   markConfigurationEventDelivered,
   readConfigurationDesiredState,
-  recordConfigurationObservedState,
+  recordConfigurationReconcileResult,
 } from '../../core/aun-configuration-desired-state'
-import { buildDefaultAunConfigurationCandidate } from '../../core/aun-configuration-candidate'
+import { buildDefaultAunConfigurationCandidate, resolveConfigurationRuntime } from '../../core/aun-configuration-candidate'
 import {
   BOOTSTRAP_SAFE_D1_DEFAULTS,
   FileBootstrapStateStore,
@@ -48,6 +53,7 @@ import {
   buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
   recordRuntimeMemoryReadyEvidence,
+  recordVerifiedNativeRuntimeMemoryReady,
 } from '../../core/runtime-memory-ready'
 import {
   selectBootstrapRuntime,
@@ -58,7 +64,7 @@ import {
   observeBootstrapQueueSmoke,
   type BootstrapQueueSmokeConsumerEvidence,
 } from '../../core/queue-runtime'
-import { createCodexBootstrapAdapter, type BootstrapAdapterCommandRunner } from './bootstrap-adapter-codex'
+import { cleanHostProviderAuthorityDigest, createCodexBootstrapAdapter, type BootstrapAdapterCommandRunner } from './bootstrap-adapter-codex'
 import { createClaudeBootstrapAdapter, parseClaudeMcpGet } from './bootstrap-adapter-claude'
 import {
   BOOTSTRAP_STAGES,
@@ -178,20 +184,14 @@ type ConfigurationDesiredRollbackArtifact = {
 }
 
 function configurationDesiredControlledRow(row: Record<string, unknown>): Record<string, unknown> {
-  const metadata = jsonRecord(row.metadata)
   return {
     profile_enabled: row.profile_enabled,
-    runtime_engine_preference: row.runtime_engine_preference,
-    home_directory: row.home_directory,
-    canonical_workspace: row.canonical_workspace,
-    canonical_home: row.canonical_home,
-    channel_port: row.channel_port,
     supervisor_identity: row.supervisor_identity,
     expected_provider_identity: row.expected_provider_identity,
     expected_provider_identity_ref: row.expected_provider_identity_ref,
     provider_token_source_ref: row.provider_token_source_ref,
     ordinary_communication_enrollment: row.ordinary_communication_enrollment,
-    ordinary_projection: row.ordinary_projection,
+    ordinary_projection: Object.fromEntries(Object.entries(jsonRecord(row.ordinary_projection)).filter(([key])=>!['provider_repo_root','provider_config_root','daemon_checkout'].includes(key))),
     desired_release_commit: row.desired_release_commit,
     desired_release_tree: row.desired_release_tree,
     desired_control_refs: row.desired_control_refs,
@@ -199,7 +199,6 @@ function configurationDesiredControlledRow(row: Record<string, unknown>): Record
     desired_digest: row.desired_digest,
     desired_updated_at: row.desired_updated_at,
     desired_updated_by: row.desired_updated_by,
-    metadata_codex_home: metadata.codex_home ?? null,
   }
 }
 
@@ -592,7 +591,7 @@ function bootstrapInputDigest(input: {
           tmux: input.env.TMUX || null,
           pane: input.env.TMUX_PANE || null,
         },
-    memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(input.workspaceRoot),
+    memory_project: input.env.AGENT_MEMORY_PROJECT || input.env.AGENT_COMMS_MEMORY_READY_PROJECT || null,
     provider_snapshot: input.providerSnapshot,
     intended_aun_tuple_template_digest: bootstrapDigest({
       command: realpathOrResolve(process.execPath),
@@ -614,8 +613,9 @@ async function withBootstrapDb<T>(
 ): Promise<T> {
   const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
   const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
+  if(postgres && !env.DATABASE_URL?.trim())throw new Error('BOOTSTRAP_DATABASE_URL_REQUIRED')
   const db: DbAdapter = postgres
-    ? new PgAdapter(env.DATABASE_URL || 'postgresql:///agent_comms?host=/tmp')
+    ? new PgAdapter(env.DATABASE_URL)
     : new SqliteAdapter(env.AGENT_COM_SQLITE_PATH, options.readonly ? { readonly: true, create: false } : {})
   try {
     return await fn(db)
@@ -673,6 +673,8 @@ async function resolveProviderRootAuthority(input: {
   env: Record<string, string>
   home: string
   repoRoot: string
+  run?: BootstrapAdapterCommandRunner
+  observeProvider?: typeof observeSeatProvider
 }): Promise<{
   ok: true
   authority: ProviderRootAuthority | null
@@ -691,18 +693,7 @@ async function resolveProviderRootAuthority(input: {
     canonicalRealpathDigest: bootstrapDigest(existsSync(cleanRoot) ? realpathSync(cleanRoot) : cleanRoot),
     projectionMatches: true,
     callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== cleanRoot),
-    authorityTupleDigest: bootstrapDigest({
-      agent_id: input.agentId,
-      repo_url: null,
-      workspace_path: null,
-      config_profile: { runtime_engine_preference: null, metadata_codex_home: null },
-      provider_binding: {
-        expected_provider_identity_ref: null,
-        provider_token_source_ref: null,
-        projection_provider_config_root: null,
-      },
-      projection_digest: bootstrapDigest({}),
-    }),
+    authorityTupleDigest: cleanHostProviderAuthorityDigest(input.agentId, cleanRoot),
   })
   if (input.requestedRuntime === 'claude') return { ok: true, authority: null }
 
@@ -742,60 +733,21 @@ async function resolveProviderRootAuthority(input: {
     }
   }
   if (!row) return { ok: true, authority: cleanAuthority() }
-  const runtime = String(row.runtime_engine_preference ?? '').toLowerCase()
-  if (input.requestedRuntime === 'auto' && runtime !== 'codex') return { ok: true, authority: null }
+  const selected = await withBootstrapDb(input.env,db=>resolveSeatProvider(db,{agentId:input.agentId,observe:input.observeProvider}),{readonly:true}).catch(()=>null)
+  if (selected?.ok && selected.code === 'SELECTED_LIVE' && selected.provider === 'claude') return {ok:true,authority:null}
+  if (selected?.ok && selected.code === 'SELECTED_LIVE' && selected.provider === 'codex' && selected.observation) {
+    const observed = await readObservedProviderRoot(input.run ?? defaultCommandRunner(), {
+      pid:selected.observation.provider_pid,startedAt:selected.observation.provider_started_at,
+      cwd:input.repoRoot,env:input.env,
+    })
+    if (observed) return {ok:true,authority:{existingTarget:true,canonicalSourceField:'observed_provider_process',
+      canonicalRoot:observed.root,canonicalRootDigest:bootstrapDigest(observed.root),canonicalRealpathDigest:observed.directoryDigest,
+      projectionMatches:true,callerMismatch:!!input.env.CODEX_HOME && resolve(input.env.CODEX_HOME)!==observed.root,
+      authorityTupleDigest:observed.digest,observedProviderPid:selected.observation.provider_pid,
+      observedProviderStartedAt:selected.observation.provider_started_at}}
+  }
+  return {ok:false,reasonCode:'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING',evidenceRef:'provider-root:current-process-evidence-unavailable'}
 
-  const metadata = jsonRecord(row.metadata)
-  const projection = jsonRecord(row.ordinary_projection)
-  const rawRoot = typeof metadata.codex_home === 'string' ? metadata.codex_home : ''
-  if (!rawRoot || !isAbsolute(rawRoot) || normalize(rawRoot) !== rawRoot || resolve(rawRoot) !== rawRoot) {
-    return {
-      ok: false,
-      reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING',
-      evidenceRef: `provider-root-authority:${bootstrapDigest({
-        source: 'metadata.codex_home', present: Boolean(rawRoot), absolute: isAbsolute(rawRoot || '.'), normalized: false,
-      })}`,
-    }
-  }
-  let canonicalRealpath = ''
-  try {
-    const link = lstatSync(rawRoot)
-    canonicalRealpath = realpathSync(rawRoot)
-    if (link.isSymbolicLink() || !link.isDirectory() || canonicalRealpath !== rawRoot) throw new Error('invalid root')
-  } catch {
-    return {
-      ok: false,
-      reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING',
-      evidenceRef: `provider-root-authority:${bootstrapDigest({ source: 'metadata.codex_home', valid_identity: false })}`,
-    }
-  }
-  const projectedRoot = typeof projection.provider_config_root === 'string'
-    ? projection.provider_config_root
-    : ''
-  if (!projectedRoot || projectedRoot !== rawRoot) {
-    return {
-      ok: false,
-      reasonCode: 'NO_GO_PROVIDER_ROOT_CONFLICT',
-      evidenceRef: `provider-root-conflict:${bootstrapDigest({
-        canonical_root_digest: bootstrapDigest(rawRoot),
-        projection_present: Boolean(projectedRoot),
-        projection_matches: false,
-      })}`,
-    }
-  }
-  return {
-    ok: true,
-    authority: {
-      existingTarget: true,
-      canonicalSourceField: 'metadata.codex_home',
-      canonicalRoot: rawRoot,
-      canonicalRootDigest: bootstrapDigest(rawRoot),
-      canonicalRealpathDigest: bootstrapDigest(canonicalRealpath),
-      projectionMatches: true,
-      callerMismatch: Boolean(input.env.CODEX_HOME && resolve(input.env.CODEX_HOME) !== rawRoot),
-      authorityTupleDigest: providerRootAuthorityTupleDigest(input.agentId, row),
-    },
-  }
 }
 
 function profileRuntimeSignal(profile: any): BootstrapRuntimeSignal | null {
@@ -1010,8 +962,8 @@ function expectedRuntimeReceiptTuple(
   env: Record<string, string>,
   profile: any,
 ): RuntimeReceiptTuple | null {
-  const sessionName = String(env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session || '').trim()
-  const port = Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || profile?.channel_port)
+  const sessionName = String(env.AUN_BOOTSTRAP_RUNTIME_SESSION || env.AUN_BOOTSTRAP_TMUX_SESSION || '').trim()
+  const port = Number(env.AUN_BOOTSTRAP_ACTUAL_PORT)
   const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
   const runtime = context.resolvedRuntime
   if (!profile || !sessionName || !Number.isInteger(port) || port <= 0
@@ -1023,7 +975,7 @@ function expectedRuntimeReceiptTuple(
     session_name: sessionName,
     process_id: providerPid,
     port,
-    checkout_path: realpathOrResolve(context.repoRoot),
+    checkout_path: realpathOrResolve(context.workspaceRoot),
     commit_sha: context.repoHead,
   }
 }
@@ -1041,6 +993,26 @@ type RuntimeReceiptDecision = {
   ordinaryActiveCount: number
   bootstrapActiveCount: number
   evidenceDigest: string
+}
+
+async function observedBootstrapRuntimeRows(db:DbAdapter,agentId:string):Promise<any[]> {
+  const anchors=await db.query<any>(`SELECT runtime_instance_id,agent_id,runtime_kind,metadata FROM agent_runtime_instances WHERE agent_id=$1`,[agentId])
+  const fresh=inspectHostRuntime({agentId})
+  if(fresh.reasonCode==='NO_LIVE_RUNTIME')return []
+  if(fresh.reasonCode!=='OBSERVED')throw new Error('BOOTSTRAP_RUNTIME_OBSERVATION_UNAVAILABLE')
+  const rows:any[]=[]
+  for(const anchor of anchors) {
+    const metadata=parseJsonRecord(anchor.metadata)
+    const id=anchor.runtime_kind==='local_process'?String(anchor.runtime_instance_id):metadata.mcp_runtime_instance_id
+    const matching=fresh.observations.filter(o=>o.runtime_instance_id===id)
+    if(matching.length!==1)continue
+    const o=matching[0],endpoint=await resolveRuntimeEndpoint(db,{agentId,runtimeInstanceId:String(id)})
+    if(!endpoint.ok || endpoint.endpoint?.processId!==o.process_id || endpoint.endpoint.processStartedAt!==o.process_started_at)continue
+    rows.push({...anchor,runtime_engine:o.provider,session_name:o.session_name,
+      process_id:anchor.runtime_kind==='bootstrap_bound_provider'?o.provider_pid:o.process_id,
+      port:o.port,checkout_path:o.workspace,commit_sha:metadata.source_commit ?? null,status:'active',metadata})
+  }
+  return rows
 }
 
 function classifyRuntimeReceiptRows(active: any[], tuple: RuntimeReceiptTuple): RuntimeReceiptDecision {
@@ -1116,16 +1088,7 @@ async function evaluateSelectedRuntimeMemoryReadyGate(
   if (!subject?.runtimeInstanceId) return evaluateRuntimeMemoryReadyGate(db as any, input)
 
   if (expectedTuple) {
-    const selectedRows = await db.query<any>(
-      `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
-              port, checkout_path, commit_sha, status, metadata
-         FROM agent_runtime_instances
-        WHERE runtime_instance_id = $1
-          AND agent_id = $2
-          AND status IN ('running', 'active')
-        LIMIT 1`,
-      [subject.runtimeInstanceId, input.agent_id],
-    )
+    const selectedRows = (await observedBootstrapRuntimeRows(db,input.agent_id)).filter(row=>row.runtime_instance_id===subject.runtimeInstanceId)
     const selection = classifyRuntimeReceiptRows(selectedRows, expectedTuple)
     if (!selection.ok || selection.action !== 'reuse'
       || selection.runtimeInstanceId !== subject.runtimeInstanceId) {
@@ -1248,15 +1211,8 @@ async function choosePort(
   context: BootstrapStageContext,
   existing: any,
 ): Promise<number | null> {
-  const explicit = Number(context.env.AUN_WEBHOOK_PORT || context.env.AUN_BOOTSTRAP_CHANNEL_PORT)
-  if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 65535) return explicit
-  const prior = profilePort(existing)
-  if (prior) return prior
-  for (let port = 8801; port <= 8900; port++) {
-    const probe = await run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { cwd: context.repoRoot, env: context.env, timeoutMs: 2_000 })
-    if (probe.exitCode !== 0 || probe.stdout.trim() === '') return port
-  }
-  return null
+  return 0 // OS allocation is performed by the MCP listener, never by bootstrap probes.
+
 }
 
 function safeD1FromPlist(home: string): typeof BOOTSTRAP_SAFE_D1_DEFAULTS | null {
@@ -1293,32 +1249,34 @@ function stringEnvironment(value: unknown): Record<string, string> | null {
   return Object.fromEntries(entries) as Record<string, string>
 }
 
-async function readConfiguredWasurezuTransport(
-  context: BootstrapStageContext,
+export async function readConfiguredWasurezuTransport(
+  context: Pick<BootstrapStageContext, 'resolvedRuntime' | 'workspaceRoot' | 'env' | 'abortSignal'>,
   run: BootstrapAdapterCommandRunner,
 ): Promise<ConfiguredMcpTransport | null> {
+  for(const alias of ['wasurezu','agent-memory']) {
   if (context.resolvedRuntime === 'codex') {
-    const result = await run('codex', ['mcp', 'get', 'wasurezu', '--json'], {
-      cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal,
+    const result = await run('codex', ['mcp', 'get', alias, '--json'], {
+      cwd: context.workspaceRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal,
     })
     const parsed = parseJsonOutput(result)
     const transport = parsed?.transport
     const environment = stringEnvironment(transport?.env) ?? {}
     if (result.exitCode !== 0 || parsed?.enabled !== true || transport?.type !== 'stdio'
       || typeof transport?.command !== 'string' || !Array.isArray(transport?.args)
-      || transport.args.some((item: unknown) => typeof item !== 'string')) return null
+      || transport.args.some((item: unknown) => typeof item !== 'string')) continue
     const tuple = { command: realpathOrResolve(transport.command), args: transport.args, env: environment }
     return { ...tuple, tupleDigest: bootstrapDigest(tuple) }
   }
   if (context.resolvedRuntime === 'claude') {
-    const result = await run('claude', ['mcp', 'get', 'wasurezu'], {
-      cwd: context.repoRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal,
+    const result = await run('claude', ['mcp', 'get', alias], {
+      cwd: context.workspaceRoot, env: context.env, timeoutMs: 30_000, signal: context.abortSignal,
     })
     const parsed = parseClaudeMcpGet(result.stdout)
     if (result.exitCode !== 0 || !parsed || parsed.type.toLowerCase() !== 'stdio'
-      || !/(?:connected|✔\s*connected|✓\s*connected)/i.test(parsed.status)) return null
+      || !/(?:connected|✔\s*connected|✓\s*connected)/i.test(parsed.status)) continue
     const tuple = { command: realpathOrResolve(parsed.command), args: parsed.args, env: parsed.environment }
     return { ...tuple, tupleDigest: bootstrapDigest(tuple) }
+  }
   }
   return null
 }
@@ -1435,16 +1393,26 @@ type DefaultPortsOptions = {
   env: Record<string, string>
   home: string
   repoRoot: string
+  observeProvider?: typeof observeSeatProvider
+  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
 }
 
-function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts {
+type BootstrapConfigurationTransaction = {
+  desired_revision: number; desired_digest: string; release_tree: string; held_event_ids: string[]
+  mutation?: Omit<BootstrapMutation, 'mutation_id' | 'stage' | 'rollback_status'>
+}
+function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPorts & {
+  /** Internal transaction fixture surface; ordinary enrollment entry is unchanged. */
+  ensureConfigurationDesiredState(context: BootstrapStageContext): Promise<BootstrapConfigurationTransaction | null>
+  recordBootstrapConfigurationReady(context:BootstrapStageContext,nativeReadback:{providerNativeDigest:string;launchagentPlistDigest:string;launchctlEnvironmentDigest:string;runtimeIdentityDigest:string}):Promise<{desiredRevision:number;desiredDigest:string;outboxEventId:string|null;idempotent:boolean}|null>
+} {
   const { run, env, home, repoRoot } = options
   const explicitTmuxSessionProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_SESSION')
   const explicitTmuxPaneProvided = Object.prototype.hasOwnProperty.call(env, 'AUN_BOOTSTRAP_TMUX_PANE')
   const explicitTmuxSession = env.AUN_BOOTSTRAP_TMUX_SESSION?.trim() ?? ''
   const explicitTmuxPane = env.AUN_BOOTSTRAP_TMUX_PANE?.trim() ?? ''
   const bunPath = process.execPath
-  const adapterDeps = { run, bunPath, serverEntry: 'server.ts' }
+  const adapterDeps = { run, bunPath, serverEntry: 'entrypoints/runtime.ts' }
   const adapters: Record<BootstrapResolvedRuntime, BootstrapRuntimeAdapter> = {
     codex: createCodexBootstrapAdapter(adapterDeps),
     claude: createClaudeBootstrapAdapter(adapterDeps),
@@ -1654,24 +1622,19 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         )
         if (!preAgentResult?.row) throw new Error('configuration desired agent row unavailable')
         const preAgentRow = preAgentResult.row
-        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
-          const liveMetadata = jsonRecord(preAgentRow.metadata)
-          const liveProjection = jsonRecord(preAgentRow.ordinary_projection)
-          const liveRoot = typeof liveMetadata.codex_home === 'string' ? liveMetadata.codex_home : ''
-          const liveProjectedRoot = typeof liveProjection.provider_config_root === 'string'
-            ? liveProjection.provider_config_root
-            : ''
-          const liveTupleDigest = providerRootAuthorityTupleDigest(context.agentId, {
-            ...preAgentRow,
-            repo_url: preAgentResult.repo_url,
-            workspace_path: preAgentResult.workspace_path,
+        if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.canonicalSourceField === 'observed_provider_process') {
+          const authority = context.providerRootAuthority
+          const current = await readObservedProviderRoot(run, {
+            pid: authority.observedProviderPid!, startedAt: authority.observedProviderStartedAt!,
+            cwd: context.repoRoot, env: context.env,
           })
-          const expectedTupleDigest = context.providerRootAuthority.authorityTupleDigest ?? liveTupleDigest
-          if (liveRoot !== context.providerRootAuthority.canonicalRoot
-            || liveProjectedRoot !== context.providerRootAuthority.canonicalRoot
-            || liveTupleDigest !== expectedTupleDigest) {
-            throw new Error('provider root authority drift under B3 row lock')
+          if (!current || current.root !== authority.canonicalRoot
+            || current.directoryDigest !== authority.canonicalRealpathDigest
+            || current.digest !== authority.authorityTupleDigest) {
+            throw new Error('observed provider root drift under B3 row lock')
           }
+        } else if (context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === true) {
+          throw new Error('configuration existing account requires fresh provider root authority')
         }
         const preOutboxRows = (await tx.query<{ row: Record<string, unknown> }>(
           `SELECT to_jsonb(o) AS row
@@ -1684,35 +1647,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
 
         await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap:${context.runId}`])
         const updated = await tx.execute(
-          `UPDATE agents SET
-             canonical_workspace = $2,
-             canonical_home = $3,
-             supervisor_identity = 'launchd:com.agent-comms.state-daemon',
-             ordinary_communication_enrollment = true,
-             ordinary_projection = $4::jsonb,
-             desired_release_commit = $5,
-             desired_release_tree = $6,
-             desired_control_refs = $7::jsonb,
-             metadata = CASE WHEN $8::boolean
-               THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($9::text), true)
-               ELSE metadata END
-           WHERE agent_id = $1`,
-          [
-            context.agentId, context.workspaceRoot, home,
-            JSON.stringify({
-              owner: 'continuous-reconciler',
-              provider_repo_root: context.repoRoot,
-              provider_config_root: context.resolvedRuntime === 'claude'
-                ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-                : context.providerRootAuthority?.canonicalRoot || env.CODEX_HOME || join(home, '.codex'),
-              daemon_checkout: join(defaultStateDaemonRestoreRoot(home), context.repoHead),
-              schema_version: 'aun-configuration-projection/v1',
-            }),
-            context.repoHead, releaseTree,
-            JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803']),
-            context.resolvedRuntime === 'codex' && context.providerRootAuthority?.existingTarget === false,
-            context.providerRootAuthority?.canonicalRoot ?? env.CODEX_HOME ?? join(home, '.codex'),
-          ],
+          `UPDATE agents SET supervisor_identity='launchd:com.agent-comms.state-daemon',
+             ordinary_communication_enrollment=true,
+             ordinary_projection=COALESCE(ordinary_projection,'{}'::jsonb) || $2::jsonb,
+             desired_release_commit=$3,desired_release_tree=$4,desired_control_refs=$5::jsonb
+           WHERE agent_id=$1`,
+          [context.agentId,JSON.stringify({owner:'continuous-reconciler',schema_version:'aun-configuration-projection/v1'}),
+            context.repoHead,releaseTree,
+            JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#issuecomment-5082585803'])],
         )
         if (updated.rowCount !== 1) throw new Error('configuration desired agent update rejected')
         const postAgentResult = await tx.queryOne<{ row: Record<string, unknown> }>(
@@ -1736,7 +1678,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const newEvents = postBeforeHold.filter((row) => !preEventIds.has(String(row.event_id)))
         const changed = bootstrapDigest(configurationDesiredControlledRow(preAgentRow))
           !== bootstrapDigest(configurationDesiredControlledRow(postAgentRow))
-        if ((!changed && newEvents.length !== 0) || (changed && newEvents.length !== 1)) {
+        const desiredChanged = preAgentRow.desired_digest !== postAgentRow.desired_digest
+        if (newEvents.length !== (desiredChanged ? 1 : 0)) {
           throw new Error('configuration desired event cardinality invalid')
         }
         for (const event of newEvents) {
@@ -1777,8 +1720,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           schema_version: 'aun-bootstrap-configuration-desired-rollback/v1',
           run_id: context.runId,
           agent_id: context.agentId,
-          pre_agent_row: preAgentRow,
-          post_agent_row: postAgentRow,
+          pre_agent_row: configurationDesiredControlledRow(preAgentRow),
+          post_agent_row: configurationDesiredControlledRow(postAgentRow),
           pre_outbox_rows: preOutboxRows,
           post_outbox_rows: postOutboxRows,
           new_event_ids: heldEventIds,
@@ -1859,174 +1802,56 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     }, { readonly: true }).catch(() => null)
   }
 
-  const recordBootstrapConfigurationReady = async (
-    context: BootstrapStageContext,
-    nativeReadback: {
-      providerNativeDigest: string
-      launchagentPlistDigest: string
-      launchctlEnvironmentDigest: string
-      runtimeIdentityDigest: string
-    },
-  ): Promise<{
-    hostId: string
-    desiredRevision: number
-    desiredDigest: string
-    candidateDigest: string
-    outboxEventId: string | null
-    previousObservedState: Record<string, unknown> | null
-    idempotent: boolean
-  } | null> => {
-    const explicit = env.AGENT_COM_DB?.trim().toLowerCase()
-    const postgres = explicit === 'postgres' || explicit === 'postgresql' || (!explicit && Boolean(env.DATABASE_URL))
-    if (!postgres) return null
-    if (Object.values(nativeReadback).some((digest) => !/^[0-9a-f]{64}$/.test(digest))) {
-      throw new Error('configuration native readback digest unavailable')
-    }
-    const desiredMutation = context.priorState.mutations.find((mutation) => mutation.kind === 'configuration_desired')
-    const desiredPayload = desiredMutation?.rollback_payload ?? {}
-    const heldEventIds = Array.isArray(desiredPayload.new_event_ids)
-      ? desiredPayload.new_event_ids.map(String)
-      : []
-    if (heldEventIds.length > 1) throw new Error('configuration desired held event cardinality invalid')
-    return withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
-      const desired = await readConfigurationDesiredState(tx, context.agentId)
-      if (!desired) throw new Error('configuration desired state unavailable')
-      if (desiredMutation && (Number(desiredPayload.desired_revision) !== desired.desiredRevision
-        || String(desiredPayload.desired_digest ?? '') !== desired.desiredDigest)) {
-        throw new Error('configuration desired mutation binding mismatch')
+  const recordBootstrapConfigurationReady = async (context:BootstrapStageContext,nativeReadback:{
+    providerNativeDigest:string;launchagentPlistDigest:string;launchctlEnvironmentDigest:string;runtimeIdentityDigest:string
+  }):Promise<{desiredRevision:number;desiredDigest:string;outboxEventId:string|null;idempotent:boolean}|null> => {
+    const explicit=env.AGENT_COM_DB?.trim().toLowerCase()
+    if(!(explicit==='postgres'||explicit==='postgresql'||(!explicit&&Boolean(env.DATABASE_URL))))return null
+    if(Object.values(nativeReadback).some(digest=>!/^[0-9a-f]{64}$/.test(digest)))throw new Error('configuration fresh native readback unavailable')
+    const mutation=context.priorState.mutations.find(m=>m.kind==='configuration_desired')
+    const payload=mutation?.rollback_payload??{}
+    const heldEventIds=Array.isArray(payload.new_event_ids)?payload.new_event_ids.map(String):[]
+    if(heldEventIds.length>1)throw new Error('configuration desired held event cardinality invalid')
+    return withBootstrapDb(env,async(db)=>db.transaction(async(tx)=>{
+      const desired=await readConfigurationDesiredState(tx,context.agentId)
+      if(!desired)throw new Error('configuration desired state unavailable')
+      if(mutation&&(Number(payload.desired_revision)!==desired.desiredRevision||String(payload.desired_digest)!==desired.desiredDigest))throw new Error('configuration desired mutation binding mismatch')
+      // B8 has just verified provider/native/daemon configuration. Reobserve the
+      // exact runtime/account here as well; READY never reads an observation cache.
+      const observedRuntime=await resolveConfigurationRuntime(tx,context.agentId,env,context.workspaceRoot,{observeProvider:options.observeProvider,run})
+      const daemonCheckout=join(defaultStateDaemonRestoreRoot(home),desired.releaseCommit)
+      buildDefaultAunConfigurationCandidate({observedRuntime,desired,
+        databaseLocatorRef:env.AUN_DATABASE_LOCATOR_REF?.trim()||'env:DATABASE_URL',
+        databaseCredentialRef:env.AUN_DATABASE_CREDENTIAL_REF?.trim()||'env:DATABASE_URL',
+        bunPath,serverEntry:'entrypoints/runtime.ts',providerRepoRoot:context.repoRoot,
+        providerConfigRoot:observedRuntime.providerConfigRoot,daemonCheckout,
+        daemonEntry:join(daemonCheckout,'bin','state-daemon.ts'),restartRequired:true})
+      const event=heldEventIds.length===1?await tx.queryOne<any>(`SELECT event_id,desired_revision,desired_digest,attempt_count,
+        delivered_at,available_at::text AS available_at_text FROM aun_configuration_desired_outbox
+        WHERE event_id=$1 AND agent_id=$2 FOR UPDATE`,[heldEventIds[0],desired.agentId]):null
+      if(heldEventIds.length===1&&(!event||Number(event.desired_revision)!==desired.desiredRevision||String(event.desired_digest)!==desired.desiredDigest))throw new Error('configuration exact event binding invalid')
+      const idempotent=['READY','IDEMPOTENT_READY'].includes(context.priorState.terminal_status??'')
+      if(idempotent) {
+        if(event&&(Number(event.attempt_count)!==1||event.delivered_at===null))throw new Error('configuration idempotent delivery invalid')
+        return {desiredRevision:desired.desiredRevision,desiredDigest:desired.desiredDigest,outboxEventId:event?String(event.event_id):null,idempotent:true}
       }
-      const projection = desired.ordinaryProjection
-      const providerRepoRoot = typeof projection.provider_repo_root === 'string'
-        ? projection.provider_repo_root
-        : context.repoRoot
-      const daemonCheckout = typeof projection.daemon_checkout === 'string'
-        ? projection.daemon_checkout
-        : join(defaultStateDaemonRestoreRoot(home), desired.releaseCommit)
-      const providerConfigRoot = typeof projection.provider_config_root === 'string'
-        ? projection.provider_config_root
-        : desired.runtimeEnginePreference === 'claude'
-          ? env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-          : env.CODEX_HOME || join(home, '.codex')
-      const candidate = buildDefaultAunConfigurationCandidate({
-        hostId: env.AUN_HOST_ID?.trim() || hostname(),
-        desired,
-        databaseLocatorRef: env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
-        databaseCredentialRef: env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
-        bunPath,
-        serverEntry: 'server.ts',
-        providerRepoRoot,
-        providerConfigRoot,
-        daemonCheckout,
-        daemonEntry: join(daemonCheckout, 'bin', 'state-daemon.ts'),
-        restartRequired: true,
-      })
-      if (context.priorState.terminal_status === 'READY' || context.priorState.terminal_status === 'IDEMPOTENT_READY') {
-        const observed = await tx.queryOne<Record<string, unknown>>(
-          `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
-                  release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
-                  launchctl_environment_digest, runtime_identity_digest, reconcile_status,
-                  drift_reason_codes, lease_id, fencing_token, observed_at
-             FROM aun_configuration_observed_state
-            WHERE host_id = $1 AND agent_id = $2`,
-          [candidate.hostId, candidate.agentId],
-        )
-        const event = heldEventIds.length === 1 ? await tx.queryOne<any>(
-          `SELECT event_id, desired_revision, desired_digest, attempt_count, delivered_at
-             FROM aun_configuration_desired_outbox
-            WHERE event_id = $1 AND agent_id = $2`,
-          [heldEventIds[0], desired.agentId],
-        ) : null
-        if (!observed
-          || Number(observed.observed_revision) !== desired.desiredRevision
-          || String(observed.observed_desired_digest) !== desired.desiredDigest
-          || String(observed.candidate_digest) !== candidate.candidateDigest
-          || (heldEventIds.length === 1 && (!event || Number(event.attempt_count) !== 1 || event.delivered_at === null
-            || Number(event.desired_revision) !== desired.desiredRevision || String(event.desired_digest) !== desired.desiredDigest))) {
-          throw new Error('configuration idempotent readback invalid')
-        }
-        return {
-          hostId: candidate.hostId,
-          desiredRevision: desired.desiredRevision,
-          desiredDigest: desired.desiredDigest,
-          candidateDigest: candidate.candidateDigest,
-          outboxEventId: event ? String(event.event_id) : null,
-          previousObservedState: observed,
-          idempotent: true,
-        }
-      }
-      const previousObservedState = await tx.queryOne<Record<string, unknown>>(
-        `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
-                release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
-                launchctl_environment_digest, runtime_identity_digest, reconcile_status,
-                drift_reason_codes, lease_id, fencing_token, observed_at
-           FROM aun_configuration_observed_state
-          WHERE host_id = $1 AND agent_id = $2`,
-        [candidate.hostId, candidate.agentId],
-      )
-      const acquired = await acquireControlPlaneLease(tx, {
-        scopeType: 'runtime_instance',
-        scopeId: `configuration-reconciler:${candidate.hostId}`,
-        purpose: 'maintenance',
-        ttlMs: 45_000,
-        holderAgentId: context.agentId,
-        holderRuntimeInstanceId: env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? null,
-        metadata: { owner: 'aun-bootstrap-first-reconciliation', run_id: context.runId },
-      })
-      if (!acquired.ok) throw new Error('configuration reconciliation lease unavailable')
+      if(event&&(event.delivered_at!==null||Number(event.attempt_count)!==0||event.available_at_text!=='infinity'))throw new Error('configuration exact held event readback invalid')
+      const acquired=await acquireControlPlaneLease(tx,{scopeType:'runtime_instance',scopeId:`configuration-reconciler:${context.agentId}`,
+        purpose:'maintenance',ttlMs:45_000,holderAgentId:context.agentId,
+        holderRuntimeInstanceId:env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID??null,
+        metadata:{owner:'aun-bootstrap-first-reconciliation',run_id:context.runId}})
+      if(!acquired.ok)throw new Error('configuration reconciliation lease unavailable')
       try {
-        const recorded = await recordConfigurationObservedState(tx, {
-          hostId: candidate.hostId,
-          agentId: candidate.agentId,
-          observedRevision: desired.desiredRevision,
-          observedDesiredDigest: desired.desiredDigest,
-          candidateDigest: candidate.candidateDigest,
-          releaseCommit: candidate.releaseCommit,
-          releaseTree: candidate.releaseTree,
-          providerNativeDigest: nativeReadback.providerNativeDigest,
-          launchagentPlistDigest: nativeReadback.launchagentPlistDigest,
-          launchctlEnvironmentDigest: nativeReadback.launchctlEnvironmentDigest,
-          runtimeIdentityDigest: nativeReadback.runtimeIdentityDigest,
-          reconcileStatus: 'READY',
-          driftReasonCodes: [],
-          leaseId: acquired.lease.lease_id,
-          fencingToken: acquired.lease.fencing_token,
-        })
-        if (!recorded) throw new Error('configuration observed state fence rejected')
-        const event = heldEventIds.length === 1 ? await tx.queryOne<any>(
-          `SELECT event_id, desired_revision, desired_digest, attempt_count,
-                  delivered_at, available_at::text AS available_at_text
-             FROM aun_configuration_desired_outbox
-            WHERE event_id = $1 AND agent_id = $2
-              AND desired_revision = $3 AND desired_digest = $4
-            FOR UPDATE`,
-          [heldEventIds[0], desired.agentId, desired.desiredRevision, desired.desiredDigest],
-        ) : null
-        if (heldEventIds.length === 1 && (!event || event.delivered_at !== null
-          || Number(event.attempt_count) !== 0 || event.available_at_text !== 'infinity')) {
-          throw new Error('configuration exact held event readback invalid')
-        }
-        if (event) {
-          const delivered = await markConfigurationEventDelivered(
-            tx, String(event.event_id), Number(event.desired_revision), String(event.desired_digest),
-          )
-          if (!delivered) throw new Error('configuration outbox delivery receipt rejected')
-        }
-        return {
-          hostId: candidate.hostId,
-          desiredRevision: desired.desiredRevision,
-          desiredDigest: desired.desiredDigest,
-          candidateDigest: candidate.candidateDigest,
-          outboxEventId: event ? String(event.event_id) : null,
-          previousObservedState,
-          idempotent: false,
-        }
+        const state={agentId:desired.agentId,desiredRevision:desired.desiredRevision,desiredDigest:desired.desiredDigest,
+          releaseCommit:desired.releaseCommit,releaseTree:desired.releaseTree,reconcileStatus:'READY' as const,driftReasonCodes:[],
+          leaseId:acquired.lease.lease_id,fencingToken:acquired.lease.fencing_token,holderAgentId:context.agentId,
+          holderRuntimeInstanceId:env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID??null}
+        if(!await recordConfigurationReconcileResult(tx,state))throw new Error('configuration logical completion fence rejected')
+        if(event&&!await markConfigurationEventDelivered(tx,String(event.event_id),desired.desiredRevision,desired.desiredDigest,state))throw new Error('configuration outbox delivery fence rejected')
+        return {desiredRevision:desired.desiredRevision,desiredDigest:desired.desiredDigest,outboxEventId:event?String(event.event_id):null,idempotent:false}
       } finally {
-        await releaseControlPlaneLease(tx, {
-          leaseId: acquired.lease.lease_id,
-          fencingToken: acquired.lease.fencing_token,
-          holderAgentId: context.agentId,
-          holderRuntimeInstanceId: env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? null,
-        })
+        await releaseControlPlaneLease(tx,{leaseId:acquired.lease.lease_id,fencingToken:acquired.lease.fencing_token,
+          holderAgentId:context.agentId,holderRuntimeInstanceId:env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID??null})
       }
     }))
   }
@@ -2097,7 +1922,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         readinessPredicates: { memory_recovery_readback_planned: true },
       }
     }
-    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
+    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT
+    if (!project) return {ok:false,reasonCodes:['NO_GO_MEMORY_RECOVERY'],evidenceRefs:['memory-error:SEAT_MEMORY_PROJECT_REQUIRED']}
     let runtimeInstanceId: string | null = null
     let runtimeCreated = false
     let runtimeBeforeDigest: string | null = null
@@ -2107,8 +1933,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
     let failureDiscriminator = 'runtime_receipt_input_invalid'
     try {
       const profile = await profileGet(context.agentId)
-      const sessionName = env.AUN_BOOTSTRAP_TMUX_SESSION || profile?.tmux_session
-      const port = Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || profile?.channel_port)
+      const endpoint = await withBootstrapDb(env, db => resolveRuntimeEndpoint(db, {agentId:context.agentId}), {readonly:true})
+      if(!endpoint.ok || !endpoint.endpoint)throw new Error('BOOTSTRAP_RUNTIME_ENDPOINT_UNAVAILABLE')
+      const sessionName=endpoint.endpoint.sessionName
+      if(env.AUN_BOOTSTRAP_TMUX_SESSION && env.AUN_BOOTSTRAP_TMUX_SESSION!==sessionName)throw new Error('BOOTSTRAP_RUNTIME_SESSION_MISMATCH')
+      if(sessionName)env.AUN_BOOTSTRAP_RUNTIME_SESSION=sessionName
+      const port = endpoint.endpoint.port
+      if (port) env.AUN_BOOTSTRAP_ACTUAL_PORT = String(port)
       const providerPid = Number(env.AUN_BOOTSTRAP_PROVIDER_PID)
       if (!profile || !sessionName || !Number.isInteger(port) || port <= 0
         || !Number.isInteger(providerPid) || providerPid <= 1 || !context.resolvedRuntime || !context.repoHead) {
@@ -2152,6 +1983,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           }
         }
       }
+      const inspectedMcp=inspectHostRuntime({agentId:context.agentId,runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,logicalWorkspace:context.workspaceRoot})
+      const providerObservation=inspectedMcp.reasonCode==='OBSERVED' && inspectedMcp.observations.length===1 ? inspectedMcp.observations[0] : null
+      if (!providerObservation || providerObservation.provider_pid !== providerPid
+        || providerObservation.provider !== context.resolvedRuntime
+        || providerObservation.workspace !== context.workspaceRoot) throw new Error('current provider observation unavailable')
       const runtimeTuple = expectedRuntimeReceiptTuple(context, env, profile)!
       runtimeTupleDigest = bootstrapDigest(runtimeTuple)
       failureDiscriminator = 'runtime_receipt_db_read'
@@ -2161,20 +1997,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           [context.agentId],
         )
         if (!agent) throw new Error('runtime receipt agent unavailable')
-        const readActive = () => tx.query<any>(
-          `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
-                  port, checkout_path, commit_sha, status, metadata
-             FROM agent_runtime_instances
-            WHERE agent_id = $1 AND status IN ('running', 'active')
-            ORDER BY runtime_instance_id`,
-          [context.agentId],
-        )
+        const readActive = () => observedBootstrapRuntimeRows(tx,context.agentId)
         const active = await readActive()
-        runtimeBeforeDigest = bootstrapDigest(active)
-        runtimeBeforeIdentities = active.map((row) => ({
-          runtime_instance_id: String(row.runtime_instance_id),
-          row_digest: bootstrapDigest(row),
-        }))
+        const legacyBefore=await tx.query<any>(`SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+          port, checkout_path, commit_sha, status, metadata FROM agent_runtime_instances WHERE agent_id=$1 ORDER BY runtime_instance_id`,[context.agentId])
+        runtimeBeforeDigest = bootstrapDigest(legacyBefore)
+        runtimeBeforeIdentities = legacyBefore.map(row=>({runtime_instance_id:String(row.runtime_instance_id),row_digest:bootstrapDigest(row)}))
         const decision = classifyRuntimeReceiptRows(active, runtimeTuple)
         if (!decision.ok) throw new RuntimeReceiptSelectionError(decision.discriminator, decision.evidenceDigest)
         if (decision.action === 'reuse' && decision.runtimeInstanceId) {
@@ -2183,14 +2011,11 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const id = randomUUID()
         const inserted = await tx.query<{ runtime_instance_id: string }>(
           `INSERT INTO agent_runtime_instances
-             (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-              process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-           VALUES
-             ($1, $2, $3, 'bootstrap_bound_provider', $4,
-              $5, $6, $7, $8, 'running', now(), now(), COALESCE($9::jsonb, '{}'::jsonb))
+             (runtime_instance_id, agent_id, runtime_kind, runtime_engine, status, started_at, metadata)
+           VALUES ($1,$2,'bootstrap_bound_provider',NULL,NULL,NULL,$3::jsonb)
            RETURNING runtime_instance_id`,
-          [id, context.agentId, context.resolvedRuntime, sessionName, providerPid, port,
-            runtimeTuple.checkout_path, context.repoHead, JSON.stringify({ bootstrap_run_id: context.runId, tuple_digest: runtimeTupleDigest })],
+          [id,context.agentId,JSON.stringify(durableRuntimeMetadata({bootstrap_run_id:context.runId,
+            mcp_runtime_instance_id:endpoint.endpoint!.runtimeInstanceId,source_commit:context.repoHead}))],
         )
         const insertedId = String(inserted[0]?.runtime_instance_id ?? id)
         const postInsert = classifyRuntimeReceiptRows(await readActive(), runtimeTuple)
@@ -2206,7 +2031,20 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       failureDiscriminator = 'memory_recovery'
       const transport = await readConfiguredWasurezuTransport(context, run)
       if (!transport) throw new Error('provider-native Wasurezu stdio tuple missing')
-      const recovery = await runStdioMcpRecovery(transport, project, context)
+      if(!observeSeatMemoryBinding({agentId:context.agentId,project,providerPid,providerStartedAt:providerObservation.provider_started_at,transportArgs:transport.args})) {
+        failureDiscriminator='actual_host_memory_binding_mismatch'
+        throw new Error('MEMORY_ACTUAL_HOST_BINDING_MISMATCH')
+      }
+      const seatReceipt = await readNativeSeatContextReceipt({transport,agentId:context.agentId,project,
+        runtimeInstanceId:runtime.id,targetRuntime:context.resolvedRuntime,cwd:context.workspaceRoot,env,
+        providerPid,providerStartedAt:providerObservation.provider_started_at,
+        hostSessionId:providerObservation.host_session_id ?? undefined,signal:context.abortSignal})
+      const recovery = {responseDigest:seatReceipt.response_digest,toolCount:1,contentCount:1,
+        startedAt:seatReceipt.native_delivery!.delivered_at,completedAt:seatReceipt.completed_at}
+      const ordinaryReceipt = await readNativeSeatContextReceipt({transport,agentId:context.agentId,project,
+        runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,targetRuntime:context.resolvedRuntime,cwd:context.workspaceRoot,env,
+        providerPid,providerStartedAt:providerObservation.provider_started_at,
+        hostSessionId:providerObservation.host_session_id ?? undefined,signal:context.abortSignal})
       failureDiscriminator = 'memory_post_mutation_readback'
       const result = await withBootstrapDb(env, async (db) => {
         const evidence = buildWasurezuBootstrapEvidence({
@@ -2219,12 +2057,14 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           port,
           checkout_path: runtimeTuple.checkout_path,
           checkout_commit_sha: context.repoHead,
-          recovery_command: 'mcp:initialize>tools/list>tools/call:recover_context',
+          recovery_command: 'mcp:tools/call:native_context_delivery',
+          recovery_receipt: seatReceipt,
         })
         evidence.metadata = {
           ...(evidence.metadata ?? {}),
           bootstrap_run_id: context.runId,
           provider_tuple_digest: transport.tupleDigest,
+          seat_context_receipt:seatReceipt,
           recovery_response_digest: recovery.responseDigest,
           recovery_tool_count: recovery.toolCount,
           recovery_content_count: recovery.contentCount,
@@ -2233,6 +2073,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           runtime_tuple_digest: runtimeTupleDigest,
         }
         const recorded = await recordRuntimeMemoryReadyEvidence(db as any, evidence)
+        await recordVerifiedNativeRuntimeMemoryReady(db as any,{agentId:context.agentId,project,
+          runtimeInstanceId:endpoint.endpoint!.runtimeInstanceId,receipt:ordinaryReceipt,observeProvider:options.observeProvider,readNativeProof:options.readNativeProof})
         const storedEvidence = await db.queryOne<any>(
           'SELECT valid_until FROM runtime_memory_ready_evidence WHERE id = $1 AND runtime_instance_id = $2',
           [recorded.evidence_id, runtime.id],
@@ -2243,6 +2085,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             agent_id: context.agentId,
             expected_agent_id: context.agentId,
             project,
+            readNativeProof:options.readNativeProof,
           },
           { runtimeInstanceId: runtime.id, evidenceId: recorded.evidence_id },
           runtimeTuple,
@@ -2326,9 +2169,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   }
 
   const memoryReadback = async (context: BootstrapStageContext): Promise<BootstrapStageOutcome> => {
-    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT || basename(context.workspaceRoot)
+    const project = env.AGENT_MEMORY_PROJECT || env.AGENT_COMMS_MEMORY_READY_PROJECT
+    if (!project) return {ok:false,reasonCodes:['NO_GO_MEMORY_RECOVERY'],evidenceRefs:['memory-error:SEAT_MEMORY_PROJECT_REQUIRED']}
     const mutation = context.priorState.mutations.find((item) => item.kind === 'memory_readiness')
     try {
+      const endpoint=await withBootstrapDb(env,db=>resolveRuntimeEndpoint(db,{agentId:context.agentId}),{readonly:true})
+      if(!endpoint.endpoint)throw new Error(endpoint.code)
+      env.AUN_BOOTSTRAP_ACTUAL_PORT=String(endpoint.endpoint.port)
       const mutationPayload = mutation?.rollback_payload ?? {}
       const selectedRuntimeInstanceId = String(
         mutationPayload.runtime_instance_id ?? env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID ?? '',
@@ -2347,13 +2194,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       let tupleBindingMatches = !mutation
       let tupleBindingSource: 'release_context' | 'bound_runtime_receipt' = 'release_context'
       if (mutation && selectedRuntimeInstanceId && releaseContextTuple && boundTupleDigest) {
-        const selected = await withBootstrapDb(env, (db) => db.queryOne<any>(
-          `SELECT agent_id, runtime_engine, runtime_kind, session_name, process_id,
-                  port, checkout_path, commit_sha, status, metadata
-             FROM agent_runtime_instances
-            WHERE runtime_instance_id = $1 AND agent_id = $2`,
-          [selectedRuntimeInstanceId, context.agentId],
-        ), { readonly: true })
+        const selected = await withBootstrapDb(env,async db=>(await observedBootstrapRuntimeRows(db,context.agentId)).find(row=>row.runtime_instance_id===selectedRuntimeInstanceId) ?? null,{readonly:true})
         selectedRuntimeRowPresent = Boolean(selected)
         const metadata = parseJsonRecord(selected?.metadata)
         const selectedTuple: RuntimeReceiptTuple | null = selected
@@ -2380,7 +2221,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           && selectedTuple!.port === releaseContextTuple.port
         tupleBindingMatches = currentProviderIdentityMatches
           && selectedRuntimeTupleDigest === boundTupleDigest
-          && metadata.tuple_digest === boundTupleDigest
+          && selectedRuntimeTupleDigest === boundTupleDigest
         if (tupleBindingMatches) {
           expectedTuple = selectedTuple
           tupleBindingSource = 'bound_runtime_receipt'
@@ -2395,8 +2236,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             runtime_instance_id: selectedRuntimeInstanceId,
             profile_present: Boolean(readbackProfile),
             session_present: Boolean(env.AUN_BOOTSTRAP_TMUX_SESSION || readbackProfile?.tmux_session),
-            port_valid: Number.isInteger(Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || readbackProfile?.channel_port))
-              && Number(env.AUN_BOOTSTRAP_CHANNEL_PORT || readbackProfile?.channel_port) > 0,
+            port_valid: Number.isInteger(Number(env.AUN_BOOTSTRAP_ACTUAL_PORT))
+              && Number(env.AUN_BOOTSTRAP_ACTUAL_PORT) > 0,
             provider_pid_valid: Number.isInteger(Number(env.AUN_BOOTSTRAP_PROVIDER_PID))
               && Number(env.AUN_BOOTSTRAP_PROVIDER_PID) > 1,
             runtime_present: Boolean(context.resolvedRuntime),
@@ -2416,6 +2257,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           agent_id: context.agentId,
           expected_agent_id: context.agentId,
           project,
+          readNativeProof:options.readNativeProof,
         },
         selectedRuntimeInstanceId
           ? {
@@ -2441,20 +2283,26 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         ))
         const metadata = parseJsonRecord(evidence?.metadata)
         const nativeTransport = await readConfiguredWasurezuTransport(context, run)
+        const observed=inspectHostRuntime({agentId:context.agentId,runtimeInstanceId:endpoint.endpoint.runtimeInstanceId})
+        const current=observed.reasonCode==='OBSERVED' && observed.observations.length===1?observed.observations[0]:null
+        const nativeReceipt=nativeTransport && current?await readNativeSeatContextReceipt({transport:nativeTransport,
+          agentId:context.agentId,project,runtimeInstanceId:String(payload.runtime_instance_id),targetRuntime:current.provider,
+          providerPid:current.provider_pid,providerStartedAt:current.provider_started_at,hostSessionId:current.host_session_id??undefined,
+          cwd:current.workspace,env,signal:context.abortSignal}):null
         const readbackDigest = bootstrapDigest({
           evidence_id: evidence?.id ?? null,
           runtime_instance_id: evidence?.runtime_instance_id ?? null,
           project: evidence?.project ?? null,
           valid_until: evidence?.valid_until ?? null,
-          provider_tuple_digest: metadata.provider_tuple_digest ?? null,
-          recovery_response_digest: metadata.recovery_response_digest ?? null,
-          runtime_tuple_digest: metadata.runtime_tuple_digest ?? null,
+          provider_tuple_digest: nativeTransport?.tupleDigest ?? null,
+          recovery_response_digest: nativeReceipt?.response_digest ?? null,
+          runtime_tuple_digest: selectedRuntimeTupleDigest ?? null,
         })
         mutationMatches = evidence?.result_status === 'ready'
           && metadata.bootstrap_run_id === payload.bootstrap_run_id
           && Boolean(evidence?.valid_until) && Date.parse(String(evidence.valid_until)) > Date.now()
           && nativeTransport?.tupleDigest === payload.provider_tuple_digest
-          && metadata.provider_tuple_digest === payload.provider_tuple_digest
+          && nativeReceipt?.invocation_digest === parseJsonRecord(metadata.seat_context_proof).invocation_digest
           && readbackDigest === mutation.actual_after_digest
       }
       return gate.ok && runtimeMatches && mutationMatches
@@ -2484,6 +2332,8 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
   }
 
   return {
+    ensureConfigurationDesiredState,
+    recordBootstrapConfigurationReady,
     async lockAndSnapshot(context) {
       const dirty = await run('git', ['status', '--porcelain'], { ...commandOptions(context, 10_000), cwd: context.repoRoot })
       if (dirty.exitCode !== 0) return { ok: false, reasonCodes: ['NO_GO_PRESTATE_UNREADABLE'] }
@@ -2663,13 +2513,21 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       const configurationMigration = join(repoRoot, 'db', 'migrations', '2026-07-26-aun-configuration-reconciliation.up.sql')
-      const configurationMigrationSql = postgres ? readFileSync(configurationMigration, 'utf8') : ''
+      const diagnosticsMigrationSql = postgres ? readFileSync(join(repoRoot,'db','migrations','2026-09-13-seat-runtime-continuity-diagnostics.up.sql'),'utf8') : ''
+      const configurationMigrationSql = postgres ? readFileSync(configurationMigration,'utf8') : ''
       const applyConfigurationMigration = async (): Promise<BootstrapCommandResult> => {
         try {
-          const applied = await withBootstrapDb(env, async (db) => db.execute(configurationMigrationSql))
+          const applied = await withBootstrapDb(env, async (db) => {
+            const installed=await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_desired_document(agents)') IS NOT NULL AS present")
+            if(!installed?.present) await db.execute(configurationMigrationSql)
+            await db.execute(diagnosticsMigrationSql)
+            await db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-21-runtime-observation-nonpersistence.up.sql'),'utf8'))
+            await db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-21-runtime-observation-restart-contract.up.sql'),'utf8'))
+            return db.execute(readFileSync(join(repoRoot,'db','migrations','2026-09-22-configuration-outbox-supersession.up.sql'),'utf8'))
+          })
           return {
             exitCode: 0,
-            stdout: JSON.stringify({ row_count: applied.rowCount, migration_digest: bootstrapDigest(configurationMigrationSql) }),
+            stdout: JSON.stringify({ row_count: applied.rowCount, migration_digest: bootstrapDigest([configurationMigrationSql,diagnosticsMigrationSql]) }),
             stderr: '',
           }
         } catch (error) {
@@ -2725,20 +2583,15 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         return { ok: false, reasonCodes: ['NO_GO_IDENTITY_MISMATCH'], evidenceRefs: [tmuxAuthority.evidenceRef] }
       }
       const session = tmuxAuthority.session
+      env.AUN_BOOTSTRAP_TMUX_SESSION=session
       const port = await choosePort(run, context, existing)
-      if (!port) return { ok: false, reasonCodes: ['NO_GO_PORT_CONFLICT'] }
+      if (port === null) return { ok: false, reasonCodes: ['NO_GO_PORT_CONFLICT'] }
       env.AUN_BOOTSTRAP_CHANNEL_PORT = String(port)
       const desired = {
         runtime: 'TUI', runtime_engine_preference: context.resolvedRuntime,
-        home_directory: context.workspaceRoot, channel_port: port, tmux_session: session, profile_enabled: true,
+        home_directory: context.workspaceRoot, channel_port: port || null, tmux_session: session, profile_enabled: true,
       }
-      const matches = existing
-        && existing.runtime === desired.runtime
-        && existing.runtime_engine_preference === desired.runtime_engine_preference
-        && resolve(existing.home_directory ?? '') === resolve(desired.home_directory)
-        && Number(existing.channel_port) === port
-        && existing.tmux_session === session
-        && existing.profile_enabled === true
+      const matches = existing && existing.profile_enabled === true
       if (context.dryRun) {
         if (existing && !matches) {
           return {
@@ -2754,28 +2607,15 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       if (matches) {
-        let configuration: Awaited<ReturnType<typeof ensureConfigurationDesiredState>>
-        try { configuration = await ensureConfigurationDesiredState(context) } catch (error) {
-          return {
-            ok: false,
-            reasonCodes: ['NO_GO_POST_MUTATION_READBACK'],
-            evidenceRefs: [`configuration-desired-error:${bootstrapDigest(String(error))}`],
-          }
-        }
-        const configurationReadback = configurationDesiredReadback(configuration)
-        return {
-          ok: true,
-          evidenceRefs: [
-            tmuxAuthority.evidenceRef,
-            `profile-existing:${bootstrapDigest(existing)}`,
-            ...(configuration ? [`configuration-desired:${configuration.desired_revision}:${configuration.desired_digest}`] : []),
-          ],
-          readinessPredicates: {
-            profile_readback_matches: true,
-            configuration_desired_state_ready: configuration !== null || env.AGENT_COM_DB?.trim().toLowerCase() === 'sqlite',
-          },
-          readbackDigest: bootstrapDigest({ profile: managedProfile(existing), configuration: configurationReadback }),
-          mutation: configuration?.mutation,
+        try {
+          const configuration=await ensureConfigurationDesiredState(context)
+          return {ok:true,evidenceRefs:[tmuxAuthority.evidenceRef,`profile-existing:${bootstrapDigest(existing)}`],
+            readinessPredicates:{profile_readback_matches:true,configuration_desired_state_ready:configuration!==null||env.AGENT_COM_DB==='sqlite'},
+            readbackDigest:bootstrapDigest({profile:managedProfile(existing),configuration:configurationDesiredReadback(configuration)}),
+            mutations:configuration?.mutation?[configuration.mutation]:[]}
+        } catch(error) {
+          return {ok:false,reasonCodes:['NO_GO_POST_MUTATION_READBACK'],
+            evidenceRefs:[`configuration-desired-error:${bootstrapDigest(String(error))}`]}
         }
       }
       if (existing) {
@@ -2787,9 +2627,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       }
       const applied = await run(bunPath, [
         'cli/index.ts', 'agent', 'profile', 'set', context.agentId,
-        '--runtime', 'TUI', '--runtime-engine', context.resolvedRuntime!,
-        '--home-directory', context.workspaceRoot, '--channel-port', String(port),
-        '--tmux-session', session, '--enabled', 'true', '--execute',
+        '--enabled', 'true', '--execute',
       ], commandOptions(context, 120_000))
       const readback = await profileGet(context.agentId)
       const actualProfile = managedProfile(readback)
@@ -2809,7 +2647,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         readbackDigest: bootstrapDigest(actualProfile ?? { absent: true }),
         mutation: observedMutation,
       }
-      if (!readback || readback.runtime_engine_preference !== context.resolvedRuntime || Number(readback.channel_port) !== port) {
+      if (!readback || readback.agent_id !== context.agentId || readback.profile_enabled !== true) {
         return {
           ok: false,
           reasonCodes: observedMutation ? ['NO_GO_POST_MUTATION_READBACK'] : ['NO_GO_IDENTITY_MISMATCH'],
@@ -3046,8 +2884,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
       if (!adapter) return { ok: false, reasonCodes: ['NO_GO_RUNTIME_UNDETECTED'] }
       const profile = await profileGet(context.agentId)
       if (profile) {
-        env.AUN_BOOTSTRAP_CHANNEL_PORT = String(profile.channel_port ?? '')
-        env.AUN_BOOTSTRAP_TMUX_SESSION = String(profile.tmux_session ?? '')
+        env.AUN_BOOTSTRAP_CHANNEL_PORT = '0'
+        const current=await withBootstrapDb(env,db=>resolveSeatProvider(db,{agentId:context.agentId}),{readonly:true})
+        if(current.ok && current.observation)env.AUN_BOOTSTRAP_TMUX_SESSION=current.observation.session_name
       }
       const [mcp, runtimeIdentity, memory, daemon, daemonNative] = await Promise.all([
         adapter.readbackMcpRegistration(context),
@@ -3137,34 +2976,13 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       const configurationMutation = configuration && !configuration.idempotent ? {
-        kind: 'configuration' as const,
-        owner_key: `configuration:${context.runId}:${configuration.hostId}:${context.agentId}`,
-        before_digest: bootstrapDigest(configuration.previousObservedState ?? { absent: true }),
-        intended_after_digest: bootstrapDigest({
-          host_id: configuration.hostId,
-          agent_id: context.agentId,
-          desired_revision: configuration.desiredRevision,
-          desired_digest: configuration.desiredDigest,
-          candidate_digest: configuration.candidateDigest,
-        }),
-        actual_after_digest: bootstrapDigest({
-          host_id: configuration.hostId,
-          agent_id: context.agentId,
-          desired_revision: configuration.desiredRevision,
-          desired_digest: configuration.desiredDigest,
-          candidate_digest: configuration.candidateDigest,
-        }),
-        rollback_action: 'restore the exact prior observed projection and re-hold only the exact run desired event',
-        rollback_payload: {
-          host_id: configuration.hostId,
-          agent_id: context.agentId,
-          desired_revision: configuration.desiredRevision,
-          desired_digest: configuration.desiredDigest,
-          candidate_digest: configuration.candidateDigest,
-          outbox_event_id: configuration.outboxEventId,
-          previous_observed_state: configuration.previousObservedState,
-        },
-      } : undefined
+        kind:'configuration' as const,owner_key:`configuration:${context.runId}:${context.agentId}`,
+        before_digest:bootstrapDigest({outbox_event_id:configuration.outboxEventId,delivered:false}),
+        intended_after_digest:bootstrapDigest({agent_id:context.agentId,desired_revision:configuration.desiredRevision,desired_digest:configuration.desiredDigest,outbox_event_id:configuration.outboxEventId,delivered:true}),
+        actual_after_digest:bootstrapDigest({agent_id:context.agentId,desired_revision:configuration.desiredRevision,desired_digest:configuration.desiredDigest,outbox_event_id:configuration.outboxEventId,delivered:true}),
+        rollback_action:'re-hold only the exact run desired event; retain logical audit history',
+        rollback_payload:{agent_id:context.agentId,desired_revision:configuration.desiredRevision,desired_digest:configuration.desiredDigest,outbox_event_id:configuration.outboxEventId},
+      }:undefined
       const providerMutation = context.priorState.mutations.find((mutation) =>
         mutation.kind === 'mcp_registration' && mutation.stage === 'B4_MCP_REGISTRATION')
       if (providerMutation && providerMutation.rollback_payload?.backup_retained === true
@@ -3183,7 +3001,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           ...(mcp.evidenceRefs ?? []), ...(memory.evidenceRefs ?? []),
           `profile-final:${bootstrapDigest(profile)}`, `daemon-final:${bootstrapDigest(daemonJson)}`,
           `d1-safe-final:${bootstrapDigest(safeD1)}`,
-          ...(configuration ? [`configuration-first-reconcile:${configuration.desiredRevision}:${configuration.candidateDigest}`] : []),
+          ...(configuration ? [`configuration-first-reconcile:${configuration.desiredRevision}:${configuration.desiredDigest}`] : []),
         ],
         readinessPredicates: {
           identity_ready: true, mcp_ready: true, memory_ready: true,
@@ -3223,12 +3041,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         const mutation = context.priorState.mutations.find((item) => item.stage === stage && item.kind === 'profile')
         const digestMatches = !mutation || mutation.actual_after_digest === bootstrapDigest(managedProfile(profile))
         const ok = Boolean(profile)
-          && profile.runtime_engine_preference === context.resolvedRuntime
-          && resolve(profile.home_directory ?? '') === resolve(context.workspaceRoot)
-          && profile.tmux_session === env.AUN_BOOTSTRAP_TMUX_SESSION
-          && profile.profile_enabled === true
+            && profile.profile_enabled === true
           && digestMatches
-        if (ok) env.AUN_BOOTSTRAP_CHANNEL_PORT = String(profile.channel_port)
+        if (ok) env.AUN_BOOTSTRAP_CHANNEL_PORT = '0'
         return ok ? {
           ok: true,
           evidenceRefs: [`resume-profile-readback:${bootstrapDigest(profile)}`],
@@ -3405,43 +3220,12 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
           const currentEventIds = new Set(currentOutbox.map((row) => String(row.event_id)))
           const pre = artifact.pre_agent_row
           await tx.execute(`SELECT set_config('aun.actor_ref', $1, true)`, [`aun-bootstrap-rollback:${context.runId}`])
-          const restoredWatched = await tx.execute(
-            `UPDATE agents SET
-               profile_enabled = $2,
-               runtime_engine_preference = $3,
-               home_directory = $4,
-               canonical_workspace = $5,
-               canonical_home = $6,
-               channel_port = $7,
-               supervisor_identity = $8,
-               expected_provider_identity = $9::jsonb,
-               expected_provider_identity_ref = $10,
-               provider_token_source_ref = $11,
-               ordinary_communication_enrollment = $12,
-               ordinary_projection = $13::jsonb,
-               desired_release_commit = $14,
-               desired_release_tree = $15,
-               desired_control_refs = $16::jsonb
-             WHERE agent_id = $1`,
-            [
-              context.agentId,
-              pre.profile_enabled,
-              pre.runtime_engine_preference,
-              pre.home_directory,
-              pre.canonical_workspace,
-              pre.canonical_home,
-              pre.channel_port,
-              pre.supervisor_identity,
-              JSON.stringify(pre.expected_provider_identity ?? {}),
-              pre.expected_provider_identity_ref,
-              pre.provider_token_source_ref,
-              pre.ordinary_communication_enrollment,
-              JSON.stringify(pre.ordinary_projection ?? {}),
-              pre.desired_release_commit,
-              pre.desired_release_tree,
-              JSON.stringify(pre.desired_control_refs ?? []),
-            ],
-          )
+          const restoredWatched=await tx.execute(`UPDATE agents SET supervisor_identity=$2,
+            ordinary_communication_enrollment=$3,
+            ordinary_projection=(COALESCE(ordinary_projection,'{}'::jsonb)-'owner'-'schema_version') || $4::jsonb,
+            desired_release_commit=$5,desired_release_tree=$6,desired_control_refs=$7::jsonb WHERE agent_id=$1`,
+            [context.agentId,pre.supervisor_identity,pre.ordinary_communication_enrollment,JSON.stringify(pre.ordinary_projection??{}),
+              pre.desired_release_commit,pre.desired_release_tree,JSON.stringify(pre.desired_control_refs??[])])
           if (restoredWatched.rowCount !== 1) throw new Error('configuration desired watched restore rejected')
           const afterWatchedOutbox = (await tx.query<{ row: Record<string, unknown> }>(
             `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o
@@ -3506,27 +3290,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             if (removed.rowCount !== 1) throw new Error('configuration desired exact event removal rejected')
             exactDeleteCount += removed.rowCount
           }
-          const preMetadata = jsonRecord(pre.metadata)
-          const restoredDerived = await tx.execute(
-            `UPDATE agents SET
-               desired_revision = $2,
-               desired_digest = $3,
-               desired_updated_at = $4,
-               desired_updated_by = $5,
-               metadata = CASE WHEN $6::boolean
-                 THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{codex_home}', to_jsonb($7::text), true)
-                 ELSE COALESCE(metadata, '{}'::jsonb) - 'codex_home' END
-             WHERE agent_id = $1`,
-            [
-              context.agentId,
-              pre.desired_revision,
-              pre.desired_digest,
-              pre.desired_updated_at,
-              pre.desired_updated_by,
-              typeof preMetadata.codex_home === 'string',
-              typeof preMetadata.codex_home === 'string' ? preMetadata.codex_home : '',
-            ],
-          )
+          const restoredDerived=await tx.execute(`UPDATE agents SET desired_revision=$2,desired_digest=$3,
+            desired_updated_at=$4,desired_updated_by=$5 WHERE agent_id=$1`,
+            [context.agentId,pre.desired_revision,pre.desired_digest,pre.desired_updated_at,pre.desired_updated_by])
           if (restoredDerived.rowCount !== 1) throw new Error('configuration desired derived restore rejected')
           const finalAgent = (await tx.queryOne<{ row: Record<string, unknown> }>(
             `SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`,
@@ -3544,7 +3310,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             throw new Error('configuration desired full preimage restore mismatch')
           }
           return {
-            digest: bootstrapDigest({ agent: finalAgent, outbox: finalOutbox }),
+            digest: bootstrapDigest({ agent: configurationDesiredControlledRow(finalAgent), outbox: finalOutbox }),
             compensatingEventCount: compensatingEvents.length,
             exactDeleteCount,
             recoveryAdmissionNoEffect: false,
@@ -3588,98 +3354,26 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
         }
       }
       if (mutation.kind === 'configuration') {
-        const payload = mutation.rollback_payload ?? {}
-        const hostId = String(payload.host_id ?? '')
-        const agentId = String(payload.agent_id ?? '')
-        const desiredRevision = Number(payload.desired_revision)
-        const desiredDigest = String(payload.desired_digest ?? '')
-        const candidateDigest = String(payload.candidate_digest ?? '')
-        const outboxEventId = payload.outbox_event_id === null || payload.outbox_event_id === undefined
-          ? null
-          : String(payload.outbox_event_id)
-        const previous = payload.previous_observed_state && typeof payload.previous_observed_state === 'object'
-          ? payload.previous_observed_state as Record<string, any>
-          : null
-        if (mutation.owner_key !== `configuration:${context.runId}:${hostId}:${agentId}`
-          || agentId !== context.agentId
-          || !Number.isSafeInteger(desiredRevision) || desiredRevision < 1
-          || !/^[0-9a-f]{64}$/.test(desiredDigest)
-          || !/^[0-9a-f]{64}$/.test(candidateDigest)) {
-          return { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
-        }
-        const readback = await withBootstrapDb(env, async (db) => db.transaction(async (tx) => {
-          const removed = await tx.execute(
-            `DELETE FROM aun_configuration_observed_state
-              WHERE host_id = $1 AND agent_id = $2
-                AND observed_revision = $3 AND observed_desired_digest = $4
-                AND candidate_digest = $5`,
-            [hostId, agentId, desiredRevision, desiredDigest, candidateDigest],
-          )
-          if (removed.rowCount !== 1) throw new Error('configuration rollback fence rejected')
-          if (previous) {
-            await tx.execute(
-              `INSERT INTO aun_configuration_observed_state (
-                 host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
-                 release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
-                 launchctl_environment_digest, runtime_identity_digest, reconcile_status,
-                 drift_reason_codes, lease_id, fencing_token, observed_at
-               ) VALUES (
-                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16
-               )`,
-              [
-                previous.host_id, previous.agent_id, previous.observed_revision,
-                previous.observed_desired_digest, previous.candidate_digest,
-                previous.release_commit, previous.release_tree, previous.provider_native_digest,
-                previous.launchagent_plist_digest, previous.launchctl_environment_digest,
-                previous.runtime_identity_digest, previous.reconcile_status,
-                JSON.stringify(previous.drift_reason_codes ?? []), previous.lease_id,
-                previous.fencing_token, previous.observed_at,
-              ],
-            )
-          }
-          if (outboxEventId) {
-            const restoredEvent = await tx.execute(
-              `UPDATE aun_configuration_desired_outbox
-                  SET delivered_at = NULL, attempt_count = 0,
-                      available_at = 'infinity'::timestamptz
-                WHERE event_id = $1 AND agent_id = $2
-                  AND desired_revision = $3 AND desired_digest = $4
-                  AND delivered_at IS NOT NULL AND attempt_count = 1`,
-              [outboxEventId, agentId, desiredRevision, desiredDigest],
-            )
-            if (restoredEvent.rowCount !== 1) throw new Error('configuration outbox rollback fence rejected')
-          }
-          const observed = await tx.queryOne<Record<string, unknown>>(
-            `SELECT host_id, agent_id, observed_revision, observed_desired_digest, candidate_digest,
-                    release_commit, release_tree, provider_native_digest, launchagent_plist_digest,
-                    launchctl_environment_digest, runtime_identity_digest, reconcile_status,
-                    drift_reason_codes, lease_id, fencing_token, observed_at
-               FROM aun_configuration_observed_state
-              WHERE host_id = $1 AND agent_id = $2`,
-            [hostId, agentId],
-          )
-          const event = outboxEventId
-            ? await tx.queryOne<any>(
-                `SELECT event_id, attempt_count, delivered_at, available_at::text AS available_at_text
-                   FROM aun_configuration_desired_outbox WHERE event_id = $1`,
-                [outboxEventId],
-              )
-            : null
-          return { observed, event }
-        })).catch(() => null)
-        const restored = Boolean(readback)
-          && (!outboxEventId || (String(readback!.event?.event_id) === outboxEventId
-            && Number(readback!.event?.attempt_count) === 0
-            && readback!.event?.delivered_at === null
-            && readback!.event?.available_at_text === 'infinity'))
-          && bootstrapDigest(readback!.observed ?? { absent: true }) === bootstrapDigest(previous ?? { absent: true })
-        return restored
-          ? {
-              ok: true,
-              readinessPredicates: { rollback_verified: true },
-              readbackDigest: bootstrapDigest({ observed: readback!.observed, outbox_event_held: Boolean(outboxEventId) }),
-            }
-          : { ok: false, reasonCodes: ['NO_GO_ROLLBACK_UNVERIFIED'] }
+        const payload=mutation.rollback_payload??{},agentId=String(payload.agent_id??'')
+        const desiredRevision=Number(payload.desired_revision),desiredDigest=String(payload.desired_digest??'')
+        const outboxEventId=payload.outbox_event_id?String(payload.outbox_event_id):null
+        if(mutation.owner_key!==`configuration:${context.runId}:${agentId}`||agentId!==context.agentId
+          ||!Number.isSafeInteger(desiredRevision)||desiredRevision<1||!/^[0-9a-f]{64}$/.test(desiredDigest))return {ok:false,reasonCodes:['NO_GO_ROLLBACK_UNVERIFIED']}
+        const restored=await withBootstrapDb(env,async(db)=>db.transaction(async(tx)=>{
+          const desired=await readConfigurationDesiredState(tx,agentId)
+          if(!desired||desired.desiredRevision!==desiredRevision||desired.desiredDigest!==desiredDigest)return false
+          if(!outboxEventId)return true
+          const changed=await tx.execute(`UPDATE aun_configuration_desired_outbox
+            SET delivered_at=NULL,attempt_count=0,available_at='infinity'::timestamptz
+            WHERE event_id=$1 AND agent_id=$2 AND desired_revision=$3 AND desired_digest=$4
+              AND delivered_at IS NOT NULL AND attempt_count=1`,[outboxEventId,agentId,desiredRevision,desiredDigest])
+          if(changed.rowCount!==1)return false
+          const event=await tx.queryOne<any>(`SELECT attempt_count,delivered_at,available_at::text AS available_at_text
+            FROM aun_configuration_desired_outbox WHERE event_id=$1 AND agent_id=$2`,[outboxEventId,agentId])
+          return !!event&&Number(event.attempt_count)===0&&event.delivered_at===null&&event.available_at_text==='infinity'
+        })).catch(()=>false)
+        return restored?{ok:true,readinessPredicates:{rollback_verified:true},readbackDigest:bootstrapDigest({outbox_event_id:outboxEventId,delivered:false})}
+          :{ok:false,reasonCodes:['NO_GO_ROLLBACK_UNVERIFIED']}
       }
       if (mutation.kind === 'memory_readiness') {
         const payload = mutation.rollback_payload ?? {}
@@ -3709,16 +3403,9 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             const row = await tx.queryOne<any>('SELECT status, metadata FROM agent_runtime_instances WHERE runtime_instance_id = $1 AND agent_id = $2', [runtimeId, context.agentId])
             const metadata = parseJsonRecord(row?.metadata)
             if (metadata.bootstrap_run_id !== context.runId) return false
-            if (row?.status === 'running' || row?.status === 'active') {
-              const stopped = await tx.execute(
-                `UPDATE agent_runtime_instances SET status = 'stopped', stopped_at = now(), last_seen_at = now()
-                  WHERE runtime_instance_id = $1 AND agent_id = $2 AND status IN ('running', 'active')`,
-                [runtimeId, context.agentId],
-              )
-              if (stopped.rowCount !== 1) return false
-            } else if (row?.status !== 'stopped') {
-              return false
-            }
+            if(!row || (row.status!==null && row.status!=='stopped')) return false
+            // Retain the logical anchor and all foreign-key history. No liveness write.
+
           }
           const evidence = evidenceId === null || evidenceId === undefined
             ? null
@@ -3811,9 +3498,7 @@ function createDefaultPorts(options: DefaultPortsOptions): BootstrapExecutionPor
             await tx.execute(`UPDATE runtime_memory_ready_evidence
               SET result_status = 'failed', failure_reason = 'BOOTSTRAP_ROLLBACK', valid_until = now()
               WHERE metadata->>'bootstrap_run_id' = $1 AND result_status = 'ready'`, [context.runId])
-            await tx.execute(`UPDATE agent_runtime_instances
-              SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), last_seen_at = now()
-              WHERE metadata->>'bootstrap_run_id' = $1 AND status IN ('running', 'active')`, [context.runId])
+            // No physical runtime stop snapshot is persisted during rollback.
             let exactQueueUpdateCount = 0
             for (const row of ownedQueueBefore) {
               const updated = await tx.execute(`UPDATE message_queue
@@ -3929,6 +3614,8 @@ export type BootstrapDependencies = {
   stateStore?: BootstrapStateStore
   ports?: BootstrapExecutionPorts
   run?: BootstrapAdapterCommandRunner
+  observeProvider?: typeof observeSeatProvider
+  readNativeProof?: RuntimeMemoryReadyGateInput['readNativeProof']
   uuid?: () => string
   stageDeadlineMs?: Partial<Record<BootstrapStage, number>>
 }
@@ -3960,6 +3647,8 @@ export async function bootstrap(
     env,
     home,
     repoRoot,
+    run: runCommand,
+    observeProvider: dependencies.observeProvider,
   })
   if (rootResolution.ok && rootResolution.authority) {
     // Target Codex commands always receive the canonical root. Caller/TUI
@@ -4021,7 +3710,7 @@ export async function bootstrap(
     if (typeof runtimeId === 'string' && runtimeId) env.AUN_BOOTSTRAP_RUNTIME_INSTANCE_ID = runtimeId
   }
   hydrateRunEnvironment(state)
-  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot })
+  const ports = dependencies.ports ?? createDefaultPorts({ run: runCommand, env, home, repoRoot, observeProvider: dependencies.observeProvider, readNativeProof:dependencies.readNativeProof })
   let lockHeld = false
   const bootstrapStartedAt = performance.now()
   const boundedDeadline = (stage: BootstrapStage, task: (signal: AbortSignal) => Promise<BootstrapStageOutcome>) =>

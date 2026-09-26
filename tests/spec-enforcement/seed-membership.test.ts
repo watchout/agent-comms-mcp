@@ -107,8 +107,8 @@ describe('supplementDiscordIdMapFromDb — DB integration', () => {
     // re-running the test suite is idempotent.
     for (const f of FIXTURE_AGENTS) {
       await db.query(
-        `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, metadata, registered_at)
-         VALUES ($1, 'default', $1, 'dev', 'claude-code', 'offline', $2::jsonb, now())
+        `INSERT INTO agents (agent_id, org_id, display_name, agent_type, metadata, registered_at)
+         VALUES ($1, 'default', $1, 'dev', $2::jsonb, now())
          ON CONFLICT (agent_id) DO UPDATE SET
            metadata = COALESCE(
              jsonb_strip_nulls(COALESCE(agents.metadata, '{}'::jsonb) || $2::jsonb),

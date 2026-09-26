@@ -1,0 +1,24 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_c5345b7222f140f6bb4110a1dd0524e4","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+42 |       return {p,lease}
+43 |     }
+44 |     const stop=async(p:ReturnType<typeof Bun.spawn>)=>{
+45 |       p.kill('SIGTERM')
+46 |       const code=await Promise.race([p.exited,Bun.sleep(10000).then(()=>{throw Error('SERVER_STOP_TIMEOUT')})])
+47 |       expect(code).toBe(0)
+                        ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:47:20)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:49:37)
+(fail) NP04 actual managed server starts, releases while it owns the socket, and restarts with a new incarnation without physical DB writes [2058.31ms]
+
+ 0 pass
+ 1 fail
+ 4 expect() calls
+Ran 1 test across 1 file. [2.09s]

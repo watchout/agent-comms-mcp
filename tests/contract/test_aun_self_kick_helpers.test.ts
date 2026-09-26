@@ -26,6 +26,11 @@ import { spawnSync } from 'node:child_process'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
 
+import { PgAdapter } from '../../core/db/pg-adapter'
+import {createReadyNativeRuntimeWithDb,stopNativeFixtures} from '../helpers/seat-native-runtime-fixture'
+const nativeHomes:string[]=[]
+let nativeEnv:NodeJS.ProcessEnv={}
+afterAll(async()=>{await stopNativeFixtures();for(const home of nativeHomes)rmSync(home,{recursive:true,force:true})})
 const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const HELPERS = join(REPO_ROOT, 'hooks', 'lib', 'aun-self-kick-helpers.sh')
 const MEMORY_READY_MIGRATION = join(REPO_ROOT, 'db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql')
@@ -45,58 +50,24 @@ async function cleanupSelfKickHelperAgent(c: Client): Promise<void> {
   await c.query(`DELETE FROM message_queue WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM outbound_queue WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
+  await c.query(`DELETE FROM control_plane_leases WHERE holder_agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
   await c.query(`DELETE FROM agents WHERE agent_id=$1`, [TEST_AGENT])
 }
 
 async function seedSelfKickHelperMemoryReady(c: Client): Promise<void> {
   await ensureMemoryReadySchema(c)
-  const runtimeId = randomUUID()
-  const port = 34_000 + Number.parseInt(runtimeId.slice(0, 4), 16) % 20_000
-  const sessionName = `${TEST_AGENT}-session`
-  const checkoutPath = `/tmp/${TEST_AGENT}-memory-ready`
-  await c.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1`, [TEST_AGENT])
-  await c.query(`DELETE FROM agent_runtime_instances WHERE agent_id=$1`, [TEST_AGENT])
-  await c.query(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port,
-        metadata, profile_revision, profile_source, home_directory)
-     VALUES ($1, $1, 'dev', 'mcp', 'idle', $2, $3::jsonb, 1, 'legacy', $4)
-     ON CONFLICT (agent_id) DO UPDATE SET
-       runtime = EXCLUDED.runtime,
-       status = EXCLUDED.status,
-       channel_port = EXCLUDED.channel_port,
-       metadata = EXCLUDED.metadata,
-       profile_revision = 1,
-       profile_source = 'legacy',
-       home_directory = EXCLUDED.home_directory`,
-    [TEST_AGENT, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
-  )
-  await c.query(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
-        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
-             $5, 'self-kick-helper-test-head', 'running',
-             '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:01.000Z',
-             '{"source":"self-kick-helper-test"}'::jsonb)`,
-    [runtimeId, TEST_AGENT, sessionName, port, checkoutPath],
-  )
-  await c.query(
-    `INSERT INTO runtime_memory_ready_evidence
-       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
-        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
-        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
-        valid_until, source, metadata)
-     VALUES
-       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
-        $3, $4, $1, $5, 'self-kick-helper-test-head',
-        'test:mcp__wasurezu__recover_context', 'ready', '2026-06-01T00:00:02.000Z',
-        '/tmp/self-kick-helper-memory-ready.json', 'self-kick-helper-memory-ready',
-        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
-        '{"fixture":true}'::jsonb)`,
-    [TEST_AGENT, runtimeId, sessionName, port, checkoutPath],
-  )
+  const runtimeId=randomUUID(),home=mkdtempSync(join(tmpdir(),'selfkick-native-'));nativeHomes.push(home)
+  await c.query('DELETE FROM runtime_memory_ready_evidence WHERE agent_id=$1',[TEST_AGENT])
+  await c.query('DELETE FROM control_plane_leases WHERE holder_agent_id=$1',[TEST_AGENT])
+  await c.query('DELETE FROM agent_runtime_instances WHERE agent_id=$1',[TEST_AGENT])
+  await c.query(`INSERT INTO agents(agent_id,display_name,agent_type,profile_revision,profile_source)
+    VALUES($1,$1,'dev',1,'legacy') ON CONFLICT(agent_id) DO NOTHING`,[TEST_AGENT])
+  const db=new PgAdapter(DATABASE_URL)
+  try {const fixture=await createReadyNativeRuntimeWithDb(db,home,TEST_AGENT,runtimeId)
+    nativeEnv={...fixture.env,CODEX_HOME:home,PATH:fixture.cliPath+':'+process.env.PATH,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId}}
+  finally {await db.close()}
+
 }
 
 async function markSelfKickHelperEvidenceBypassed(c: Client): Promise<void> {
@@ -154,8 +125,9 @@ function runWithHelper(
 ): { stdout: string; stderr: string; status: number } {
   const fullEnv = {
     ...process.env,
+    ...nativeEnv,
     ...env,
-    PATH: pathPrefix ? `${pathPrefix}:${process.env.PATH ?? '/usr/bin:/bin'}` : (process.env.PATH ?? '/usr/bin:/bin'),
+    PATH: pathPrefix ? `${pathPrefix}:${nativeEnv.PATH ?? process.env.PATH ?? '/usr/bin:/bin'}` : (nativeEnv.PATH ?? process.env.PATH ?? '/usr/bin:/bin'),
   }
   const r = spawnSync('bash', ['-c', `source "${HELPERS}"; ${body}`], {
     env: fullEnv,

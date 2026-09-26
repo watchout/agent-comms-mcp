@@ -1,3 +1,4 @@
+import {fixture} from '../helpers/runtime-observation-nonpersistence-db-fixture'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -399,7 +400,10 @@ describe('fleet runtime queue observation v2 semantic core', () => {
   })
 
   test('isolated PostgreSQL migration proves bootstrap, OLD+NEW, ABA, idempotency, guarded down, and epoch monotonicity', async () => {
-    const client = await connect()
+    const historical=await fixture('postgres')
+    const TEST_DATABASE_URL=historical.databaseUrl
+    const TEST_DATABASE_NAME=historical.name
+    const client=new Client({connectionString:TEST_DATABASE_URL});await client.connect()
     try {
       const initiallyActive = await client.query(`SELECT to_regclass('fleet_runtime_queue_observation_active')::text AS active`)
       if (initiallyActive.rows[0].active !== null) await client.query(DOWN_SQL)
@@ -407,15 +411,21 @@ describe('fleet runtime queue observation v2 semantic core', () => {
       await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = 'kodama'`)
       await client.query(`DELETE FROM agents WHERE agent_id IN ('aun-runtime-executor', 'kodama', 'zero-history-agent', 'queue-history-agent', 'cross-agent', 'disabled-agent', 'unrelated-enabled-fixture')`)
       await client.query(`
-        INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, home_directory, profile_enabled, profile_revision, profile_source, disabled_at)
+        INSERT INTO agents (agent_id, display_name, agent_type, runtime, profile_enabled, profile_revision, profile_source, disabled_at)
         VALUES
-          ('aun-runtime-executor', 'AUN Runtime Executor', 'system', 'local_process', 'offline', NULL, true, 1, 'agent.register', NULL),
-          ('kodama', 'Kodama', 'dev', 'TUI', 'offline', '/Users/yuji/Developer/kodama', true, 1, 'legacy', NULL),
-          ('zero-history-agent', 'Zero History', 'dev', 'codex', 'offline', '/tmp/zero-history', true, 1, 'legacy', NULL),
-          ('cross-agent', 'Cross Agent', 'dev', 'codex', 'offline', '/tmp/cross-agent', true, 1, 'legacy', NULL),
-          ('unrelated-enabled-fixture', 'Unrelated Enabled Fixture', 'dev', 'codex', 'offline', '/tmp/unrelated-enabled-fixture', true, 1, 'legacy', NULL),
-          ('disabled-agent', 'Disabled', 'dev', 'codex', 'disabled', '/tmp/disabled', false, 1, 'legacy', transaction_timestamp())
+          ('aun-runtime-executor', 'AUN Runtime Executor', 'system', 'local_process', true, 1, 'agent.register', NULL),
+          ('kodama', 'Kodama', 'dev', 'TUI', true, 1, 'legacy', NULL),
+          ('zero-history-agent', 'Zero History', 'dev', 'TUI', true, 1, 'legacy', NULL),
+          ('cross-agent', 'Cross Agent', 'dev', 'TUI', true, 1, 'legacy', NULL),
+          ('unrelated-enabled-fixture', 'Unrelated Enabled Fixture', 'dev', 'TUI', true, 1, 'legacy', NULL),
+          ('disabled-agent', 'Disabled', 'dev', 'TUI', false, 1, 'legacy', transaction_timestamp())
       `)
+      // This frozen v1 canary reader still rejects a logical-only profile. Preserve
+      // genuine pre-cutover history; never disable the guard to seed it afterwards.
+      await client.query(`UPDATE agents SET runtime='local_process',status='offline' WHERE agent_id='aun-runtime-executor'`)
+      await client.query(`UPDATE agents SET runtime='TUI',status='offline',home_directory='/historical/kodama' WHERE agent_id='kodama'`)
+      await historical.apply()
+      await expect(client.query(`UPDATE agents SET status='busy' WHERE agent_id='kodama'`)).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
       await client.query(`INSERT INTO message_queue (agent_id, payload, status) VALUES ('queue-history-agent', '{}', 'done')`)
       const expectedBootstrap = await client.query(`
         SELECT agent_id, '0'::text AS revision
@@ -424,7 +434,7 @@ describe('fleet runtime queue observation v2 semantic core', () => {
               FROM agents
              WHERE profile_enabled = true
                AND disabled_at IS NULL
-               AND status <> 'disabled'
+
                AND agent_id IS NOT NULL
                AND agent_id <> ''
             UNION
@@ -560,6 +570,7 @@ describe('fleet runtime queue observation v2 semantic core', () => {
       expect(BigInt(reup.rows[0].epoch)).toBeGreaterThan(BigInt(firstEpoch))
     } finally {
       await client.end()
+      await historical.close()
     }
   }, 30_000)
 })

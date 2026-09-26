@@ -1,0 +1,13 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_native.test.ts"
+  ],
+  "started_at": "2026-09-21T05:25:05.313498+00:00",
+  "ended_at": "2026-09-21T05:25:07.797805+00:00",
+  "exit_code": 1,
+  "changed_input": "diagnostic receipt and gate timestamp readback",
+  "log_sha256": "2625db41819e6cc5197e0a56e21263ee8266f42d857d80859151740d79f2a76d"
+}

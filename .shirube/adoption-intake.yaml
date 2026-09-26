@@ -1,41 +1,43 @@
+---
 schema_version: shirube-adoption-intake/v1
-adoption_id: ADOPT-AGENT-COMMS-MCP-001
+adoption_id: ADOPT-AUN940-CURRENT-CONTROL-RECONCILIATION
 lane: adoption_intake
 repo: watchout/agent-comms-mcp
 framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
 profile: hotel-lite
-current_status: PARTIAL_SHIRUBE_PILOT
-target_status_after_merge: RAPID_LITE_REPORT_ONLY
-disposition: retrofit_accelerate
-source_control_ref: watchout/agent-comms-mcp#802
-source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+current_status: CURRENT_PRODUCT_CONTROL_RECONCILIATION_PENDING_AUDIT
+target_status_after_merge: NO_MERGE_OR_LIVE_CLAIM
+disposition: retrofit_recover
+source_control_ref: watchout/agent-comms-mcp#940
+source_mirror_ref: ".shirube/source-mirrors/control-issue.yaml"
 owner:
   role: repo_owner
   actor: watchout
-existing_state_scan_ref: .shirube/existing-state-scan.yaml
-existing_state_scan:
-  specs:
-    - path: https://github.com/watchout/agent-comms-mcp/issues/802
-      status: source_mirror_pending_owner_review
-      authority: control_source_snapshot
-  implementation:
-    - path: runtime/product tree
-      status: not_modified_by_adoption_pack
-  tests:
-    - path: repository test suite
-      status: not_modified_by_adoption_pack
-  legacy_sources: []
-  known_drift: []
-  unsafe_changes: []
-  llm_truth_claims: []
-  unknowns:
-    - Full runtime/API/DB/package inventory is not performed by the renderer.
-repo_spec_ref: .shirube/repo-spec.yaml
-owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+existing_state_scan_ref: ".shirube/existing-state-scan.yaml"
+repo_spec_ref: ".shirube/repo-spec.yaml"
+owner_confirmation_ref:
 gap_fill_plan:
-  - Fill owner confirmation and exact-head evidence before merge readiness.
-  - Replace the older repository-local gate script with the current overlay gate.
-  - Keep workflow changes limited to pr-checks.yml and the generated report-only thin caller.
-spec_reconciliation_ref: null
-next_safe_cell_ref: .shirube/control-handoffs/CH-001.yaml
-control_handoff_ref: .shirube/control-handoffs/CH-001.yaml
+- Project existing owner direction and frozen graph without claiming a new RPS confirmation.
+- Materialize these exact 8 metadata files and 135 total paths; independently accept
+  bytes before candidate freeze.
+- Require same-head source/private/local/public quality and genuine structured checklist/protected
+  reviews.
+- Produce the genuine external subject through the existing trusted workflow in a
+  separately authorized finite publication step.
+- Adjudicate remaining baseline/static report findings only with exact evidence and
+  later owner authority when required; never fabricate PASS.
+spec_reconciliation_ref: ".shirube/spec-reconciliation-plan.yaml"
+next_safe_cell_ref: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+control_handoff_ref: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+historical_adoption:
+  adoption_id: ADOPT-AGENT-COMMS-MCP-001
+  source_control_ref: watchout/agent-comms-mcp#802
+  owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+  scope: 'Historical #802 overlay only'
+owner_direction_ref: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+owner_direction_source_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+current_scope_authority_ref:
+  url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4

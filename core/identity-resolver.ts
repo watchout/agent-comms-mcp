@@ -15,7 +15,7 @@
  *   3. FAIL — there is no default identity.
  *
  * Verification (fail-closed, ARC review condition 2):
- *   realpath(workspace) → agent_workspaces(org_id, local_path) →
+ *   logical workspace declaration → agent_workspaces(org_id, workspace_id) →
  *   workspace_id → ACTIVE agent_workspace_bindings(agent_id, workspace_id).
  *   A copied workspace (same identity.json, different realpath) therefore
  *   fails closed. The declared agent_id must also exist in `agents`.
@@ -23,6 +23,7 @@
  * The five fail-closed negative cases in ADR-029R §5 are contract-tested in
  * tests/identity-resolver.test.ts.
  */
+import {resolveSeatProvider} from './seat-runtime-selection'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -113,17 +114,17 @@ async function verifyAgainstDb(
     return fail('workspace_not_registered', `realpath(${cwd}) failed: ${(err as Error).message}`)
   }
 
-  const workspace = await db.query<{ workspace_id: string }>(
-    `SELECT workspace_id FROM agent_workspaces WHERE org_id = $1 AND local_path = $2`,
-    [orgId, canonicalPath],
-  )
-  if (workspace.rows.length === 0) {
-    return fail(
-      'workspace_not_registered',
-      `no agent_workspaces row for (org_id=${orgId}, local_path=${canonicalPath}) — a copied workspace fails here by design`,
-    )
-  }
-  const workspaceId = workspace.rows[0].workspace_id
+  let declaredWorkspace:string|null=null
+  try {const value=JSON.parse(readFileSync(join(canonicalPath,'.agent','identity.json'),'utf8'))
+    if(typeof value.workspace_id==='string' && value.workspace_id.trim())declaredWorkspace=value.workspace_id.trim()
+  } catch { /* Explicit operator override still requires an unambiguous logical binding. */ }
+  const workspace=declaredWorkspace
+    ? await db.query<{workspace_id:string}>('SELECT workspace_id FROM agent_workspaces WHERE org_id=$1 AND workspace_id=$2',[orgId,declaredWorkspace])
+    : await db.query<{workspace_id:string}>(`SELECT w.workspace_id FROM agent_workspaces w
+        JOIN agent_workspace_bindings b ON b.workspace_id=w.workspace_id
+        WHERE w.org_id=$1 AND b.agent_id=$2 AND b.binding_role='primary'`,[orgId,agentId])
+  if(workspace.rows.length!==1)return fail('workspace_not_registered','logical workspace binding missing or ambiguous')
+  const workspaceId=workspace.rows[0].workspace_id
 
   const binding = await db.query(
     `SELECT 1 FROM agent_workspace_bindings WHERE agent_id = $1 AND workspace_id = $2 AND active = true`,
@@ -133,6 +134,9 @@ async function verifyAgainstDb(
     return fail('no_active_binding', `no active agent_workspace_bindings row for (${agentId}, ${workspaceId})`)
   }
 
+  const current=await resolveSeatProvider(db,{agentId})
+  if(!current.ok || current.observation?.workspace!==canonicalPath)
+    return fail('workspace_not_registered','current authorized provider does not prove the requested workspace')
   return { workspace_id: workspaceId }
 }
 

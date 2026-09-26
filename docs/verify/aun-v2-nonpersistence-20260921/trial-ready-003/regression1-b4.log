@@ -1,0 +1,214 @@
+bun test v1.3.11 (af24e281)
+
+tests/norm-022-runtime-endpoint-lease.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-ejW5Mq/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease [1406.41ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-vfdFOm/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal [1020.82ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-MbCDF3/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > stale_ttl_expiry [826.01ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-1VbypN/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > duplicate_active_lease_fenced [783.73ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > supervisor_down_fail_closed [0.08ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-4zPF7F/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > restart_gated_by_lease_heartbeat_fencing [774.77ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-Sm0Tya/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed [982.76ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-kFdlqj/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime [1339.38ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-TWXKvR/norm-022.db
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-zHVRd3/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed [2751.93ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > tmux_diagnostics_only_for_tmux_supervisor [0.08ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > non_tmux_destructive_lifecycle_fails_closed_without_tmux_evidence [0.06ms]
+
+tests/runtime-heartbeat.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-TJB6gv/test.db
+(pass) runtime heartbeat logical authority > acquires a logical runtime and lease without copying connector observations [1211.77ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-7lhyvZ/test.db
+(pass) runtime heartbeat logical authority > does not attach existing connector rows without connector evidence [1194.02ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-FtHxe1/test.db
+(pass) runtime heartbeat logical authority > renews an existing runtime endpoint lease using the process-held receipt [1736.00ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-fxzU8I/test.db
+(pass) runtime heartbeat logical authority > expired runtime endpoint cannot be resurrected by its delayed heartbeat [1690.94ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-LZFbxp/test.db
+(pass) runtime heartbeat logical authority > uses logical workspace membership while the current holder supplies its path [1192.04ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/heartbeat-logical-jVo7hW/test.db
+(pass) runtime heartbeat logical authority > registers an exact MCP holder without PWD or TMUX metadata and refuses an unrelated path [1366.18ms]
+(pass) runtime heartbeat logical authority > infers session name and port from runtime environment [0.23ms]
+(pass) runtime heartbeat logical authority > derives stable local workspace identity from checkout path [0.25ms]
+
+tests/queue-work.test.ts:
+(pass) queue work envelope > builds a runtime envelope that forbids queue-control tools
+(pass) queue work envelope > detects GitHub-backed phase handoff rows without echoing payload in planner-facing fields [0.03ms]
+(pass) queue work envelope > does not derive the reply contract from legacy no-reply fields or prose [0.05ms]
+(pass) queue work envelope > honors an explicit typed reply contract without inspecting prose
+(pass) queue work envelope > detects an instruction-form evidence audit request as GitHub-backed [0.02ms]
+(pass) runReceivedQueueWork > advances received -> in_progress -> done and persists runner result [0.88ms]
+(pass) runReceivedQueueWork > codex output fallback success advances the row to done with fallback evidence [0.33ms]
+(pass) runReceivedQueueWork > expectedClaimSource leaves rows claimed by another path untouched (CLAIM_NOT_OWNED) [0.22ms]
+(pass) runReceivedQueueWork > expectedClaimSource processes rows whose receive_claim.source matches [0.15ms]
+(pass) runReceivedQueueWork > adapter failures leave the row in_progress with runner_error evidence [0.47ms]
+(pass) runReceivedQueueWork > non-ok result persistence returns its row for rows-length database adapters [0.21ms]
+(pass) runReceivedQueueWork > state-invariant typed adapter failure becomes failed immediately without retry or done evidence [0.16ms]
+(pass) runReceivedQueueWork > claude invalid MCP configuration is typed non-retryable and consumes no reclaim attempt [0.16ms]
+(pass) runReceivedQueueWork > exact claim fence prevents a stale runner from persisting done after ownership changes [0.18ms]
+(pass) runReceivedQueueWork > same-agent expiry, reclaim, and re-receive cannot persist or finalize the stale result [0.05ms]
+(pass) runReceivedQueueWork > fenced runner persists pre-invocation runtime authority and exact result claim [0.19ms]
+(pass) runReceivedQueueWork > a new fenced execution archives and clears the prior runner error before invocation [0.18ms]
+(pass) runReceivedQueueWork > exact claim fence prevents stale runner_error persistence after ownership changes [0.10ms]
+(pass) runReceivedQueueWork > claim expiry during terminal persistence prevents a stale done write [0.13ms]
+(pass) runReceivedQueueWork > claim expiry during error persistence prevents a stale runner_error write [0.23ms]
+(pass) runReceivedQueueWork > abort is a typed non-terminal outcome with no done or runner_error write [1.36ms]
+(pass) finalizeDoneQueueWork > claim/result fence blocks outbound and close for a stale same-agent result [1.42ms]
+(pass) finalizeDoneQueueWork > D1 done rows cannot close without an exact completed receipt DB fence [0.05ms]
+(pass) finalizeDoneQueueWork > holds the finalize transaction across select, reply send, and replied update [0.11ms]
+(pass) finalizeDoneQueueWork > releases the row lock for a sender-owned close and verifies exact reply readback [0.40ms]
+(pass) finalizeDoneQueueWork > persists mediated writeback receipt before sender-owned reply close [0.16ms]
+(pass) finalizeDoneQueueWork > sends the stored reply and closes done rows as replied [0.07ms]
+(pass) finalizeDoneQueueWork > rolls back without sending when a reply result has no reply sender [0.11ms]
+(pass) finalizeDoneQueueWork > closes non-reply results without calling a reply sender [0.03ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff results require a structured mediated writeback [0.06ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization delegates posting to a mediated sender [0.16ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization fails closed when mediated sender returns no posted URL [0.18ms]
+(pass) finalizeDoneQueueWork > does not terminal-close retry results until retry semantics exist [0.07ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > AUN per-engine override reaches both the child and the slot budget with the same value [0.10ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > STATE per-engine/generic overrides match between child and slot budget [0.03ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > conflicting overrides: slot budget never undercuts the largest legitimate child budget [0.01ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > canonical precedence: engine-specific beats generic; AUN beats STATE within each tier [0.03ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > malformed or non-positive timeouts are typed errors for both sides, never silent defaults [0.08ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > STATE generic timeout reaches the command-json child and equals the daemon slot budget [0.02ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > AUN generic beats STATE generic; engine-specific overrides never leak into the custom child but still raise the slot budget [0.07ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > unset generic timeout resolves to the documented default 600000 for the custom child [0.02ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > malformed STATE or AUN generic timeout is a typed QUEUE_WORK_TIMEOUT_CONFIG_INVALID failure before any child spawns [0.22ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > the resolved generic budget is the value actually enforced on the spawned child [204.35ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > bounded worker keeps the shared timeout and admission binding without receiving host credentials [16.71ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > valid timeout does not let a malformed admission binding spawn a child [0.31ms]
+
+tests/state-daemon-queue-work-scheduler.test.ts:
+(pass) disabled Shirube D1 is not wired into the production daemon [0.06ms]
+(pass) queue-work failure reporting surfaces the failed finalizer instead of the successful runner
+(pass) queue-work runtime workspace resolves from fresh observation with enabled logical authority [1.78ms]
+(pass) queue-work runtime workspace fails closed on missing authority, relative, or absent observed paths [0.18ms]
+(pass) queue-work child env replaces daemon project with the resolved target project [0.03ms]
+(pass) state_daemon queue work scheduler boundary > verified live provider selects queue-work engines despite opposite legacy preferences [0.31ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive output becomes the exact immutable runner claim fence [0.18ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive fence rejects a different queue incarnation [0.05ms]
+(pass) state_daemon queue work scheduler boundary > valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers [2.78ms]
+(pass) state_daemon queue work scheduler boundary > D1-shaped rejection fails closed without generic routing or dispatch [0.13ms]
+(pass) state_daemon queue work scheduler boundary > duplicate pending notifications share one in-flight D1 dispatch [0.54ms]
+(pass) state_daemon queue work scheduler boundary > production D1 dispatcher uses exact fences, canonical source, finalize, and codex-exec by default [0.15ms]
+(pass) state_daemon queue work scheduler boundary > done D1 notification resumes finalization and is reported as replay [1.45ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep recovers a done D1 row without generic scheduler [2.15ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep leaves historical done D1 rows untouched while D1 is disabled [1.46ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep reclaims an expired D1 claim and dispatches it once [1.78ms]
+(pass) state_daemon queue work scheduler boundary > production-composed received not_d1 rows use the generic runner without tmux wake [1.54ms]
+(pass) state_daemon queue work scheduler boundary > invalid disabled D1 env leaves a D1-shaped row to the generic scheduler exactly once [1.46ms]
+(pass) state_daemon queue work scheduler boundary > done generic queue events resume only the stored-result finalizer [1.49ms]
+(pass) state_daemon queue work scheduler boundary > sweep resumes a stored-result finalizer after a writeback failure or restart [1.64ms]
+(pass) state_daemon queue work scheduler boundary > done finalizer sweep selects only enabled rows owned by the current scheduler [0.20ms]
+(pass) state_daemon queue work scheduler boundary > pending LLM queue events use the scheduler when runPending is configured [5.32ms]
+(pass) state_daemon queue work scheduler boundary > daemon pre-gate uses the target agent project instead of its global project [1.84ms]
+(pass) state_daemon queue work scheduler boundary > daemon passes the same target project to the direct Codex runner child [1.31ms]
+(pass) state_daemon queue work scheduler boundary > no-reply work still runs before the scheduler closes it without outbound chat [1.79ms]
+(pass) state_daemon queue work scheduler boundary > exact-fenced phase handoff canaries bypass routing hold and use pending scheduler [2.08ms]
+(pass) state_daemon queue work scheduler boundary > non-fenced phase handoff rows remain routing-held before pending scheduler [1.67ms]
+(pass) state_daemon queue work scheduler boundary > received notify for the same queue row is suppressed while pending runner is in flight [0.53ms]
+(pass) state_daemon queue work scheduler boundary > different queue rows for one agent are serialized until the active runner completes [5.32ms]
+(pass) state_daemon queue work scheduler boundary > different agents retain parallel queue-work capacity [2.00ms]
+(pass) state_daemon queue work scheduler boundary > live queue-work ids remain heartbeat-renewable past the generic claim max age [0.89ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence skips pre-existing received residue for the same allowlisted agent [1.43ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion skips policy-preserved received rows before runner invocation [2.66ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence is applied to claim heartbeat refresh SQL [0.27ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to claim heartbeat refresh SQL [0.02ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows are reclaimed to pending with recovery evidence [0.48ms]
+(pass) state_daemon queue work scheduler boundary > non-retryable runner_error is failed in place without a reclaim attempt [0.27ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows fail after the bounded reclaim cap [0.25ms]
+(pass) state_daemon queue work scheduler boundary > exact fenced canary recovery grants one control-ref-bound reclaim beyond the normal cap [0.17ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery is inert when queue-work scheduler is not configured [0.20ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery does not reclaim policy-preserved residue rows [0.03ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence is applied to sweep fetch SQL [0.11ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to sweep fetch SQL [0.26ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon loads residue exclusion ids from the governed policy file [0.62ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon fails closed on invalid manual residue exclusion ids [0.04ms]
+(pass) state_daemon queue work scheduler boundary > scheduler-owned expired rows are not reclaimed into legacy runner when scheduler is disabled [0.04ms]
+
+tests/seat-runtime-continuity.test.ts:
+(pass) SC1 stable seat provider selection > P01 target ancestry snapshots select either provider despite opposite legacy preference [0.35ms]
+(pass) SC1 stable seat provider selection > live provider root ignores caller context and rejects PID reuse, missing or conflicting evidence [0.82ms]
+(pass) SC1 stable seat provider selection > actual connected memory child must match the current provider and seat; private repaired lookup is insufficient [0.12ms]
+(pass) SC1 stable seat provider selection > P02 unknown, generic MCP, foreign seat, and multiple live owners cannot select [0.13ms]
+(pass) SC1 stable seat provider selection > P03 cold launch requires explicit intent; qualified/stale/profile-only/ambiguous history cannot launch [0.12ms]
+(pass) SC2 held OS endpoint and exact lease resolution > legacy generated port env never requests a fixed listener [0.04ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/seat-endpoint-2zM9BA/fixture.db
+(pass) SC2 held OS endpoint and exact lease resolution > P05-P07 held binds, exact publication, same-seat replacement and foreign/stale denial [30.55ms]
+(pass) SC2 held OS endpoint and exact lease resolution > P06 registration failure closes only its own held socket [1.86ms]
+(pass) native fixture report publication > partial staging bytes are invisible until the actual publisher completes [0.69ms]
+(pass) native fixture report publication > failed partial write or publication never exposes a complete report [0.43ms]
+
+tests/runtime-current-resolver.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-LOwcfJ/test.db
+(pass) runtime current resolver > codex-cto sole live holder remains current and stale same-kind diagnostics cannot mutate anchors [22.66ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-fUI4lo/test.db
+(pass) runtime current resolver > two live holders fail closed and revocation selects the sole remaining holder [22.46ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-NZMtB8/test.db
+(pass) runtime current resolver > a legacy profile tuple cannot break two-holder ambiguity or block a sole relocated holder [21.68ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-sTj54k/test.db
+(pass) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [21.66ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-gSQcjM/test.db
+(pass) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [21.10ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-I89Vj9/test.db
+(pass) runtime current resolver > requested kind defines an independent ordinary ranking surface [22.29ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-CatQJ7/test.db
+(pass) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [22.21ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-W0cqKm/test.db
+(pass) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [21.19ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-1VLpG1/test.db
+(pass) runtime current resolver > unknown group uses the frozen 30m/24h defaults [22.37ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-p8d2nF/test.db
+(pass) runtime current resolver > policy rejects unsupported or unsafe values [17.52ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.12ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.25ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof [0.09ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.37ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.10ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.21ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1103.79ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [867.03ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.28ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [1.88ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.59ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.04ms]
+
+ 142 pass
+ 0 fail
+ 719 expect() calls
+Ran 142 tests across 7 files. [20.91s]

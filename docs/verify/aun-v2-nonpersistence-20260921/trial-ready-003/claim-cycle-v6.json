@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_claim_cycle.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "c925eddcfe86cc85d59bd254c08d1d0bffb2a15960795c94e3669986e1246c18",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "d5a4185c43fff2e36821e09f427bf1a1f98aecf1975cce7da26b2b264081b9c1",
+  "started_at": "2026-09-21T09:54:25.378191+00:00",
+  "ended_at": "2026-09-21T09:54:27.354179+00:00",
+  "exit_code": 1,
+  "log_sha256": "f4c93ab86937093e273726afec238d803c65b60a5b635ed3b3fbb2d6b5c4802d"
+}

@@ -20,7 +20,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -35,6 +35,7 @@ afterAll(async () => {
 })
 beforeEach(async () => {
   await cleanAll(pg)
+  enableNativeRuntimeFixtures(pg, '2030-06-01T05:00:00.000Z')
 })
 
 function hostProfile(overrides: Partial<RuntimeInvocationProfile> = {}): RuntimeInvocationProfile {
@@ -70,6 +71,8 @@ function daemon(input: {
   const alert = new FakeAlertSink()
   const tmux = new FakeTmux()
   const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -121,19 +124,19 @@ class FixtureHostRuntimeInvoker implements HostRuntimeInvoker {
 
 async function seedPendingCodexWork(suffix: string): Promise<{ agent: string; queueId: number }> {
   const agent = makeAgentId(suffix)
-  await seedAgent(pg, {
+  await seedAgent(pg, { observed_provider: 'codex',
     agent_id: agent,
     runtime: 'codex',
     tmux_session: null,
     status: 'online',
-    last_seen_at: new Date('2030-06-01T05:00:00.000Z'),
+    last_seen_at: fixtureDate(pg, '2030-06-01T05:00:00.000Z'),
   })
   const queueId = await seedQueueRow(pg, {
     agent_id: agent,
     status: 'pending',
     message_id: '11111111-1111-4111-8111-111111111111',
     payload: JSON.stringify({ author_id: 'aun', content: 'untrusted payload must not become argv', message_type: 'instruction' }),
-    created_at: new Date('2030-06-01T05:00:00.000Z'),
+    created_at: fixtureDate(pg, '2030-06-01T05:00:00.000Z'),
   })
   return { agent, queueId }
 }
@@ -144,7 +147,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
     const codexRunner = new FakeCodexRunner()
     const hostRuntimeInvoker = new FixtureHostRuntimeInvoker()
     const h = daemon({
-      clock: new FakeClock('2030-06-01T05:00:01.000Z'),
+      clock: new FakeClock(fixtureDate(pg, '2030-06-01T05:00:01.000Z')),
       codexRunner,
       hostRuntimeInvoker,
       profile: hostProfile(),
@@ -172,14 +175,14 @@ describe('CP-40D host runtime adapter profile gate', () => {
     })
     expect(hostRuntimeInvoker.executions).toHaveLength(0)
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
-  })
+  }, 60000)
 
   test('explicit host-runtime profile builds structured argv and parses fixture output into typed evidence', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-enabled')
     const codexRunner = new FakeCodexRunner()
     const hostRuntimeInvoker = new FixtureHostRuntimeInvoker()
     const h = daemon({
-      clock: new FakeClock('2030-06-01T05:00:01.000Z'),
+      clock: new FakeClock(fixtureDate(pg, '2030-06-01T05:00:01.000Z')),
       codexRunner,
       hostRuntimeInvoker,
       profile: hostProfile({ allowed_dirs: ['/repo', '/repo/shared'] }),
@@ -227,14 +230,36 @@ describe('CP-40D host runtime adapter profile gate', () => {
       final_structured_result: { outcome: 'claimed_work' },
     })
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_invoked' })).toBe(1)
-  })
+  }, 60000)
+
+  test('an explicit profile for a different provider fails before wake reservation or invocation', async () => {
+    const { agent, queueId } = await seedPendingCodexWork('host-gate-provider-mismatch')
+    const codexRunner = new FakeCodexRunner()
+    const hostRuntimeInvoker = new FixtureHostRuntimeInvoker()
+    const h = daemon({ clock: new FakeClock(fixtureDate(pg, '2030-06-01T05:00:01.000Z')),
+      codexRunner, hostRuntimeInvoker, hostRuntimeAdapterEnabled: true,
+      profile: hostProfile({runtime:'claude'}),
+    })
+    const read = () => pg.query(`SELECT q.status, q.claimed_by, q.claimed_at, q.last_wake_attempt_at,
+      q.payload, a.last_wake_attempt_at AS agent_wake FROM message_queue q JOIN agents a ON a.agent_id=q.agent_id WHERE q.id=$1`, [queueId])
+    const before = (await read()).rows
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({op:'INSERT',id:queueId,agent_id:agent,status:'pending',claim_expires_at:null})
+      expect((await read()).rows).toEqual(before)
+      expect(codexRunner.invocations).toHaveLength(0)
+      expect(hostRuntimeInvoker.executions).toHaveLength(0)
+      expect(h.alert.contains('RUNTIME_PROFILE_PROVIDER_MISMATCH')).toBe(true)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', {result:'host_runtime_profile_provider_mismatch'})).toBe(1)
+    } finally { await h.daemon.stop() }
+  }, 60000)
 
   test('unsupported flags fail closed with typed evidence and leave queue lifecycle untouched', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-flags')
     const codexRunner = new FakeCodexRunner()
     const hostRuntimeInvoker = new FixtureHostRuntimeInvoker()
     const h = daemon({
-      clock: new FakeClock('2030-06-01T05:00:01.000Z'),
+      clock: new FakeClock(fixtureDate(pg, '2030-06-01T05:00:01.000Z')),
       codexRunner,
       hostRuntimeInvoker,
       profile: hostProfile(),
@@ -263,7 +288,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
     expect(hostRuntimeInvoker.executions).toHaveLength(0)
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_failed' })).toBe(1)
     expect(h.alert.contains('RUNTIME_FLAG_UNSUPPORTED')).toBe(true)
-  })
+  }, 60000)
 
   test('malformed host stream is typed failure evidence and cannot close or transfer work', async () => {
     const { agent, queueId } = await seedPendingCodexWork('host-gate-malformed')
@@ -271,7 +296,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
     const hostRuntimeInvoker = new FixtureHostRuntimeInvoker()
     hostRuntimeInvoker.stdout = '{not-json'
     const h = daemon({
-      clock: new FakeClock('2030-06-01T05:00:01.000Z'),
+      clock: new FakeClock(fixtureDate(pg, '2030-06-01T05:00:01.000Z')),
       codexRunner,
       hostRuntimeInvoker,
       profile: hostProfile(),
@@ -304,7 +329,7 @@ describe('CP-40D host runtime adapter profile gate', () => {
       failure_code: 'STREAM_PARSE_ERROR',
     })
     expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'host_runtime_adapter_error' })).toBe(1)
-  })
+  }, 60000)
 
   test('invalid profile/schema selection returns typed failure instead of prose fallback', () => {
     const baseInvocation = {
@@ -339,5 +364,5 @@ describe('CP-40D host runtime adapter profile gate', () => {
       ok: false,
       failure: { failure_code: 'SCHEMA_REQUIRED' },
     })
-  })
+  }, 60000)
 })

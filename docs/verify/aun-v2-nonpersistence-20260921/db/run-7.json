@@ -1,0 +1,39 @@
+{
+  "run": 7,
+  "changed_input": "Direct SQLite entrypoint moved after guard const initialization; fresh SQLite test now calls migrate-sqlite.ts directly to exercise that entrypoint. Reused owned private cluster for this changed-input check.",
+  "fixture_resume_argv": [
+    "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+    "-D",
+    "/private/tmp/aun-np-db-n_mu4fk1/pgdata",
+    "-l",
+    "/private/tmp/aun-np-db-n_mu4fk1/postgres.log",
+    "-o",
+    "-k /private/tmp/aun-np-db-n_mu4fk1/socket -c listen_addresses=''",
+    "-w",
+    "-t",
+    "20",
+    "start"
+  ],
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T14:07:47.786240+09:00",
+  "finished_at": "2026-09-21T14:07:49.425813+09:00",
+  "duration_seconds": 1.639,
+  "exit_code": 0,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "source_files_sha256": {
+    "db/migrate.ts": "0659c029ae23f6d740bf899b325521728d9c3d67901e13f277511837146ee9de",
+    "db/migrate-sqlite.ts": "797c5f2d4b2bb322ed0ac27d2d19e4da89463b615db07d6d49891cb1fab6fb04",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql": "9e3d347e9e7a4a1aa858bd2f6f40a963bc65d6e9e56a059247f1291e436f5c0f",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts": "537c0fccbd01c1cb180fc18f6edb0792ea44e6b2a352539642cff37e14736805",
+    "tests/helpers/runtime-observation-nonpersistence-db-fixture.ts": "06d28f9f5ad32ac9b8b98cdc55ad95c76cb2b667b623521068c4a83e296aac29"
+  },
+  "stdout_sha256": "648636de320206596241e3124dae6624963793b4c8eeef6fdf50deecfd29cde3",
+  "stderr_sha256": "45da0ac9e99c41315ed57111046e7db50afde78509ae3cb08aecf91739200df7"
+}

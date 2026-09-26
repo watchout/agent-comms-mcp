@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_cleanup.test.ts",
+    "tests/contract/test_runtime_nonpersist_authority.test.ts",
+    "tests/contract/test_runtime_nonpersist_native.test.ts",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts"
+  ],
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "42df8d06fe604d1500c49bc0a219c1280303ee15424f06b0de33234914e4a762",
+  "started_at": "2026-09-21T05:39:40.416986+00:00",
+  "ended_at": "2026-09-21T05:39:56.624154+00:00",
+  "exit_code": 1,
+  "log_sha256": "eeadb8f91993c3251cd32e5d99a90bcf2ae9083518715d98d110fdf0e4c43d73"
+}

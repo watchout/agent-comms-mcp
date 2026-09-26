@@ -1,0 +1,110 @@
+server.ts:741:    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+server.ts:1233:    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
+server.ts:1253:      await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
+server.ts:1315:      `UPDATE agent_runtime_instances
+server.ts:1616:  await client.query('UPDATE agents SET active_thread = $1 WHERE agent_id = $2', [threadId, agentId])
+server.ts:1630:    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+server.ts:1657:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+server.ts:2216:        `UPDATE agents SET
+server.ts:2892:      `UPDATE agents SET
+server.ts:3871:          `UPDATE agents SET
+server.ts:4900:                      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+server.ts:5107:              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
+server.ts:5450:      await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+core/runtime-current-resolver.ts:572:      `UPDATE agent_runtime_instances
+hooks/claim-close-enforcement.ts:200:        `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/runtime-cleanup.ts:677:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/runtime-cleanup.ts:721:          `UPDATE agent_runtime_instances
+core/runtime-cleanup.ts:740:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/control-plane-leases.ts:188:        `UPDATE control_plane_leases
+core/control-plane-leases.ts:208:      `INSERT INTO control_plane_leases (
+core/control-plane-leases.ts:255:    `UPDATE control_plane_leases
+core/control-plane-leases.ts:289:    `UPDATE control_plane_leases
+core/inbound-delivery.ts:241:        `INSERT INTO event_log (event_id, event_type, seat_id, conversation_id, correlation_id, turn_id, payload)
+core/inbound-delivery.ts:248:          `INSERT INTO event_log (event_id, event_type, seat_id, conversation_id, causation_id, correlation_id, turn_id, payload)
+adapters/discord.ts:419:            `UPDATE agents
+cli/index.ts:396:    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+cli/index.ts:1624:    `INSERT INTO agents (
+cli/index.ts:2004:        `UPDATE agent_workspaces
+cli/index.ts:2015:        `INSERT INTO agent_workspaces
+cli/index.ts:2049:      `UPDATE agent_runtime_instances
+cli/index.ts:2079:        `UPDATE connector_instances
+cli/index.ts:2106:        `INSERT INTO connector_instances
+cli/index.ts:2926:          `UPDATE agents SET
+cli/index.ts:3854:          `UPDATE agents SET
+cli/index.ts:4269: * Transaction: UPDATE message_queue → UPDATE agents in one BEGIN/COMMIT so a
+cli/index.ts:4342:        `UPDATE agents SET
+cli/index.ts:4412:        `UPDATE agents SET
+cli/index.ts:5823:      `UPDATE agents SET last_seen_at = now(),
+cli/index.ts:5889:        `UPDATE agents SET last_seen_at = now(),
+adapters/outbound-consumer.ts:333:          `UPDATE agents SET last_seen_at = now(),
+core/channel-registration-reconcile.ts:471:        `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/channel-registration-reconcile.ts:745:      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+bin/aun/bootstrap.ts:1668:          `UPDATE agents SET
+bin/aun/bootstrap.ts:1733:            `UPDATE aun_configuration_desired_outbox
+bin/aun/bootstrap.ts:2178:          `INSERT INTO agent_runtime_instances
+bin/aun/bootstrap.ts:3402:            `UPDATE agents SET
+bin/aun/bootstrap.ts:3458:              `UPDATE aun_configuration_desired_outbox SET available_at = 'infinity'::timestamptz
+bin/aun/bootstrap.ts:3504:            `UPDATE agents SET
+bin/aun/bootstrap.ts:3614:              `INSERT INTO aun_configuration_observed_state (
+bin/aun/bootstrap.ts:3635:              `UPDATE aun_configuration_desired_outbox
+bin/aun/bootstrap.ts:3691:                `UPDATE runtime_memory_ready_evidence
+bin/aun/bootstrap.ts:3707:                `UPDATE agent_runtime_instances SET status = 'stopped', stopped_at = now(), last_seen_at = now()
+bin/aun/bootstrap.ts:3804:            await tx.execute(`UPDATE runtime_memory_ready_evidence
+bin/aun/bootstrap.ts:3807:            await tx.execute(`UPDATE agent_runtime_instances
+bin/aun/receive.ts:576:            `UPDATE agents SET
+bin/aun/receive.ts:1826:            `UPDATE agents SET
+bin/aun/lifecycle.ts:211:          `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+bin/aun/lifecycle.ts:400:          `UPDATE agents SET
+core/runtime-memory-ready-identity.ts:143:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/discord-credential-promotion.ts:347:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/discord-credential-promotion.ts:534:    `UPDATE connector_instances
+core/runtime-heartbeat.ts:273:      `INSERT INTO agent_workspaces
+core/runtime-heartbeat.ts:316:    `INSERT INTO connector_instances
+core/runtime-heartbeat.ts:403:      `UPDATE control_plane_leases
+core/runtime-heartbeat.ts:436:      `UPDATE control_plane_leases
+core/runtime-heartbeat.ts:460:    `INSERT INTO control_plane_leases (
+core/runtime-heartbeat.ts:569:    `INSERT INTO agent_runtime_instances
+core/state-daemon/github-work-puller.ts:554:      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/runtime-endpoint.ts:69:  await db.query(`UPDATE control_plane_leases SET status = 'released', released_at = now()
+core/agent-status-lifecycle.ts:15:    `UPDATE agents
+core/agent-status-lifecycle.ts:31:    `UPDATE agent_runtime_instances
+core/agent-status-lifecycle.ts:49:    `UPDATE agents
+core/inbox-cursor.ts:209:    `UPDATE agents SET
+core/inbox-cursor.ts:359:    `UPDATE agents SET
+core/state-daemon/index.ts:2080:      `UPDATE agents
+core/state-daemon/index.ts:2100:        `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2145:        `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2208:        `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2228:          `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2245:          `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2267:        `UPDATE agents SET last_wake_attempt_at=NULL
+core/state-daemon/index.ts:2279:        `UPDATE agents SET last_wake_attempt_at=NULL
+core/claim-ttl.ts:176:      `UPDATE agents SET
+core/owner-handoff-routing.ts:348:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/runtime-memory-ready.ts:542:    `INSERT INTO runtime_memory_ready_evidence
+core/runtime-memory-ready.ts:578:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/aun-configuration-desired-state.ts:465:    `UPDATE aun_configuration_desired_outbox
+core/aun-configuration-desired-state.ts:479:    `INSERT INTO aun_configuration_observed_state (
+core/aun-configuration-desired-state.ts:537:    `INSERT INTO aun_configuration_restart_requests (
+core/aun-configuration-desired-state.ts:579:    `UPDATE aun_configuration_restart_requests r
+core/aun-configuration-desired-state.ts:749:    `UPDATE aun_configuration_restart_requests
+core/channel-connector-sync.ts:310:    `INSERT INTO connector_instances (
+core/full-channel-smoke.ts:1280:        `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/queue-repair.ts:90:    'INSERT INTO audit_log (event_type, agent_id, target, detail, org_id) VALUES ($1, $2, $3, $4, $5)',
+core/queue-repair.ts:270:         UPDATE agents a SET
+core/queue-repair.ts:373:         UPDATE agents a SET
+core/outbound-acl-diagnostic.ts:61:    `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/eventlog/schema.ts:83:     UPDATE event_log_turn_projection
+core/eventlog/schema.ts:103:     UPDATE event_log_turn_projection
+core/eventlog/schema.ts:126:     UPDATE event_log_turn_projection
+core/registry-identity-reconciliation.ts:949:        `UPDATE agents
+core/registry-identity-reconciliation.ts:964:      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/registry-identity-reconciliation.ts:1071:        `UPDATE agents
+core/registry-identity-reconciliation.ts:1086:      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/eventlog/views.ts:275:          `UPDATE event_log_turn_projection
+core/eventlog/views.ts:294:          `UPDATE event_log_turn_projection
+core/eventlog/views.ts:306:          `UPDATE event_log_turn_projection
+core/eventlog/store.ts:56:  INSERT INTO event_log (
+core/state-daemon-readiness.ts:700:      `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
+core/eventlog/registered-loader.ts:93:  INSERT INTO event_log (

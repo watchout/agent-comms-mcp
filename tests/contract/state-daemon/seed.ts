@@ -8,8 +8,93 @@
  */
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { nativeHostFixture, registerNativeFixtureRuntime, stopNativeFixtures } from '../../helpers/seat-native-runtime-fixture'
+import { readNativeSeatContextReceipt } from '../../../core/seat-context-recovery'
+import { recordVerifiedNativeRuntimeMemoryReady } from '../../../core/runtime-memory-ready'
+import type { observeSeatProvider } from '../../../core/seat-runtime-selection'
+
+type NativeFixture = Awaited<ReturnType<typeof nativeHostFixture>>
+const nativeModes = new WeakMap<Client, { epoch: number; origin: number; startupDelayMs: number;
+  seats: Map<string, { fixture: NativeFixture; home: string; id: string; session: string; providerVisible: boolean }> }>()
+
+/** Only the opted-in caller tests use real native evidence. Business-clock offsets
+ * remain deterministic, translated near the genuine receipt's wall clock. */
+export function enableNativeRuntimeFixtures(client: Client, epoch: string, startupDelayMs=0): void {
+  nativeModes.set(client, { epoch: Date.parse(epoch), origin: Date.now(), startupDelayMs, seats: new Map() })
+}
+export function fixtureDate(client: Client, original: Date | string): Date {
+  const mode = nativeModes.get(client)
+  if (!mode) throw new Error('NATIVE_FIXTURE_CLOCK_NOT_ENABLED')
+  return new Date(mode.origin + new Date(original).getTime() - mode.epoch)
+}
+export function fixtureProviderObserver(client: Client): typeof observeSeatProvider {
+  return input => {
+    const seat = nativeModes.get(client)?.seats.get(input.agentId)
+    return seat?.providerVisible ? seat.fixture.observeProvider(input) : null
+  }
+}
+
+export function fixtureNativeProofReader(client: Client): typeof import('../../../core/runtime-native-proof').readCurrentNativeProof {
+  return async input => {
+    const seat=nativeModes.get(client)?.seats.get(input.agentId)
+    if(!seat || seat.id!==input.runtimeInstanceId)throw Error('NATIVE_FIXTURE_SEAT_MISMATCH')
+    return readNativeSeatContextReceipt({agentId:input.agentId,project:input.project,runtimeInstanceId:input.runtimeInstanceId,
+      targetRuntime:'codex',providerPid:input.observation.provider_pid,providerStartedAt:input.observation.provider_started_at,
+      hostSessionId:seat.session,transport:{command:seat.fixture.node,args:[seat.fixture.memory],env:seat.fixture.env},
+      env:{PATH:process.env.PATH!,LANG:'C',...seat.fixture.env},cwd:seat.home})
+  }
+}
+
+export async function refreshNativeFixtureHeartbeat(client: Client, agentId: string, now: Date): Promise<void> {
+  const seat = nativeModes.get(client)?.seats.get(agentId)
+  if (!seat) throw new Error('NATIVE_FIXTURE_SEAT_MISSING')
+  const endpoint = seat.fixture.observed.endpoint
+  const observation = seat.fixture.observeProvider({agentId,runtimeInstanceId:seat.id,
+    processId:endpoint.pid,sessionName:seat.session,workspace:seat.home,now})
+  if (!observation) throw new Error('NATIVE_FIXTURE_PROVIDER_EXITED')
+  // Heartbeat renews logical authority. Physical freshness is read from this
+  // fixture's actual process; the deterministic business clock is not a DB
+  // liveness snapshot.
+  await client.query(`UPDATE control_plane_leases SET expires_at=$2
+    WHERE holder_runtime_instance_id=$1 AND status='active'`,
+    [seat.id,new Date(Math.max(Date.now(),now.getTime())+30*60_000)])
+
+}
+
+async function seedNativeRuntime(client: Client, agent: SeedAgent, session: string): Promise<void> {
+  const mode = nativeModes.get(client)!
+  let seat = mode.seats.get(agent.agent_id)
+  const preparing = !seat
+  if (!seat) {
+    if(mode.startupDelayMs)await Bun.sleep(mode.startupDelayMs)
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'daemon-native-seat-')))
+    const id = agent.runtime_instance_id ?? randomUUID()
+    const fixture = await nativeHostFixture(home, home, agent.agent_id, 'agent-comms-mcp', session, 'accepted', id)
+    seat = { fixture, home, id, session,
+      providerVisible: agent.observed_provider === 'codex' }
+    mode.seats.set(agent.agent_id, seat)
+  }
+  const db = {
+    query: async (sql: string, params?: any[]) => (await client.query(sql, params)).rows,
+    execute: async (sql: string, params?: any[]) => ({ rowCount: (await client.query(sql, params)).rowCount ?? 0 }),
+  }
+  await registerNativeFixtureRuntime(db as any, seat.fixture, agent.agent_id, 'agent-comms-mcp', seat.session, seat.home, seat.id)
+  if (agent.memoryReady !== false) {
+    const receipt = await readNativeSeatContextReceipt({agentId:agent.agent_id,project:'agent-comms-mcp',runtimeInstanceId:seat.id,
+      targetRuntime:'codex',providerPid:seat.fixture.observed.provider.pid,providerStartedAt:seat.fixture.observed.provider.startedAt,
+      hostSessionId:seat.session,transport:{command:seat.fixture.node,args:[seat.fixture.memory],env:seat.fixture.env},cwd:seat.home})
+    await recordVerifiedNativeRuntimeMemoryReady(db,{agentId:agent.agent_id,project:'agent-comms-mcp',runtimeInstanceId:seat.id,
+      receipt,observeProvider:seat.fixture.observeProvider,inspect:seat.fixture.inspect,readNativeProof:fixtureNativeProofReader(client)})
+  }
+  await client.query(`INSERT INTO channels (id, name, type, members) VALUES ($1, $1, 'channel', ARRAY[$2]::text[])
+    ON CONFLICT (id) DO UPDATE SET members=EXCLUDED.members`, [`${TEST_PREFIX}channel-${agent.agent_id}`, agent.agent_id])
+  // The business clock starts after real native setup. A slow machine must not
+  // make its genuine completed receipt appear to come from the future.
+  if(preparing)mode.origin=Date.now()
+}
 
 export const TEST_PREFIX = 'sd-test-'
 
@@ -64,6 +149,12 @@ export async function openClient(): Promise<Client> {
 }
 
 export async function cleanAll(c: Client): Promise<void> {
+  const mode = nativeModes.get(c)
+  if (mode?.seats.size) {
+    await stopNativeFixtures()
+    for (const seat of mode.seats.values()) rmSync(seat.home, {recursive:true,force:true})
+    mode.seats.clear()
+  }
   await c.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
   await c.query(`DELETE FROM agent_messages WHERE channel_id LIKE $1`, [`${TEST_PREFIX}channel-%`])
   await c.query(`DELETE FROM channels WHERE id LIKE $1`, [`${TEST_PREFIX}channel-%`])
@@ -71,6 +162,8 @@ export async function cleanAll(c: Client): Promise<void> {
 }
 
 export interface SeedAgent {
+  /** Explicit fixture process observation, independent of stored profile hints. */
+  observed_provider?: 'codex' | null
   agent_id: string
   runtime?: 'TUI' | 'SIG' | 'codex' | 'codex-runner'
   runtime_engine_preference?: 'codex' | 'codex-runner' | 'claude-code' | null
@@ -105,78 +198,24 @@ export async function seedAgent(c: Client, a: SeedAgent): Promise<void> {
   }
   const port = a.port === undefined ? fixturePort(a.agent_id) : a.port
   await c.query(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, last_seen_at,
-        last_wake_attempt_at, channel_port, metadata, runtime_engine_preference,
-        profile_enabled, disabled_at, home_directory)
-     VALUES ($1, $2, 'test', $3, $4, $5, NULL, 0, $6::jsonb, $7, TRUE, NULL, $8)
-     ON CONFLICT (agent_id) DO UPDATE SET
-       runtime = EXCLUDED.runtime,
-       runtime_engine_preference = EXCLUDED.runtime_engine_preference,
-       status = EXCLUDED.status,
-       last_seen_at = EXCLUDED.last_seen_at,
-       last_wake_attempt_at = NULL,
-       metadata = EXCLUDED.metadata,
-       home_directory = EXCLUDED.home_directory,
-       profile_enabled = TRUE,
-       disabled_at = NULL`,
-    [
-      a.agent_id,
-      a.agent_id,
-      a.runtime ?? 'TUI',
-      a.status ?? 'online',
-      a.last_seen_at ?? new Date(),
-      JSON.stringify(metadata),
-      a.runtime_engine_preference ?? null,
-      '/tmp/state-daemon-test-checkout',
-    ],
+    `INSERT INTO agents(agent_id,display_name,agent_type,last_wake_attempt_at,
+       metadata,profile_enabled,disabled_at)
+     VALUES ($1,$1,'test',NULL,$2::jsonb,TRUE,NULL)
+     ON CONFLICT(agent_id) DO UPDATE SET last_wake_attempt_at=NULL,
+       metadata=EXCLUDED.metadata,profile_enabled=TRUE,disabled_at=NULL`,
+    [a.agent_id,JSON.stringify({memory_project:'agent-comms-mcp',...(a.discord_id?{discord_id:a.discord_id}:{})})],
   )
-  await c.query(`UPDATE agents SET channel_port=$2 WHERE agent_id=$1`, [a.agent_id, port])
+  if (nativeModes.has(c) && port !== null && a.observed_provider === 'codex' && a.status !== 'offline') {
+    await seedNativeRuntime(c, a, metadata.tmux_session as string)
+    return
+  }
   if (a.memoryReady === false || port === null) return
 
+  // Non-native caller fixtures can enroll logical identity but cannot mint a
+  // native memory receipt or claim that a provider process is running.
   const runtimeInstanceId = a.runtime_instance_id ?? randomUUID()
-  const sessionName = metadata.tmux_session as string
-  const runtimeStartedAt = '2026-05-01T00:00:00.000Z'
-  const completedAt = '2026-05-01T00:00:01.000Z'
-  await c.query(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
-        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, $3, 'local_process', $4, $5,
-             '/tmp/state-daemon-test-checkout', 'state-daemon-test-head', 'running',
-             $6, $7, '{"source":"state-daemon-fixture"}'::jsonb)
-     ON CONFLICT (runtime_instance_id) DO UPDATE SET
-       agent_id=EXCLUDED.agent_id,
-       runtime_engine=EXCLUDED.runtime_engine,
-       session_name=EXCLUDED.session_name,
-       port=EXCLUDED.port,
-       status=EXCLUDED.status,
-       last_seen_at=EXCLUDED.last_seen_at`,
-    [
-      runtimeInstanceId,
-      a.agent_id,
-      a.runtime ?? 'TUI',
-      sessionName,
-      port,
-      runtimeStartedAt,
-      a.last_seen_at ?? '2099-01-01T00:00:00.000Z',
-    ],
-  )
-  await c.query(
-    `INSERT INTO runtime_memory_ready_evidence
-       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
-        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
-        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
-        valid_until, source, metadata)
-     VALUES
-       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
-        $3, $4, $1, '/tmp/state-daemon-test-checkout', 'state-daemon-test-head',
-        'fixture:mcp__wasurezu__recover_context', 'ready', $5,
-        '/tmp/state-daemon-memory-ready-fixture.json', 'fixture-memory-ready-log',
-        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
-        '{"fixture":true}'::jsonb)`,
-    [a.agent_id, runtimeInstanceId, sessionName, port, completedAt],
-  )
+  await c.query(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind)
+    VALUES($1,$2,'local_process') ON CONFLICT(runtime_instance_id) DO NOTHING`,[runtimeInstanceId,a.agent_id])
   const fixtureChannelId = `${TEST_PREFIX}channel-${a.agent_id}`
   await c.query(
     `INSERT INTO channels (id, name, type, members)
@@ -220,8 +259,8 @@ export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> 
   const res = await c.query(
     `INSERT INTO message_queue
        (agent_id, status, message_id, payload, claim_expires_at,
-        claimed_by, claimed_at, created_at, last_wake_attempt_at, last_heartbeat_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10)
+        claimed_by, claimed_at, created_at, last_wake_attempt_at, last_heartbeat_at,claimed_runtime_instance_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10,$11)
      RETURNING id`,
     [
       r.agent_id,
@@ -234,6 +273,7 @@ export async function seedQueueRow(c: Client, r: SeedQueueRow): Promise<number> 
       r.created_at ?? null,
       r.last_wake_attempt_at ?? null,
       r.last_heartbeat_at ?? null,
+      ['received','in_progress'].includes(r.status ?? 'pending') ? nativeModes.get(c)?.seats.get(r.agent_id)?.id ?? null : null,
     ],
   )
   return Number((res.rows as Array<{ id: number }>)[0].id)

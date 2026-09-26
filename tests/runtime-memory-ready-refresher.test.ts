@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import * as hostObserver from '../core/host-runtime-observer'
+import { unitRuntimeObservation } from './helpers/logical-runtime-unit-fixture'
+import { afterEach, beforeEach, describe, expect, test, spyOn } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +9,8 @@ import { SqliteAdapter } from '../core/db/sqlite-adapter'
 import { runRuntimeMemoryReadyFleetRefresh } from '../core/runtime-memory-ready-refresher'
 import { parseRuntimeMemoryReadyPolicy } from '../core/runtime-current-resolver'
 
+const observations = new Map<string, hostObserver.HostRuntimeObservation>()
+let hostSpy: ReturnType<typeof spyOn>
 let tmp: string
 let db: SqliteAdapter
 const now = new Date('2026-08-21T00:10:00.000Z')
@@ -19,6 +23,11 @@ const policy = parseRuntimeMemoryReadyPolicy(JSON.stringify({
 }), '/tmp/runtime-memory-ready-policy.refresher.test.json')
 
 beforeEach(() => {
+  observations.clear()
+  hostSpy = spyOn(hostObserver, 'inspectHostRuntime').mockImplementation(input => {
+    const o=observations.get(input.agentId)
+    return {reasonCode:o?'OBSERVED':'NO_LIVE_RUNTIME',observations:o?[o]:[]}
+  })
   tmp = mkdtempSync(join(tmpdir(), 'memory-ready-refresher-'))
   const dbPath = join(tmp, 'test.db')
   migrateSqlite(dbPath)
@@ -26,38 +35,36 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  hostSpy?.mockRestore()
   await db.close()
   rmSync(tmp, { recursive: true, force: true })
 })
 
 async function seedSeatHuman(agentId: string, status: 'idle' | 'busy' = 'idle'): Promise<void> {
-  await db.execute(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
-        home_directory, profile_enabled, disabled_at)
-     VALUES ($1, $1, 'human', 'codex', $2, 39002, $3, $4, 1, NULL)`,
-    [agentId, status, JSON.stringify({}), `/tmp/${agentId}`],
-  )
+  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,profile_enabled) VALUES($1,$1,'human',1)`,[agentId])
 }
 
 async function seedSeat(agentId: string, status: 'idle' | 'busy' = 'idle'): Promise<void> {
-  await db.execute(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port, metadata,
-        home_directory, profile_enabled, disabled_at)
-     VALUES ($1, $1, 'dev', 'codex', $2, 39001, $3, $4, 1, NULL)`,
-    [agentId, status, JSON.stringify({ tmux_session: `${agentId}-session` }), `/tmp/${agentId}`],
-  )
-  await db.execute(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-        port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, 'codex', 'local_process', $3, 39001, $4, 'head', 'running', $5, $5, $6)`,
-    [`runtime-${agentId}`, agentId, `${agentId}-session`, `/tmp/${agentId}`, now.toISOString(), JSON.stringify({ source: 'server.ts' })],
-  )
+  await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,profile_enabled) VALUES($1,$1,'dev',1)`,[agentId])
+  await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind) VALUES($1,$2,'local_process')`,['runtime-'+agentId,agentId])
+  await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,acquired_at,expires_at)
+    VALUES($1,'runtime_instance',$2,'worker',$3,$2,1,'active','2026-08-20T00:01:00Z','2099-01-01T00:00:00Z')`,['lease-'+agentId,'runtime-'+agentId,agentId])
+  observations.set(agentId,unitRuntimeObservation(agentId,{runtime_instance_id:'runtime-'+agentId,workspace:'/tmp/'+agentId,
+    process_started_at:'2026-08-20T00:00:00Z',observed_at:now.toISOString()}))
 }
 
 describe('memory-ready fleet refresher', () => {
+  test('default liveness refresh cannot manufacture a recovery receipt', async () => {
+    await seedSeat('no-recovery')
+    const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
+      now, policy,
+      resolveProject: async (_db, agentId) => ({ agent_id: agentId, project: agentId, workspace_path: null, source: 'agent_metadata_override' }),
+    })
+    expect(report.ok).toBe(false)
+    expect(report.seats[0].status).toBe('failed')
+    expect(report.seats[0].details.error).toContain('MEMORY_CONTEXT_RECOVERY_REQUIRED')
+    expect(await db.query('SELECT * FROM runtime_memory_ready_evidence')).toHaveLength(0)
+  })
   test('returns N/N terminal results and isolates one seat failure', async () => {
     await seedSeat('alpha', 'idle')
     await seedSeat('bravo', 'busy')
@@ -98,10 +105,11 @@ describe('memory-ready fleet refresher', () => {
     expect(report.discord_visible_sends).toBe(0)
   })
 
-  test('dry-run records every unresolved seat instead of silently omitting it', async () => {
+  test('dry-run uses current observation while rejecting physical profile mutation', async () => {
     await seedSeat('healthy')
     await seedSeat('broken')
-    await db.execute(`UPDATE agent_runtime_instances SET session_name='wrong' WHERE agent_id='broken'`)
+    await expect(db.execute(`UPDATE agent_runtime_instances SET session_name='wrong' WHERE agent_id='broken'`)).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
+    observations.set('broken',{...observations.get('broken')!,session_name:'current-session'})
 
     const report = await runRuntimeMemoryReadyFleetRefresh(db as any, {
       now,
@@ -115,22 +123,17 @@ describe('memory-ready fleet refresher', () => {
       }),
     })
 
+    expect(report.seats.every(row=>!('registration_profile_mismatch' in row.details))).toBe(true)
     expect(report.summary.inventory).toBe(2)
     expect(report.summary.terminal_results).toBe(2)
     expect(report.seats).toEqual(expect.arrayContaining([
       expect.objectContaining({ agent_id: 'healthy', status: 'dry_run_ready' }),
       expect.objectContaining({
         agent_id: 'broken',
-        status: 'failed',
-        reason: 'REGISTRATION_PROFILE_MISMATCH',
+        status: 'dry_run_ready',
+        reason: 'DRY_RUN_READY',
         runtime_instance_id: 'runtime-broken',
-        details: expect.objectContaining({
-          repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
-          registration_profile_mismatch: expect.objectContaining({
-            current: true,
-            handling: 'WARN_ONLY_CURRENT_FALLBACK',
-          }),
-        }),
+        details: expect.objectContaining({project_resolution_source:'canonical_workspace'}),
       }),
     ]))
   })

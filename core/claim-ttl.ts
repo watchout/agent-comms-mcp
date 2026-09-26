@@ -21,7 +21,10 @@
 // `core/queue-ttl.ts`: shares the bot's PG pool + lifecycle, no
 // separate cron / DB extension, no SPOF beyond the bot itself.
 
+import { unboundedQueuePredicate } from './queue-admission'
+
 export interface ClaimTtlDb {
+  dialect?: 'sqlite' | 'postgres'
   query<T = Record<string, unknown>>(
     text: string,
     params?: unknown[],
@@ -95,6 +98,7 @@ export async function sweepExpiredClaims(
          AND claimed_by NOT IN (${placeholders})
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
+         AND ${unboundedQueuePredicate('agent_id', db.dialect)}
       RETURNING id`,
       [...opts.selfAgentIds],
     )
@@ -117,6 +121,7 @@ export async function sweepExpiredClaims(
          AND claimed_by <> $1
          AND claim_expires_at IS NOT NULL
          AND claim_expires_at < now()
+         AND ${unboundedQueuePredicate('agent_id', db.dialect)}
        RETURNING id`,
       [opts.selfAgentId],
     )
@@ -137,6 +142,7 @@ export async function sweepExpiredClaims(
        AND claimed_by IS NOT NULL
        AND claim_expires_at IS NOT NULL
        AND claim_expires_at < now()
+       AND ${unboundedQueuePredicate('agent_id', db.dialect)}
      RETURNING id`,
     [],
   )
@@ -165,16 +171,8 @@ async function selectExpiredClaimAgents(
 }
 
 async function syncAgentStatusForAgents(db: ClaimTtlDb, agentIds: string[]): Promise<void> {
-  for (const agentId of agentIds) {
-    await db.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-  }
+  // Queue transitions remain durable; busy/idle is derived when read.
+  return
 }
 
 /**

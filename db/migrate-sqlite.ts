@@ -6,6 +6,7 @@ import {
 } from './destructive-migration-gate'
 
 export function migrateSqlite(dbPath?: string): void {
+  if (process.env.AUN_ADMISSION_POLICY_ID) throw new Error('ADMISSION_STORAGE_UNSUPPORTED')
   console.log(destructiveGateLogLine())
   const path = dbPath ?? process.env.AGENT_COM_SQLITE_PATH ?? './agent-com.db'
   const db = new Database(path, { create: true })
@@ -250,11 +251,11 @@ export function migrateSqlite(dbPath?: string): void {
       org_id TEXT NOT NULL DEFAULT 'default',
       display_name TEXT NOT NULL DEFAULT '',
       agent_type TEXT NOT NULL DEFAULT 'dev',
-      runtime TEXT NOT NULL DEFAULT 'TUI',
+      runtime TEXT,
       cli_type TEXT,
       discord_token TEXT,
       discord_user_id TEXT,
-      status TEXT NOT NULL DEFAULT 'offline',
+      status TEXT,
       status_detail TEXT,
       status_updated_at TEXT,
       last_seen_at TEXT,
@@ -329,10 +330,9 @@ export function migrateSqlite(dbPath?: string): void {
   // #530: the `status` CLI extension joins on agents.runtime to surface
   // TUI bots without tmux_session metadata as drift. SQLite was missing
   // the column (PG has had it since the pre-#341 migration); add it
-  // here with the same default the runtime self-register path uses
-  // (server.ts uses 'TUI' as the implicit fallback when bots register).
+  // here as nullable history: new logical identities do not persist a provider.
   if (!agentsColNames.has('runtime')) {
-    gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT NOT NULL DEFAULT 'TUI'`)
+    gatedExec(`ALTER TABLE agents ADD COLUMN runtime TEXT`)
   }
   if (!agentsColNames.has('channel_port')) {
     gatedExec(`ALTER TABLE agents ADD COLUMN channel_port INTEGER`)
@@ -396,8 +396,8 @@ export function migrateSqlite(dbPath?: string): void {
        AND agent_type <> 'human'
        AND COALESCE(profile_enabled, 1) = 1
   `)
-  gatedExec(`UPDATE agents SET runtime = cli_type WHERE (runtime IS NULL OR runtime = '' OR runtime = 'unknown' OR runtime = 'TUI') AND cli_type IS NOT NULL AND cli_type <> ''`)
-  gatedExec(`UPDATE agents SET runtime = 'TUI' WHERE runtime IS NULL OR runtime = '' OR runtime = 'unknown'`)
+  // Runtime observations stay NULL after cutover, including on migration re-entry.
+  // Existing legacy values are history; neither backfill nor overwrite them.
   gatedExec(`UPDATE agents SET registered_at = COALESCE(registered_at, created_at, datetime('now')) WHERE registered_at IS NULL OR registered_at = ''`)
   gatedExec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_agent_uri ON agents(agent_uri) WHERE agent_uri IS NOT NULL`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_agents_identity_scope ON agents(identity_scope)`)
@@ -434,16 +434,6 @@ export function migrateSqlite(dbPath?: string): void {
              profile_enabled = COALESCE(NEW.profile_enabled, 1),
              profile_revision = COALESCE(NULLIF(NEW.profile_revision, 0), 1),
              profile_source = COALESCE(NULLIF(NEW.profile_source, ''), 'legacy')
-       WHERE agent_id = NEW.agent_id;
-    END;
-  `)
-  gatedExec(`
-    CREATE TRIGGER IF NOT EXISTS trg_agents_runtime_after_insert
-    AFTER INSERT ON agents
-    WHEN (NEW.runtime IS NULL OR NEW.runtime = '' OR NEW.runtime = 'unknown') AND NEW.cli_type IS NOT NULL
-    BEGIN
-      UPDATE agents
-         SET runtime = NEW.cli_type
        WHERE agent_id = NEW.agent_id;
     END;
   `)
@@ -517,7 +507,7 @@ export function migrateSqlite(dbPath?: string): void {
       runtime_instance_id TEXT PRIMARY KEY NOT NULL DEFAULT ${uuidDefault},
       agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
       workspace_id TEXT REFERENCES agent_workspaces(workspace_id) ON DELETE SET NULL,
-      runtime_engine TEXT NOT NULL DEFAULT 'unknown',
+      runtime_engine TEXT,
       runtime_kind TEXT NOT NULL DEFAULT 'local_process',
       host_id TEXT,
       session_name TEXT,
@@ -526,8 +516,8 @@ export function migrateSqlite(dbPath?: string): void {
       checkout_path TEXT,
       commit_sha TEXT,
       endpoint_uri TEXT,
-      status TEXT NOT NULL DEFAULT 'unknown',
-      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      status TEXT,
+      started_at TEXT,
       stopped_at TEXT,
       last_seen_at TEXT,
       metadata TEXT NOT NULL DEFAULT '{}'
@@ -544,12 +534,12 @@ export function migrateSqlite(dbPath?: string): void {
       runtime_instance_id TEXT NOT NULL,
       profile_revision INTEGER,
       profile_source TEXT,
-      session_name TEXT NOT NULL,
-      port INTEGER NOT NULL,
+      session_name TEXT,
+      port INTEGER,
       expected_agent_id TEXT NOT NULL,
       checkout_path TEXT,
       checkout_commit_sha TEXT,
-      recovery_command TEXT NOT NULL,
+      recovery_command TEXT,
       result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
       failure_reason TEXT,
       completed_at TEXT NOT NULL,
@@ -1060,8 +1050,384 @@ export function migrateSqlite(dbPath?: string): void {
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_delivery_connector_pending ON outbound_queue(delivery_connector_instance_id, status, next_retry_at) WHERE delivery_connector_instance_id IS NOT NULL AND status = 'pending'`)
   gatedExec(`CREATE INDEX IF NOT EXISTS idx_outbound_queue_channel_binding_pending ON outbound_queue(channel_binding_id, status, next_retry_at) WHERE channel_binding_id IS NOT NULL AND status = 'pending'`)
 
+  // Same base EventLog table as core/eventlog/schema.ts. Its normal ensure adds
+  // projections/indexes; creating it here ensures the cutover guard cannot be
+  // missed merely because the runtime first opens EventLog after migration.
+  gatedExec(`CREATE TABLE IF NOT EXISTS event_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL, occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    seat_id TEXT, seat_instance_id TEXT, conversation_id TEXT, causation_id TEXT,
+    correlation_id TEXT, turn_id TEXT, reply_id TEXT, claim_epoch INTEGER,
+    payload TEXT NOT NULL DEFAULT '{}'
+  )`)
+  applyRuntimeObservationNonpersistenceSqlite(db)
+  applyConfigurationRestartLogicalSqlite(db)
   db.close()
   console.log(`SQLite migration complete: ${path}`)
+}
+
+
+export const runtimeObservationGuardContract = {
+  "agent_runtime_instances": {
+    "physical": [
+      "runtime_engine",
+      "host_id",
+      "session_name",
+      "process_id",
+      "port",
+      "checkout_path",
+      "endpoint_uri",
+      "status",
+      "started_at",
+      "stopped_at",
+      "last_seen_at"
+    ],
+    "json": {
+      "metadata": {
+        "schema_version": "=aun-runtime-nonpersistence/v1",
+        "bootstrap_run_id": "bootstrap_id",
+        "mcp_runtime_instance_id": "uuid",
+        "source_commit": "sha1",
+        "source_tree": "sha1"
+      }
+    }
+  },
+  "runtime_memory_ready_evidence": {
+    "values": {"source": "identifier", "failure_reason": "identifier", "evidence_log_id": "identifier", "checkout_commit_sha": "sha1"},
+    "physical": [
+      "session_name",
+      "port",
+      "checkout_path",
+      "recovery_command",
+      "evidence_path"
+    ],
+    "json": {
+      "metadata": {
+        "schema_version": "=aun-runtime-nonpersistence/v1",
+        "seat_context_proof": {
+          "agent_id": "string",
+          "project": "string",
+          "runtime_instance_id": "uuid",
+          "pack_id": "string",
+          "work_digest": "sha256",
+          "invocation_digest": "sha256",
+          "completed_at": "string"
+        },
+        "actor": "string",
+        "reason": "string",
+        "timestamp": "string",
+        "target_agent": "string",
+        "target_agent_id": "string",
+        "expires_at": "string",
+        "expiry": "string",
+        "expiry_at": "string",
+        "queue_scope": {
+          "queue_id": "scopevalues",
+          "queue_ids": "scopevalues",
+          "status": "scopevalues",
+          "statuses": "scopevalues",
+          "action_kind": "scopevalues",
+          "action_kinds": "scopevalues",
+          "agent_id": "string",
+          "target_agent": "string",
+          "target_agent_id": "string"
+        },
+        "bootstrap_run_id": "bootstrap_id",
+        "target": {
+          "agent_id": "string"
+        }
+      }
+    }
+  },
+  "control_plane_leases": {
+    "physical": [],
+    "json": {
+      "metadata": {
+        "schema_version": "=aun-runtime-nonpersistence/v1"
+      }
+    }
+  },
+  "agents": {
+    "physical": [
+      "runtime",
+      "cli_type",
+      "status",
+      "status_detail",
+      "status_updated_at",
+      "last_seen_at",
+      "heartbeat_at",
+      "channel_port",
+      "home_directory",
+      "runtime_engine_preference",
+      "canonical_home",
+      "canonical_workspace"
+    ],
+    "json": {
+      "metadata": "logical",
+      "ordinary_projection": "logical"
+    }
+  },
+  "agent_workspaces": {
+    "physical": [
+      "local_path"
+    ],
+    "json": {
+      "metadata": "logical"
+    }
+  },
+  "connector_instances": {
+    "physical": [
+      "last_seen_at"
+    ],
+    "json": {
+      "metadata": "logical"
+    }
+  },
+  "agent_endpoints": {
+    "physical": [
+      "endpoint_uri"
+    ],
+    "json": {
+      "metadata": "logical"
+    }
+  },
+  "aun_configuration_observed_state": {
+    "physical": [
+      "host_id",
+      "runtime_identity_digest",
+      "candidate_digest",
+      "provider_native_digest",
+      "launchagent_plist_digest",
+      "launchctl_environment_digest",
+      "observed_at"
+    ],
+    "json": {},
+    "deny_insert": true
+  },
+  "aun_configuration_restart_requests": {
+    "physical": [
+      "host_id",
+      "candidate_digest",
+      "rollback_artifact_digest"
+    ],
+    "json": {},
+    "deny_insert": true
+  },
+  "audit_log": {
+    "physical": [],
+    "json": {},
+    "events": {
+      "runtime.memory_ready_identity": {
+        "detail": {
+          "code": "reason_code"
+        }
+      },
+      "runtime.cleanup_target": {
+        "detail": {
+          "dry_run": "boolean",
+          "classification": "string",
+          "risk": "string",
+          "runtime_instance_id": "string|null",
+          "action_kinds": "strings"
+        }
+      },
+      "runtime.cleanup_execute": {
+        "detail": {
+          "executable_actions": "number",
+          "cleanup_targets": "number",
+          "unknown_risk_targets": "number"
+        }
+      },
+      "runtime.memory_ready": {
+        "detail": {
+          "project": "string|number",
+          "runtime_instance_id": "string|number",
+          "result_status": "string|number",
+          "source": "string|number",
+          "evidence_id": "string|number",
+          "evidence_log_id": "string|number|null"
+        }
+      }
+    }
+  },
+  "event_log": {
+    "physical": [],
+    "json": {},
+    "events": {
+      "reply.failed": {
+        "payload": {
+          "kind": "string",
+          "code": "delivery_code"
+        }
+      }
+    }
+  }
+} as const
+
+const observationKeys = ["provider", "actualprovider", "providerobservation", "nativedelivery", "providerpid", "providerstartedat", "providerexecutablesha256", "workspacesha256", "pipesha256", "hostsessionid", "runtimeengine", "runtime", "hostid", "pid", "processid", "port", "endpoint", "endpointuri", "sessionname", "tmuxsession", "checkoutpath", "runtimecheckoutpath", "localpath", "homedirectory", "canonicalhome", "canonicalworkspace", "providerreporoot", "providerconfigroot", "daemoncheckout", "startedat", "stoppedat", "lastseenat", "liveness", "recoverycommand", "evidencepath", "error"]
+
+// Cutover is additive in history, not a destructive reset. FK enforcement is
+// suspended only around an atomic table replacement; no referenced row is
+// deleted with foreign_keys=ON, and the complete graph is checked before COMMIT.
+export function applyRuntimeObservationNonpersistenceSqlite(db: Database): void {
+  if (db.inTransaction) throw new Error('AUN_NONPERSISTENCE_REQUIRES_TOP_LEVEL_TRANSACTION')
+  const foreignKeys = (db.query('PRAGMA foreign_keys').get() as any).foreign_keys
+  const exec = (sql: string) => { assertDestructiveMigrationAllowed(sql); db.exec(sql) }
+  const quote = (s: string) => `'${s.replaceAll("'", "''")}'`
+  const ident = (s: string) => `"${s.replaceAll('"','""')}"`
+  const hasTable = (name: string) => !!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)
+  const cols = (table: string) => db.query(`PRAGMA table_info(${ident(table)})`).all() as Array<{name:string,notnull:number,dflt_value:string|null}>
+  const exists = (table: string, column:string) => cols(table).some(c=>c.name===column)
+  const rootValue = (column:string, side:string) => `COALESCE(${side}.${ident(column)}, '{}')`
+  function jsonViolation(column:string, side:string, old:string, spec:any):string {
+    const value=rootValue(column,side), previous=old==='NULL'?"'{}'":rootValue(column,old)
+    const normalize=`lower(replace(replace(CAST(n.key AS TEXT),'_',''),'-',''))`
+    const unchanged=`EXISTS (SELECT 1 FROM json_tree(${previous}) o WHERE o.fullkey=n.fullkey AND o.type=n.type AND o.value IS n.value)`
+    const unchangedReverse=`EXISTS (SELECT 1 FROM json_tree(${value}) o WHERE o.fullkey=n.fullkey AND o.type=n.type AND o.value IS n.value)`
+    if(spec==='logical') {
+      const forbidden=`${normalize} IN (${observationKeys.map(quote).join(',')})`
+      return `(NOT json_valid(${value}) OR json_type(${value}) <> 'object' OR EXISTS(SELECT 1 FROM json_tree(${value}) n WHERE ${forbidden} AND NOT (${unchanged})) OR EXISTS(SELECT 1 FROM json_tree(${previous}) n WHERE ${forbidden} AND NOT (${unchangedReverse})))`
+    }
+    const allowed:string[]=[`(n.fullkey='$' AND n.type='object')`]
+    function walk(shape:any,path:string) {
+      for(const [key,type] of Object.entries(shape)) {
+        const here=path+'.'+(/^[A-Za-z][A-Za-z0-9]*$/.test(key)?key:JSON.stringify(key)),match=`n.fullkey=${quote(here)}`
+        if(type && typeof type==='object') { allowed.push(`(${match} AND n.type='object')`);walk(type,here) }
+        else if(type==='strings') {allowed.push(`(${match} AND n.type='array')`);allowed.push(`(n.path=${quote(here)} AND n.type='text')`)}
+        else if(type==='scopevalues') {allowed.push(`(${match} AND n.type IN ('array','text','integer','real'))`);allowed.push(`(n.path=${quote(here)} AND n.type IN ('text','integer','real'))`)}
+        else if(type==='sha1'||type==='sha256') allowed.push(`(${match} AND n.type='text' AND length(n.value)=${type==='sha1'?40:64} AND n.value NOT GLOB '*[^0-9a-f]*')`)
+        else if(type==='uuid'||type==='bootstrap_id') {
+          const value=type==='uuid'?'n.value':"substr(n.value,11)"
+          allowed.push(`(${match} AND n.type='text' AND ${type==='bootstrap_id'?"substr(n.value,1,10)='bootstrap-' AND ":''}length(${value})=36 AND length(replace(${value},'-',''))=32 AND ${value} NOT GLOB '*[^0-9a-f-]*' AND substr(${value},9,1)='-' AND substr(${value},14,1)='-' AND substr(${value},19,1)='-' AND substr(${value},24,1)='-')`)
+        }
+        else if(type==='reason_code') allowed.push(`(${match} AND n.type='text' AND length(n.value)>0 AND substr(n.value,1,1) GLOB '[A-Z]' AND n.value NOT GLOB '*[^A-Z0-9_]*')`)
+        else if(type==='delivery_code') allowed.push(`(${match} AND n.type='text' AND n.value IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE'))`)
+        else if(String(type).startsWith('=')) allowed.push(`(${match} AND n.type='text' AND n.value=${quote(String(type).slice(1))})`)
+        else {const types=String(type).split('|').flatMap(t=>t==='string'?['text']:t==='number'?['integer','real']:t==='boolean'?['true','false']:t==='null'?['null']:[]);allowed.push(`(${match} AND n.type IN (${types.map(quote).join(',')}))`)}
+      }
+    }
+    walk(spec,'$');const good=allowed.join(' OR ')
+    return `(NOT json_valid(${value}) OR json_type(${value}) <> 'object' OR EXISTS(SELECT 1 FROM json_tree(${value}) n WHERE NOT (${good}) AND NOT (${unchanged})) OR EXISTS(SELECT 1 FROM json_tree(${previous}) n WHERE NOT (${good}) AND NOT (${unchangedReverse})))`
+  }
+  exec('PRAGMA foreign_keys=OFF')
+  try {
+    exec('BEGIN IMMEDIATE')
+    // Rebuild only constrained physical columns. Reusing the CREATE text retains
+    // every unknown logical column, CHECK, UNIQUE and FK from the caller schema.
+    const loosen:Record<string,string[]>={agents:['runtime','status'],agent_runtime_instances:['runtime_engine','status','started_at'],runtime_memory_ready_evidence:['session_name','port','recovery_command']}
+    for(const [table,fields] of Object.entries(loosen)) {
+      if(!hasTable(table)) continue
+      const info=cols(table)
+      if(!info.some(c=>fields.includes(c.name)&&(c.notnull||c.dflt_value!==null)))continue
+      const before=db.query(`SELECT * FROM ${ident(table)} ORDER BY rowid`).all()
+      const row=db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as {sql:string}
+      const objects=db.query("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").all(table) as Array<{sql:string}>
+      const sequence=hasTable('sqlite_sequence')?db.query('SELECT seq FROM sqlite_sequence WHERE name=?').get(table) as {seq:number}|null:null
+      const temp=table+'__aun_np_upgrade'
+      if(hasTable(temp))throw new Error('AUN_NONPERSISTENCE_REBUILD_NAME_COLLISION')
+      let create=row.sql.replace(/^(CREATE TABLE(?: IF NOT EXISTS)?)\s+(?:"[^"]+"|\w+)/i,`$1 ${ident(temp)}`)
+      for(const field of fields) {
+        const pattern=new RegExp(`(\\b${field}\\s+(?:TEXT|INTEGER|TIMESTAMPTZ))[^,\\n]*`,'i')
+        create=create.replace(pattern,'$1')
+      }
+      exec(create)
+      const names=info.map(c=>ident(c.name)).join(',')
+      exec(`INSERT INTO ${ident(temp)} (rowid,${names}) SELECT rowid,${names} FROM ${ident(table)}`)
+      const after=db.query(`SELECT * FROM ${ident(temp)} ORDER BY rowid`).all()
+      if(JSON.stringify(before)!==JSON.stringify(after))throw new Error('AUN_NONPERSISTENCE_ROW_COPY_MISMATCH')
+      exec(`DROP TABLE ${ident(table)}`)
+      exec(`ALTER TABLE ${ident(temp)} RENAME TO ${ident(table)}`)
+      for(const object of objects) if(!object.sql.includes('trg_agents_runtime_after_insert'))exec(object.sql)
+      if(sequence)db.query('UPDATE sqlite_sequence SET seq=? WHERE name=?').run(sequence.seq,table)
+    }
+    exec('DROP TRIGGER IF EXISTS trg_agents_runtime_after_insert')
+    for(const [table,baseContract] of Object.entries(runtimeObservationGuardContract) as Array<[string,any]>) {
+      if(!hasTable(table))continue
+      const contract=table==='aun_configuration_restart_requests'&&exists(table,'rollback_release_commit')
+        ? {...baseContract,deny_insert:false,values:{rollback_release_commit:'sha1',rollback_release_tree:'sha1'}}:baseContract
+      for(const op of ['INSERT','UPDATE']) {
+        const old=op==='INSERT'?'NULL':'OLD',bad:string[]=[]
+        if(contract.deny_insert&&op==='INSERT')bad.push('1')
+        if(table==='aun_configuration_restart_requests'&&exists(table,'rollback_release_commit')&&op==='INSERT')bad.push('NEW.rollback_release_commit IS NULL OR NEW.rollback_release_tree IS NULL')
+        for(const column of contract.physical) if(exists(table,column))bad.push(op==='INSERT'?`(NEW.${ident(column)} IS NOT NULL ${table==='agents'&&column==='channel_port'?'AND NEW.channel_port <> 0':''})`:`NEW.${ident(column)} IS NOT OLD.${ident(column)}`)
+        for(const [column,spec] of Object.entries(contract.json))if(exists(table,column)) {
+          const strict=jsonViolation(column,'NEW',old,spec)
+          bad.push(table==='control_plane_leases' && column==='metadata' ? `(CASE WHEN NEW.lease_scope_type='runtime_instance' AND NEW.lease_purpose='worker' THEN ${strict} ELSE ${jsonViolation(column,'NEW',old,'logical')} END)` : strict)
+        }
+        for(const [column,kind] of Object.entries(contract.values??{})) if(exists(table,column)) {
+          const value=`NEW.${ident(column)}`
+          const valid=kind==='sha1'
+            ? `(length(${value})=40 AND ${value} NOT GLOB '*[^0-9a-f]*')`
+            : `(length(${value}) BETWEEN 1 AND 200 AND substr(${value},1,1) GLOB '[A-Za-z0-9]' AND ${value} NOT GLOB '*[^A-Za-z0-9_.:-]*')`
+          bad.push(`(${value} IS NOT NULL ${op==='UPDATE'?`AND ${value} IS NOT OLD.${ident(column)}`:''} AND (typeof(${value})<>'text' OR NOT ${valid}))`)
+        }
+        for(const [event,shapes] of Object.entries(contract.events??{}) as Array<[string,any]>) {
+          for(const [column,spec] of Object.entries(shapes))if(exists(table,column))bad.push(`(NEW.event_type=${quote(event)} AND ${jsonViolation(column,'NEW',old,spec)})`)
+        }
+        if(table==='audit_log')bad.push(`(NEW.event_type IN ('runtime.cleanup_target','runtime.cleanup_execute') AND (NEW.target GLOB 'listener:*' OR NEW.target GLOB 'tmux:*') ${op==='UPDATE'?'AND NEW.target IS NOT OLD.target':''})`)
+        if(bad.length===0)continue
+        const trigger=`aun_np_${table}_${op.toLowerCase()}`
+        exec(`CREATE TRIGGER IF NOT EXISTS ${ident(trigger)} AFTER ${op} ON ${ident(table)} WHEN ${bad.join(' OR ')} BEGIN SELECT RAISE(ABORT,'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN'); END`)
+      }
+    }
+    const violations=db.query('PRAGMA foreign_key_check').all()
+    if(violations.length)throw new Error('AUN_NONPERSISTENCE_FOREIGN_KEY_CHECK_FAILED:'+JSON.stringify(violations))
+    exec('COMMIT')
+  } catch(error) {
+    if(db.inTransaction)db.exec('ROLLBACK')
+    throw error
+  } finally {db.exec(`PRAGMA foreign_keys=${foreignKeys?1:0}`)}
+}
+
+/** D-CFG-1 applies only when this existing optional configuration table exists. */
+export function applyConfigurationRestartLogicalSqlite(db:Database):void {
+  const table='aun_configuration_restart_requests'
+  const old=db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as {sql:string}|null
+  if(!old)return
+  const fields=db.query(`PRAGMA table_info(${table})`).all() as Array<{name:string}>
+  if(!fields.some(f=>f.name==='host_id'))return
+  if(db.inTransaction)throw new Error('AUN_NONPERSISTENCE_REQUIRES_TOP_LEVEL_TRANSACTION')
+  const enabled=(db.query('PRAGMA foreign_keys').get() as any).foreign_keys
+  const exec=(sql:string)=>{assertDestructiveMigrationAllowed(sql);db.exec(sql)}
+  exec('PRAGMA foreign_keys=OFF')
+  try {
+    exec('BEGIN IMMEDIATE')
+    if(db.query(`SELECT 1 FROM ${table} GROUP BY agent_id,to_revision,to_digest HAVING count(*)>1`).get())throw new Error('AUN_CONFIGURATION_LOGICAL_RESTART_CONFLICT')
+    const name=table+'__aun_logical_upgrade'
+    if(db.query('SELECT 1 FROM sqlite_master WHERE name=?').get(name))throw new Error('AUN_NONPERSISTENCE_REBUILD_NAME_COLLISION')
+    const objects=db.query("SELECT name,sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL").all(table) as Array<{name:string;sql:string}>
+    let create=old.sql.replace(/^(CREATE TABLE(?: IF NOT EXISTS)?)\s+(?:"[^"]+"|\w+)/i,`$1 ${name}`)
+      .replace(/UNIQUE\s*\(\s*host_id\s*,\s*agent_id\s*,\s*to_revision\s*,\s*to_digest\s*,\s*candidate_digest\s*\)/ig,'UNIQUE(agent_id,to_revision,to_digest)')
+      .replace(/\bhost_id\s+TEXT\s*(?:NOT NULL)?\s*,/i,'')
+      .replace(/(\b(?:candidate_digest|rollback_artifact_digest)\s+TEXT)\s+NOT NULL/ig,'$1')
+    if(/\bhost_id\b/i.test(create))throw new Error('AUN_CONFIGURATION_HOST_CONSTRAINT_UNSUPPORTED')
+    exec(create)
+    exec(`ALTER TABLE ${name} ADD COLUMN rollback_release_commit TEXT`)
+    exec(`ALTER TABLE ${name} ADD COLUMN rollback_release_tree TEXT`)
+    const columns=fields.filter(f=>f.name!=='host_id').map(f=>'"'+f.name.replaceAll('"','""')+'"').join(',')
+    const before=db.query(`SELECT ${columns} FROM ${table} ORDER BY rowid`).all()
+    exec(`INSERT INTO ${name}(rowid,${columns}) SELECT rowid,${columns} FROM ${table}`)
+    if(JSON.stringify(before)!==JSON.stringify(db.query(`SELECT ${columns} FROM ${name} ORDER BY rowid`).all()))throw new Error('AUN_NONPERSISTENCE_ROW_COPY_MISMATCH')
+    exec(`DROP TABLE ${table}`)
+    exec(`ALTER TABLE ${name} RENAME TO ${table}`)
+    for(const item of objects) {
+      if(item.name.startsWith('aun_np_'))continue
+      if(/\bhost_id\b/i.test(item.sql))throw new Error('AUN_CONFIGURATION_HOST_CONSTRAINT_UNSUPPORTED')
+      exec(item.sql)
+    }
+    exec(`CREATE UNIQUE INDEX IF NOT EXISTS aun_configuration_restart_logical_unique ON ${table}(agent_id,to_revision,to_digest)`)
+    for(const op of ['INSERT','UPDATE']) {
+      const physical=['candidate_digest','rollback_artifact_digest'].filter(c=>fields.some(f=>f.name===c))
+        .map(c=>op==='INSERT'?`NEW.${c} IS NOT NULL`:`NEW.${c} IS NOT OLD.${c}`)
+      const release=['rollback_release_commit','rollback_release_tree'].map(c=>`(NEW.${c} IS ${op==='INSERT'?'NULL':'NOT OLD.'+c} AND NEW.${c} IS NULL)`)
+      const invalid=['rollback_release_commit','rollback_release_tree'].map(c=>`(NEW.${c} IS NOT NULL AND (length(NEW.${c})<>40 OR NEW.${c} GLOB '*[^0-9a-f]*'))`)
+      exec(`CREATE TRIGGER aun_np_${table}_${op.toLowerCase()} AFTER ${op} ON ${table}
+        WHEN ${[...physical,...release,...invalid].join(' OR ')} BEGIN SELECT RAISE(ABORT,'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN'); END`)
+    }
+    if(db.query('PRAGMA foreign_key_check').all().length)throw new Error('AUN_NONPERSISTENCE_FOREIGN_KEY_CHECK_FAILED')
+    exec('COMMIT')
+  }catch(error){if(db.inTransaction)db.exec('ROLLBACK');throw error}
+  finally{db.exec(`PRAGMA foreign_keys=${enabled?1:0}`)}
 }
 
 if (import.meta.main) {

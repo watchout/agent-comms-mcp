@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/norm-022-runtime-endpoint-lease.test.ts",
+    "tests/runtime-memory-ready.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "97940511ab0972bdc6359567cbe7e5e2a1d9dd3d5b0ff94c24054dd7183f8f26",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "b55b99db82f8ca4b9ef31e80095980d1c5ae1ac7ff9b5d9a1c3f1fc8da2ab7c0",
+  "started_at": "2026-09-21T09:47:22.918980+00:00",
+  "ended_at": "2026-09-21T09:47:30.938505+00:00",
+  "exit_code": 1,
+  "log_sha256": "3c9680efda9114406ab6e12f11bc389aa2dc5a9a7b461656bf6f3ff9a941d03b"
+}

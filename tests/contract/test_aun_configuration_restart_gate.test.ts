@@ -21,7 +21,7 @@ test('restart-required reconciliation emits approval request and performs zero r
   const store = new FakeStore()
   const port = new FakeProjection()
   port.restartRequired = true
-  const result = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).reconcileAgent('misell')
+  const result = await new AunConfigurationReconciler(store, new FakeLease(), port).reconcileAgent('misell')
   expect(result).toMatchObject({ status: 'DEGRADED_APPROVAL_REQUIRED', applyCount: 0 })
   expect(store.restarts).toHaveLength(1)
   expect(store.restarts[0].restartBudget).toBe(1)
@@ -40,7 +40,7 @@ test('revision drift during native readback creates no restart request', async (
     store.desired = desiredFixture(2)
     return originalReadback()
   }
-  const result = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).reconcileAgent('misell')
+  const result = await new AunConfigurationReconciler(store, new FakeLease(), port).reconcileAgent('misell')
   expect(result).toMatchObject({ status: 'NO_GO_STALE_CANDIDATE', restartRequestId: null })
   expect(result.reasonCodes).toEqual(['STALE_BEFORE_RESTART_REQUEST'])
   expect(store.restarts).toEqual([])
@@ -78,7 +78,7 @@ class FakeRestartExecutionStore implements ConfigurationRestartExecutionStore {
 function ctoExecutionLease(): ControlPlaneLease {
   return {
     ...new FakeLease().lease,
-    lease_scope_id: 'configuration-restart:host-a:misell',
+    lease_scope_id: 'configuration-restart:misell',
     holder_agent_id: 'codex-cto',
   }
 }

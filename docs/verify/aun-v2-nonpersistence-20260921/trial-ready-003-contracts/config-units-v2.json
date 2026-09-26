@@ -1,0 +1,25 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/aun-configuration-candidate.test.ts",
+    "tests/aun-configuration-reconciler.test.ts",
+    "tests/contract/test_aun_configuration_concurrent_revision.test.ts",
+    "tests/contract/test_aun_configuration_db_outage.test.ts",
+    "tests/contract/test_aun_configuration_endpoint_rebind.test.ts",
+    "tests/contract/test_aun_configuration_notification_loss.test.ts",
+    "tests/contract/test_aun_configuration_projection_readback.test.ts",
+    "tests/contract/test_aun_configuration_restart_gate.test.ts",
+    "tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "30250e8e195d073b4ea922fc96c3fd1a2fce8ec616266d3b61aa5eabb0545e27",
+  "source_head": "0ee04fd51d2de6a9f2903bc603b5e290b49bfa3b",
+  "working_diff_sha256": "6997e550010a1548ab02f2695c379ea47fe54aa1fc204bd744c45ee0c3f6e3d4",
+  "started_at": "2026-09-21T11:57:18.708684+00:00",
+  "ended_at": "2026-09-21T11:57:18.976112+00:00",
+  "exit_code": 0,
+  "log_sha256": "ace7474518ac9f63a5387ab3a6493769046a312eded1866b137b6c7fb82986e5"
+}

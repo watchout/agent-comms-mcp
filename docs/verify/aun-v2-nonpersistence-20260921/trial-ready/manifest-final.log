@@ -1,0 +1,16 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-inventory.test.ts:
+(pass) ordinary all-agent manifest candidate inventory > resolves one exact workspace/runtime/profile/identity row without inferring protected D1 [1.56ms]
+(pass) ordinary all-agent manifest candidate inventory > keeps unresolved/new seats in the denominator and fails the complete candidate [0.15ms]
+(pass) ordinary all-agent manifest candidate inventory > keeps explicitly production seats in the denominator when agent ids contain test substrings [0.23ms]
+(pass) ordinary all-agent manifest candidate inventory > omitted protected_d1 is a blocker, never an inherited default [0.10ms]
+(pass) ordinary all-agent manifest candidate inventory > enabled unclassified seats fail closed and are never classified from their names [0.10ms]
+(pass) ordinary all-agent manifest candidate inventory > observed Claude overrides a stale Codex profile without profile writes [0.02ms]
+(pass) ordinary all-agent manifest candidate inventory > unverified provider ownership cannot fall back to the configured Codex preference
+
+ 7 pass
+ 4 filtered out
+ 0 fail
+ 23 expect() calls
+Ran 7 tests across 1 file. [25.00ms]

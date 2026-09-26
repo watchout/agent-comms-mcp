@@ -1,0 +1,88 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-XqPvey/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [4737.85ms]
+(pass) NP07 real native absent original cannot produce a receipt [529.38ms]
+(pass) NP07 real native pending original cannot produce a receipt [761.78ms]
+
+tests/contract/test_runtime_nonpersist_authority.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_67158d6a3f794454890129c13df8b1f2","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease [2691.94ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_6ba045ca8cef4722bf6cf01dd6ac7556","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP03 lease-write failure rolls back the new logical anchor; only the owned socket remains [1360.65ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_9f49082d509646b9b5b7e8cac95b2a06","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 fence replacement during observation and holder change after SQL both deny endpoint resolution [1520.49ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_4962c99f32394d5ea5e5c5b9bfc1dad7","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 SQL-time expiry advances during a transaction and delayed renewal has no effect [1691.41ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_23efeae4562a475d978a8f91742d699b","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/06 inventory uses fresh host fields; release requires the acquisition fence and cannot resurrect the old UUID [2280.09ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_cc86c2fa5341463689498279d598194e","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 valid UUID replay in a different actual process/workspace denies resolve, admission and renewal with the old lease surviving [3446.97ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.12ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof [0.06ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.35ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.04ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.14ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1031.09ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [807.92ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.05ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [2.33ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.46ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.06ms]
+
+tests/contract/test_runtime_nonpersist_durable_fields.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_f86fc2ba390e41b7b2b8184b73ce34af","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP01/10 postgres typed logical columns reject an observation hidden in an allowed key [168.40ms]
+(pass) NP01/10 sqlite typed logical columns reject an observation hidden in an allowed key [72.20ms]
+(pass) NP01 machine-field serializer rejects before SQL without altering original operator text [0.17ms]
+
+tests/contract/test_runtime_nonpersist_bootstrap.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-bootstrap-yoUdDa/aun.db
+(pass) NP01/07 B5 creates sealed and ordinary native readiness from a NULL physical anchor and preserves the seat [4311.34ms]
+
+tests/contract/test_runtime_nonpersist_daemon.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_1687dde9d4514394956fb81cf0b4c567","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP02/04/08 daemon eligibility and claim renewal work with NULL physical rows and reject a changed fence [2560.70ms]
+
+tests/contract/test_runtime_observation_nonpersistence_db.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_cf578de018a84ba19fb404e14d93e845","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"legacy-preservation","kind":"postgres","before_sha256":"44805ab6a9b4ccfb0a99d01ea7230bec90605681ff6c3742b393f6c641c4a8de","after_sha256":"44805ab6a9b4ccfb0a99d01ea7230bec90605681ff6c3742b393f6c641c4a8de","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+(pass) postgres runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [197.86ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_fc103b9b7f6341eda6ce4ebbb264d3bf","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"guards-and-null-anchor","kind":"postgres","rejected_cases":15,"logical_audit_event_and_owner_content":"PRESERVED"}
+(pass) postgres runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [209.36ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_79c8707759c0442b85ca5cac2c634ba1","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+{"case":"rollback","kind":"postgres","before_sha256":"f828e08b0e3f0f1f72daf33a80c779e6dab6e90f577370d76293f9de89f375e2","after_sha256":"f828e08b0e3f0f1f72daf33a80c779e6dab6e90f577370d76293f9de89f375e2","schema_restored":true}
+(pass) postgres runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [193.75ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_1b89ad86375547909cffdb56f89ab30a","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) postgres runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [186.79ms]
+{"case":"legacy-preservation","kind":"sqlite","before_sha256":"409ae240658fe6c8836e33139a381c9d81dcd170254c02a7ff151bb710dd1aea","after_sha256":"409ae240658fe6c8836e33139a381c9d81dcd170254c02a7ff151bb710dd1aea","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+(pass) sqlite runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [93.84ms]
+{"case":"guards-and-null-anchor","kind":"sqlite","rejected_cases":15,"logical_audit_event_and_owner_content":"PRESERVED"}
+(pass) sqlite runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [74.91ms]
+{"case":"rollback","kind":"sqlite","before_sha256":"2088f088bd169c9f76136cfe852691bf5550264bf51ac345df628ac1536974cf","after_sha256":"2088f088bd169c9f76136cfe852691bf5550264bf51ac345df628ac1536974cf","schema_restored":true}
+(pass) sqlite runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [74.49ms]
+(pass) sqlite runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [56.64ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_eb5db960281a48b4b12f1e13c3d752f2","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) PostgreSQL old physical-writing rollback is explicitly refused [182.59ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_a0c92124b5aa445abcc5ff944fac7d0f","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) desired-state trigger cannot recopy physical values; stable policy still advances once [194.90ms]
+
+tests/contract/test_runtime_nonpersist_cleanup.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_1a2c0ca23c8c4a8f8511e57aaadc87ae","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/08 cleanup denies unknown work, changed PID start, active lease and DB failure before any kill [1642.46ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_652bbed66a9e43e4ba1c920053f0b35d","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/08 cleanup plan binds process start; expired holder stops exactly once without physical persistence [1485.80ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_17613fd544864501963c86c45ec81e8d","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP08 orphan kill-only and observation timeout never authorize an unbound process [928.10ms]
+
+ 39 pass
+ 0 fail
+ 319 expect() calls
+Ran 39 tests across 8 files. [33.62s]

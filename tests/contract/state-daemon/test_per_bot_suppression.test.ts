@@ -96,14 +96,14 @@ describe('TUI prompt wake is disabled', () => {
       }
 
       expect(tmux.sentKeys).toEqual([])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(5)
+      expect(metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(5)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(0)
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(5)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       expect(metrics.countInc('state_daemon_state_actions_total', {
         action: 'legacy_tui_disabled',
         status: 'pending',
         terminal: 'false',
-      })).toBe(5)
+      })).toBe(0)
 
       const stamps = await pg.query<{ last_wake_attempt_at: Date | null }>(
         `SELECT last_wake_attempt_at FROM message_queue WHERE agent_id=$1`,
@@ -154,7 +154,7 @@ describe('TUI prompt wake is disabled', () => {
       })
 
       expect(tmux.sentKeys).toEqual([])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'dedup_skipped' })).toBe(0)
       const row = await pg.query<{ last_wake_attempt_at: Date | null }>(
         `SELECT last_wake_attempt_at FROM message_queue WHERE id=$1`,
@@ -201,13 +201,13 @@ describe('TUI prompt wake is disabled', () => {
       })
 
       expect(tmux.sentKeys).toEqual([])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'active_claim_skipped' })).toBe(1)
+      expect(metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
       expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
       expect(metrics.countInc('state_daemon_state_actions_total', {
         action: 'observe_busy',
         status: 'pending',
         terminal: 'false',
-      })).toBe(1)
+      })).toBe(0)
     } finally {
       await daemon.stop()
     }
@@ -247,13 +247,13 @@ describe('TUI prompt wake is disabled', () => {
       })
 
       expect(tmux.sentKeys).toEqual([])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+      expect(metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       expect(metrics.countInc('state_daemon_state_actions_total', {
         action: 'legacy_tui_disabled',
         status: 'received',
         terminal: 'false',
-      })).toBe(1)
+      })).toBe(0)
     } finally {
       await daemon.stop()
     }
@@ -293,13 +293,13 @@ describe('TUI prompt wake is disabled', () => {
       }
 
       expect(tmux.sentKeys).toEqual([])
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(6)
-      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(6)
+      expect(metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(6)
+      expect(metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       expect(metrics.countInc('state_daemon_state_actions_total', {
         action: 'legacy_tui_disabled',
         status: 'pending',
         terminal: 'false',
-      })).toBe(6)
+      })).toBe(0)
     } finally {
       await daemon.stop()
     }

@@ -55,8 +55,25 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres17:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_comms_bounded17_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+      AGENT_COM_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+      AGENT_COM_BOUNDED_PG16_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+      AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/agent_comms_bounded17_test
+      AUN_BOUNDED_TEST_STAGE: ci
     outputs:
       route: ${{ steps.classify.outputs.route }}
     steps:
@@ -88,7 +105,57 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify isolated PostgreSQL versions and record tested subject
+        run: |
+          set -euo pipefail
+          test "$(psql "$AGENT_COM_BOUNDED_PG16_TEST_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num')::int BETWEEN 160000 AND 169999 AND current_database()='agent_comms_test' AND inet_server_port()=5432")" = t
+          test "$(psql "$AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num')::int BETWEEN 170000 AND 179999 AND current_database()='agent_comms_bounded17_test' AND inet_server_port()=5432 AND current_setting('transaction_timeout',true) IS NOT NULL")" = t
+          psql "$AGENT_COM_BOUNDED_PG16_TEST_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 -c "SELECT current_database(),current_user,current_setting('server_version_num'),inet_server_port()" > bounded-ci-versions.txt
+          psql "$AGENT_COM_BOUNDED_PG17_TEST_DATABASE_URL" -X -At -v ON_ERROR_STOP=1 -c "SELECT current_database(),current_user,current_setting('server_version_num'),inet_server_port()" >> bounded-ci-versions.txt
+          bounded_fixture_dir=$(mktemp -d "$RUNNER_TEMP/aun-bounded-ci.XXXXXX")
+          chmod 700 "$bounded_fixture_dir"
+          printf 'AUN_BOUNDED_FIXTURE_ROOT=%s\n' "$bounded_fixture_dir" >> "$GITHUB_ENV"
+          node --input-type=module > bounded-ci-subject.json <<'JS'
+          import {readFileSync,createReadStream,mkdtempSync,openSync,closeSync,rmSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          const gitOptions={timeout:15000,maxBuffer:16*1024*1024};
+          const git=(...a)=>execFileSync('git',a,{...gitOptions,encoding:'utf8'}).trim();
+          const sha=b=>createHash('sha256').update(b).digest('hex');
+          const event=JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH,'utf8'));
+          const tested_commit=git('rev-parse','HEAD'),candidate_head=event.pull_request?.head.sha??tested_commit;
+          const base=event.pull_request?.base.sha??'0f772883db6f3b50772d3e4b82ce47795091f0a9';
+          // Preserve the complete binary diff checksum without buffering the
+          // growing raw-evidence packet in execFileSync's stdout limit.
+          const diffDir=mkdtempSync(join(process.env.RUNNER_TEMP,'aun-subject-diff-'));
+          const diffPath=join(diffDir,'subject.diff'),diffFd=openSync(diffPath,'wx',0o600);
+          let binary_diff_sha256;
+          try {
+            try {execFileSync('git',['diff','--binary','--full-index',`${base}...${candidate_head}`],{...gitOptions,stdio:['ignore',diffFd,'pipe']});}
+            finally {closeSync(diffFd);}
+            const digest=createHash('sha256');
+            for await(const chunk of createReadStream(diffPath))digest.update(chunk);
+            binary_diff_sha256=digest.digest('hex');
+          } finally {rmSync(diffDir,{recursive:true,force:true});}
+          const test_files_sha256=Object.fromEntries(['admission','admission_postgres','retry','use_trace'].map(n=>{
+            const p=`tests/contract/test_queue_bounded_${n}.test.ts`;return[p,sha(readFileSync(p))];
+          }));
+          console.log(JSON.stringify({base,candidate_head,candidate_tree:git('rev-parse',`${candidate_head}^{tree}`),tested_commit,
+            tested_tree:git('rev-parse','HEAD^{tree}'),tested_parents:git('rev-list','--parents','-n1','HEAD').split(' ').slice(1),
+            binary_diff_sha256,test_files_sha256,
+            design_raw_sha256:'ed86b14f35b97d8483bf8052dd73765732c4568a945cb6e59bc6b8b7e99ea703',
+            design_canonical_sha256:'880b99e5514f9791968ba8971e9d526b59173732986c12a54e8db04413f1972e',
+            run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT,scope:'TESTED_CHECKOUT_OBSERVATION',private_status:'PRIVATE_STAGE_REQUIRED'}));
+          JS
+
       - name: Run migrations
+        run: bun run db/migrate.ts
+
+      - name: Run bounded PostgreSQL 17 migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5433/agent_comms_bounded17_test
+          AGENT_COM_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/agent_comms_bounded17_test
         run: bun run db/migrate.ts
 
       - name: Type check
@@ -119,6 +186,74 @@ jobs:
             echo "::notice::route:fast-merge — CI green still requires Shirube/owner exact-head controls before merge."
           fi
 
+      - name: Shirube source-admission gate
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git diff --name-only origin/main...HEAD > changed-files.txt
+          node scripts/shirube-current-overlay-check.mjs \
+            --mode source-admission \
+            --repo "${{ github.repository }}" \
+            --event "$GITHUB_EVENT_PATH" \
+            --changed-files changed-files.txt
+
+      - name: Prepare pinned native Wasurezu fixture
+        run: |
+          set -euo pipefail
+          native_fixture_receipt_dir=$(mktemp -d "$RUNNER_TEMP/aun-native-receipt.XXXXXX")
+          AUN_TEST_WASUREZU_OUTPUT="$native_fixture_receipt_dir/source-root.txt" \
+            bash scripts/prepare-seat-continuity-test-wasurezu.sh
+          native_fixture_root=$(cat "$native_fixture_receipt_dir/source-root.txt")
+          test -f "$native_fixture_root/dist/native-context-delivery.js"
+          printf 'AUN_TEST_WASUREZU_ROOT=%s\n' "$native_fixture_root" >> "$GITHUB_ENV"
+
+      - name: Verify six reproducibility cases in separate processes
+        run: |
+          set -euo pipefail
+          bun test tests/runtime-memory-ready.test.ts -t '^runtime memory-ready evidence gate SQLite dry-run reads a clean rollback-journal database without file or journal changes$' --timeout 30000 --reporter=junit --reporter-outfile=repro-sqlite.xml
+          bun test tests/norm-022-runtime-endpoint-lease.test.ts -t '^NORM-022 frozen runtime endpoint lease fixtures healthy_endpoint_lease$' --timeout 30000 --reporter=junit --reporter-outfile=repro-norm-healthy.xml
+          bun test tests/norm-022-runtime-endpoint-lease.test.ts -t '^NORM-022 frozen runtime endpoint lease fixtures multi_channel_single_runtime$' --timeout 30000 --reporter=junit --reporter-outfile=repro-norm-multi.xml
+          bun test tests/contract/test_runtime_nonpersist_configuration_contract.test.ts -t '^AC-CFG-1 fresh hostname' --timeout 30000 --reporter=junit --reporter-outfile=repro-cfg1.xml
+          bun test tests/contract/test_runtime_nonpersist_configuration_contract.test.ts -t '^AC-CFG-2 ordinary reconcile' --timeout 30000 --reporter=junit --reporter-outfile=repro-cfg2.xml
+          bun test tests/contract/test_runtime_nonpersist_authority.test.ts -t '^NP04 valid UUID replay in a different actual process/workspace' --timeout 30000 --reporter=junit --reporter-outfile=repro-np04.xml
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          files=glob.glob('repro-*.xml')
+          assert len(files)==6, files
+          for file in files:
+              cases=list(ET.parse(file).getroot().iter('testcase'))
+              executed=[c for c in cases if not any(x.tag=='skipped' for x in c)]
+              assert len(executed)==1, (file,len(executed))
+              assert not any(x.tag in ('failure','error') for c in cases for x in c), file
+          PY
+
+      - name: Run full test suite
+        run: bun test --timeout 30000 --reporter=junit --reporter-outfile=bounded-full.xml
+
+      - name: Verify bounded public stage (private stage remains required)
+        run: |
+          python3 - ci bounded-full.xml > bounded-ci-stage.json <<'PY'
+          import hashlib, json, sys, xml.etree.ElementTree as ET
+          route, file = sys.argv[1:]
+          assert route in ("ci", "local17", "private"), "route_invalid"
+          private = ["BA-CORE-F08", "BA-CORE-F10"]
+          core = [f"BA-CORE-F{i:02}" for i in range(1, 12) if i not in (8, 10)]
+          pg17 = [f"BA-17-F{n}-{x}" for n in (12, 13) for x in "ABC"]
+          pg16 = ["BA-16-MIGRATION", "BA-16-UNSUPPORTED", "BA-16-DEFAULT-CLAIM", "BA-16-DEFAULT-RETRY"]
+          required = private if route == "private" else core + pg17 + (pg16 if route == "ci" else [])
+          raw = open(file, "rb").read()
+          cases = list(ET.fromstring(raw).iter("testcase"))
+          for name in required:
+              matching = [c for c in cases if c.get("name") == name]
+              assert len(matching) == 1, (name, "missing_or_duplicate")
+              assert not any(x.tag in ("failure", "error", "skipped") for x in matching[0]), (name, "not_executed_pass")
+          assert not any(x.tag in ("failure", "error") for c in cases for x in c), "global_failure"
+          observed = [c.get("name") for c in cases if c.get("name", "").startswith("BA-")]
+          assert set(observed) == set(required) and len(observed) == len(required), "stage_identity_partition"
+          print(json.dumps({"route":route,"required_ids":required,"executed_pass":len(required),"required_failed_or_skipped":0,"junit_sha256":hashlib.sha256(raw).hexdigest(),"other_skipped":sum(any(x.tag=="skipped" for x in c) for c in cases),"scope":"STAGE_PROCEDURE_ONLY","private_status":"VERIFIED_IN_SEPARATE_STAGE" if route=="private" else "PRIVATE_STAGE_REQUIRED"}))
+          PY
+
       - name: Shirube current-overlay gate
         if: github.event_name == 'pull_request'
         env:
@@ -130,15 +265,18 @@ jobs:
             --event "$GITHUB_EVENT_PATH" \
             --changed-files changed-files.txt
 
-      - name: Run full test suite
-        run: bun test --timeout 30000
-
       - name: Upload route classification
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: route-${{ github.event.pull_request.number }}
-          path: route.json
+          path: |
+            route.json
+            bounded-full.xml
+            bounded-ci-stage.json
+            bounded-ci-subject.json
+            bounded-ci-versions.txt
+            repro-*.xml
           retention-days: 7
 
   # ── Auto-merge (owner exact-head + explicit method gated) ────────────────

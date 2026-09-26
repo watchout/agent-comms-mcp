@@ -133,16 +133,16 @@ async function fixture(): Promise<{
   const seed = new Database(path)
   seed.exec(`
     INSERT INTO agents
-      (agent_id, display_name, agent_type, status, metadata, profile_enabled,
+      (agent_id, display_name, agent_type, metadata, profile_enabled,
        profile_revision, profile_source, profile_updated_at)
     VALUES
-      ('dev-001', 'Dev', 'dev', 'idle', '{"custom":"preserved"}', 1, 4, 'legacy', '2026-08-01T00:00:00Z'),
-      ('billing-production', 'Fixture', 'dev', 'idle', '{}', 1, 2, 'legacy', NULL),
-      ('human-owner', 'Owner', 'human', 'idle', '{}', 1, 1, 'legacy', NULL),
-      ('disabled-dev', 'Disabled', 'dev', 'disabled', '{}', 0, 3, 'legacy', NULL);
+      ('dev-001', 'Dev', 'dev', '{"custom":"preserved"}', 1, 4, 'legacy', '2026-08-01T00:00:00Z'),
+      ('billing-production', 'Fixture', 'dev', '{}', 1, 2, 'legacy', NULL),
+      ('human-owner', 'Owner', 'human', '{}', 1, 1, 'legacy', NULL),
+      ('disabled-dev', 'Disabled', 'dev', '{}', 0, 3, 'legacy', NULL);
 
-    INSERT INTO agent_workspaces (workspace_id, name, local_path, repo_url)
-    VALUES ('ws-dev', 'Dev workspace', '/work/dev', 'https://github.com/watchout/agent-comms-mcp.git');
+    INSERT INTO agent_workspaces (workspace_id, name, repo_url)
+    VALUES ('ws-dev', 'Dev workspace', 'https://github.com/watchout/agent-comms-mcp.git');
     INSERT INTO agent_workspace_bindings (agent_id, workspace_id, binding_role, active)
     VALUES ('dev-001', 'ws-dev', 'primary', 1);
   `)
@@ -354,8 +354,8 @@ describe('Cell 20 registry identity reconciliation', () => {
       })).rejects.toThrow('REGISTRY_RECONCILIATION_EXACT_SUBJECT_OR_INPUT_DRIFT')
 
       await db.execute(
-        `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id, runtime_engine, status)
-         VALUES ('runtime-drift', 'dev-001', 'codex', 'active')`,
+        `INSERT INTO agent_runtime_instances (runtime_instance_id, agent_id)
+         VALUES ('runtime-drift', 'dev-001')`,
       )
       await expect(applyRegistryIdentityReconciliation(db, plan, applyOptions(plan, rawInput)))
         .rejects.toThrow('REGISTRY_RECONCILIATION_RELATED_ROW_DRIFT')
@@ -366,16 +366,14 @@ describe('Cell 20 registry identity reconciliation', () => {
     }
   })
 
-  test('heartbeat-only timestamps keep the plan byte-stable and do not invalidate apply', async () => {
+  test('rejected runtime timestamps and logical binding timestamps keep the plan stable', async () => {
     const { db, rawInput } = await fixture()
     try {
       await db.execute(
         `INSERT INTO agent_runtime_instances
-           (runtime_instance_id, agent_id, workspace_id, runtime_engine, status, commit_sha,
-            endpoint_uri, last_seen_at)
+           (runtime_instance_id, agent_id, workspace_id, metadata)
          VALUES
-           ('runtime-heartbeat', 'dev-001', 'ws-dev', 'codex', 'active', 'runtime-head',
-            'http://127.0.0.1:3000', '2026-08-05T00:00:00Z')`,
+           ('runtime-heartbeat', 'dev-001', 'ws-dev', '{}')`,
       )
       await db.execute(
         `UPDATE agent_workspace_bindings
@@ -384,11 +382,11 @@ describe('Cell 20 registry identity reconciliation', () => {
       )
       const before = await buildRegistryIdentityReconciliationPlan(db, rawInput, { [SOURCE_REF]: SOURCE_BODY })
 
-      await db.execute(
+      await expect(db.execute(
         `UPDATE agent_runtime_instances
             SET last_seen_at = '2026-08-05T00:05:00Z'
           WHERE runtime_instance_id = 'runtime-heartbeat'`,
-      )
+      )).rejects.toThrow('AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN')
       await db.execute(
         `UPDATE agent_workspace_bindings
             SET updated_at = '2026-08-05T00:05:00Z'
@@ -409,8 +407,8 @@ describe('Cell 20 registry identity reconciliation', () => {
     const { db, rawInput, plan } = await fixture()
     try {
       await db.execute(
-        `INSERT INTO agents (agent_id, display_name, agent_type, status, metadata, profile_enabled)
-         VALUES ('late-seat', 'Late', 'dev', 'idle', '{}', 1)`,
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata, profile_enabled)
+         VALUES ('late-seat', 'Late', 'dev', '{}', 1)`,
       )
       await expect(applyRegistryIdentityReconciliation(db, plan, applyOptions(plan, rawInput)))
         .rejects.toThrow('REGISTRY_RECONCILIATION_DENOMINATOR_DRIFT')

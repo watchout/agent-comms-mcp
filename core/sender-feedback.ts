@@ -1,24 +1,9 @@
-/**
- * Sender-delivery-status feedback (spec §8.2).
- *
- * Motivation: when A sends to B, the delivery is synchronous only if B is
- * `idle`. If B is `busy` or `disconnected`, B won't see the message until
- * some later event — but A has no way to know that. Spec §8.2 requires that
- * we insert a system-authored row into A's own `message_queue` describing
- * the target's state so A's next `agent-com next` surfaces the information.
- *
- * Contract:
- *   - `idle` target → no-op (immediate delivery; nothing to feed back).
- *   - `busy` target → `system_info` row: "⏳ {targetId} はタスク処理中, キュー待ち N 件".
- *   - `disconnected` target → `system_error` row: "⚠️ {targetId} はオフラインです...".
- *   - Unknown / unregistered sender (senderId not in `agents`) → no-op so
- *     Discord-human posts don't fan out phantom feedback rows.
- *
- * All I/O is best-effort: failure writes to stderr but never throws — feedback
- * is advisory, so a DB hiccup must not fail the outer send/notify/inbound
- * flow. The only caller-visible side effect is the optional message_queue row.
- */
+import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 
+/** Best-effort delivery advisory from logical claims and fresh OS observation.
+ * Busy emits an out-of-band signal; only confirmed absence enqueues an error.
+ * Historical agent status and copied physical diagnostics are never authority.
+ */
 /**
  * Minimal DB shape — matches `core/route-message-db.DbAdapter` so the same
  * instance returned by `coreDbAdapter()` works here without adaptation.
@@ -30,10 +15,11 @@ export interface SenderFeedbackDb {
 export interface NotifyDeliveryStatusArgs {
   /** agent_id of the sender (NOT a Discord user id). Required to insert a row. */
   senderId: string
-  /** agent_id of the target — looked up in the `agents` table for status. */
+  /** Logical recipient identity. */
   targetId: string
   /** agent_messages.id of the source message, for audit / traceability. Optional. */
   messageId?: string | null
+  inspect?: HostRuntimeInspector
 }
 
 export async function notifySenderOfDeliveryStatus(
@@ -58,23 +44,16 @@ export async function notifySenderOfDeliveryStatus(
       return { emitted: null, reason: 'sender-not-registered' }
     }
 
-    const targetRow = await db.query<{ status: string | null }>(
-      `SELECT status FROM agents WHERE agent_id = $1`,
+    const targetRow = await db.query<{ agent_id: string }>(
+      `SELECT agent_id FROM agents WHERE agent_id = $1`, [targetId],
+    )
+    if (targetRow.rows.length === 0) return { emitted: null, reason: 'target-unknown' }
+    const claims = await db.query<{ id: string | number }>(
+      `SELECT id FROM message_queue WHERE agent_id=$1 AND claimed_by=$1
+        AND status IN ('received','in_progress') AND claim_expires_at > clock_timestamp() LIMIT 1`,
       [targetId],
     )
-    const targetStatus = targetRow.rows[0]?.status ?? null
-    if (targetStatus === null || targetStatus === undefined) {
-      return { emitted: null, reason: 'target-unknown' }
-    }
-    if (targetStatus === 'idle' || targetStatus === 'online') {
-      return { emitted: null, reason: 'target-idle' }
-    }
-    if (targetStatus !== 'busy' && targetStatus !== 'disconnected') {
-      // Unknown status keyword — treat as idle to avoid spamming on new states.
-      return { emitted: null, reason: `target-status-${targetStatus}` }
-    }
-
-    if (targetStatus === 'busy') {
+    if (claims.rows.length > 0) {
       // Issue #251 (b) — skip the queue INSERT for the busy /
       // system_info notification. It's an out-of-band signal to the
       // sender ("target is processing, N queued"), not an actionable
@@ -84,6 +63,9 @@ export async function notifySenderOfDeliveryStatus(
       // intact, with reason='queue-skip' to disambiguate.
       return { emitted: 'system_info', reason: 'queue-skip' }
     }
+    const current = (args.inspect ?? inspectHostRuntime)({agentId: targetId})
+    if (current.observations.length > 0) return {emitted: null, reason: 'target-idle'}
+    if (current.reasonCode !== 'NO_LIVE_RUNTIME') return {emitted: null, reason: 'target-unavailable'}
     const content = `⚠️ ${targetId} はオフラインです、セッション復旧後に配信されます`
     const messageType: 'system_error' = 'system_error'
 

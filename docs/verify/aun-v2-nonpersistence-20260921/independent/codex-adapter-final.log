@@ -1,0 +1,49 @@
+bun test v1.3.11 (af24e281)
+
+tests/aun-bootstrap-codex-adapter.test.ts:
+(pass) aun bootstrap Codex adapter > observed account root never permits a foreign global tuple to be rewritten and fences PID reuse [2.39ms]
+(pass) aun bootstrap Codex adapter > uses provider CLI registration and exact get/list readback [0.64ms]
+(pass) aun bootstrap Codex adapter > exact existing registration is idempotent and creates no mutation [0.15ms]
+(pass) aun bootstrap Codex adapter > mcp add that mutates then exits 124 returns an observed mutation and native rollback proof [2.88ms]
+{"fixture":"B4_ABSENT_PRESTATE_FOREIGN_TUPLE_FENCE","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","remove_calls":0,"foreign_tuple_preserved":true}
+(pass) aun bootstrap Codex adapter > absent-prestate recovery preserves a foreign current tuple without invoking remove [0.49ms]
+{"fixture":"B4_FINAL_CHECK_TO_REMOVE_FOREIGN_TUPLE_RACE","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","remove_calls":0,"foreign_tuple_preserved":true}
+(pass) aun bootstrap Codex adapter > absent-prestate rollback preserves a foreign tuple replaced after final readback and before remove [1.40ms]
+{"fixture":"B4_NULL_SENTINEL_ATOMIC_FOREIGN_WINNER","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","foreign_bytes_preserved":true,"foreign_link_count":1,"residue":false}
+(pass) aun bootstrap Codex adapter > null-prestate sentinel commit atomically preserves a foreign winner with zero residue [2.17ms]
+{"fixture":"B4_NULL_SENTINEL_SIGKILL_FOREIGN_WINNER_RECOVERY","child_exit_signal":"SIGKILL","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","foreign_bytes_preserved":true,"foreign_link_count":1,"residue":false}
+(pass) aun bootstrap Codex adapter > null-prestate SIGKILL recovery atomically preserves a foreign winner with zero residue [28.13ms]
+{"fixture":"B4_ADMITTED_PROVIDER_AUTHORITY_DIGEST_DRIFT","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","remove_calls":0,"intended_tuple_preserved":true}
+(pass) aun bootstrap Codex adapter > absent-prestate rollback rejects admitted provider-authority digest drift with zero remove [0.40ms]
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"move","recovery_admission":false,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"remove","recovery_admission":false,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"commit","recovery_admission":false,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"move","recovery_admission":true,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"remove","recovery_admission":true,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+{"fixture":"B4_PRIVATE_REMOVE_HARD_CRASH_RECOVERY","boundary":"commit","recovery_admission":true,"child_exit_signal":"SIGKILL","exact_recovery":true,"false_no_effect_receipt":false,"residue":false}
+(pass) aun bootstrap Codex adapter > absent-prestate conditional remove recovers exactly after SIGKILL with no false no-effect receipt [159.61ms]
+{"fixture":"B4_IMPLICIT_POSTGRES_AUTHORITY_UNAVAILABLE","database_url_present":true,"agent_com_db_present":false,"provider_mutations":0,"result":"NO_GO_ROLLBACK_UNVERIFIED"}
+(pass) aun bootstrap Codex adapter > implicit PostgreSQL authority fails closed when live DATABASE_URL readback is unavailable [4.00ms]
+(pass) aun bootstrap Codex adapter > post-exit readback uses a fresh bounded signal after the stage signal aborts [0.48ms]
+(pass) aun bootstrap Codex adapter > unresolved post-exit target still returns a recovery-required owned mutation [0.15ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing disabled tuple without mutation [0.07ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-command tuple without mutation
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-argv tuple without mutation
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-agent tuple without mutation [0.04ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-workspace tuple without mutation [0.02ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-session tuple without mutation [0.03ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-database tuple without mutation [0.02ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-port tuple without mutation [0.02ms]
+(pass) aun bootstrap Codex adapter > rejects stale existing wrong-repo tuple without mutation [0.03ms]
+(pass) aun bootstrap Codex adapter > failed or duplicate native list readback is never absence verification [0.09ms]
+(pass) aun bootstrap Codex adapter > F7 enabled, duplicate, or unrecognized legacy tuples fail closed with zero mutation [0.84ms]
+(pass) aun bootstrap Codex adapter > F8 nonzero legacy remove with exact unchanged prestate deletes the private backup without mutation [1.10ms]
+(pass) aun bootstrap Codex adapter > current Codex native JSON shape upgrades the exact disabled legacy tuple [2.37ms]
+(pass) aun bootstrap Codex adapter > F13 a hard-linked provider artifact fails closed before native mutation [0.70ms]
+{"fixture":"B4_PROVIDER_FINAL_CHECK_TO_COMMIT_RACE","rollback_result":"NO_GO_ROLLBACK_UNVERIFIED","no_clobber_commit":true,"foreign_bytes_preserved":true,"private_backup_retained":true,"displaced_run_owned_residue":false}
+(pass) aun bootstrap Codex adapter > recognized disabled user-scope legacy tuple upgrades with a private durable backup and exact rollback [7.99ms]
+
+ 28 pass
+ 0 fail
+ 262 expect() calls
+Ran 28 tests across 1 file. [242.00ms]

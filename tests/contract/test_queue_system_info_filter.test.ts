@@ -34,14 +34,16 @@ dbDescribe('test_queue_system_info_filter — busy / system_info path no longer 
     await client.connect()
     // Register the test agents so the SELECT FROM agents in
     // sender-feedback finds them.
-    for (const [id, status] of [[SENDER, 'idle'], [BUSY_TARGET, 'busy'], [OFFLINE_TARGET, 'disconnected']] as const) {
+    for (const [id] of [[SENDER, 'idle'], [BUSY_TARGET, 'busy'], [OFFLINE_TARGET, 'disconnected']] as const) {
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-         VALUES ($1, $1, 'dev', 'claude-code', $2)
-         ON CONFLICT (agent_id) DO UPDATE SET status = EXCLUDED.status`,
-        [id, status],
+        `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'dev')
+         ON CONFLICT (agent_id) DO NOTHING`,
+        [id],
       )
     }
+    await client.query(`INSERT INTO message_queue(agent_id,payload,status,claimed_by,claimed_at,claim_expires_at)
+      VALUES($1,'{}','in_progress',$1,clock_timestamp(),clock_timestamp()+interval '10 minutes')`,[BUSY_TARGET])
   })
 
   beforeEach(async () => {
@@ -50,6 +52,7 @@ dbDescribe('test_queue_system_info_filter — busy / system_info path no longer 
 
   afterAll(async () => {
     await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [SENDER])
+    await client.query('DELETE FROM message_queue WHERE agent_id=$1',[BUSY_TARGET])
     for (const id of [SENDER, BUSY_TARGET, OFFLINE_TARGET]) {
       await client.query(`DELETE FROM agents WHERE agent_id = $1`, [id])
     }
@@ -116,6 +119,12 @@ dbDescribe('test_queue_system_info_filter — busy / system_info path no longer 
       [SENDER],
     )
     expect(parseInt(rows.rows[0].n, 10)).toBe(0)
+  })
+
+  test('OS inspection failure is unknown and never creates an offline advisory',async()=>{
+    const result=await notifySenderOfDeliveryStatus(client,{senderId:SENDER,targetId:OFFLINE_TARGET,inspect:()=>({observations:[],reasonCode:'HOST_OBSERVATION_DEADLINE'})})
+    expect(result).toEqual({emitted:null,reason:'target-unavailable'})
+    expect((await client.query('SELECT id FROM message_queue WHERE agent_id=$1',[SENDER])).rows).toHaveLength(0)
   })
 
   test('(5) wrapper bumps systemError counter on disconnected target (and queue row stays)', async () => {

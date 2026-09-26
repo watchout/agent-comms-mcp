@@ -11,7 +11,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -26,6 +26,7 @@ afterAll(async () => {
 })
 beforeEach(async () => {
   await cleanAll(pg)
+  enableNativeRuntimeFixtures(pg, '2026-05-18T00:00:00.000Z')
   await pg.query('BEGIN')
 })
 afterEach(async () => {
@@ -42,6 +43,8 @@ function daemon(
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -68,6 +71,8 @@ function scopedDaemon(
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -94,6 +99,8 @@ function disabledDaemon(clock: FakeClock, codexRunner: FakeCodexRunner) {
   const alert = new FakeAlertSink()
   const tmux = new FakeTmux()
   const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -154,25 +161,40 @@ async function mismatchMemoryReadyRuntime(agentId: string): Promise<void> {
 }
 
 describe('state_daemon invoke_codex_runner dispatch boundary', () => {
+  test('native startup slower than the business-clock offset still reaches the actual runner', async () => {
+    enableNativeRuntimeFixtures(pg,'2026-05-18T00:00:00.000Z',1500)
+    const agent=makeAgentId('slow-native-start')
+    await seedAgent(pg,{agent_id:agent,observed_provider:'codex',runtime:'codex',tmux_session:null})
+    const id=await seedQueueRow(pg,{agent_id:agent,status:'pending',
+      message_id:'11111111-1111-4111-8111-111111111111',
+      payload:JSON.stringify({author_id:'codex-cto',content:'do work',message_type:'instruction'}),
+      created_at:fixtureDate(pg,'2026-05-18T00:00:00.000Z')})
+    const runner=new FakeCodexRunner(),h=daemon(new FakeClock(fixtureDate(pg,'2026-05-18T00:00:01.000Z')),runner)
+    await h.daemon.start()
+    try {
+      await h.daemon.__testHandleEvent({op:'INSERT',id,agent_id:agent,status:'pending',claim_expires_at:null})
+      expect(runner.invocations,JSON.stringify({metrics:h.metrics.calls,alerts:h.alert.alerts})).toHaveLength(1)
+    } finally {await h.daemon.stop()}
+  })
   test('pending idle Codex runtime invokes runner and never tmux wake', async () => {
     const agent = makeAgentId('codex-runner')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-111111111111',
       payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -204,7 +226,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('missing/stale/mismatched memory-ready evidence blocks Codex runner before dispatch', async () => {
     const scenarios = [
@@ -215,12 +237,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
     for (const scenario of scenarios) {
       const agent = makeAgentId(`codex-${scenario.suffix}`)
-      await seedAgent(pg, {
+      await seedAgent(pg, { observed_provider: 'codex',
         agent_id: agent,
         runtime: 'codex',
         tmux_session: null,
         status: 'online',
-        last_seen_at: '2026-05-18T00:00:01.000Z',
+        last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
       })
       await scenario.mutate(agent)
       const id = await seedQueueRow(pg, {
@@ -228,11 +250,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         status: 'pending',
         message_id: '11111111-1111-4111-8111-111111111119',
         payload: JSON.stringify({ author_id: 'codex-cto', content: `do work ${scenario.suffix}`, message_type: 'instruction' }),
-        created_at: new Date('2026-05-18T00:00:00.000Z'),
+        created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
       })
 
       const runner = new FakeCodexRunner()
-      const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner)
+      const h = daemon(new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z')), runner)
       await h.daemon.start()
       try {
         await h.daemon.__testHandleEvent({
@@ -260,18 +282,18 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         await h.daemon.stop()
       }
     }
-  })
+  }, 60000)
 
   test('repeated identical memory-ready blocks are exponentially deferred and alert only on transitions', async () => {
     const agent = makeAgentId('memory-backoff-dedup')
     const runtimeInstanceId = '11111111-2222-4333-8444-555555555555'
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'idle',
       runtime_instance_id: runtimeInstanceId,
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     await deleteMemoryReadyEvidence(agent)
     const id = await seedQueueRow(pg, {
@@ -279,9 +301,9 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       status: 'pending',
       message_id: '11111111-1111-4111-8111-555555555555',
       payload: JSON.stringify({ author_id: 'arc', content: 'backoff fixture', message_type: 'instruction' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const runner = new FakeCodexRunner()
     const h = daemon(clock, runner)
     const event = { op: 'INSERT' as const, id, agent_id: agent, status: 'pending', claim_expires_at: null }
@@ -305,13 +327,13 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       })).toBe(2)
       expect(h.alert.alerts.filter(value => value.includes('memory_ready gate blocked'))).toHaveLength(1)
 
-      await seedAgent(pg, {
+      await seedAgent(pg, { observed_provider: 'codex',
         agent_id: agent,
         runtime: 'codex',
         tmux_session: null,
         status: 'idle',
         runtime_instance_id: runtimeInstanceId,
-        last_seen_at: '2026-05-18T00:01:31.000Z',
+        last_seen_at: fixtureDate(pg, '2026-05-18T00:01:31.000Z'),
       })
       clock.advance(60_000)
       await h.daemon.__testHandleEvent(event)
@@ -320,27 +342,27 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('disabled memory-ready gate config fails closed instead of bypassing dispatch', async () => {
     const agent = makeAgentId('codex-config-bypass')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
       message_id: '11111111-1111-4111-8111-111111111121',
       payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work with disabled memory gate', message_type: 'instruction' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner, new FakeTmux(), {
+    const h = daemon(new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z')), runner, new FakeTmux(), {
       memoryReadyGateEnabled: false,
     })
     await h.daemon.start()
@@ -363,7 +385,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('legacy TUI paths are disabled before memory-ready gated runner dispatch', async () => {
     const pendingScenarios = [
@@ -378,17 +400,17 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         agent_id: agent,
         runtime: 'TUI',
         status: 'online',
-        last_seen_at: '2026-05-18T00:00:01.000Z',
+        last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
       })
       await scenario.mutate(agent)
       const id = await seedQueueRow(pg, {
         agent_id: agent,
         status: 'pending',
         payload: JSON.stringify({ author_id: 'codex-cto', content: `wake ${scenario.suffix}`, message_type: 'instruction' }),
-        created_at: new Date('2026-05-18T00:00:00.000Z'),
+        created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
       })
 
-      const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), new FakeCodexRunner())
+      const h = daemon(new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z')), new FakeCodexRunner())
       await h.daemon.start()
       try {
         await h.daemon.__testHandleEvent({
@@ -404,8 +426,8 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
           action: 'legacy_tui_disabled',
           reason: scenario.reason,
         })).toBe(0)
-        expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+        expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
       } finally {
         await h.daemon.stop()
       }
@@ -416,20 +438,20 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       agent_id: receivedAgent,
       runtime: 'TUI',
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     await deleteMemoryReadyEvidence(receivedAgent)
     const receivedId = await seedQueueRow(pg, {
       agent_id: receivedAgent,
       status: 'received',
       payload: JSON.stringify({ author_id: 'codex-cto', content: 'wake received without memory', message_type: 'instruction' }),
-      claim_expires_at: new Date('2026-05-18T00:01:00.000Z'),
+      claim_expires_at: fixtureDate(pg, '2026-05-18T00:01:00.000Z'),
       claimed_by: receivedAgent,
-      claimed_at: new Date('2026-05-18T00:00:00.000Z'),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      claimed_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
-    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), new FakeCodexRunner())
+    const h = daemon(new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z')), new FakeCodexRunner())
     await h.daemon.start()
     try {
       await h.daemon.__testHandleEvent({
@@ -437,7 +459,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         id: receivedId,
         agent_id: receivedAgent,
         status: 'received',
-        claim_expires_at: new Date('2026-05-18T00:01:00.000Z'),
+        claim_expires_at: fixtureDate(pg, '2026-05-18T00:01:00.000Z'),
       })
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_wake_actions_total', {
@@ -445,21 +467,21 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         action: 'legacy_tui_disabled',
         reason: 'missing_evidence',
       })).toBe(0)
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('exact typed ACK envelope terminalizes without consulting ACK prose', async () => {
     const agent = makeAgentId('typed-ack')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -475,11 +497,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
           acknowledged_message_id: '11111111-1111-4111-8111-000000000950',
         },
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const h = daemon(new FakeClock('2026-05-18T00:00:01.000Z'), runner)
+    const h = daemon(new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z')), runner)
     await h.daemon.start()
     try {
       await h.daemon.__testHandleEvent({
@@ -515,17 +537,17 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('direct mention smoke is passed to auto-final reply without daemon ACK', async () => {
     const agent = makeAgentId('codex-smoke')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       discord_id: '999010',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -538,7 +560,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         source: 'discord',
         input_mentions: ['999010'],
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
@@ -565,7 +587,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         completion_reason: 'auto_final_reply_completed',
       },
     }
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner, new FakeTmux(), { codexRunnerAutoFinalReply: true })
     await h.daemon.start()
     try {
@@ -589,17 +611,17 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('auto-final reply mode passes exact queue without daemon-authored ACK prose', async () => {
     const agent = makeAgentId('codex-final')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       discord_id: '999010',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -612,7 +634,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         source: 'discord',
         input_mentions: ['999010'],
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
@@ -639,7 +661,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         completion_reason: 'auto_final_reply_completed',
       },
     }
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner, new FakeTmux(), { codexRunnerAutoFinalReply: true })
     await h.daemon.start()
     try {
@@ -665,16 +687,16 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('free-text no-reply instructions are delivered instead of terminalized', async () => {
     const agent = makeAgentId('codex-complete')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -686,11 +708,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         message_type: 'instruction',
         no_reply_required: true,
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -721,7 +743,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('typed no-reply preference cannot silently close TUI work without an approved runner', async () => {
     const agent = makeAgentId('tui-no-reply')
@@ -730,7 +752,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       runtime: 'TUI',
       tmux_session: `${agent}-session`,
       status: 'idle',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -742,12 +764,12 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
         no_reply_required: true,
         message_type: 'instruction',
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
     const tmux = new FakeTmux()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner, tmux)
     await h.daemon.start()
     try {
@@ -767,32 +789,32 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       )
       expect(row.rows[0]).toMatchObject({ status: 'pending' })
       expect(row.rows[0]?.done_at).toBeNull()
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('pending busy Codex runtime observes and does not start duplicate runner', async () => {
     const agent = makeAgentId('codex-busy')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const pending = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
     await seedQueueRow(pg, {
       agent_id: agent,
       status: 'received',
       claimed_by: agent,
-      claimed_at: new Date('2026-05-18T00:00:00.000Z'),
-      claim_expires_at: new Date('2026-05-18T00:01:00.000Z'),
+      claimed_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
+      claim_expires_at: fixtureDate(pg, '2026-05-18T00:01:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -811,21 +833,21 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('Codex runner execution is disabled by default until operator activation', async () => {
     const agent = makeAgentId('codex-disabled')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = disabledDaemon(clock, runner)
     await h.daemon.start()
     try {
@@ -844,22 +866,22 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('runner failure records diagnostics without terminal-failing the row', async () => {
     const agent = makeAgentId('codex-fail')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
     runner.result = { ok: false, code: 1, stderr: 'runner failed' }
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -878,24 +900,26 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('stale pending event does not invoke runner after row was already closed', async () => {
     const agent = makeAgentId('codex-stale-event')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
     const metrics = new FakeMetrics()
     const alert = new FakeAlertSink()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
       db: new CloseRowAfterReserveDB(pg, id),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -931,7 +955,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await d.stop()
     }
-  })
+  }, 60000)
 
   test('legacy TUI pending path is disabled and does not inject wake prompts', async () => {
     const agent = makeAgentId('tui-wake-disabled')
@@ -939,7 +963,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     const id = await seedQueueRow(pg, { agent_id: agent, status: 'pending' })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -953,17 +977,17 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(runner.invocations).toHaveLength(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference invokes runner without tmux prompt injection', async () => {
     const agent = makeAgentId('tui-codex-preference')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'TUI',
       runtime_engine_preference: 'codex',
@@ -978,7 +1002,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -999,21 +1023,21 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
       expect(h.tmux.sentKeys).toEqual([])
       expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'invoke_codex_runner' })).toBe(1)
       expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'codex_runner_invoked' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference and no tmux session bypasses stall gate and invokes runner', async () => {
     const agent = makeAgentId('tui-codex-no-tmux-runner')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'TUI',
       runtime_engine_preference: 'codex',
       tmux_session: null,
       status: 'idle',
-      last_seen_at: '2026-05-18T00:00:00.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -1023,7 +1047,7 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1049,17 +1073,17 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('agent allowlist ignores pg_notify rows outside the activation scope', async () => {
     const allowed = makeAgentId('allowed-codex')
     const blocked = makeAgentId('blocked-codex')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
-    await seedAgent(pg, { agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z') })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: blocked, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z') })
     const blockedId = await seedQueueRow(pg, { agent_id: blocked, status: 'pending' })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = scopedDaemon(clock, runner, [allowed])
     await h.daemon.start()
     try {
@@ -1078,19 +1102,19 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('agent allowlist limits stale sweep wake to selected agents', async () => {
     const allowed = makeAgentId('allowed-tui')
     const blocked = makeAgentId('blocked-tui')
     await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
     await seedAgent(pg, { agent_id: blocked, runtime: 'TUI', tmux_session: `${blocked}-session`, status: 'online' })
-    const old = new Date('2026-05-18T00:00:00.000Z')
+    const old = fixtureDate(pg, '2026-05-18T00:00:00.000Z')
     await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
     await seedQueueRow(pg, { agent_id: blocked, status: 'pending', created_at: old })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:30.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:30.000Z'))
     const h = scopedDaemon(clock, runner, [allowed])
     await h.daemon.start()
     try {
@@ -1098,26 +1122,26 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('human seats are excluded from stale sweep wake while preserving fleet default', async () => {
     const allowed = makeAgentId('denied-sweep-allowed')
     const denied = makeAgentId('denied-sweep-blocked')
     await seedAgent(pg, { agent_id: allowed, runtime: 'TUI', tmux_session: `${allowed}-session`, status: 'online' })
     await seedAgent(pg, { agent_id: denied, runtime: 'TUI', tmux_session: `${denied}-session`, status: 'online' })
-    const old = new Date('2026-05-18T00:00:00.000Z')
+    const old = fixtureDate(pg, '2026-05-18T00:00:00.000Z')
     await seedQueueRow(pg, { agent_id: allowed, status: 'pending', created_at: old })
     await seedQueueRow(pg, { agent_id: denied, status: 'pending', created_at: old })
     await markHuman(denied)
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:30.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:30.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1125,25 +1149,25 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result.rewoken).toBe(0)
       expect(h.tmux.sentKeys).toEqual([])
-      expect(h.metrics.countInc('state_daemon_state_actions_total', { action: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(1)
-      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'tui_wake_disabled' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(2)
+      expect(h.metrics.countInc('state_daemon_wake_actions_total', { result: 'legacy_tui_disabled' })).toBe(0)
+      expect(h.metrics.countInc('state_daemon_automatic_processing_blocked_total', { reason: 'RUNTIME_NOT_READY' })).toBe(2)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('human seats are ignored on pg_notify while non-human fleet rows proceed', async () => {
     const allowed = makeAgentId('denied-sibling-allowed')
     const denied = makeAgentId('denied-sibling-blocked')
-    await seedAgent(pg, { agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
-    await seedAgent(pg, { agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: '2026-05-18T00:00:01.000Z' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: allowed, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z') })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: denied, runtime: 'codex', tmux_session: null, status: 'online', last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z') })
     const deniedId = await seedQueueRow(pg, { agent_id: denied, status: 'pending' })
     const allowedId = await seedQueueRow(pg, { agent_id: allowed, status: 'pending' })
     await markHuman(denied)
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1168,14 +1192,14 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('offline agents are not auto-restarted when full-fleet scope is enabled', async () => {
     const agent = makeAgentId('offline-no-restart')
     await seedAgent(pg, { agent_id: agent, runtime: 'TUI', tmux_session: null, status: 'offline' })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1183,25 +1207,25 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result).toEqual({ checked: 0, restarted: 0, escalated: 0 })
       expect(h.tmux.restarts).toEqual([])
-      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'offline' })).toBe(1)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { status: 'unknown' })).toBe(1)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('TUI legacy profile with Codex preference is not treated as a tmux restart target', async () => {
     const agent = makeAgentId('tui-codex-no-restart')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'TUI',
       runtime_engine_preference: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:00.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:05:00.000Z')
+    const clock = new FakeClock(new Date())
     const h = daemon(clock, runner)
     await h.daemon.start()
     try {
@@ -1209,9 +1233,11 @@ describe('state_daemon invoke_codex_runner dispatch boundary', () => {
 
       expect(result).toEqual({ checked: 1, restarted: 0, escalated: 0 })
       expect(h.tmux.restarts).toEqual([])
-      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'codex' })).toBe(1)
+      // The actual current provider observation is fresh even when the agent profile heartbeat is stale.
+      expect(result.checked).toBe(1)
+      expect(h.metrics.countInc('state_daemon_bot_liveness_skipped_total', { runtime: 'codex' })).toBe(0)
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

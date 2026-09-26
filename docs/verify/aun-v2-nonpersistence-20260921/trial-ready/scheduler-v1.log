@@ -1,0 +1,163 @@
+bun test v1.3.11 (af24e281)
+
+tests/state-daemon-queue-work-scheduler.test.ts:
+(pass) disabled Shirube D1 is not wired into the production daemon [1.12ms]
+(pass) queue-work failure reporting surfaces the failed finalizer instead of the successful runner [0.25ms]
+377 |     AND profile_enabled=true AND disabled_at IS NULL`,[agentId])
+378 |   if(row.rows.length!==1)throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+379 |   const current=await resolveSeatProvider(db,{agentId,inspect:options.inspect})
+380 |   const observed=current.observation?.workspace
+381 |   if(!current.ok || !observed || !isAbsolute(observed) || !existsSync(observed) || !statSync(observed).isDirectory()) {
+382 |     throw new Error('QUEUE_WORK_CURRENT_WORKSPACE_UNAVAILABLE')
+                    ^
+error: QUEUE_WORK_CURRENT_WORKSPACE_UNAVAILABLE
+      at resolveQueueWorkRuntimeWorkspace (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/bin/state-daemon.ts:382:15)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:98:28)
+(fail) queue-work runtime workspace resolves from the enabled agent DB binding [54.57ms]
+124 |   for (const fixture of cases) {
+125 |     await expect(resolveQueueWorkRuntimeWorkspace({
+126 |       async query<T>() {
+127 |         return { rows: fixture.rows as T[], rowCount: fixture.rows.length }
+128 |       },
+129 |     }, 'codex-audit')).rejects.toThrow(fixture.message)
+                                     ^
+error: expect(received).toThrow(expected)
+
+Expected substring: "must be an absolute DB path"
+Received message: "QUEUE_WORK_CURRENT_WORKSPACE_UNAVAILABLE"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:129:32)
+(fail) queue-work runtime workspace fails closed on missing, relative, or absent DB paths [55.41ms]
+(pass) queue-work child env replaces daemon project with the resolved target project [0.11ms]
+508 |     )
+509 | 
+510 |     await scheduler.runDone({ queueId: 41, agentId: 'codex-audit' })
+511 |     await scheduler.runDone({ queueId: 42, agentId: 'devauditor' })
+512 | 
+513 |     expect(selected).toEqual([
+                           ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "agentId": "codex-audit",
+-     "runtime": "codex-exec",
++     "runtime": "runtime-preference-required",
+    },
+    {
+      "agentId": "devauditor",
+-     "runtime": "claude-code",
++     "runtime": "runtime-preference-required",
+    },
+  ]
+
+- Expected  - 2
++ Received  + 2
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:513:22)
+(fail) state_daemon queue work scheduler boundary > verified live provider selects queue-work engines despite opposite legacy preferences [0.60ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive output becomes the exact immutable runner claim fence [0.04ms]
+(pass) state_daemon queue work scheduler boundary > targeted receive fence rejects a different queue incarnation [0.04ms]
+(pass) state_daemon queue work scheduler boundary > valid D1 phase_handoff uses only D1 dispatch under production-composed schedulers [3.84ms]
+(pass) state_daemon queue work scheduler boundary > D1-shaped rejection fails closed without generic routing or dispatch [0.10ms]
+(pass) state_daemon queue work scheduler boundary > duplicate pending notifications share one in-flight D1 dispatch [0.49ms]
+(pass) state_daemon queue work scheduler boundary > production D1 dispatcher uses exact fences, canonical source, finalize, and codex-exec by default [0.08ms]
+(pass) state_daemon queue work scheduler boundary > done D1 notification resumes finalization and is reported as replay [1.57ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep recovers a done D1 row without generic scheduler [2.08ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep leaves historical done D1 rows untouched while D1 is disabled [1.46ms]
+(pass) state_daemon queue work scheduler boundary > post-restart sweep reclaims an expired D1 claim and dispatches it once [1.67ms]
+(pass) state_daemon queue work scheduler boundary > production-composed received not_d1 rows use the generic runner without tmux wake [1.60ms]
+(pass) state_daemon queue work scheduler boundary > invalid disabled D1 env leaves a D1-shaped row to the generic scheduler exactly once [2.13ms]
+(pass) state_daemon queue work scheduler boundary > done generic queue events resume only the stored-result finalizer [1.46ms]
+(pass) state_daemon queue work scheduler boundary > sweep resumes a stored-result finalizer after a writeback failure or restart [1.57ms]
+(pass) state_daemon queue work scheduler boundary > done finalizer sweep selects only enabled rows owned by the current scheduler [0.22ms]
+(pass) state_daemon queue work scheduler boundary > pending LLM queue events use the scheduler when runPending is configured [4.21ms]
+(pass) state_daemon queue work scheduler boundary > daemon pre-gate uses the target agent project instead of its global project [1.82ms]
+(pass) state_daemon queue work scheduler boundary > daemon passes the same target project to the direct Codex runner child [0.88ms]
+(pass) state_daemon queue work scheduler boundary > no-reply work still runs before the scheduler closes it without outbound chat [2.44ms]
+(pass) state_daemon queue work scheduler boundary > exact-fenced phase handoff canaries bypass routing hold and use pending scheduler [1.98ms]
+(pass) state_daemon queue work scheduler boundary > non-fenced phase handoff rows remain routing-held before pending scheduler [1.57ms]
+(pass) state_daemon queue work scheduler boundary > received notify for the same queue row is suppressed while pending runner is in flight [0.34ms]
+(pass) state_daemon queue work scheduler boundary > different queue rows for one agent are serialized until the active runner completes [4.83ms]
+1645 |       await Promise.all(rows.map((row) => daemon.__testHandleEvent({
+1646 |         op: 'INSERT' as const, id: row.id, agent_id: row.agent_id,
+1647 |         status: 'pending', claim_expires_at: null,
+1648 |       })))
+1649 |       await new Promise((resolve) => setTimeout(resolve, 0))
+1650 |       expect(calls).toEqual([
+                           ^
+error: expect(received).toEqual(expected)
+
+  [
+    {
+      "agentId": "codex-audit",
+      "queueId": 494,
+    },
+-   {
+-     "agentId": "adf-lead",
+-     "queueId": 495,
+-   },
+  ]
+
+- Expected  - 4
++ Received  + 0
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:1650:21)
+(fail) state_daemon queue work scheduler boundary > different agents retain parallel queue-work capacity [2.04ms]
+1689 |       await daemon.__testHandleEvent({ op: 'INSERT', id: 496, agent_id: agentId, status: 'pending', claim_expires_at: null })
+1690 |       await started
+1691 |       await daemon.refreshClaims()
+1692 |       const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+1693 |       const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+1694 |       expect(update?.sql).toContain('OR mq.id = ANY($4::bigint[])')
+                                 ^
+error: Received value must be an array type, or both received and expected values must be strings.
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:1694:27)
+(fail) state_daemon queue work scheduler boundary > live queue-work ids remain heartbeat-renewable past the generic claim max age [0.57ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence skips pre-existing received residue for the same allowlisted agent [1.52ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion skips policy-preserved received rows before runner invocation [1.43ms]
+1850 |       await daemon.stop()
+1851 |     }
+1852 | 
+1853 |     const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+1854 |     const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+1855 |     expect(update?.sql).toContain('mq.payload NOT LIKE')
+                               ^
+error: Received value must be an array type, or both received and expected values must be strings.
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:1855:25)
+(fail) state_daemon queue work scheduler boundary > queue-work fence is applied to claim heartbeat refresh SQL [0.25ms]
+1889 |       await daemon.stop()
+1890 |     }
+1891 | 
+1892 |     const update = db.queries.find((query) => query.sql.includes('UPDATE message_queue mq'))
+1893 |     const skipped = db.queries.find((query) => query.sql.includes('count(*)::int AS n'))
+1894 |     expect(update?.sql).toContain('NOT (mq.id = ANY')
+                               ^
+error: Received value must be an array type, or both received and expected values must be strings.
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/state-daemon-queue-work-scheduler.test.ts:1894:25)
+(fail) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to claim heartbeat refresh SQL [0.01ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows are reclaimed to pending with recovery evidence [0.52ms]
+(pass) state_daemon queue work scheduler boundary > non-retryable runner_error is failed in place without a reclaim attempt [0.26ms]
+(pass) state_daemon queue work scheduler boundary > runner_error in_progress rows fail after the bounded reclaim cap [0.21ms]
+(pass) state_daemon queue work scheduler boundary > exact fenced canary recovery grants one control-ref-bound reclaim beyond the normal cap [0.22ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery is inert when queue-work scheduler is not configured [0.06ms]
+(pass) state_daemon queue work scheduler boundary > runner_error recovery does not reclaim policy-preserved residue rows [0.18ms]
+(pass) state_daemon queue work scheduler boundary > queue-work fence is applied to sweep fetch SQL [0.06ms]
+(pass) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to sweep fetch SQL [0.21ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon loads residue exclusion ids from the governed policy file [0.52ms]
+(pass) state_daemon queue work scheduler boundary > state-daemon fails closed on invalid manual residue exclusion ids [0.05ms]
+(pass) state_daemon queue work scheduler boundary > scheduler-owned expired rows are not reclaimed into legacy runner when scheduler is disabled [0.22ms]
+
+7 tests failed:
+(fail) queue-work runtime workspace resolves from the enabled agent DB binding [54.57ms]
+(fail) queue-work runtime workspace fails closed on missing, relative, or absent DB paths [55.41ms]
+(fail) state_daemon queue work scheduler boundary > verified live provider selects queue-work engines despite opposite legacy preferences [0.60ms]
+(fail) state_daemon queue work scheduler boundary > different agents retain parallel queue-work capacity [2.04ms]
+(fail) state_daemon queue work scheduler boundary > live queue-work ids remain heartbeat-renewable past the generic claim max age [0.57ms]
+(fail) state_daemon queue work scheduler boundary > queue-work fence is applied to claim heartbeat refresh SQL [0.25ms]
+(fail) state_daemon queue work scheduler boundary > queue-work residue exclusion is applied to claim heartbeat refresh SQL [0.01ms]
+
+ 39 pass
+ 7 fail
+ 157 expect() calls
+Ran 46 tests across 1 file. [263.00ms]

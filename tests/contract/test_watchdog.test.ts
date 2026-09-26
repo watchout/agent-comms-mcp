@@ -1,5 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import {fixture, type Fixture} from '../helpers/runtime-observation-nonpersistence-db-fixture'
+import * as hostRuntime from '../../core/host-runtime-observer'
+import {unitRuntimeAuthority,unitRuntimeId,unitRuntimeObservation} from '../helpers/logical-runtime-unit-fixture'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Client } from 'pg'
@@ -20,22 +24,15 @@ const DATABASE_URL = process.env.DATABASE_URL
 const dbDescribe = DATABASE_URL ? describe : describe.skip
 
 dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
-  let client: Client
+  let client: ReadOnlyQueryClient
+  let historical: Fixture
   const TEST_PREFIX = `test-watchdog-${randomUUID().slice(0, 8)}`
 
-  beforeAll(async () => {
-    client = new Client({ connectionString: DATABASE_URL })
-    await client.connect()
-  })
-
   beforeEach(async () => {
-    await client.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
+    historical = await fixture('postgres', false)
+    client = {query: async (sql,params) => ({rows: await historical.query(sql, params)})}
   })
-
-  afterAll(async () => {
-    await client.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${TEST_PREFIX}%`])
-    await client.end()
-  })
+  afterEach(async () => { await historical?.close() })
 
   async function seedAgent(options: {
     id: string
@@ -45,8 +42,7 @@ dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
   }): Promise<void> {
     await client.query(
       `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at)
-       VALUES ($1, $1, $2, 'mcp', $3,
-               CASE WHEN $4::int IS NULL THEN NULL ELSE now() - make_interval(secs => $4) END)
+       VALUES ($1, $1, $2, 'TUI', $3, CASE WHEN $4::int IS NULL THEN NULL ELSE now() - make_interval(secs => $4) END)
        ON CONFLICT (agent_id) DO UPDATE
        SET status = EXCLUDED.status,
            last_seen_at = EXCLUDED.last_seen_at,
@@ -60,6 +56,7 @@ dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
     const fresh = `${TEST_PREFIX}-fresh`
     await seedAgent({ id: stale, status: 'busy', lastSeenSecondsAgo: 360 })
     await seedAgent({ id: fresh, status: 'idle', lastSeenSecondsAgo: 30 })
+    await historical.apply()
     const crashed = await findCrashedAgents(client)
     expect(crashed.some((agent) => agent.agentId === stale)).toBe(true)
     expect(crashed.some((agent) => agent.agentId === fresh)).toBe(false)
@@ -84,6 +81,7 @@ dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
     await seedAgent({ id: profileDisabled, status: 'idle', lastSeenSecondsAgo: 600 })
     await client.query(`UPDATE agents SET profile_enabled = false WHERE agent_id = $1`, [profileDisabled])
 
+    await historical.apply()
     const crashed = await findCrashedAgents(client)
     for (const fixture of fixtures) {
       expect(crashed.some((agent) => agent.agentId === `${TEST_PREFIX}-${fixture.suffix}`)).toBe(false)
@@ -91,17 +89,16 @@ dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
     expect(crashed.some((agent) => agent.agentId === profileDisabled)).toBe(false)
   })
 
-  test('DB profile remains the session and port source of truth', async () => {
+  test('historical profile diagnostic preserves the old session and port without authorizing it', async () => {
     const agentId = `${TEST_PREFIX}-profile`
     await client.query(
       `INSERT INTO agents
-         (agent_id, display_name, agent_type, runtime, status, last_seen_at,
-          metadata, home_directory, channel_port, profile_enabled)
+         (agent_id, display_name, agent_type, runtime, metadata, home_directory, channel_port, profile_enabled)
        VALUES
-         ($1, $1, 'dev', 'TUI', 'idle', now(),
-          jsonb_build_object('tmux_session', $2::text), $3, $4, true)`,
+         ($1, $1, 'dev', 'TUI', jsonb_build_object('tmux_session', $2::text), $3, $4, true)`,
       [agentId, `${TEST_PREFIX}-session`, `/tmp/${TEST_PREFIX}`, 19001],
     )
+    await historical.apply()
     const sessions = await loadDbProfileSessions(client)
     expect(sessions.get(agentId)).toEqual({
       session: `${TEST_PREFIX}-session`,
@@ -112,16 +109,9 @@ dbDescribe('watchdog legacy read-only heartbeat/profile detection', () => {
   })
 
   test('seven-dimension SELECT executes on migrated PostgreSQL without writes', async () => {
+    await historical.apply()
     const agentId = `${TEST_PREFIX}-projection`
-    await client.query(
-      `INSERT INTO agents
-         (agent_id, display_name, agent_type, runtime, status, last_seen_at,
-          metadata, home_directory, channel_port, profile_enabled)
-       VALUES
-         ($1, $1, 'dev', 'TUI', 'idle', now(),
-          jsonb_build_object('tmux_session', $2::text), $3, $4, true)`,
-      [agentId, `${TEST_PREFIX}-projection-session`, `/tmp/${TEST_PREFIX}`, 19002],
-    )
+    await historical.query(`INSERT INTO agents(agent_id,display_name,agent_type,profile_enabled) VALUES($1,$1,'dev',true)`,[agentId])
     const reports = await collectRuntimeHealthReports(client, {
       supervisorSession: () => ({
         probe_result: 'ok', state: 'HEALTHY', reason_code: 'SUPERVISOR_SESSION_PRESENT',
@@ -187,6 +177,8 @@ describe('watchdog seven-dimension edge projection', () => {
       supervisorType: 'tmux',
       profilePort: '8810',
       runtimePort: '8810',
+      runtimeEndpointVerified:true,
+      runtimeProcessId:1234,
       expectedProviderIdentity: '{"provider":"discord"}',
       runtimeInstanceId: 'runtime-arc-1',
       runtimeStatus: 'running',
@@ -235,7 +227,7 @@ describe('watchdog seven-dimension edge projection', () => {
     })
   })
 
-  test('same-agent profile/runtime session-port drift fails closed without probing profile values', () => {
+  test('historical profile drift does not veto the current runtime session or endpoint', () => {
     const probeCalls = { supervisor: [] as string[], endpoint: [] as string[], ui: [] as string[] }
     const probes: RuntimeObservationProbes = {
       supervisorSession: (session) => {
@@ -267,20 +259,27 @@ describe('watchdog seven-dimension edge projection', () => {
 
     const dimensions = buildRuntimeHealthDimensionInputs(snapshot, probes, NOW_MS)
     expect(dimensions.find((candidate) => candidate.dimension === 'supervisor_session')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'SUPERVISOR_SESSION_PRESENT',
     })
     expect(dimensions.find((candidate) => candidate.dimension === 'endpoint_identity')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_PORT_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'ENDPOINT_EXPECTED_IDENTITY_PRESENT',
     })
     expect(dimensions.find((candidate) => candidate.dimension === 'ui_runner_reachability')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'UI_RUNNER_SURFACE_PRESENT',
     })
-    expect(probeCalls).toEqual({ supervisor: [], endpoint: [], ui: [] })
+    expect(probeCalls).toEqual({supervisor:['runtime-new-session'],endpoint:['9999'],ui:['runtime-new-session']})
   })
 
+  test('missing or foreign endpoint lease remains unknown and never probes a historical profile port',()=>{
+    const calls:string[]=[]
+    const probes=healthyProbes();probes.endpointIdentity=port=>{calls.push(port);return {probe_result:'ok',state:'HEALTHY',reason_code:'incorrect'}}
+    const dimensions=buildRuntimeHealthDimensionInputs({...healthySnapshot(),runtimeEndpointVerified:false,profilePort:'9999'},probes,NOW_MS)
+    expect(dimensions.find(row=>row.dimension==='endpoint_identity')?.declared_state).toBe('UNKNOWN')
+    expect(calls).toEqual([])
+  })
   test('agent-wide claim without selected runtime ownership stays UNKNOWN', () => {
     const snapshot = {
       ...healthySnapshot(),
@@ -365,8 +364,8 @@ describe('watchdog seven-dimension edge projection', () => {
       agent_last_seen_at: NOW,
       metadata: { tmux_session: 'discord-arc', supervisor_type: 'tmux' },
       channel_port: 8810,
-      expected_provider_identity: '{"provider":"discord"}',
-      runtime_instance_id: 'runtime-arc-1',
+      expected_provider_identity: '{"provider":"codex"}',
+      runtime_instance_id: unitRuntimeId('arc'),
       runtime_status: 'running',
       runtime_last_seen_at: NOW,
       runtime_session_name: 'discord-arc',
@@ -386,6 +385,8 @@ describe('watchdog seven-dimension edge projection', () => {
       query: async (sql) => {
         sqlCalls.push(sql)
         if (!/^\s*SELECT\b/i.test(sql)) throw new Error(`mutation SQL refused: ${sql}`)
+        if(sql.includes('JOIN control_plane_leases')) return {rows:[unitRuntimeAuthority('arc')]} as never
+        if(sql.includes('FROM connector_instances'))return {rows:[{connector_count:0}]} as never
         return { rows: [rawRow] } as never
       },
     }
@@ -409,15 +410,16 @@ describe('watchdog seven-dimension edge projection', () => {
       },
     }
 
-    const reports = await collectRuntimeHealthReports(client, probes, NOW_MS)
+    const observer = spyOn(hostRuntime,'inspectHostRuntime').mockImplementation(input=>({reasonCode:'OBSERVED',observations:[unitRuntimeObservation(input.agentId,{observed_at:NOW})]}))
+    const reports = await collectRuntimeHealthReports(client, probes, NOW_MS).finally(()=>observer.mockRestore())
     expect(reports).toHaveLength(1)
     expect(reports[0].aggregate_state).toBe('HEALTHY')
     expect(reports[0].mutation_performed).toBe(false)
-    expect(sqlCalls).toHaveLength(1)
+    expect(sqlCalls).toHaveLength(5)
     expect(sqlCalls[0]).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ALTER|CREATE|DROP)\b/i)
-    expect(sqlCalls[0]).toContain('mq.claimed_by = a.agent_id')
-    expect(sqlCalls[0]).toContain('mq.claimed_runtime_instance_id::text = runtime.runtime_instance_id::text')
-    expect(sqlCalls[0]).toContain('mq.claimed_runtime_instance_id::text IS DISTINCT FROM runtime.runtime_instance_id::text')
+    expect(sqlCalls.find(sql=>sql.includes('FROM message_queue'))).toContain('mq.claimed_by=$1')
+    expect(sqlCalls.find(sql=>sql.includes('FROM message_queue'))).toContain('mq.claimed_runtime_instance_id::text=$2')
+    expect(sqlCalls.find(sql=>sql.includes('FROM message_queue'))).toContain('mq.claimed_runtime_instance_id::text IS DISTINCT FROM $2')
     expect(probeCalls).toEqual({ supervisor: 1, endpoint: 1, ui: 1 })
   })
 })

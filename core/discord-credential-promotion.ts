@@ -534,8 +534,7 @@ export async function reconcileDiscordDeliveryCredentialPromotion(
     `UPDATE connector_instances
         SET status = CASE WHEN status = 'registered' THEN 'active' ELSE status END,
             trust_status = CASE WHEN trust_status = 'local' THEN 'verified' ELSE trust_status END,
-            updated_at = now(),
-            last_seen_at = COALESCE(last_seen_at, now())
+            updated_at = now()
       WHERE connector_instance_id = $1
         AND status IN ('registered', 'active')`,
     [connectorInstanceId],

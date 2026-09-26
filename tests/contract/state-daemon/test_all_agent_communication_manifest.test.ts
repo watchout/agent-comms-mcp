@@ -1,11 +1,17 @@
-import { describe, expect, test } from 'bun:test'
+import * as hostRuntime from '../../../core/host-runtime-observer'
+import {unitRuntimeAuthority,unitRuntimeInspector} from '../../helpers/logical-runtime-unit-fixture'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { StateDaemon } from '../../../core/state-daemon/index'
 import {
   loadAllAgentCommunicationManifestOverridesFromEnv,
   type StateDaemonDeps,
 } from '../../../core/state-daemon/types'
 
+let hostSpy: ReturnType<typeof spyOn> | undefined
+afterEach(() => { hostSpy?.mockRestore(); hostSpy=undefined })
+
 function fixture(enforcement: boolean, gateOutcome: 'admit' | 'deny', rowStatus = 'pending') {
+  hostSpy=spyOn(hostRuntime,'inspectHostRuntime').mockImplementation(unitRuntimeInspector)
   const queries: string[] = []
   const scheduler = { pending: 0, received: 0 }
   let listener: ((payload: string) => void) | null = null
@@ -13,10 +19,10 @@ function fixture(enforcement: boolean, gateOutcome: 'admit' | 'deny', rowStatus 
     db: {
       async query(sql: string) {
         queries.push(sql)
+        if (sql.includes('JOIN control_plane_leases')) return {rows:[unitRuntimeAuthority('dev-001')],rowCount:1}
         if (sql.includes('profile_enabled, disabled_at') && sql.includes('FROM agents')) return {
           rows: [{
-            agent_id: 'dev-001', runtime: 'codex', runtime_engine_preference: 'codex',
-            status: 'online', profile_enabled: true, disabled_at: null,
+            agent_id: 'dev-001', profile_enabled: true, disabled_at: null,
           }],
           rowCount: 1,
         }

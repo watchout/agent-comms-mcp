@@ -2,7 +2,13 @@ import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:tes
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { PgAdapter } from '../../core/db/pg-adapter'
+import { createReadyNativeRuntimeWithDb, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
+const fixtureHomes:string[]=[]
+const nativeEnvs=new Map<string,NodeJS.ProcessEnv>()
+afterAll(async()=>{await stopNativeFixtures();for(const home of fixtureHomes)rmSync(home,{recursive:true,force:true})})
 import { join, dirname } from 'node:path'
 import { resetAutoSkipPatternsCache } from '../../config/auto-skip-patterns'
 
@@ -36,6 +42,7 @@ async function ensureMemoryReadySchema(client: Client): Promise<void> {
 async function cleanupMemoryReadyAgent(client: Client, agentId: string): Promise<void> {
   await client.query(`DELETE FROM message_queue WHERE agent_id = $1`, [agentId])
   await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM control_plane_leases WHERE holder_agent_id = $1`, [agentId])
   await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
   await client.query(`DELETE FROM agents WHERE agent_id = $1`, [agentId])
 }
@@ -47,48 +54,16 @@ async function seedMemoryReadyAgent(client: Client, agentId: string, agentType =
   const sessionName = `${agentId}-memory-ready-session`
   const checkoutPath = `/tmp/${agentId}-memory-ready`
   await client.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id = $1`, [agentId])
+  await client.query(`DELETE FROM control_plane_leases WHERE holder_agent_id = $1`, [agentId])
   await client.query(`DELETE FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
-  await client.query(
-    `INSERT INTO agents
-       (agent_id, display_name, agent_type, runtime, status, channel_port,
-        metadata, profile_revision, profile_source, home_directory)
-     VALUES ($1, $1, $2, 'mcp', 'idle', $3, $4::jsonb, 1, 'legacy', $5)
-     ON CONFLICT (agent_id) DO UPDATE SET
-       agent_type = EXCLUDED.agent_type,
-       runtime = EXCLUDED.runtime,
-       status = EXCLUDED.status,
-       channel_port = EXCLUDED.channel_port,
-       metadata = EXCLUDED.metadata,
-       profile_revision = 1,
-       profile_source = 'legacy',
-       home_directory = EXCLUDED.home_directory`,
-    [agentId, agentType, port, JSON.stringify({ tmux_session: sessionName }), checkoutPath],
-  )
-  await client.query(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port,
-        checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-     VALUES ($1, $2, 'mcp', 'local_process', $3, $4,
-             $5, 'session-drain-test-head', 'running',
-             clock_timestamp() - interval '1 second', clock_timestamp(),
-             '{"source":"session-start-drain-test"}'::jsonb)`,
-    [runtimeId, agentId, sessionName, port, checkoutPath],
-  )
-  await client.query(
-    `INSERT INTO runtime_memory_ready_evidence
-       (agent_id, project, runtime_instance_id, profile_revision, profile_source,
-        session_name, port, expected_agent_id, checkout_path, checkout_commit_sha,
-        recovery_command, result_status, completed_at, evidence_path, evidence_log_id,
-        valid_until, source, metadata)
-     VALUES
-       ($1, 'agent-comms-mcp', $2, 1, 'legacy',
-        $3, $4, $1, $5, 'session-drain-test-head',
-        'test:mcp__wasurezu__recover_context', 'ready', clock_timestamp(),
-        '/tmp/session-start-drain-memory-ready.json', 'session-start-drain-memory-ready',
-        '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery',
-        '{"fixture":true}'::jsonb)`,
-    [agentId, runtimeId, sessionName, port, checkoutPath],
-  )
+  await client.query(`INSERT INTO agents(agent_id,display_name,agent_type,metadata,profile_revision,profile_source)
+    VALUES($1,$1,$2,'{}',1,'legacy') ON CONFLICT(agent_id) DO UPDATE SET
+      agent_type=EXCLUDED.agent_type,metadata=EXCLUDED.metadata,profile_revision=1,profile_source='legacy'`,[agentId,agentType])
+  const home=mkdtempSync(join(tmpdir(),'drain-native-'));fixtureHomes.push(home)
+  const db=new PgAdapter(DATABASE_URL!)
+  try { const fixture=await createReadyNativeRuntimeWithDb(db,home,agentId,runtimeId);nativeEnvs.set(agentId,{...fixture.env,CODEX_HOME:home,PATH:fixture.cliPath+':'+process.env.PATH,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId}) }
+  finally {await db.close()}
+
 }
 
 dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
@@ -116,6 +91,7 @@ dbDescribe('test_session_start_drain — F-2 bounded read scope', () => {
   function runDrainHook(limit: number | null = null): { stdout: string; stderr: string; status: number | null } {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
+      ...nativeEnvs.get(TEST_AGENT),
       AGENT_ID: TEST_AGENT,
       DATABASE_URL: DATABASE_URL!,
     }
@@ -276,7 +252,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
       )
     }
 
-    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL! }
+    const env = { ...process.env as Record<string, string>, ...nativeEnvs.get(agentId), AGENT_ID: agentId, DATABASE_URL: DATABASE_URL! }
     // Strip any inherited overrides so the role default is what the
     // runner falls back to.
     delete env.AGENT_COMMS_DRAIN_LIMIT
@@ -332,7 +308,7 @@ dbDescribe('test_session_start_drain — F-3 role-differential scope', () => {
       )
     }
     const overrideKey = `AGENT_COMMS_DRAIN_LIMIT_${agentId.replace(/-/g, '_').toUpperCase()}`
-    const env = { ...process.env as Record<string, string>, AGENT_ID: agentId, DATABASE_URL: DATABASE_URL!, [overrideKey]: '2' }
+    const env = { ...process.env as Record<string, string>, ...nativeEnvs.get(agentId), AGENT_ID: agentId, DATABASE_URL: DATABASE_URL!, [overrideKey]: '2' }
     const r = spawnSync('bun', [RUNNER], { env, encoding: 'utf-8' })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('drained=2')

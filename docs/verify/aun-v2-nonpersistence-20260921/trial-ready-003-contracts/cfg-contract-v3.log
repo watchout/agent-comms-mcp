@@ -1,0 +1,45 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_aa52ee18d7a94b31b2ed76953f50011c","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+15 | export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:any[])=>Promise<any>},agentId:string,env:Record<string,string>,cwd:string,
+16 |   dependencies:{observeProvider?:typeof observeSeatProvider;run?:Parameters<typeof readObservedProviderRoot>[0]}={}):Promise<ObservedConfigurationRuntime> {
+17 |   const selected=await resolveSeatProvider(db,{agentId,observe:dependencies.observeProvider})
+18 |   const endpoint=await resolveRuntimeEndpoint(db,{agentId})
+19 |   const o=selected.observation
+20 |   if(!selected.ok||!o||!endpoint.endpoint||endpoint.endpoint.runtimeInstanceId!==o.runtime_instance_id) throw new Error('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+                                                                                                                       ^
+error: CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE
+      at resolveConfigurationRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/aun-configuration-candidate.ts:20:115)
+      at async currentCandidate (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:20:24)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:30:19)
+(fail) AC-CFG-1 fresh hostname stays outside candidate, logical scopes and durable records; supplied host is rejected [1348.14ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_2a01e4f941174ba8a49fa1c6b8256837","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+15 | export async function resolveConfigurationRuntime(db:{query:(sql:string,params?:any[])=>Promise<any>},agentId:string,env:Record<string,string>,cwd:string,
+16 |   dependencies:{observeProvider?:typeof observeSeatProvider;run?:Parameters<typeof readObservedProviderRoot>[0]}={}):Promise<ObservedConfigurationRuntime> {
+17 |   const selected=await resolveSeatProvider(db,{agentId,observe:dependencies.observeProvider})
+18 |   const endpoint=await resolveRuntimeEndpoint(db,{agentId})
+19 |   const o=selected.observation
+20 |   if(!selected.ok||!o||!endpoint.endpoint||endpoint.endpoint.runtimeInstanceId!==o.runtime_instance_id) throw new Error('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+                                                                                                                       ^
+error: CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE
+      at resolveConfigurationRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/aun-configuration-candidate.ts:20:115)
+      at async currentCandidate (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:20:24)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:48:17)
+(fail) AC-CFG-2 ordinary reconcile delivers existing outbox with logical audit and no observation sink; stale fence cannot deliver [1330.47ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_61963a27019241d599117da33a5dde62","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-4","logical_insert":1,"authenticated_claim":1,"ownerless_denied":1,"rollback_mismatch_denied":1,"duplicate_execution_denied":1,"expired_denied":1,"physical_denied":4,"restarts":0}
+(pass) AC-CFG-4 logical restart insert and authenticated one-shot execution pass; physical fields, ownerless and expired execution fail [204.08ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_a3d0c57e5e634455a54745071810595a","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-5","submitted":2,"durable_requests":1,"foreign_holder_denied":1,"wrong_fence_denied":1,"idempotent_migration":1}
+(pass) AC-CFG-5 duplicate logical restart requests converge; a stale holder cannot create another request [194.28ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_03ce75a6ff8e4f8aa8c1cb349d732247","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"restart-migration","kind":"postgres","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 postgres preserves existing request history, rejects duplicate migration and physical rewrites [194.09ms]
+{"case":"restart-migration","kind":"sqlite","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 sqlite preserves existing request history, rejects duplicate migration and physical rewrites [3.16ms]
+
+ 4 pass
+ 2 fail
+ 28 expect() calls
+Ran 6 tests across 1 file. [3.30s]

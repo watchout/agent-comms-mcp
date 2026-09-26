@@ -1,0 +1,205 @@
+bun test v1.3.11 (af24e281)
+
+tests/norm-022-runtime-endpoint-lease.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-Xn64cM/norm-022.db
+146 |   test('healthy_endpoint_lease', async () => {
+147 |     await withNorm022Db(({ dbPath, ids }) => {
+148 |       insertRuntimeEndpointLease(dbPath, ids)
+149 | 
+150 |       const doctor = runCli(dbPath, ['agent', 'profile', 'doctor', '--strict'])
+151 |       expect(doctor.status, doctor.stdout + doctor.stderr).toBe(0)
+                                                                 ^
+error: 2 | #!/usr/bin/env bun
+    ^
+error: Syntax Error
+    at /Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:2:1
+
+Bun v1.3.11 (macOS arm64)
+
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:151:60)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:58:18)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:147:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease [849.58ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-zYm9HJ/norm-022.db
+155 | 
+156 |   test('missing_lease_refusal', async () => {
+157 |     await withNorm022Db(({ dbPath, ids }) => {
+158 |       const doctor = runCli(dbPath, ['agent', 'profile', 'doctor', '--strict'])
+159 |       expect(doctor.status).toBe(1)
+160 |       const payload = JSON.parse(doctor.stdout)
+                                 ^
+SyntaxError: JSON Parse error: Unexpected EOF
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:160:28)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:58:18)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:157:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal [756.21ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-uCquL0/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > stale_ttl_expiry [781.74ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-SGA3jo/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > duplicate_active_lease_fenced [767.95ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > supervisor_down_fail_closed [0.05ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-8mJ70C/norm-022.db
+(pass) NORM-022 frozen runtime endpoint lease fixtures > restart_gated_by_lease_heartbeat_fencing [758.64ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-neawYn/norm-022.db
+302 |   test('disabled_or_revoked_fail_closed', async () => {
+303 |     await withNorm022Db(({ dbPath, ids }) => {
+304 |       insertRuntimeEndpointLease(dbPath, ids, { status: 'revoked' })
+305 |       const doctor = runCli(dbPath, ['agent', 'profile', 'doctor', '--strict'])
+306 |       expect(doctor.status).toBe(1)
+307 |       const payload = JSON.parse(doctor.stdout)
+                                 ^
+SyntaxError: JSON Parse error: Unexpected EOF
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:307:28)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:58:18)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:303:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed [764.22ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-khBMtr/norm-022.db
+333 |       ).get(ids.agentId, ids.connectorId) as { runtimes: number; bindings: number }
+334 |       db.close()
+335 | 
+336 |       expect(counts.runtimes).toBe(1)
+337 |       expect(counts.bindings).toBe(2)
+338 |       expect(runCli(dbPath, ['agent', 'profile', 'doctor', '--strict']).status).toBe(0)
+                                                                                      ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:338:81)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:58:18)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:317:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime [774.29ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/norm-022-9nyeZM/norm-022.db
+374 |       )
+375 |       db.close()
+376 | 
+377 |       const doctor = runCli(dbPath, ['agent', 'profile', 'doctor', '--strict'])
+378 |       expect(doctor.status).toBe(1)
+379 |       const payload = JSON.parse(doctor.stdout)
+                                 ^
+SyntaxError: JSON Parse error: Unexpected EOF
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:379:28)
+      at withNorm022Db (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:58:18)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/norm-022-runtime-endpoint-lease.test.ts:360:11)
+(fail) NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed [774.38ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > tmux_diagnostics_only_for_tmux_supervisor [0.10ms]
+(pass) NORM-022 frozen runtime endpoint lease fixtures > non_tmux_destructive_lifecycle_fails_closed_without_tmux_evidence [0.17ms]
+
+tests/runtime-memory-ready.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-VapCw5/test.db
+(pass) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [27.61ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-tACMSf/test.db
+(pass) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [20.78ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ZEy1Zw/test.db
+192 |     await expect(resolveRuntimeMemoryReadyProject(db as any,agentId,{now:args.now})).resolves.toMatchObject({project:args.project,source:'verified_current_runtime_receipt'})
+193 |     const foreignNative = {...native,agent_id:'foreign-seat'}
+194 |     const foreignReceipt = {...receipt,project:'foreign-project',pack_id:`restart_pack:${agentId}:foreign-project:1789280000000`,native_delivery:foreignNative,response_digest:seatContextDigest(foreignNative)} as SeatContextReceipt
+195 |     await recordReady(agentId,{project:'foreign-project',completed_at:completed,metadata:{seat_context_receipt:foreignReceipt}})
+196 |     originals.set(`${runtimeInstanceId}:foreign-project`,foreignReceipt)
+197 |     await expect(resolveRuntimeMemoryReadyProject(db as any,agentId,{now:args.now})).resolves.toMatchObject({project:args.project})
+                                                                                                    ^
+error: 
+
+Expected promise that resolves
+Received promise that rejected: Promise { <rejected> }
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-memory-ready.test.ts:197:95)
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [28.14ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-8Q8uYc/test.db
+(pass) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [21.74ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-P7Jz7U/test.db
+(pass) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [22.69ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ZXLigR/test.db
+(pass) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [19.34ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-KFP1ji/test.db
+(pass) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [19.88ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-0IyuW3/test.db
+(pass) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [21.02ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-Iv79rI/test.db
+(pass) runtime memory-ready evidence gate > gate follows current logical authority rather than evidence-bound precedence [20.79ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-hnajWW/test.db
+(pass) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [20.33ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-jCPSuz/test.db
+(pass) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [19.86ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-275MnR/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [19.62ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-qsoWZz/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [19.41ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-PvRNdF/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [19.94ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-O3mqEO/test.db
+(pass) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [19.29ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-mtHci7/test.db
+(pass) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [21.06ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-YYYpnh/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [19.71ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-TeJjRn/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [20.51ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-FqISOp/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [19.81ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-WlW3EW/test.db
+(pass) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [19.48ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-WSgsjH/test.db
+(pass) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [19.87ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-JzxQUk/test.db
+(pass) runtime memory-ready evidence gate > Wasurezu bootstrap evidence is queue-independent metadata [16.88ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-MCPx67/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run never creates a missing database or journal [19.38ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-qROHlX/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [23.94ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-1yBrAQ/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [1098.28ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-jk4Hl3/test.db
+(pass) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [86.50ms]
+
+6 tests failed:
+(fail) NORM-022 frozen runtime endpoint lease fixtures > healthy_endpoint_lease [849.58ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > missing_lease_refusal [756.21ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > disabled_or_revoked_fail_closed [764.22ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > multi_channel_single_runtime [774.29ms]
+(fail) NORM-022 frozen runtime endpoint lease fixtures > partial_active_connector_coverage_fails_closed [774.38ms]
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [28.14ms]
+
+ 31 pass
+ 6 fail
+ 137 expect() calls
+Ran 37 tests across 2 files. [8.01s]

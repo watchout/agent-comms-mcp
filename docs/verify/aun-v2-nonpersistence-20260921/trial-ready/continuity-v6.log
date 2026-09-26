@@ -1,0 +1,39 @@
+bun test v1.3.11 (af24e281)
+
+tests/seat-runtime-continuity.test.ts:
+(pass) SC1 stable seat provider selection > P01 target ancestry snapshots select either provider despite opposite legacy preference [1.86ms]
+(pass) SC1 stable seat provider selection > live provider root ignores caller context and rejects PID reuse, missing or conflicting evidence [1.03ms]
+(pass) SC1 stable seat provider selection > actual connected memory child must match the current provider and seat; private repaired lookup is insufficient [0.04ms]
+(pass) SC1 stable seat provider selection > P02 unknown, generic MCP, foreign seat, and multiple live owners cannot select [0.11ms]
+(pass) SC1 stable seat provider selection > P03 cold launch requires explicit intent; qualified/stale/profile-only/ambiguous history cannot launch [0.09ms]
+(pass) SC2 held OS endpoint and exact lease resolution > legacy generated port env never requests a fixed listener [0.04ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/seat-endpoint-kbYyM7/fixture.db
+32 |   return {server, port, endpointUri: `http://127.0.0.1:${port}`,
+33 |     async publish<T>(register: (port: number, uri: string) => Promise<T>): Promise<T> {
+34 |       try { const result=await register(port, `http://127.0.0.1:${port}`);
+35 |         if(!input.authorize || !await input.authorize()) throw new Error('RUNTIME_ENDPOINT_POST_COMMIT_UNVERIFIED')
+36 |         published=true; return result }
+37 |       catch (error) { published=false; server.stop(true); throw new Error('RUNTIME_ENDPOINT_REGISTRATION_FAILED', {cause: error}) }
+                                                                         ^
+error: RUNTIME_ENDPOINT_REGISTRATION_FAILED
+      at publish (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-endpoint.ts:37:69)
+
+30 |   const port = server.port
+31 |   if (!port || port < 1) { server.stop(true); throw new Error('RUNTIME_ENDPOINT_BIND_FAILED') }
+32 |   return {server, port, endpointUri: `http://127.0.0.1:${port}`,
+33 |     async publish<T>(register: (port: number, uri: string) => Promise<T>): Promise<T> {
+34 |       try { const result=await register(port, `http://127.0.0.1:${port}`);
+35 |         if(!input.authorize || !await input.authorize()) throw new Error('RUNTIME_ENDPOINT_POST_COMMIT_UNVERIFIED')
+                                                                        ^
+error: RUNTIME_ENDPOINT_POST_COMMIT_UNVERIFIED
+      at publish (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-endpoint.ts:35:68)
+(fail) SC2 held OS endpoint and exact lease resolution > P05-P07 held binds, exact publication, same-seat replacement and foreign/stale denial [40.60ms]
+(pass) SC2 held OS endpoint and exact lease resolution > P06 registration failure closes only its own held socket [1.46ms]
+(pass) native fixture report publication > partial staging bytes are invisible until the actual publisher completes [0.69ms]
+(pass) native fixture report publication > failed partial write or publication never exposes a complete report [1.83ms]
+
+ 9 pass
+ 1 fail
+ 72 expect() calls
+Ran 10 tests across 1 file. [126.00ms]

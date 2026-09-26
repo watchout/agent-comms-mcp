@@ -1,0 +1,10 @@
+{
+  "parent": "2a5270af61bbbf66f29bd7587511c05c2ea9bd29",
+  "changed_paths": [
+    "tests/contract/test_aun_configuration_outbox_supersession.test.ts"
+  ],
+  "all_assertion_lines_identical": true,
+  "assertion_lines": 40,
+  "product_spec_migration_workflow_unchanged": true,
+  "source_files": 798
+}

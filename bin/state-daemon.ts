@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import type { HostRuntimeInspector } from '../core/host-runtime-observer'
+import { resolveSeatProvider } from '../core/seat-runtime-selection'
 /**
  * state-daemon entry point (Issue #323 spec v0.6 §5.3 / §6).
  *
@@ -23,9 +25,10 @@
  * trigger and the new columns it depends on land via PR #329 first.
  */
 import { Client } from 'pg'
+import { admissionBindingFromEnv } from '../core/queue-admission'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { StateDaemon } from '../core/state-daemon/index'
@@ -44,6 +47,8 @@ import {
 } from '../core/aun-configuration-reconciler'
 import {
   buildDefaultAunConfigurationCandidate,
+  resolveConfigurationRuntime,
+  configurationRuntimeIdentity,
   type AunConfigurationCandidate,
 } from '../core/aun-configuration-candidate'
 import { configurationDigest, type AunConfigurationDesiredState } from '../core/aun-configuration-desired-state'
@@ -67,7 +72,7 @@ import {
 } from '../core/state-daemon/queue-work-residue-policy'
 import { receiveTargeted, type TargetedReceiveResult } from './aun/receive'
 import { runQueueWork, type RunQueueWorkCliResult } from './aun/run-queue-work'
-import type { QueueWorkClaimFence } from '../core/queue-work'
+import { resolveQueueWorkCodexPermissions, type QueueWorkClaimFence } from '../core/queue-work'
 import { runtimeV2, type RuntimeV2CliOptions, type RuntimeV2CliResult } from './aun/runtime-v2'
 import { classifyShirubeD1AutoReceive } from '../core/shirube-d1-runtime'
 import { resolveRuntimeMemoryReadyProject } from '../core/runtime-memory-ready'
@@ -349,10 +354,10 @@ export function buildQueueWorkAgentEnv(
     AGENT_COM_EXPECTED_AGENT_ID: agentId,
     AGENT_COMMS_MEMORY_READY_PROJECT: project,
     AGENT_MEMORY_PROJECT: project,
-    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
-    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_RECEIVE_CLAIM_SOURCE: base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_RECEIVE_CLAIM_SOURCE ?? 'state-daemon-queue-work-scheduler',
+    AUN_QUEUE_WORK_INVOCATION_SOURCE: base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_QUEUE_WORK_INVOCATION_SOURCE ?? 'state-daemon-queue-work-scheduler',
     AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE:
-      base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE
+      (base.AUN_ADMISSION_POLICY_ID ? 'bounded-admission' : base.AUN_QUEUE_WORK_EXPECTED_CLAIM_SOURCE)
         ?? base.AUN_RECEIVE_CLAIM_SOURCE
         ?? 'state-daemon-queue-work-scheduler',
   }
@@ -366,41 +371,17 @@ export type QueueWorkRuntimeWorkspaceDb = {
 }
 
 export async function resolveQueueWorkRuntimeWorkspace(
-  db: QueueWorkRuntimeWorkspaceDb,
-  agentId: string,
-): Promise<string> {
-  const result = await db.query<{
-    agent_id: string
-    runtime_workspace: string | null
-  }>(
-    `SELECT a.agent_id,
-            COALESCE(workspace.local_path, NULLIF(a.canonical_workspace, ''), NULLIF(a.home_directory, '')) AS runtime_workspace
-       FROM agents a
-       LEFT JOIN LATERAL (
-         SELECT w.local_path
-           FROM agent_workspace_bindings b
-           JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
-          WHERE b.agent_id = a.agent_id
-            AND b.active = true
-          ORDER BY CASE WHEN b.binding_role = 'primary' THEN 0 ELSE 1 END, b.workspace_id
-          LIMIT 1
-       ) workspace ON true
-      WHERE a.agent_id = $1
-        AND a.profile_enabled = true
-        AND a.disabled_at IS NULL`,
-    [agentId],
-  )
-  if (result.rows.length !== 1) {
-    throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  db:QueueWorkRuntimeWorkspaceDb,agentId:string,options:{inspect?:HostRuntimeInspector}={},
+):Promise<string> {
+  const row=await db.query<{agent_id:string}>(`SELECT agent_id FROM agents WHERE agent_id=$1
+    AND profile_enabled=true AND disabled_at IS NULL`,[agentId])
+  if(row.rows.length!==1)throw new Error(`queue-work runtime workspace requires one enabled DB agent row for ${agentId}`)
+  const current=await resolveSeatProvider(db,{agentId,inspect:options.inspect})
+  const observed=current.observation?.workspace
+  if(!current.ok || !observed || !isAbsolute(observed) || !existsSync(observed) || !statSync(observed).isDirectory()) {
+    throw new Error('QUEUE_WORK_CURRENT_WORKSPACE_UNAVAILABLE')
   }
-  const configured = result.rows[0]?.runtime_workspace?.trim() ?? ''
-  if (!configured || !isAbsolute(configured)) {
-    throw new Error(`queue-work runtime workspace must be an absolute DB path for ${agentId}`)
-  }
-  if (!existsSync(configured) || !statSync(configured).isDirectory()) {
-    throw new Error(`queue-work runtime workspace does not exist as a directory for ${agentId}: ${configured}`)
-  }
-  return realpathSync(configured)
+  return realpathSync(observed)
 }
 
 export type QueueWorkRuntimeSelection =
@@ -420,16 +401,12 @@ export function queueWorkRuntimeForPreference(preference: unknown): QueueWorkRun
 export async function resolveQueueWorkRuntimeForAgent(
   db: QueueWorkRuntimeWorkspaceDb,
   agentId: string,
+  observationOptions: Pick<Parameters<typeof resolveSeatProvider>[1], 'observe' | 'inspect' | 'hostId' | 'now'> = {},
 ): Promise<QueueWorkRuntimeSelection> {
-  const result = await db.query<{ runtime_engine_preference: string | null }>(
-    `SELECT runtime_engine_preference
-       FROM agents
-      WHERE agent_id = $1
-        AND profile_enabled = true
-        AND disabled_at IS NULL`,
-    [agentId],
-  )
-  return queueWorkRuntimeForPreference(result.rows[0]?.runtime_engine_preference ?? null)
+  const selection = await resolveSeatProvider(db, {agentId,...observationOptions})
+  if (!selection.ok) return selection.code === 'PROVIDER_UNSUPPORTED' ? 'runtime-preference-unsupported' : 'runtime-preference-required'
+  return selection.provider === 'codex' ? 'codex-exec' : 'claude-code'
+
 }
 
 export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
@@ -524,6 +501,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
     // Only process rows this scheduler claimed itself (receive_claim.source
     // match) — never rows claimed by a TUI session or another runner.
     const env = buildQueueWorkAgentEnv(this.env, agentId, project)
+    resolveQueueWorkCodexPermissions(env)
     if (env.STATE_DAEMON_QUEUE_WORK_COMMAND && !env.AUN_QUEUE_WORK_COMMAND) {
       env.AUN_QUEUE_WORK_COMMAND = env.STATE_DAEMON_QUEUE_WORK_COMMAND
     }
@@ -539,6 +517,7 @@ export class QueueWorkRunnerScheduler implements QueueWorkScheduler {
       'CODEX_SANDBOX',
       'CODEX_MODEL',
       'CODEX_PROFILE',
+      'CODEX_PERMISSIONS_PROFILE',
       'CODEX_EPHEMERAL',
       'CODEX_IGNORE_RULES',
       'CODEX_TIMEOUT_MS',
@@ -796,6 +775,7 @@ function loadConfig(): Partial<StateDaemonConfig> {
   set('codexRunnerAutoFinalReply', bool('STATE_DAEMON_CODEX_RUNNER_AUTO_FINAL_REPLY'))
   set('memoryReadyProject', str('STATE_DAEMON_MEMORY_READY_PROJECT') ?? str('AGENT_MEMORY_PROJECT'))
   set('agentAllowlist', csv('STATE_DAEMON_AGENT_ALLOWLIST'))
+  set('admissionBinding', admissionBindingFromEnv(process.env))
   set('queueWorkFenceQueueIds', csvNum('STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS'))
   set('queueWorkFenceMessageIds', csv('STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS'))
   set('queueWorkFenceCreatedAfter', str('STATE_DAEMON_QUEUE_WORK_FENCE_CREATED_AFTER'))
@@ -962,21 +942,21 @@ async function readNativeReleaseIdentity(checkoutRoot: string): Promise<NativeRe
 class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   constructor(private readonly db: PgAdapter) {}
 
-  async render(input: { hostId: string; desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
-    const projection = input.desired.ordinaryProjection
-    const providerRepoRoot = typeof projection.provider_repo_root === 'string' ? projection.provider_repo_root.trim() : ''
-    const providerConfigRoot = typeof projection.provider_config_root === 'string' ? projection.provider_config_root.trim() : ''
-    const daemonCheckout = typeof projection.daemon_checkout === 'string' ? projection.daemon_checkout.trim() : ''
-    if (!providerRepoRoot || !providerConfigRoot || !daemonCheckout) throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
+  async render(input: { desired: AunConfigurationDesiredState }): Promise<AunConfigurationCandidate> {
+    // Source location comes from this exact invoked release, never saved target
+    // runtime paths. validate() checks its commit/tree against desired release.
+    const providerRepoRoot=resolve(import.meta.dir,'..')
+    const daemonCheckout=providerRepoRoot
+    const observedRuntime=await resolveConfigurationRuntime(this.db,input.desired.agentId,process.env as Record<string,string>,providerRepoRoot)
     return buildDefaultAunConfigurationCandidate({
-      hostId: input.hostId,
+      observedRuntime,
       desired: input.desired,
       databaseLocatorRef: process.env.AUN_DATABASE_LOCATOR_REF?.trim() || 'env:DATABASE_URL',
       databaseCredentialRef: process.env.AUN_DATABASE_CREDENTIAL_REF?.trim() || 'env:DATABASE_URL',
       bunPath: Bun.which('bun') ?? process.execPath,
-      serverEntry: 'server.ts',
+      serverEntry: 'entrypoints/runtime.ts',
       providerRepoRoot: resolve(providerRepoRoot),
-      providerConfigRoot: resolve(providerConfigRoot),
+      providerConfigRoot: observedRuntime.providerConfigRoot,
       daemonCheckout: resolve(daemonCheckout),
       daemonEntry: join(resolve(daemonCheckout), 'bin', 'state-daemon.ts'),
       restartRequired: true,
@@ -987,6 +967,7 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
     const reasons: string[] = []
     if (!/^[0-9a-f]{64}$/.test(candidate.candidateDigest)) reasons.push('CANDIDATE_DIGEST_INVALID')
     if (candidate.providerMcp.databaseLocatorRef !== candidate.launchAgent.databaseLocatorRef) reasons.push('MIXED_DATABASE_ENDPOINT_CANDIDATE')
+    if(candidate.runtimeSelection && !await this.runtimeMatches(candidate)) reasons.push('CONFIGURATION_CURRENT_RUNTIME_CHANGED')
     const [providerRelease, daemonRelease] = await Promise.all([
       readNativeReleaseIdentity(candidate.providerMcp.checkoutRoot),
       readNativeReleaseIdentity(candidate.launchAgent.workingDirectory),
@@ -1118,6 +1099,12 @@ class NativeConfigurationProjectionPort implements ConfigurationProjectionPort {
   }
 
   private async runtimeMatches(candidate: AunConfigurationCandidate): Promise<boolean> {
+    if(candidate.runtimeSelection) {
+      try {
+        const actual=await resolveConfigurationRuntime(this.db,candidate.agentId,process.env as Record<string,string>,candidate.runtimeRegistration.workspace)
+        return configurationDigest(configurationRuntimeIdentity(actual))===configurationDigest(candidate.runtimeSelection)
+      } catch {return false}
+    }
     const rows = await this.db.query<any>(
       `SELECT r.runtime_engine, r.port, r.status, w.local_path
          FROM agent_runtime_instances r
@@ -1206,7 +1193,6 @@ export async function main(): Promise<void> {
   const configurationDb = config.configurationReconcilerEnabled ? new PgAdapter(connStr) : null
   const configurationReconciler = configurationDb
     ? new AunConfigurationReconciler(
-        process.env.AUN_HOST_ID?.trim() || hostname(),
         new DbConfigurationDesiredStateStore(configurationDb),
         new DbConfigurationLeasePort(
           configurationDb,
@@ -1261,7 +1247,9 @@ export async function main(): Promise<void> {
     config,
   })
 
-  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any).catch((error) => [{
+  const identityResults = await reconcileRuntimeMemoryReadyFleetIdentity(db as any, {
+    agentAllowlist: config.agentAllowlist,
+  }).catch((error) => [{
     agent_id: 'fleet',
     observed_runtime_instance_id: null,
     current_runtime_instance_id: null,

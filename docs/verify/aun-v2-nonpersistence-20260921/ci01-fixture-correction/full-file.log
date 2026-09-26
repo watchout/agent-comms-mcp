@@ -1,0 +1,62 @@
+bun test v1.4.2 (744846f84)
+
+tests/shirube-current-overlay-check.test.ts:
+(pass) bounded PR963 CI supply > A01/A02/A04 exact canonical R4 current-head supply, with or without informational label [2200.91ms]
+{"subcase":"CI-AMEND-A03/A05","negative_cases":52,"input_mode":"offline-fixture","effect_count":0}
+(pass) bounded PR963 CI supply > A03/A05 canonical, ownership, scope, stale/conflicting consumer and metadata negatives [24981.42ms]
+{"subcase":"I26-CURRENT-DAY-BOUNDARY","last_valid":1,"at_or_after_expiry_rejected":2,"old_consumer_rejected":3,"old_handoff_rejected":8,"product_Date_now_unchanged":true}
+(pass) I26 effective date boundary keeps expired consumers and historical source substitutions blocked [3972.03ms]
+{"subcase":"I9-FULL-INDEX-CONSUMER","head":"56b5228396ec79b352da92ffc8a3f334e59b017c","abbrev":[7,8],"full_index_sha256":"91c9fadf0fedbecf977f058781583cf1a2b80ecbb58b4e416281efcdef4fe570","all_index_ids40":true,"legacy_rejections":2}
+(pass) I9 current consumer uses full-index across abbrev7/8 and rejects abbreviated evidence [3302.99ms]
+(pass) shirube-current-overlay-check > allows runtime implementation PRs under the installed overlay gate [35.92ms]
+(pass) shirube-current-overlay-check > still blocks runtime files in the Rapid/Lite adoption overlay PR [33.85ms]
+(pass) shirube-current-overlay-check > allows a non-draft PR when the owner decision and one merge-method label match [35.37ms]
+(pass) shirube-current-overlay-check > blocks a merge-method label that disagrees with the exact-head owner decision [33.04ms]
+(pass) shirube-current-overlay-check > blocks an owner decision that omits merge_method [33.41ms]
+(pass) shirube-current-overlay-check > blocks missing, multiple, and unsupported merge-method labels [99.29ms]
+(pass) shirube-current-overlay-check > parses merge_method only from the shirube owner decision block [34.00ms]
+(pass) shirube-current-overlay-check > fails closed when exact-head owner decisions conflict without explicit supersession [31.78ms]
+(pass) shirube-current-overlay-check > accepts one current exact-head decision when it explicitly supersedes the prior decision [33.80ms]
+(pass) shirube-current-overlay-check > fails closed when a superseding decision changes method but the live label is stale [32.75ms]
+(pass) shirube-current-overlay-check > fails closed when supersedes_decision_ref does not identify a prior valid exact-head decision [32.59ms]
+(pass) shirube-current-overlay-check > fails closed when the live PR head differs from the checked workflow head [34.30ms]
+(pass) shirube-current-overlay-check > allows auto-squash revalidation only while the live decision and label remain squash [32.98ms]
+(pass) shirube-current-overlay-check > fails a stale auto-squash run after the live authority changes to merge [32.44ms]
+(pass) shirube-current-overlay-check > fails a stale auto-squash run after the live authority changes to rebase [32.90ms]
+(pass) shirube-current-overlay-check > accepts the public same-repository exact-ref manifest-verified local runtime topology [37.53ms]
+(pass) shirube-current-overlay-check > rejects a private ADF reusable workflow call or checkout [71.28ms]
+(pass) shirube-current-overlay-check > rejects a drifted public runtime ref [35.53ms]
+(pass) shirube-current-overlay-check > rejects missing strict runtime manifest verification [35.71ms]
+{"subcase":"C207-source-forms","positive":3,"negative":13,"authenticated_overlay_positive_separate":true}
+(pass) C207 source-specific original JSON and actual marked OD syntax [3.79ms]
+{"subcase":"I6-ACTUAL-CI-COLLECTOR","binary_diff_bytes":17522514,"binary_diff_sha256":"5c606f533a184cfebd0494604400056ac6aba608893ea609a5fc30a90ee77101","workflow_collector_sha256":"3513331c58f8fcec03d6450e8c9fe63bf2f9892fd9c849d12c11dab3c4ff983a","head":"aa91e435c5ad858185e27950f9f083e6349d2f69","tree":"ffe34ec1463beb579c91a1ca2327cea27ca5510b","independent_file_hash_equal":true,"git_failure_refused_without_subject":true,"abbrev7_8_same_subject":true,"all_index_ids40":true}
+(pass) I6 actual workflow collector preserves a repository binary diff above 1 MiB and refuses incomplete subjects [1263.24ms]
+(pass) CI-01 source admission before protected release > valid bounded source reaches quality validation without release owner or merge selection [2434.63ms]
+(pass) CI-01 source admission before protected release > existing standing-authorized ordinary route passes both modes without owner or overlay label [101.80ms]
+(pass) CI-01 source admission before protected release > the same standing waiver still refuses protected, uncited and breaking routes without overlay [196.61ms]
+(pass) CI-01 source admission before protected release > source mode retains expired, invalid, ambiguous source and current-overlay checks [6089.06ms]
+(pass) CI-01 source admission before protected release > full mode still refuses a wrong exact-head owner and accepts the matching owner [134.87ms]
+(pass) CI-01 source admission before protected release > unknown, duplicate, missing, ambiguous and release-incompatible flags fail closed [334.91ms]
+(pass) CI-01 source admission before protected release > source-only checked-head pin remains enforced [32.74ms]
+(pass) CI-01 source admission before protected release > workflow keeps fatal source before quality, full after quality, and unchanged auto-merge [12.94ms]
+(pass) CI-01 source admission before protected release > declared workflow delta preserves exact history and refuses undeclared mutations [22.78ms]
+(pass) CI-01 source admission before protected release > CI-01 workflow delta cannot reuse previous I21 admission [102.65ms]
+(pass) I25 distinct CI supply and canonical workflow namespaces > source accepts separate canonical refs without treating them as CI authority [757.75ms]
+(pass) I25 distinct CI supply and canonical workflow namespaces > missing, duplicate, indented, wrong and legacy-only CI pins cannot fall back to canonical refs [375.48ms]
+(pass) I25 distinct CI supply and canonical workflow namespaces > separate canonical refs never waive the non-draft exact-head owner gate [772.47ms]
+(pass) I25 current metadata rejects historical adoption as current state and keeps historical onboarding intact [187.76ms]
+(pass) I25 scoped current metadata refuses historical/comment substitutes and ambiguous trust fields [395.06ms]
+(pass) I25 A1/A2 scope amendments require authenticated complete current inputs [2028.45ms]
+(pass) I26 authenticated finite successor window > current source is usable after old expiry but never grants protected release [3066.19ms]
+{"subcase":"I26-AUTHENTICATED-WINDOW-NEGATIVES","cases":24,"public_effects":0}
+(pass) I26 authenticated finite successor window > I26 missing forged scope identity duplicate and stale inputs fail closed [4036.98ms]
+(pass) I26 authenticated finite successor window > old published fixtures keep their exact bytes and expiry history [15.70ms]
+{"subcase":"I26-A3-ACTUAL-CHECKOUT","candidate":"56b5228396ec79b352da92ffc8a3f334e59b017c","base":"0f772883db6f3b50772d3e4b82ce47795091f0a9","tested":"56b5228396ec79b352da92ffc8a3f334e59b017c","candidateTree":"f169b73cec8ec326e4cf1ca479833dea328130ae","testedTree":"f169b73cec8ec326e4cf1ca479833dea328130ae","candidateParents":["d982dc2c0284a633b2b1f82d6780b3f77b8e0dd1"],"testedParents":["d982dc2c0284a633b2b1f82d6780b3f77b8e0dd1"],"offline_fixture":true,"public_effects":0}
+(pass) I26-A3 candidate and tested checkout separation > actual checkout subject plus missing malformed wrong-subject and shape negatives [60.97ms]
+(pass) I26-A3 candidate and tested checkout separation > A3 authentication and old consumer cannot be substituted [1333.42ms]
+(pass) I26-A3 actual mode predicate rejects chmod symlink add delete rename and abbreviated objects [0.49ms]
+
+ 47 pass
+ 0 fail
+ 635 expect() calls
+Ran 47 tests across 1 file. [59.11s]

@@ -56,6 +56,11 @@ class FakeQueueDb implements QueueWorkDb {
 
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
     this.calls.push({ sql, params })
+    if (sql === "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed") {
+      // These existing cases exercise the default, non-admitted database path.
+      // Real installed-policy behavior is measured in the bounded PG fixtures.
+      return { rows: [{ installed: false }] as T[], rowCount: 1 }
+    }
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql)) {
       return { rows: [], rowCount: 0 }
     }
@@ -1305,10 +1310,11 @@ describe('finalizeDoneQueueWork', () => {
       queue_id: '42',
     })
     const sqls = db.calls.map((call) => call.sql)
-    expect(sqls).toHaveLength(3)
-    expect(sqls[0]).toBe('BEGIN')
-    expect(sqls[1]).toContain('FOR UPDATE')
-    expect(sqls[2]).toBe('ROLLBACK')
+    expect(sqls).toHaveLength(4)
+    expect(sqls[0]).toBe("SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed")
+    expect(sqls[1]).toBe('BEGIN')
+    expect(sqls[2]).toContain('FOR UPDATE')
+    expect(sqls[3]).toBe('ROLLBACK')
     expect(db.row.status).toBe('done')
   })
 
@@ -1531,6 +1537,7 @@ describe('finalizeDoneQueueWork', () => {
     })
     expect(sendCount).toBe(0)
     expect(db.calls.map((call) => call.sql)).toEqual([
+      "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed",
       'BEGIN',
       expect.stringContaining('FOR UPDATE'),
       'ROLLBACK',
@@ -1673,5 +1680,50 @@ describe('command-json custom runner consumes the shared generic resolver at the
     const startedAt = Date.now()
     await expect(adapter.invoke(envelope)).rejects.toThrow('runtime command failed')
     expect(Date.now() - startedAt).toBeLessThan(4_000) // killed by the resolver budget, not by the 5s sleep
+  })
+
+  test('bounded worker keeps the shared timeout and admission binding without receiving host credentials', async () => {
+    const protectedKeys = ['DATABASE_URL', 'PGPASSWORD', 'GITHUB_TOKEN', 'DISCORD_BOT_TOKEN', 'AUN_QUEUE_WORK_MEDIATED_POSTING_COMMAND']
+    const env = {
+      AUN_ADMISSION_POLICY_ID: 'integration-fixture',
+      AUN_ADMISSION_CONFIG_DIGEST: 'a'.repeat(64),
+      AUN_ADMISSION_SOURCE_SHA: 'b'.repeat(40),
+      AUN_ADMISSION_COHORT_DIGEST: 'c'.repeat(64),
+      AUN_ADMISSION_RUNTIME_ID: 'command-json',
+      STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '2400000',
+      ...Object.fromEntries(protectedKeys.map((key) => [key, 'fixture-only-never-use'])),
+    }
+    const script = `
+      await Bun.stdin.text()
+      const result = ${JSON.stringify(okResult({ reply: null, next_action: 'close' }))}
+      result.summary = JSON.stringify({
+        protectedKeysPresent: ${JSON.stringify(protectedKeys)}.filter((key) => Object.hasOwn(process.env, key)),
+        policy: process.env.AUN_ADMISSION_POLICY_ID,
+        timeout: process.env.STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS,
+      })
+      process.stdout.write(JSON.stringify(result))
+    `
+    const adapter = new CommandJsonRuntimeAdapter(process.execPath, ['-e', script], process.cwd(), env)
+    expect(adapter.execution_timeout_ms).toBe(2_400_000)
+    expect(adapter.execution_timeout_ms).toBe(resolveQueueWorkTimeouts(env).maxLegitimateRunnerTimeoutMs)
+    const result = await adapter.invoke(envelope)
+    expect(result.ok).toBe(true)
+    expect(JSON.parse(result.summary)).toEqual({ protectedKeysPresent: [], policy: 'integration-fixture', timeout: '2400000' })
+  })
+
+  test('valid timeout does not let a malformed admission binding spawn a child', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'aun-e7-admission-'))
+    try {
+      const marker = join(dir, 'spawned')
+      const adapter = new CommandJsonRuntimeAdapter(process.execPath,
+        ['-e', `await Bun.write(${JSON.stringify(marker)}, 'spawned')`], process.cwd(), {
+          AUN_ADMISSION_POLICY_ID: 'incomplete-fixture',
+          STATE_DAEMON_QUEUE_WORK_TIMEOUT_MS: '1000',
+        })
+      await expect(adapter.invoke(envelope)).rejects.toThrow('ADMISSION_LOADED_CONFIG_INVALID')
+      expect(existsSync(marker)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

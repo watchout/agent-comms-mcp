@@ -1,0 +1,121 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_21219ea964234cc582cfd921a7b6513b","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: null value in column "agent_type" of relation "agents" violates not-null constraint
+     length: 950,
+   severity: "ERROR",
+     detail: "Failing row contains (cfg-fixture, configuration fixture, null, null, null, null, 2026-09-21 21:00:33.465819+09, null, null, null, null, default, null, f, null, null, null, null, aun://default/agents/cfg-fixture, local, local, local, null, null, {}, null, null, null, null, null, {}, t, 1, legacy, null, null, null, null, null, null, launchd:com.agent-comms.state-daemon, agent-profile:cfg-fixture:expected-provider-identity:44136fa355b..., t, {\"owner\": \"continuous-reconciler\", \"schema_version\": \"aun-config..., 1, f301a70be8d35c4cd1686ab33332ddde599f5d6e740d2020a8a88b56804594f0, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, [\"https://github.com/watchout/agent-comms-mcp/issues/940#issueco..., 2026-09-21 21:00:33.467187+09, legacy).",
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: "public",
+      table: "agents",
+   dataType: undefined,
+ constraint: undefined,
+       file: "execMain.c",
+    routine: "ExecConstraints",
+       code: "23502"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) AC-CFG-1 fresh hostname stays outside candidate, logical scopes and durable records; supplied host is rejected [224.40ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_51cb026ceac942a0bf4be1848e9b0cc6","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: null value in column "agent_type" of relation "agents" violates not-null constraint
+     length: 950,
+   severity: "ERROR",
+     detail: "Failing row contains (cfg-fixture, configuration fixture, null, null, null, null, 2026-09-21 21:00:33.649832+09, null, null, null, null, default, null, f, null, null, null, null, aun://default/agents/cfg-fixture, local, local, local, null, null, {}, null, null, null, null, null, {}, t, 1, legacy, null, null, null, null, null, null, launchd:com.agent-comms.state-daemon, agent-profile:cfg-fixture:expected-provider-identity:44136fa355b..., t, {\"owner\": \"continuous-reconciler\", \"schema_version\": \"aun-config..., 1, f301a70be8d35c4cd1686ab33332ddde599f5d6e740d2020a8a88b56804594f0, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, [\"https://github.com/watchout/agent-comms-mcp/issues/940#issueco..., 2026-09-21 21:00:33.651045+09, legacy).",
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: "public",
+      table: "agents",
+   dataType: undefined,
+ constraint: undefined,
+       file: "execMain.c",
+    routine: "ExecConstraints",
+       code: "23502"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) AC-CFG-2 ordinary reconcile delivers existing outbox with logical audit and no observation sink; stale fence cannot deliver [183.37ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_0cd0dfb496694ed384dc3ddb80cbfc64","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: null value in column "agent_type" of relation "agents" violates not-null constraint
+     length: 950,
+   severity: "ERROR",
+     detail: "Failing row contains (cfg-fixture, configuration fixture, null, null, null, null, 2026-09-21 21:00:33.821607+09, null, null, null, null, default, null, f, null, null, null, null, aun://default/agents/cfg-fixture, local, local, local, null, null, {}, null, null, null, null, null, {}, t, 1, legacy, null, null, null, null, null, null, launchd:com.agent-comms.state-daemon, agent-profile:cfg-fixture:expected-provider-identity:44136fa355b..., t, {\"owner\": \"continuous-reconciler\", \"schema_version\": \"aun-config..., 1, f301a70be8d35c4cd1686ab33332ddde599f5d6e740d2020a8a88b56804594f0, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, [\"https://github.com/watchout/agent-comms-mcp/issues/940#issueco..., 2026-09-21 21:00:33.822792+09, legacy).",
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: "public",
+      table: "agents",
+   dataType: undefined,
+ constraint: undefined,
+       file: "execMain.c",
+    routine: "ExecConstraints",
+       code: "23502"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) AC-CFG-4 logical restart insert and authenticated one-shot execution pass; physical fields, ownerless and expired execution fail [171.63ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_88d58b9201b74fb1a3096ba5935a2322","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: null value in column "agent_type" of relation "agents" violates not-null constraint
+     length: 950,
+   severity: "ERROR",
+     detail: "Failing row contains (cfg-fixture, configuration fixture, null, null, null, null, 2026-09-21 21:00:34.037959+09, null, null, null, null, default, null, f, null, null, null, null, aun://default/agents/cfg-fixture, local, local, local, null, null, {}, null, null, null, null, null, {}, t, 1, legacy, null, null, null, null, null, null, launchd:com.agent-comms.state-daemon, agent-profile:cfg-fixture:expected-provider-identity:44136fa355b..., t, {\"owner\": \"continuous-reconciler\", \"schema_version\": \"aun-config..., 1, f301a70be8d35c4cd1686ab33332ddde599f5d6e740d2020a8a88b56804594f0, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, [\"https://github.com/watchout/agent-comms-mcp/issues/940#issueco..., 2026-09-21 21:00:34.039359+09, legacy).",
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: "public",
+      table: "agents",
+   dataType: undefined,
+ constraint: undefined,
+       file: "execMain.c",
+    routine: "ExecConstraints",
+       code: "23502"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) AC-CFG-5 duplicate logical restart requests converge; a stale holder cannot create another request [216.48ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_9dfbb6e4c90e4ccaba74374565f677c4","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"restart-migration","kind":"postgres","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 postgres preserves existing request history, rejects duplicate migration and physical rewrites [386.81ms]
+{"case":"restart-migration","kind":"sqlite","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 sqlite preserves existing request history, rejects duplicate migration and physical rewrites [3.69ms]
+
+ 2 pass
+ 4 fail
+ 13 expect() calls
+Ran 6 tests across 1 file. [1220.00ms]

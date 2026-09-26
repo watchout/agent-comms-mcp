@@ -23,10 +23,7 @@ async function withReconcileDb<T>(fn: (db: SqliteAdapter, path: string) => Promi
       ['codex-cto', '900000000000000003'],
     ] as const) {
       seed.prepare(
-        `INSERT INTO agents (
-           agent_id, display_name, agent_type, cli_type, runtime, status, metadata,
-           provider_token_source_ref
-         ) VALUES (?, ?, 'dev', 'TUI', 'codex', 'idle', ?, ?)`,
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata, provider_token_source_ref) VALUES (?, ?, 'dev', ?, ?)`,
       ).run(
         agentId,
         agentId,

@@ -90,9 +90,9 @@ beforeEach(() => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   withDb((db) => {
     db.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, status)
-        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'idle'),
-               ('other-dev', 'other-dev', 'dev', 'idle');
+      INSERT INTO agents (agent_id, display_name, agent_type)
+        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev'),
+               ('other-dev', 'other-dev', 'dev');
       INSERT INTO channels (id, name, members)
         VALUES ('lifecycle-ch', 'lifecycle-ch', '["${TEST_AGENT}","codex-cto"]');
     `)
@@ -139,7 +139,7 @@ describe('aun lifecycle CLI transitions', () => {
     })
     expect(body.final_close_contract).toContain('reply --close')
     expect(queueRow(queueId).status).toBe('in_progress')
-    expect(agentStatus().status).toBe('busy')
+    expect(agentStatus().status).toBeNull()
   })
 
   test('done advances in_progress to done and stamps done_at without replying/closing', () => {
@@ -158,7 +158,7 @@ describe('aun lifecycle CLI transitions', () => {
     const row = queueRow(queueId)
     expect(row.status).toBe('done')
     expect(row.done_at).not.toBeNull()
-    expect(agentStatus().status).toBe('idle')
+    expect(agentStatus().status).toBeNull()
   })
 
   test('done stamps terminal_baton when explicit no-reply content includes PASS', () => {

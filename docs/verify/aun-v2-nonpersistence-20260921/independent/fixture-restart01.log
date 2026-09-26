@@ -1,0 +1,8 @@
+2026-09-21 15:22:53.738 JST [39908] LOG:  starting PostgreSQL 17.9 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-09-21 15:22:53.739 JST [39908] LOG:  could not bind IPv6 address "::1": Address already in use
+2026-09-21 15:22:53.739 JST [39908] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-09-21 15:22:53.739 JST [39908] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
+2026-09-21 15:22:53.739 JST [39908] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-09-21 15:22:53.739 JST [39908] WARNING:  could not create listen socket for "localhost"
+2026-09-21 15:22:53.739 JST [39908] FATAL:  could not create any TCP/IP sockets
+2026-09-21 15:22:53.739 JST [39908] LOG:  database system is shut down
