@@ -1440,8 +1440,8 @@ resolver はまず `status IN ('running','active')` かつ valid heartbeat (`las
 `LIVENESS_TTL` 内の row を live pool にする。live exact tuple match が 1 行以上あれば、その集合だけを
 current ranking に参加させ、複数なら `last_seen_at DESC, started_at DESC,
 runtime_instance_id ASC` で決定的に 1 行を選ぶ。同時に存在する live profile-mismatch row は typed
-`PROFILE_MISMATCH_DEPRIORITIZED` とし、exact row より下位へ置く。この順位付け以外の理由で
-profile-mismatch row を一律除外してはならない。
+profile の旧値で順位を上書きしない。選択は観測した現在の runtime 行と namespace に従い、mismatch は診断情報として残す。
+
 
 live exact tuple match が 0 行で、requested kind の live row が 1 行以上ある場合は、freshness 順の
 先頭を current として維持し、typed `REGISTRATION_PROFILE_MISMATCH` observation を返す。この fallback は
@@ -1464,17 +1464,14 @@ gate detail、daemon log/metric、read-only identity monitor は同じ resolver 
 config から読み、resolver/refresher report と daemon startup readback に schema version と
 content digest を出す。config が absent / malformed / unsupported version なら fail-closed とする。
 
-**Runtime rotation と memory-ready evidence rebinding**
+**Runtime rotation と memory-ready evidence の再確認（2026-09-13）**
 
-ordinary runtime heartbeat の upsert 後、heartbeat writer は同じ exported current-runtime resolver
-で当該席を再解決する。heartbeat row が新しい current candidate で、当該席/project の最新
-`runtime_memory_ready_evidence.runtime_instance_id` が current instance と異なる場合、それを typed
-`SUPERSEDED_EVIDENCE_BINDING` として検出し、同じ single-seat refresher/readback 経路で evidence を
-current instance に再束縛する。再取得後は gate readback が `ready` にならなければ成功として扱わない。
-exact current が存在する間に `PROFILE_MISMATCH_DEPRIORITIZED` となった heartbeat は evidence を
-再束縛できず typed warning のみを残す。`REGISTRATION_PROFILE_MISMATCH` current は silent に捨てず、
-登録 provenance と mismatch を audit/monitor に残す。heartbeat writer が profile authority で row を
-correct した後は、同じ heartbeat event 内で通常の evidence 再束縛へ進む。
+[席の継続契約](spec/seat-runtime-continuity.md)を適用する。profile の旧 provider・port・物理 path は
+現在の実行系を選ぶ権限ではない。同一席の新しい current runtime には、同じ provider PID/start・native
+session・workspace に届いた Wasurezu native context receipt を検証し、その runtime UUID へ束縛する。
+古い receipt の UUID をコピーするだけでは再束縛できない。現在の MCP endpoint lease と semantic receipt
+が両方一致するまで memory-ready は false。queue claim の所有者・token・expiry は変更しない。
+
 
 rotation refresh は heartbeat event が主契機であり、固定周期 refresher の次回実行待ちにしては
 ならない。daemon 起動時にも 1 回 reconciliation を行い、daemon 配備前に生じた rotation を回収する。
@@ -1483,7 +1480,7 @@ heartbeat event と起動時 reconciliation は冪等で、latest evidence が c
 heartbeat row、旧 evidence、又は queue row を手動修復しない。
 
 read-only identity monitor は少なくとも `REGISTRATION_PROFILE_MISMATCH`、
-`PROFILE_MISMATCH_DEPRIORITIZED`、`SUPERSEDED_EVIDENCE_BINDING` を席別に列挙・集計できなければ
+`REGISTRATION_PROFILE_MISMATCH`、`SUPERSEDED_EVIDENCE_BINDING` を席別に列挙・集計できなければ
 ならない。registration finding は effective 登録 metadata の provenance も返し、同型の全席を一つの
 query/report で列挙する。最後の finding は latest evidence と common resolver が選ぶ current instance の
 不一致で判定し、stopped row に束縛された evidence も同じ typed finding とする。

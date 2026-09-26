@@ -1,3 +1,4 @@
+import { hostname } from 'node:os'
 import { createHash } from 'node:crypto'
 import type { DbAdapter } from './db'
 import { parseJsonObject, profileExclusionReason, normalizeText } from './profile-classification'
@@ -98,6 +99,7 @@ type AgentRow = {
 
 type RuntimeRow = {
   runtime_instance_id: string
+  host_id: string | null
   agent_id: string
   runtime_engine: string | null
   runtime_kind: string | null
@@ -259,7 +261,7 @@ async function loadAgents(db: DbAdapter): Promise<AgentRow[]> {
 async function loadRuntimes(db: DbAdapter): Promise<RuntimeRow[]> {
   return await queryRows<RuntimeRow>(
     db,
-    `SELECT runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
+    `SELECT runtime_instance_id, host_id, agent_id, runtime_engine, runtime_kind, session_name, process_id,
             port, checkout_path, commit_sha, status, started_at, stopped_at, last_seen_at, metadata
        FROM agent_runtime_instances
       ORDER BY agent_id, started_at DESC`,
@@ -320,7 +322,7 @@ export async function buildRuntimeCleanupReport(
   for (const agent of agents) {
     const agentRuntimes = runtimeByAgent.get(agent.agent_id) ?? []
     const exclusionReason = profileExclusionReason(agent, { includeDisabledProfiles, includeTestProfiles })
-    const port = numberOrNull(agent.channel_port) ?? numberOrNull(agentRuntimes.find((row) => row.port)?.port)
+    const port = numberOrNull(agentRuntimes.find((row) => row.port)?.port)
     const tmuxSession = tmuxSessionFor(agent, agentRuntimes)
     if (port) {
       candidatePorts.add(port)
@@ -360,7 +362,7 @@ export async function buildRuntimeCleanupReport(
     const latestLive = liveRuntimes[0] ?? null
     const metadata = parseJsonObject(agent.metadata)
     const tmuxSession = tmuxSessionFor(agent, agentRuntimes)
-    const port = numberOrNull(agent.channel_port) ?? numberOrNull(latestLive?.port)
+    const port = numberOrNull(latestLive?.port)
     const matchingListeners = listenersForPort(port, portListeners)
     for (const listener of matchingListeners) coveredListenerKeys.add(`${listener.port}:${listener.pid}`)
     const matchingTmuxPanes = tmuxSession
@@ -619,6 +621,20 @@ export async function buildRuntimeCleanupReport(
     }))
   }
 
+  const leases=await queryRows<{lease_scope_id:string;expires_at:string}>(db,
+    "SELECT lease_scope_id, expires_at FROM control_plane_leases WHERE lease_scope_type='runtime_instance' AND lease_purpose='worker' AND status='active'")
+  const leased=new Set(leases.filter(row=>Date.parse(row.expires_at)>nowMs).map(row=>String(row.lease_scope_id)))
+  for(const target of targets) target.actions=target.actions.map(action=>{
+    if(action.kind==='noop') return action
+    const holders=runtimes.filter(runtime=>runtime.agent_id===target.agent_id && (
+      action.kind==='stop_runtime' ? runtime.runtime_instance_id===action.runtime_instance_id :
+      action.kind==='kill_process' ? Number(runtime.process_id)===action.pid && Number(runtime.port)===action.port :
+      runtime.session_name===action.tmux_session))
+    if(holders.length!==1 || holders[0].host_id!==hostname() || leased.has(holders[0].runtime_instance_id)) {
+      return {...action,kind:'noop',reason:'runtime_holder_unavailable_foreign_or_actively_leased'}
+    }
+    return action
+  })
   const sortedTargets = sortTargets(targets)
   const executableActions = sortedTargets.flatMap((target) => target.actions).filter((action) => action.kind !== 'noop')
   const blockers = sortedTargets

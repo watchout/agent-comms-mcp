@@ -1,7 +1,5 @@
 import {
-  buildWasurezuBootstrapEvidence,
   evaluateRuntimeMemoryReadyGate,
-  recordRuntimeMemoryReadyEvidence,
   resolveRuntimeMemoryReadyProject,
   type RuntimeMemoryReadyDb,
   type RuntimeMemoryReadyProjectResolution,
@@ -87,21 +85,8 @@ async function defaultRefreshSeat(input: {
   if (!runtime || !profile || !runtime.session_name || runtime.port === null) {
     throw new Error('CURRENT_RUNTIME_IDENTITY_INCOMPLETE')
   }
-  const evidence = buildWasurezuBootstrapEvidence({
-    agent_id: input.resolution.agent_id,
-    project: input.project.project,
-    runtime_instance_id: runtime.runtime_instance_id,
-    profile_revision: profile.profile_revision,
-    profile_source: profile.profile_source,
-    session_name: runtime.session_name,
-    port: runtime.port,
-    checkout_path: runtime.checkout_path,
-    checkout_commit_sha: runtime.commit_sha,
-    completed_at: input.now,
-    valid_for_seconds: input.validForSeconds,
-    recovery_command: 'mcp__wasurezu__recover_context',
-  })
-  const recorded = await recordRuntimeMemoryReadyEvidence(input.db, evidence)
+  // A liveness tick is not a recovery invocation. It may confirm a current
+  // consumption receipt, but cannot mint/rebind/extend one after replacement.
   const gate = await evaluateRuntimeMemoryReadyGate(input.db, {
     agent_id: input.resolution.agent_id,
     expected_agent_id: input.resolution.agent_id,
@@ -109,10 +94,9 @@ async function defaultRefreshSeat(input: {
     now: input.now,
     policy: input.policy,
   })
-  if (!gate.ok) {
-    throw new Error(`MEMORY_READY_READBACK_FAILED:${gate.reason}`)
-  }
-  return recorded
+  if (!gate.ok) throw new Error(`MEMORY_CONTEXT_RECOVERY_REQUIRED:${gate.reason}`)
+  return { evidence_id: gate.evidence_id, evidence_log_id: gate.evidence_log_id }
+
 }
 
 export { defaultRefreshSeat as refreshRuntimeMemoryReadySeat }

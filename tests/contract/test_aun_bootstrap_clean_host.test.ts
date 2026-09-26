@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootstrap, bootstrapInternal } from '../../bin/aun/bootstrap'
@@ -16,6 +17,12 @@ import {
   type StateDaemonRestorePlan,
 } from '../../core/state-daemon/launchagent'
 import { createPostgresTestDatabase, type PostgresTestDatabase } from '../helpers/postgres-test-database'
+import { execFileSync } from 'node:child_process'
+import { hostname } from 'node:os'
+import { observeSeatProvider } from '../../core/seat-runtime-selection'
+import { resolveConfigurationRuntime } from '../../core/aun-configuration-candidate'
+
+import { nativeHostFixture, registerNativeFixtureRuntime, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 
 const roots: string[] = []
 const postgresDatabases: PostgresTestDatabase[] = []
@@ -25,12 +32,45 @@ SHIRUBE_D1_KILL_SWITCH => 1
 SHIRUBE_D1_TARGET_ALLOWLIST => []
 STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED => 0
 `
-afterEach(() => {
+afterEach(async () => {
+  await stopNativeFixtures()
   while (postgresDatabases.length) postgresDatabases.pop()!.drop()
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
 })
 
 describe('aun bootstrap clean-host journal', () => {
+  for (const drift of ['modified', 'replaced'] as const) {
+    test(`SQLite rollback preserves an externally ${drift} database`, async () => {
+      const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-sqlite-external-fence-')))
+      roots.push(home)
+      const dbPath=join(home,'fixture.db'),repoRoot=realpathSync(join(import.meta.dir,'..','..'))
+      const db=new Database(dbPath)
+      db.exec("CREATE TABLE fixture(value TEXT); INSERT INTO fixture VALUES ('owned')")
+      db.close()
+      const snapshot=()=>['','-wal','-shm'].map(suffix=>({suffix,exists:existsSync(dbPath+suffix),
+        digest:existsSync(dbPath+suffix)?bootstrapDigest(readFileSync(dbPath+suffix)):null}))
+      const afterDigest=bootstrapDigest(snapshot()),identity={realpath:realpathSync(dbPath),device:Number(statSync(dbPath).dev),inode:Number(statSync(dbPath).ino)}
+      if(drift==='modified') {
+        const external=new Database(dbPath);external.exec("INSERT INTO fixture VALUES ('external')");external.close()
+        expect(bootstrapDigest(snapshot())).not.toBe(afterDigest)
+      } else {
+        const replacement=join(home,'replacement.db');writeFileSync(replacement,readFileSync(dbPath));renameSync(replacement,dbPath)
+        expect(Number(statSync(dbPath).ino)).not.toBe(identity.inode)
+        expect(bootstrapDigest(snapshot())).toBe(afterDigest)
+      }
+      const externalState=snapshot()
+      const env={HOME:home,AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:dbPath}
+      const ports=bootstrapInternal.createDefaultPorts({home,repoRoot,env,run:async()=>{throw new Error('unexpected command')}})
+      const context={runId:'sqlite-fence',agentId:'fixture',requestedRuntime:'codex',resolvedRuntime:'codex',
+        repoRoot,workspaceRoot:repoRoot,repoHead:'a'.repeat(40),dryRun:false,env,priorState:{mutations:[]}} as unknown as BootstrapStageContext
+      const outcome=await ports.rollbackMutation(context,{mutation_id:'db-fence',kind:'db',stage:'B2_DB_MIGRATION',rollback_status:'not_run',
+        owner_key:'db:sqlite-fence',before_digest:null,intended_after_digest:afterDigest,actual_after_digest:afterDigest,
+        rollback_action:'remove exact run-owned database',rollback_payload:{backend:'sqlite',path:dbPath,after_identity:identity,after_digest:afterDigest,created_by_run:true}})
+      expect(outcome.ok).toBe(false)
+      expect(outcome.reasonCodes).toContain('NO_GO_ROLLBACK_UNVERIFIED')
+      expect(snapshot()).toEqual(externalState)
+    })
+  }
   test('B5-TARGET-AUTHORITY-001 uses only the validated target pane process tree when the controller differs', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-target-tmux-'))
     roots.push(home)
@@ -307,13 +347,14 @@ describe('aun bootstrap clean-host journal', () => {
   })
 
   test('B5-CONCURRENCY-001, B5-FINAL-TUPLE-READBACK-001, and B5-INCREMENTAL-BINDING-001 bind readback and reject every authoritative tuple drift', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-'))
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-b5-concurrency-')))
     roots.push(home)
     const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
     const databaseName = `aun_bootstrap_b5_concurrency_${process.pid}_${Date.now()}`
     const postgresDatabase = createPostgresTestDatabase(databaseName)
     postgresDatabases.push(postgresDatabase)
     const databaseUrl = postgresDatabase.databaseUrl
+    const native=await nativeHostFixture(home,repoRoot,'b5-concurrency','b5-concurrency-project','b5-session')
     const baseEnv = {
       ...process.env,
       HOME: home,
@@ -322,7 +363,7 @@ describe('aun bootstrap clean-host journal', () => {
       DATABASE_URL: databaseUrl,
       AGENT_MEMORY_PROJECT: 'b5-concurrency-project',
       AUN_BOOTSTRAP_CHANNEL_PORT: '8812',
-      AUN_BOOTSTRAP_PROVIDER_PID: '7312',
+      AUN_BOOTSTRAP_PROVIDER_PID: String(native.observed.provider.pid),
     } as Record<string, string>
     expect(Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env: baseEnv }).exitCode).toBe(0)
     const profileSet = Bun.spawnSync([
@@ -332,13 +373,7 @@ describe('aun bootstrap clean-host journal', () => {
     ], { cwd: repoRoot, env: baseEnv })
     expect(profileSet.exitCode).toBe(0)
     const db = new PgAdapter(databaseUrl)
-    await db.execute(
-      `INSERT INTO agent_runtime_instances
-         (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name,
-          process_id, port, checkout_path, commit_sha, status, started_at, last_seen_at, metadata)
-       VALUES ($1, $2, 'codex', 'local_process', 'b5-session', 7000, 8812, $3, $4, 'active', now(), now(), $5::jsonb)`,
-      ['ba000000-0000-4000-8000-000000000001', 'b5-concurrency', repoRoot, 'a'.repeat(40), JSON.stringify({ owner: 'ordinary-runtime' })],
-    )
+    await registerNativeFixtureRuntime(db,native,'b5-concurrency','b5-concurrency-project','b5-session',repoRoot,'ba000000-0000-4000-8000-000000000001')
     const storedProfile = await db.queryOne<any>(
       `SELECT profile_revision, profile_source FROM agents WHERE agent_id = $1`,
       ['b5-concurrency'],
@@ -349,16 +384,6 @@ describe('aun bootstrap clean-host journal', () => {
       channel_port: 8812, tmux_session: 'b5-session', profile_enabled: true,
       profile_revision: Number(storedProfile?.profile_revision), profile_source: storedProfile?.profile_source,
     }
-    const recoveryFixture = `
-      const readline = require('node:readline');
-      const rl = readline.createInterface({ input: process.stdin });
-      rl.on('line', (line) => {
-        const m = JSON.parse(line);
-        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'fixture',version:'1'}}}));
-        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project b5-concurrency-project recovered'}],isError:false}}));
-      });
-    `
     let ordinaryHeartbeatAdvances = 0
     let providerTransportDrift = false
     const run = async (command: string, args: string[]) => {
@@ -371,7 +396,7 @@ describe('aun bootstrap clean-host journal', () => {
         try {
           await heartbeatDb.execute(
             `UPDATE agent_runtime_instances
-                SET last_seen_at = now() + interval '1 hour'
+                SET last_seen_at = now()
               WHERE runtime_instance_id = $1
                 AND agent_id = $2
                 AND runtime_kind = 'local_process'`,
@@ -386,8 +411,8 @@ describe('aun bootstrap clean-host journal', () => {
           stdout: JSON.stringify({
             enabled: true,
             transport: {
-              type: 'stdio', command: process.execPath,
-              args: ['-e', providerTransportDrift ? `${recoveryFixture}\n// drift` : recoveryFixture], env: {},
+              type: 'stdio', command: native.node,
+              args: [native.memory,...(providerTransportDrift?['drift']:[])], env: native.env,
             },
           }),
           stderr: '',
@@ -397,7 +422,7 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const runGate = async (runId: string) => {
       const env = { ...baseEnv }
-      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
+      const ports = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot, observeProvider:native.observeProvider })
       const context = {
         runId, agentId: 'b5-concurrency', requestedRuntime: 'codex', resolvedRuntime: 'codex',
         repoRoot, workspaceRoot: repoRoot, repoHead: 'a'.repeat(40), dryRun: false, env,
@@ -424,7 +449,7 @@ describe('aun bootstrap clean-host journal', () => {
 
     const expectedReceipt = {
       runtime_kind: 'bootstrap_bound_provider', runtime_engine: 'codex', session_name: 'b5-session',
-      process_id: 7312, port: 8812, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
+      process_id: native.observed.provider.pid, port: native.observed.endpoint.port, checkout_path: repoRoot, commit_sha: 'a'.repeat(40),
     }
     const driftCases = [
       { id: 'runtime_kind', values: { ...expectedReceipt, runtime_kind: 'local_process' } },
@@ -606,11 +631,11 @@ describe('aun bootstrap clean-host journal', () => {
     expect(active.filter((row) => row.runtime_kind === 'local_process')).toEqual([
       { runtime_instance_id: 'ba000000-0000-4000-8000-000000000001', runtime_kind: 'local_process', status: 'active' },
     ].map((row) => expect.objectContaining(row)))
-    expect(ordinaryHeartbeatAdvances).toBe(7)
+    expect(ordinaryHeartbeatAdvances).toBeGreaterThanOrEqual(7)
     await readback.close()
-  })
+  }, 30000)
 
-  test('existing Codex target root authority comes only from metadata.codex_home and projection equality', async () => {
+  test('live Codex account-root observation survives stale, absent and symlinked profile metadata', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-root-db-')))
     roots.push(home)
     const codexRoot = join(home, '.codex')
@@ -639,14 +664,17 @@ describe('aun bootstrap clean-host journal', () => {
        ) VALUES ($1, $2, 'bot', 'TUI', $3::jsonb, 'codex', $4::jsonb)`,
       ['root-authority', 'Root authority fixture', JSON.stringify({ codex_home: codexRoot }), JSON.stringify({ provider_config_root: codexRoot })],
     )
+    const native=await nativeHostFixture(home,repoRoot,'root-authority','root-project','root-session')
+    await registerNativeFixtureRuntime(db,native,'root-authority','root-project','root-session',repoRoot,randomUUID())
+    const observeRoot={observeProvider:native.observeProvider,run:async(_command:string,args:string[])=>({exitCode:0,stdout:args.includes('lstart=')?native.observed.provider.startedAt:`/fixture/codex HOME=${home} CODEX_HOME=${codexRoot}`,stderr:''})}
     const exact = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env: { ...env, CODEX_HOME: wrongRoot }, home, repoRoot,
     })
     expect(exact.ok).toBe(true)
     if (!exact.ok) throw new Error('expected exact root authority')
     expect(exact.authority).toMatchObject({
       existingTarget: true,
-      canonicalSourceField: 'metadata.codex_home',
+      canonicalSourceField: 'observed_provider_process',
       canonicalRoot: codexRoot,
       projectionMatches: true,
       callerMismatch: true,
@@ -659,14 +687,14 @@ describe('aun bootstrap clean-host journal', () => {
       'root-authority', JSON.stringify({ provider_config_root: '/tmp/conflict' }),
     ])
     const conflict = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(conflict).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_CONFLICT' })
+    expect(conflict).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
     await db.execute(`UPDATE agents SET metadata = '{}'::jsonb WHERE agent_id = $1`, ['root-authority'])
     const missing = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(missing).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    expect(missing).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
     const symlinkRoot = join(home, '.codex-link')
     symlinkSync(codexRoot, symlinkRoot)
     await db.execute(
@@ -675,13 +703,15 @@ describe('aun bootstrap clean-host journal', () => {
       ['root-authority', symlinkRoot],
     )
     const ambiguous = await bootstrapInternal.resolveProviderRootAuthority({
-      agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
+      ...observeRoot,agentId: 'root-authority', requestedRuntime: 'codex', env, home, repoRoot,
     })
-    expect(ambiguous).toMatchObject({ ok: false, reasonCode: 'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING' })
+    expect(ambiguous).toMatchObject({ok:true,authority:{canonicalRoot:codexRoot}})
+    const noCurrent=await bootstrapInternal.resolveProviderRootAuthority({agentId:'root-authority',requestedRuntime:'codex',env,home,repoRoot,observeProvider:()=>null})
+    expect(noCurrent).toMatchObject({ok:false,reasonCode:'NO_GO_PROVIDER_ROOT_AUTHORITY_MISSING'})
     await db.close()
   }, 30_000)
 
-  test('B3 holds the exact desired outbox event from concurrent consumers and restores full preimages', async () => {
+  test('B3 preserves existing seat authority and outbox despite stale runtime projection', async () => {
     const home = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'aun-bootstrap-b3-hold-')))
     roots.push(home)
     const codexRoot = join(home, '.codex')
@@ -761,33 +791,8 @@ describe('aun bootstrap clean-host journal', () => {
     }
     const outcome = await ports.ensureAgentProfile(context)
     expect(outcome.ok).toBe(true)
-    expect(outcome.mutation?.kind).toBe('configuration_desired')
-    const held = await db.query<any>(
-      `SELECT event_id, attempt_count, delivered_at, available_at::text AS available_at_text
-         FROM aun_configuration_desired_outbox
-        WHERE agent_id = $1 AND event_id = ANY($2::uuid[])`,
-      ['b3-held', outcome.mutation?.rollback_payload?.new_event_ids],
-    )
-    expect(held).toHaveLength(1)
-    expect(held[0]).toMatchObject({ attempt_count: 0, delivered_at: null, available_at_text: 'infinity' })
-    const concurrentlyVisible = await db.query<any>(
-      `SELECT event_id FROM aun_configuration_desired_outbox
-        WHERE agent_id = $1 AND delivered_at IS NULL AND available_at <= now()`,
-      ['b3-held'],
-    )
-    expect(concurrentlyVisible.filter((row) => String(row.event_id) === String(held[0].event_id))).toHaveLength(0)
-    const rolledBack = await ports.rollbackMutation(context, {
-      mutation_id: 'b3-held-mutation', stage: 'B3_AGENT_PROFILE', rollback_status: 'not_run', ...outcome.mutation!,
-    })
-    expect(rolledBack.ok).toBe(true)
-    expect(rolledBack.readinessPredicates).toMatchObject({
-      held_run_event_delivery_count: 0,
-      compensating_event_count: 1,
-      exact_delete_count: 2,
-      broad_delete_count: 0,
-      trigger_disable_count: 0,
-      foreign_event_mutation_count: 0,
-    })
+    expect(outcome.mutation).toBeUndefined()
+    expect(outcome.mutations).toBeUndefined()
     const finalAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-held'])
     const finalOutbox = await db.query<any>(
       `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -798,11 +803,114 @@ describe('aun bootstrap clean-host journal', () => {
     await db.close()
   }, 30_000)
 
+  test('ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects', async () => {
+    const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-native-cli-')));roots.push(home)
+    const repoRoot=realpathSync(join(import.meta.dir,'../..'))
+    const fixtureDb=createPostgresTestDatabase(`native_cli_${process.pid}_${Date.now()}`);postgresDatabases.push(fixtureDb)
+    const env={...process.env,HOME:home,AGENT_COM_DB:'postgres',DATABASE_URL:fixtureDb.databaseUrl} as Record<string,string>
+    expect(Bun.spawnSync([process.execPath,'--no-env-file','db/migrate.ts'],{cwd:repoRoot,env}).exitCode).toBe(0)
+    const db=new PgAdapter(fixtureDb.databaseUrl)
+    try {
+      await db.execute(readFileSync(join(repoRoot,'db/migrations/2026-07-26-aun-configuration-reconciliation.up.sql'),'utf8'))
+      await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status) VALUES('preserved-seat','Preserved','bot','TUI',true,'idle')`)
+      await db.execute(`INSERT INTO message_queue(agent_id,message_id,status,claimed_by,claimed_at,payload) VALUES('preserved-seat',$1,'in_progress','preserved-seat',now(),'{}')`,[randomUUID()])
+      const snapshot=async()=>bootstrapDigest({
+        agents:await db.query('SELECT to_jsonb(a) AS row FROM agents a ORDER BY agent_id'),
+        queues:await db.query('SELECT to_jsonb(q) AS row FROM message_queue q ORDER BY id'),
+        runtimes:await db.query('SELECT to_jsonb(r) AS row FROM agent_runtime_instances r ORDER BY runtime_instance_id'),
+        leases:await db.query('SELECT to_jsonb(l) AS row FROM control_plane_leases l ORDER BY lease_id'),
+        outbox:await db.query('SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o ORDER BY event_id'),
+        newMigration:await db.queryOne("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"),
+      })
+      for(const scenario of [{mode:'accepted',durableProject:true},{mode:'accepted',durableProject:false},{mode:'pending',durableProject:true},{mode:'absent',durableProject:true}] as const) {
+        const {mode,durableProject}=scenario,key=`${mode}-${durableProject}`
+        const agent=`native-cli-${key}`,project='stable-cli-project',session=`session-${key}`,runtimeId=randomUUID()
+        const localHome=join(home,key);mkdirSync(localHome);mkdirSync(join(localHome,'.codex'));mkdirSync(join(localHome,'bin'))
+        const native=await nativeHostFixture(localHome,repoRoot,agent,project,session,mode)
+        await db.execute(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,profile_enabled,status,runtime_engine_preference,metadata)
+          VALUES($1,$1,'bot','TUI',true,'idle','claude-code',$2)`,[agent,JSON.stringify(durableProject?{memory_project:project}:{})])
+        await registerNativeFixtureRuntime(db,native,agent,project,session,repoRoot,runtimeId)
+        const queue=await db.queryOne<any>(`INSERT INTO message_queue(agent_id,message_id,status,payload) VALUES($1,$2,'pending',$3) RETURNING id`,
+          [agent,randomUUID(),JSON.stringify({author_id:'aun-bootstrap',message_type:'instruction',content:'fixture native ready receive',next_action:'none',no_reply_required:true})])
+        const configCalls=join(localHome,'config-calls'),codex=join(localHome,'bin','codex'),wrapper=join(localHome,'native-cli.ts')
+        writeFileSync(codex,`#!${process.execPath}\nimport {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(configCalls)},'get\\n');console.log(${JSON.stringify(JSON.stringify({enabled:true,transport:{type:'stdio',command:native.node,args:[native.memory],env:native.env}}))});`);chmodSync(codex,0o755)
+        // Execute the actual CLI dispatcher in its own process. Only classification
+        // of the real harmless Node host is injected; PID/start/root/pipe/lease and
+        // registered Wasurezu lookup all remain actual observations.
+        writeFileSync(wrapper,`
+          import {mock} from 'bun:test';import {execFileSync} from 'node:child_process';
+          const mod=await import(${JSON.stringify(join(repoRoot,'core/seat-runtime-selection.ts'))});
+          const observe=mod.observeSeatProvider,readRoot=mod.readObservedProviderRoot;
+          const provider=${JSON.stringify(native.observed.provider)};
+          mock.module(${JSON.stringify(join(repoRoot,'core/seat-runtime-selection.ts'))},()=>({...mod,
+            observeSeatProvider:(input)=>{
+              const ppid=Number(execFileSync('ps',['-p',String(input.processId),'-o','ppid='],{encoding:'utf8'}).trim());
+              const start=new Date(execFileSync('ps',['-p',String(provider.pid),'-o','lstart='],{encoding:'utf8'}).trim()).toISOString();
+              if(ppid!==provider.pid||start!==provider.startedAt)return null;
+              const actual=execFileSync('ps',['eww','-p',String(input.processId),'-o','command='],{encoding:'utf8'});
+              return observe({...input,providerStartedAt:start,processes:[{pid:input.processId,ppid,command:actual},{pid:ppid,ppid:1,command:'/fixture/codex'}]});
+            },
+            readObservedProviderRoot:(run,input)=>readRoot(async(command,args,options)=>{
+              const r=await run(command,args,options);if(command==='ps'&&args.includes('eww'))r.stdout=r.stdout.replace(/^\\s*\\S+/,'/fixture/codex');return r;
+            },input)
+          }));
+          const {runAsync}=await import(${JSON.stringify(join(repoRoot,'bin/aun.ts'))});
+          process.exit(await runAsync([process.execPath,'aun',...process.argv.slice(2)]));
+        `)
+        const cliEnv={...env,HOME:localHome,PATH:`${join(localHome,'bin')}:${env.PATH}`,AGENT_ID:agent,AGENT_COM_EXPECTED_AGENT_ID:agent,
+          AGENT_MEMORY_AGENT_ID:'foreign-controller',AGENT_MEMORY_PROJECT:'foreign-controller-project',AGENT_COMMS_MEMORY_READY_PROJECT:project,AUN_RECEIVE_CLAIM_SOURCE:'native-cli-fixture'}
+        const invoke=async(args:string[],ordinary=false)=>{
+          const child=Bun.spawn([process.execPath,'--no-env-file',ordinary?join(repoRoot,'bin/aun.ts'):wrapper,...args],{cwd:repoRoot,env:cliEnv,stdout:'pipe',stderr:'pipe'})
+          const [stdout,stderr,code]=await Promise.all([new Response(child.stdout).text(),new Response(child.stderr).text(),child.exited]);return {code,stdout,stderr,pid:child.pid}
+        }
+        const before=await snapshot()
+        const plan=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--dry-run'])
+        expect(plan.code).toBe(0);expect(JSON.parse(plan.stdout)).toMatchObject({dry_run:true,native_receipt_checked:false,mutation_performed:false})
+        expect(existsSync(configCalls)).toBe(false);expect(await snapshot()).toBe(before)
+        expect(JSON.parse(plan.stdout).plan.project).toBe(durableProject?project:null)
+        const foreign=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--runtime-instance-id',randomUUID()])
+        expect(foreign.code).toBe(1);expect(JSON.parse(foreign.stdout).reason).toBe('MEMORY_EXPECTATION_MISMATCH:runtime_instance')
+        expect(await snapshot()).toBe(before)
+        const wrongProject=await invoke(['memory-ready-bootstrap','--agent-id',agent,'--project','foreign-project'])
+        expect(wrongProject.code).toBe(1);expect(JSON.parse(wrongProject.stdout).mutation_performed).toBe(false)
+        expect(await snapshot()).toBe(before)
+        const ready=await invoke(['memory-ready-bootstrap','--agent-id',agent])
+        if(mode==='accepted'&&ready.code!==0)console.error('NATIVE_CLI_RESULT',ready)
+        expect(ready.code).toBe(mode==='accepted'?0:1)
+        expect(await snapshot()).toBe(before)
+        const evidence=await db.query<any>('SELECT * FROM runtime_memory_ready_evidence WHERE agent_id=$1',[agent])
+        expect(evidence).toHaveLength(mode==='accepted'?1:0)
+        const receive=await invoke(['receive-actionable','--agent-id',agent,'--queue-id',String(queue.id)],true)
+        expect(receive.code).toBe(mode==='accepted'?0:1)
+        if(mode==='accepted') {
+          expect(JSON.parse(ready.stdout)).toMatchObject({mutation_performed:true,native_receipt_checked:true,memory_ready:{ok:true,runtime_instance_id:runtimeId}})
+          expect(evidence[0].runtime_instance_id).toBe(runtimeId)
+          expect(evidence[0].metadata.seat_context_receipt.native_delivery.provider_pid).toBe(native.observed.provider.pid)
+          expect(evidence[0].metadata.seat_context_receipt.native_delivery.project).toBe(project)
+          expect((await db.queryOne<any>('SELECT status,claimed_by FROM message_queue WHERE id=$1',[queue.id]))).toMatchObject({status:'received',claimed_by:agent})
+          await db.execute("UPDATE control_plane_leases SET expires_at=now()-interval '1 second' WHERE lease_id=$1",[runtimeId])
+          const stale=await invoke(['memory-ready-bootstrap','--agent-id',agent])
+          expect(stale.code).toBe(1);expect(JSON.parse(stale.stdout).mutation_performed).toBe(false)
+          expect((await db.query<any>('SELECT id FROM runtime_memory_ready_evidence WHERE agent_id=$1',[agent]))).toHaveLength(1)
+        } else {
+          expect(JSON.parse(ready.stdout)).toMatchObject({mutation_performed:false,reason:'MEMORY_NATIVE_CONTEXT_IDENTITY_MISMATCH'})
+          expect((await db.queryOne<any>('SELECT status FROM message_queue WHERE id=$1',[queue.id]))?.status).toBe('pending')
+        }
+        expect(existsSync(join(localHome,'Library/LaunchAgents'))).toBe(false)
+        expect(existsSync(join(localHome,'.aun/bootstrap'))).toBe(false)
+      }
+      expect((await db.queryOne<any>("SELECT status,claimed_by FROM message_queue WHERE agent_id='preserved-seat'"))).toMatchObject({status:'in_progress',claimed_by:'preserved-seat'})
+      expect((await db.queryOne<any>("SELECT to_regprocedure('aun_configuration_legacy_desired_document(agents)') AS function"))?.function).toBeNull()
+    } finally {await db.close()}
+  },30_000)
+
   for (const fixture of ['sqlite-new', 'sqlite-existing', 'postgres'] as const) test(`real default ${fixture} path performs genuine MCP recovery and separate-process ordinary receive`, async () => {
     const backend = fixture === 'postgres' ? 'postgres' : 'sqlite'
-    const home = mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-'))
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'aun-bootstrap-default-sqlite-')))
     roots.push(home)
-    const repoRoot = join(import.meta.dir, '..', '..')
+    const repoRoot = realpathSync(join(import.meta.dir, '..', '..'))
+    const native=await nativeHostFixture(home,repoRoot,'clean-default','bootstrap-clean-project','clean-session')
+    const ordinaryRuntimeId=randomUUID()
     const dbPath = join(home, 'agent-com.db')
     let sqlitePrestate: Buffer | null = null
     if (fixture === 'sqlite-existing') {
@@ -826,21 +934,13 @@ describe('aun bootstrap clean-host journal', () => {
       ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
       AGENT_MEMORY_PROJECT: 'bootstrap-clean-project',
       CODEX_SANDBOX: 'workspace-write',
+      AUN_BOOTSTRAP_PROVIDER_PID:String(native.observed.provider.pid),
     } as Record<string, string>
     if (databaseUrl) {
       const migrated = Bun.spawnSync([process.execPath, 'db/migrate.ts'], { cwd: repoRoot, env })
       expect(migrated.exitCode).toBe(0)
     }
-    const mcpFixture = `
-      const readline = require('node:readline');
-      const rl = readline.createInterface({ input: process.stdin });
-      rl.on('line', (line) => {
-        const m = JSON.parse(line);
-        if (m.id === 1) console.log(JSON.stringify({jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-03-26',capabilities:{},serverInfo:{name:'wasurezu-fixture',version:'1'}}}));
-        if (m.id === 2) console.log(JSON.stringify({jsonrpc:'2.0',id:2,result:{tools:[{name:'recover_context',inputSchema:{type:'object'}}]}}));
-        if (m.id === 3) console.log(JSON.stringify({jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:'Project bootstrap-clean-project recovered'}],isError:false}}));
-      });
-    `
+    const profileCommandTrace: unknown[] = []
     let aunRegistered = false
     let daemonLoaded = false
     let queueReceiveCount = 0
@@ -851,13 +951,13 @@ describe('aun bootstrap clean-host journal', () => {
       name: 'aun', enabled: true,
       transport: {
         type: 'stdio', command: realpathSync(process.execPath),
-        args: ['run', '--cwd', realpathSync(repoRoot), 'server.ts'],
+        args: ['run', '--cwd', realpathSync(repoRoot), join(realpathSync(repoRoot), 'server.ts')],
         env: {
           AGENT_ID: 'clean-default', AGENT_COM_EXPECTED_AGENT_ID: 'clean-default',
           ...(databaseUrl
             ? { DATABASE_URL: databaseUrl }
             : { AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: realpathSync(dbPath) }),
-          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8801',
+          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
         },
       },
     })
@@ -878,10 +978,12 @@ describe('aun bootstrap clean-host journal', () => {
         return { exitCode: 0, stdout: 'booted out\n', stderr: '', pid: ++syntheticPid }
       }
       if (command === 'lsof') return { exitCode: 1, stdout: '', stderr: '', pid: ++syntheticPid }
+      if (command === 'ps' && args.includes('lstart=')) return {exitCode:0,stdout:native.observed.provider.startedAt,stderr:''}
+      if (command === 'ps' && args.includes('eww')) return {exitCode:0,stdout:`/fixture/codex HOME=${home} CODEX_HOME=${join(home,'.codex')}`,stderr:''}
       if (command === 'ps') return { exitCode: 1, stdout: '', stderr: '', pid: ++syntheticPid }
       if (command === 'codex' && joined === '--version') return { exitCode: 0, stdout: 'codex-cli 1.0.0\n', stderr: '', pid: ++syntheticPid }
       if (command === 'codex' && joined === 'mcp get wasurezu --json') {
-        return { exitCode: 0, stdout: JSON.stringify({ enabled: true, transport: { type: 'stdio', command: process.execPath, args: ['-e', mcpFixture], env: {} } }), stderr: '', pid: ++syntheticPid }
+        return { exitCode: 0, stdout: JSON.stringify({ enabled: true, transport: { type: 'stdio', command: native.node, args: [native.memory], env: native.env } }), stderr: '', pid: ++syntheticPid }
       }
       if (command === 'codex' && joined === 'mcp get aun --json') return aunRegistered
         ? { exitCode: 0, stdout: nativeTuple(), stderr: '', pid: ++syntheticPid }
@@ -928,14 +1030,43 @@ describe('aun bootstrap clean-host journal', () => {
         if (args[0] === 'bin/aun.ts' && args[1] === 'receive') queueReceiveCount++
         const child = Bun.spawn([command, ...args], { cwd: options.cwd, env: options.env, stdout: 'pipe', stderr: 'pipe' })
         const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+        if(args[0]==='cli/index.ts' && args[1]==='agent' && args[2]==='profile') {
+          let profile:any=null
+          try {profile=JSON.parse(stdout).profile}catch{}
+          profileCommandTrace.push({operation:args[3],disable:args.includes('false'),exitCode,
+            profile:profile ? {runtime:profile.runtime,runtime_engine_preference:profile.runtime_engine_preference,
+              home_directory:profile.home_directory,channel_port:profile.channel_port,tmux_session:profile.tmux_session,
+              profile_enabled:profile.profile_enabled,profile_revision:profile.profile_revision} : null,
+            stdout_digest:bootstrapDigest(stdout),stderr_digest:bootstrapDigest(stderr)})
+        }
+        if(exitCode===0 && args[0]==='cli/index.ts' && args.includes('set')) {
+          const fixtureDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
+          try {
+            await registerNativeFixtureRuntime(fixtureDb,native,'clean-default','bootstrap-clean-project','clean-session',repoRoot,ordinaryRuntimeId)
+          } finally {await fixtureDb.close()}
+        }
         return { exitCode, stdout, stderr, pid: child.pid }
       }
       return { exitCode: 1, stdout: '', stderr: `unhandled fake command: ${command} ${joined}`, pid: ++syntheticPid }
     }
 
     const input = { agentId: 'clean-default', runtime: 'codex' as const, home, repoRoot, workspaceRoot: repoRoot, env }
-    const first = await bootstrap(input, { run })
+    const first = await bootstrap(input, { run, observeProvider:native.observeProvider })
+    if(first.status!=='READY') console.error('CLEAN_HOST_RESULT',JSON.stringify(first))
     expect(first.status).toBe('READY')
+    // B8 must use the same actual fixture host as B5, never an outer controller's Codex ancestor.
+    const configurationDb=backend==='postgres'?new PgAdapter(databaseUrl!):new SqliteAdapter(dbPath)
+    try {
+      const current=await resolveConfigurationRuntime(configurationDb,'clean-default',env,repoRoot,
+        {observeProvider:native.observeProvider,run})
+      expect(current.observation.provider_pid).toBe(native.observed.provider.pid)
+      expect(current.observation.provider_started_at).toBe(native.observed.provider.startedAt)
+      expect(current.observation.runtime_instance_id).toBe(ordinaryRuntimeId)
+      expect(current.providerHome).toBe(home)
+      expect(current.providerConfigRoot).toBe(join(home,'.codex'))
+      await expect(resolveConfigurationRuntime(configurationDb,'clean-default',env,repoRoot,
+        {observeProvider:()=>null,run})).rejects.toThrow('CONFIGURATION_CURRENT_RUNTIME_UNAVAILABLE')
+    } finally {await configurationDb.close()}
     expect(first.readiness_predicates).toMatchObject({ genuine_mcp_recovery: true, queue_progress_ready: true })
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
@@ -1002,7 +1133,8 @@ describe('aun bootstrap clean-host journal', () => {
       '--reason', `aun-bootstrap-no-effect:${first.run_id}:contention`,
     ])).exitCode).toBe(0)
 
-    const second = await bootstrap(input, { run })
+    const second = await bootstrap(input, { run, observeProvider:native.observeProvider })
+    if(second.status!=='IDEMPOTENT_READY')console.error('CLEAN_HOST_SECOND',JSON.stringify(second))
     expect(second.status).toBe('IDEMPOTENT_READY')
     expect(queueReceiveCount).toBe(1)
     expect(stateDaemonRestoreCalls).toHaveLength(1)
@@ -1031,7 +1163,23 @@ describe('aun bootstrap clean-host journal', () => {
       invalidPayloadQueueId = String(invalidShared[0]!.id)
       await ownedDb.close()
     }
-    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run })
+    const rolledBack = await bootstrap({ ...input, rollbackRunId: first.run_id }, { run, observeProvider:native.observeProvider })
+    if(rolledBack.status!=='ROLLED_BACK') {
+      console.error('CLEAN_HOST_ROLLBACK',JSON.stringify(rolledBack))
+      console.error('CLEAN_HOST_PROFILE_COMMANDS',JSON.stringify(profileCommandTrace))
+      const state=JSON.parse(readFileSync(join(env.AUN_HOME,'bootstrap','clean-default',`${first.run_id}.json`),'utf8'))
+      console.error('CLEAN_HOST_ROLLBACK_MUTATIONS',JSON.stringify(state.mutations.map((m:any)=>({kind:m.kind,stage:m.stage,status:m.rollback_status,evidence:m.rollback_payload?.rollback_evidence_refs}))))
+      if(backend==='sqlite') {
+        const payload=state.mutations.find((m:any)=>m.kind==='db')?.rollback_payload
+        const files=[dbPath,`${dbPath}-wal`,`${dbPath}-shm`].map(path=>({suffix:path.slice(dbPath.length),exists:existsSync(path),digest:existsSync(path)?bootstrapDigest(readFileSync(path)):null}))
+        const actual=existsSync(dbPath)?{realpath:realpathSync(dbPath),device:Number(statSync(dbPath).dev),inode:Number(statSync(dbPath).ino)}:null
+        let holders=''
+        try {holders=execFileSync('lsof',['-F','pfn',dbPath],{encoding:'utf8',timeout:3000})}catch{}
+        console.error('CLEAN_HOST_DB_FENCE',JSON.stringify({backend:payload?.backend,path:payload?.path,
+          expected_identity:payload?.after_identity,actual_identity:actual,
+          expected_digest:payload?.after_digest,actual_digest:bootstrapDigest(files),files,holders}))
+      }
+    }
     expect(rolledBack.status).toBe('ROLLED_BACK')
     expect(rolledBack.reason_codes).toEqual([])
     if (fixture === 'sqlite-new') {

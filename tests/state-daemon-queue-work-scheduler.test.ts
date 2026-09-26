@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
 import {
   RuntimeV2ShirubeD1AutoReceiveDispatcher,
@@ -232,26 +232,34 @@ class PendingLlmDb implements DBClient {
           runtime: 'codex',
           profile_revision: null,
           profile_source: null,
-          channel_port: null,
+          channel_port: 19123,
           home_directory: '/repo',
           metadata: { tmux_session: `${this.agentId}-session` },
         }] as T[],
         rowCount: 1,
       }
     }
-    if (sql.includes('FROM agent_runtime_instances')) {
+    const fixtureSeen = new Date(Math.floor(new Date(this.row.created_at ?? '2026-05-08T00:00:00Z').getTime()/60000)*60000-60000).toISOString()
+    if (sql.includes('JOIN control_plane_leases')) return {rows:[{
+      runtime_instance_id:'rt-queue-scheduler',agent_id:this.agentId,runtime_kind:'local_process',host_id:hostname(),
+      process_id:1234,port:19123,endpoint_uri:'http://127.0.0.1:19123',runtime_status:'running',last_seen_at:fixtureSeen,
+      lease_id:'fixture-lease',fencing_token:1,holder_agent_id:this.agentId,holder_runtime_instance_id:'rt-queue-scheduler',
+      lease_status:'active',expires_at:'2030-05-08T01:00:00Z',
+      lease_metadata:{port:19123,process_id:1234,endpoint_uri:'http://127.0.0.1:19123'},
+    }] as T[],rowCount:1}
+    if (sql.includes('FROM agent_runtime_instances') && !sql.includes('FROM runtime_memory_ready_evidence')) {
       return {
         rows: [{
           runtime_instance_id: 'rt-queue-scheduler',
           agent_id: this.agentId,
           runtime_engine: 'codex',
-          runtime_kind: 'local_process',
+          runtime_kind: 'local_process',host_id:hostname(),process_id:1234,
           session_name: `${this.agentId}-session`,
-          port: null,
+          port: 19123,
           checkout_path: '/repo',
           commit_sha: null,
           started_at: '2026-05-07T23:50:00.000Z',
-          last_seen_at: '2030-05-07T23:59:00.000Z',
+          last_seen_at: fixtureSeen,
           status: 'running',
           metadata: { source: 'state-daemon-queue-work-fixture' },
         }] as T[],
@@ -269,7 +277,7 @@ class PendingLlmDb implements DBClient {
           profile_revision: null,
           profile_source: null,
           session_name: `${this.agentId}-session`,
-          port: null,
+          port: 19123,
           expected_agent_id: this.agentId,
           checkout_path: '/repo',
           checkout_commit_sha: null,
@@ -281,7 +289,7 @@ class PendingLlmDb implements DBClient {
           evidence_log_id: null,
           valid_until: '2030-05-08T01:00:00.000Z',
           source: 'wasurezu_boot_recovery',
-          metadata: {},
+          metadata: {seat_context_receipt:{schema_version:'seat-context-consumption/v1',agent_id:this.agentId,project:this.memoryProject,runtime_instance_id:'rt-queue-scheduler',target_runtime:'codex',pack_id:`restart_pack:${this.agentId}:${this.memoryProject}:1789280000000`,response_digest:'a'.repeat(64),work_digest:'b'.repeat(64),invocation_digest:'c'.repeat(64),transport_binding_digest:'d'.repeat(64),completed_at:'2026-05-07T23:55:00Z',consumption:{runtime_instance_id:'rt-queue-scheduler',invocation_digest:'c'.repeat(64),consumer:'fixture-host-input'}}},
         }] as T[],
         rowCount: 1,
       }
@@ -473,7 +481,7 @@ class D1ExpiredClaimRecoveryDb implements DBClient {
 }
 
 describe('state_daemon queue work scheduler boundary', () => {
-  test('runtime_engine_preference selects different queue-work engines for two seats', async () => {
+  test('verified live provider selects queue-work engines despite opposite legacy preferences', async () => {
     const preferences = new Map([
       ['codex-audit', 'codex'],
       ['devauditor', 'claude-code'],
@@ -482,7 +490,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       async query<T>(_sql: string, params?: unknown[]) {
         const preference = preferences.get(String(params?.[0])) ?? null
         return {
-          rows: [{ runtime_engine_preference: preference }] as T[],
+          rows: [{ runtime_instance_id:'runtime-'+params?.[0],agent_id:params?.[0],host_id:'fixture',process_id:200,
+            session_name:'session',checkout_path:'/agent-workspace',status:'running',last_seen_at:new Date().toISOString(),
+            metadata:{},runtime_engine_preference: preference === 'codex' ? 'claude-code' : 'codex' }] as T[],
           rowCount: preference === null ? 0 : 1,
         }
       },
@@ -493,7 +503,11 @@ describe('state_daemon queue work scheduler boundary', () => {
       '/repo',
       async () => '/agent-workspace',
       async () => 'agent-comms-mcp',
-      (agentId) => resolveQueueWorkRuntimeForAgent(db, agentId),
+      (agentId) => resolveQueueWorkRuntimeForAgent(db, agentId, {hostId:'fixture',observe: input => ({
+        schema_version:'seat-provider-observation/v1',agent_id:input.agentId,runtime_instance_id:input.runtimeInstanceId,
+        host_id:'fixture',process_id:200,provider_pid:100,provider_started_at:'fixture-start',provider:input.agentId === 'codex-audit' ? 'codex' : 'claude',
+        session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true,
+      })}),
       async (opts) => {
         selected.push({ agentId: opts.agentId, runtime: opts.runtime })
         return {
@@ -596,6 +610,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, {
         id: 88701,
         agent_id: agentId,
@@ -639,6 +656,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const metrics = new FakeMetrics()
     const alerts = new FakeAlertSink()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, {
         id: 88702, agent_id: agentId, status: 'received', message_id: 'msg-d1-invalid',
         payload: JSON.stringify({ message_type: 'phase_handoff', shirube_v4_d1: {} }),
@@ -685,6 +705,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_wake_attempt_at: null, last_heartbeat_at: null,
     }
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, row),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
       metrics, alert: new FakeAlertSink(), shirubeD1AutoReceive: d1,
@@ -743,6 +766,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const calls: string[] = []
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb({
         id: 88705, agent_id: agentId, status: 'done', message_id: 'msg-d1-done',
         payload: JSON.stringify({ shirube_v4_d1: {} }),
@@ -773,6 +799,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     let dispatches = 0
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new D1DoneRecoveryDb({
         id: 88706, agent_id: agentId, status: 'done', message_id: 'msg-d1-restart',
         payload: JSON.stringify({ shirube_v4_d1: {} }),
@@ -804,6 +833,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     let classifications = 0
     let dispatches = 0
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new D1DoneRecoveryDb({
         id: 88708, agent_id: agentId, status: 'done', message_id: 'msg-d1-disabled-history',
         payload: JSON.stringify({ shirube_v4_d1: {} }),
@@ -844,6 +876,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     let dispatches = 0
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db, pgListen: new FakePgListen(), tmux: new FakeTmux(),
       clock: new FakeClock('2026-07-23T00:00:00.000Z'), metrics, alert: new FakeAlertSink(),
       shirubeD1AutoReceive: {
@@ -879,6 +914,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const tmux = new FakeTmux()
     let d1Dispatches = 0
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb({
         id: 489,
         agent_id: 'codex-audit',
@@ -939,6 +977,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: null,
     }
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb(row),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -982,6 +1023,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       },
     }
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb({
         id: 497,
         agent_id: 'codex-audit',
@@ -1041,6 +1085,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: null,
     }
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new DoneFinalizationDb(row),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1072,6 +1119,9 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('done finalizer sweep selects only enabled rows owned by the current scheduler', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1114,6 +1164,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const metrics = new FakeMetrics()
     const tmux = new FakeTmux()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, {
         id: 490,
         agent_id: agentId,
@@ -1178,6 +1231,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: null,
     }, 'codex')
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1231,7 +1287,11 @@ describe('state_daemon queue work scheduler boundary', () => {
     const db = new DirectCodexLlmDb(agentId, row, 'codex')
     const runner = new FakeCodexRunner()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
+
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
       clock: new FakeClock('2026-08-13T11:41:20.000Z'),
@@ -1288,6 +1348,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const db = new PendingLlmDb(agentId, row)
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1335,6 +1398,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, {
         id: 121926,
         agent_id: agentId,
@@ -1403,6 +1469,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, {
         id: 121927,
         agent_id: agentId,
@@ -1486,6 +1555,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: null,
     }
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new PendingLlmDb(agentId, row),
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1553,6 +1625,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }))
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new MultiPendingLlmDb(rows),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
       metrics, alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
@@ -1600,6 +1675,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_wake_attempt_at: null, last_heartbeat_at: null,
     }))
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new MultiPendingLlmDb(rows),
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
       metrics: new FakeMetrics(), alert: new FakeAlertSink(), queueWorkScheduler: scheduler,
@@ -1635,6 +1713,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const db = new RecordingMultiPendingLlmDb([row])
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(), tmux: new FakeTmux(), clock: new FakeClock(),
       metrics: new FakeMetrics(), alert: new FakeAlertSink(),
@@ -1674,6 +1755,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb({
         id: 120245,
         agent_id: 'qa',
@@ -1733,6 +1817,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     }
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db: new SingleRowDb({
         id: 121744,
         agent_id: 'secretary',
@@ -1784,6 +1871,9 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('queue-work fence is applied to claim heartbeat refresh SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1822,6 +1912,9 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('queue-work residue exclusion is applied to claim heartbeat refresh SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1872,6 +1965,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     })
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1933,6 +2029,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     })
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -1995,6 +2094,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const alert = new FakeAlertSink()
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2060,6 +2162,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: new Date('2026-05-08T00:00:10.000Z'),
     })
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2121,6 +2226,9 @@ describe('state_daemon queue work scheduler boundary', () => {
       last_heartbeat_at: new Date('2026-05-08T00:00:10.000Z'),
     })
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2169,6 +2277,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     })
     const alert = new FakeAlertSink()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2202,6 +2313,9 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('queue-work fence is applied to sweep fetch SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2238,6 +2352,9 @@ describe('state_daemon queue work scheduler boundary', () => {
   test('queue-work residue exclusion is applied to sweep fetch SQL', async () => {
     const db = new RecordingDb()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),
@@ -2330,6 +2447,9 @@ describe('state_daemon queue work scheduler boundary', () => {
     const db = new ExpiredSchedulerClaimDb(row)
     const metrics = new FakeMetrics()
     const daemon = new StateDaemon({
+      providerObserver: input => ({schema_version:'seat-provider-observation/v1',agent_id:input.agentId,
+        runtime_instance_id:input.runtimeInstanceId,host_id:hostname(),process_id:1234,provider_pid:5678,provider_started_at:'fixture-start',
+        provider:'codex',session_name:input.sessionName,workspace:input.workspace,observed_at:input.now!.toISOString(),source:'process_ancestry',verified:true}),
       db,
       pgListen: new FakePgListen(),
       tmux: new FakeTmux(),

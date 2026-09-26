@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { nativeHostFixture, registerNativeFixtureRuntime, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
+import { renameSync } from 'node:fs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -266,6 +268,8 @@ if (crashFixtureStage) {
           JSON.stringify(['https://github.com/watchout/agent-comms-mcp/issues/887#b3-fence-fixture']),
         ],
       )
+      const native=await nativeHostFixture(home,repoRoot,'b3-fences','agent-comms-mcp','b3-session')
+      await registerNativeFixtureRuntime(db,native,'b3-fences','agent-comms-mcp','b3-session',repoRoot,'aaaaaaaa-1111-4111-8111-111111111111')
       const preAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-fences'])
       const preOutbox = await db.query<any>(
         `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -273,6 +277,12 @@ if (crashFixtureStage) {
       )
       const run = async (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => {
         const joined = args.join(' ')
+        if(command==='ps'){
+          const result=Bun.spawnSync([command,...args],{cwd:options.cwd,env:options.env,stdout:'pipe',stderr:'pipe'})
+          const stdout=result.stdout.toString()
+          // Classification alone is synthetic; PID/start/env/root inode are real.
+          return {exitCode:result.exitCode,stdout:args.includes('command=')?stdout.replace(/^\s*\S+/,'/fixture/codex'):stdout,stderr:result.stderr.toString()}
+        }
         if (command === 'git' && joined === 'rev-parse HEAD^{tree}') return { exitCode: 0, stdout: `${'b'.repeat(40)}\n`, stderr: '' }
         if (command === 'tmux') return { exitCode: 0, stdout: 'b3-session\n', stderr: '' }
         if (command === process.execPath && args[0] === 'cli/index.ts') {
@@ -286,7 +296,7 @@ if (crashFixtureStage) {
       }
       const executionPorts = bootstrapInternal.createDefaultPorts({ run, env, home, repoRoot })
       const authority = await bootstrapInternal.resolveProviderRootAuthority({
-        agentId: 'b3-fences', requestedRuntime: 'codex', env, home, repoRoot,
+        agentId: 'b3-fences', requestedRuntime: 'codex', env, home, repoRoot, run, observeProvider:native.observeProvider,
       })
       expect(authority.ok).toBe(true)
       if (!authority.ok || !authority.authority) throw new Error('expected exact B3 authority')
@@ -297,15 +307,21 @@ if (crashFixtureStage) {
         providerRootAuthority: authority.authority,
       }
 
-      const driftedRoot = join(home, '.codex-drift')
-      mkdirSync(driftedRoot, { mode: 0o700 })
-      await db.execute(
-        `UPDATE agents SET metadata = jsonb_set(metadata, '{codex_home}', to_jsonb($2::text), true) WHERE agent_id = $1`,
-        ['b3-fences', driftedRoot],
-      )
+      const existing=await executionPorts.ensureAgentProfile(context)
+      expect(existing.ok).toBe(true)
+      expect(existing.mutation).toBeUndefined()
+      expect(existing.mutations).toBeUndefined()
+      expect((await db.query<any>('SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id=$1 ORDER BY event_id',['b3-fences']))).toEqual(preOutbox)
+
+      // This is transaction-level coverage through the existing internal test
+      // surface; the ordinary existing-target path above does not mutate it.
+      // Replacing the observed provider root directory invalidates the held
+      // identity fence even though its pathname and stale profile are unchanged.
+      const driftedRoot = join(home, '.codex-preserved')
+      renameSync(codexRoot,driftedRoot)
+      mkdirSync(codexRoot,{mode:0o700})
       const driftBaselineAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-fences'])
-      const authorityDrift = await executionPorts.ensureAgentProfile(context)
-      expect(authorityDrift.ok).toBe(false)
+      await expect(executionPorts.ensureConfigurationDesiredState(context)).rejects.toThrow('observed provider root drift under B3 row lock')
       const afterAuthorityAgent = await db.queryOne<any>(`SELECT to_jsonb(a) AS row FROM agents a WHERE agent_id = $1`, ['b3-fences'])
       const afterAuthorityOutbox = await db.query<any>(
         `SELECT to_jsonb(o) AS row FROM aun_configuration_desired_outbox o WHERE agent_id = $1 ORDER BY event_id`,
@@ -314,15 +330,13 @@ if (crashFixtureStage) {
       expect(bootstrapDigest(afterAuthorityAgent?.row)).toBe(bootstrapDigest(driftBaselineAgent?.row))
       expect(bootstrapDigest(afterAuthorityOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
       expect((await db.queryOne<any>(`SELECT metadata->>'codex_home' AS codex_home FROM agents WHERE agent_id = $1`, ['b3-fences']))?.codex_home)
-        .toBe(driftedRoot)
+        .toBe(codexRoot)
       expect(existsSync(join(home, '.aun', 'bootstrap', context.agentId, `${context.runId}.configuration-desired.rollback.json`))).toBe(false)
-      await db.execute(
-        `UPDATE agents SET metadata = jsonb_set(metadata, '{codex_home}', to_jsonb($2::text), true) WHERE agent_id = $1`,
-        ['b3-fences', codexRoot],
-      )
+      rmSync(codexRoot,{recursive:true});renameSync(driftedRoot,codexRoot)
 
-      const outcome = await executionPorts.ensureAgentProfile(context)
-      expect(outcome.ok).toBe(true)
+      const outcome = await executionPorts.ensureConfigurationDesiredState(context)
+      expect(outcome?.mutation).toBeDefined()
+      if(!outcome)throw new Error('configuration transaction result missing')
       const held = await db.queryOne<any>(
         `SELECT event_id, desired_revision, desired_digest FROM aun_configuration_desired_outbox
           WHERE agent_id = $1 AND event_id = ANY($2::uuid[])`,
@@ -365,14 +379,15 @@ if (crashFixtureStage) {
       expect(bootstrapDigest(finalAgent?.row)).toBe(bootstrapDigest(preAgent?.row))
       expect(bootstrapDigest(finalOutbox.map((item) => item.row))).toBe(bootstrapDigest(preOutbox.map((item) => item.row)))
       console.log(JSON.stringify({
-        fixture: 'B3_AUTHORITY_REVISION_DIGEST_FENCES',
+        fixture: 'B3_CONFIGURATION_TRANSACTION_AUTHORITY_REVISION_DIGEST_FENCES',
         authority_drift_zero_effect: true,
-        authority_drift_field: 'config_profile.metadata_codex_home',
+        authority_drift_field: 'observed_provider_root.directory_inode',
         authority_tuple_digest: authority.authority.authorityTupleDigest,
         drift_receipts: driftReceipts,
         exact_rollback_verified: true,
       }))
     } finally {
+      await stopNativeFixtures()
       await db?.close().catch(() => {})
       postgresDatabase.drop()
       rmSync(home, { recursive: true, force: true })

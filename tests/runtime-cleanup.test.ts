@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrateSqlite } from '../db/migrate-sqlite'
 import { SqliteAdapter } from '../core/db/sqlite-adapter'
@@ -19,6 +19,7 @@ async function withCleanupDb<T>(seedSql: string, fn: (db: SqliteAdapter, path: s
     migrateSqlite(dbPath)
     const seed = new Database(dbPath)
     seed.exec(seedSql)
+    seed.prepare('UPDATE agent_runtime_instances SET host_id = ? WHERE host_id IS NULL').run(hostname())
     seed.close()
     adapter = new SqliteAdapter(dbPath)
     return await fn(adapter, dbPath)
@@ -184,36 +185,12 @@ describe('runtime cleanup lifecycle', () => {
       const disabled = report.targets.find((target) => target.agent_id === 'disabled-old')
 
       expect(active?.classification).toBe('active')
-      expect(disabled?.classification).toBe('unknown-risk')
-      expect(disabled?.risk).toBe('unknown-risk')
-      expect(disabled?.actions).toContainEqual({
-        kind: 'noop',
-        pid: 7777,
-        port: 41234,
-        reason: 'disabled_profile_port_listener_has_active_owner',
-      })
-      expect(disabled?.actions).not.toContainEqual(expect.objectContaining({
-        kind: 'kill_process',
-        pid: 7777,
-      }))
-      expect(disabled?.evidence.shared_active_listeners).toEqual([{
-        pid: 7777,
-        port: 41234,
-        owners: ['active-owner'],
-        command: 'bun',
-      }])
+      expect(disabled).toBeUndefined() // A profile port alone is no runtime residue.
+      expect(active?.port).toBe(41234)
+      expect(active?.actions).toEqual([{kind:'noop',reason:'fresh_active_runtime'}])
       expect(report.summary.cleanup_targets).toBe(0)
-      expect(report.summary.unknown_risk_targets).toBe(1)
-      expect(report.blockers).toContain('agent:disabled-old:disabled-profile-residue:unknown-risk')
-
+      expect(report.summary.unknown_risk_targets).toBe(0)
       const killedPids: number[] = []
-      await expect(executeRuntimeCleanup(db, {
-        ...observations,
-        confirmHash: report.plan_hash,
-        killProcess: (pid) => killedPids.push(pid),
-      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
-      expect(killedPids).toEqual([])
-
       const override = await executeRuntimeCleanup(db, {
         ...observations,
         allowUnknownRisk: true,
@@ -244,29 +221,14 @@ describe('runtime cleanup lifecycle', () => {
         portListeners: [{ pid: 7777, port: 2222, command: 'bun' }],
       }
       const report = await buildRuntimeCleanupReport(db, observations)
-      const listener = report.targets.find((target) => target.target_id === 'listener:2222:7777:unknown-risk')
-
-      expect(listener?.classification).toBe('unknown-risk')
-      expect(listener?.risk).toBe('unknown-risk')
-      expect(listener?.agent_id).toBe('active-owner')
-      expect(listener?.actions).toEqual([{ kind: 'noop', reason: 'listener_has_active_owner_or_runtime' }])
-      expect(listener?.evidence).toMatchObject({
-        active_port_owners: ['active-owner'],
-        active_runtime_port_owners: ['active-owner'],
-        active_runtime_pid_owners: ['active-owner'],
-      })
-      expect(report.targets.some((target) => target.target_id === 'listener:2222:7777:orphan-listener')).toBe(false)
+      const listener = report.targets.find(target => target.agent_id === 'active-owner')
+      expect(listener?.classification).toBe('active')
+      expect(listener?.port).toBe(2222)
+      expect(listener?.actions).toEqual([{kind:'noop',reason:'fresh_active_runtime'}])
+      expect(report.targets.some(target => target.port === 1111)).toBe(false)
       expect(report.summary.cleanup_targets).toBe(0)
-      expect(report.summary.unknown_risk_targets).toBe(1)
-
+      expect(report.summary.unknown_risk_targets).toBe(0)
       const killedPids: number[] = []
-      await expect(executeRuntimeCleanup(db, {
-        ...observations,
-        confirmHash: report.plan_hash,
-        killProcess: (pid) => killedPids.push(pid),
-      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
-      expect(killedPids).toEqual([])
-
       const override = await executeRuntimeCleanup(db, {
         ...observations,
         allowUnknownRisk: true,
@@ -302,10 +264,10 @@ describe('runtime cleanup lifecycle', () => {
         ],
       }
       const report = await buildRuntimeCleanupReport(db, observations)
-      const listener = report.targets.find((target) => target.target_id === 'listener:2222:7777:unknown-risk')
+      const listener = report.targets.find((target) => target.agent_id === 'active-owner')
       const disabled = report.targets.find((target) => target.agent_id === 'disabled-old')
 
-      expect(listener?.classification).toBe('unknown-risk')
+      expect(listener?.classification).toBe('active')
       expect(listener?.actions).not.toContainEqual(expect.objectContaining({
         kind: 'kill_process',
         pid: 7777,
@@ -318,16 +280,9 @@ describe('runtime cleanup lifecycle', () => {
         reason: 'disabled_profile_port_listener',
       })
       expect(report.summary.cleanup_targets).toBe(1)
-      expect(report.summary.unknown_risk_targets).toBe(1)
+      expect(report.summary.unknown_risk_targets).toBe(0)
 
       const killedPids: number[] = []
-      await expect(executeRuntimeCleanup(db, {
-        ...observations,
-        confirmHash: report.plan_hash,
-        killProcess: (pid) => killedPids.push(pid),
-      })).rejects.toThrow('UNKNOWN_RISK_REFUSED')
-      expect(killedPids).toEqual([])
-
       const override = await executeRuntimeCleanup(db, {
         ...observations,
         allowUnknownRisk: true,
@@ -339,6 +294,19 @@ describe('runtime cleanup lifecycle', () => {
     })
   })
 
+  test('active lease or foreign host prevents disabled-profile cleanup from stopping the actual holder',async()=>{
+    await withCleanupDb(`INSERT INTO agents(agent_id,display_name,agent_type,runtime,status,profile_enabled) VALUES('seat','Seat','dev','TUI','offline',0);
+      INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_engine,runtime_kind,session_name,process_id,port,status,last_seen_at)
+      VALUES('held','seat','codex','local_process','seat-session',123,19999,'running','2026-09-13T00:00:00Z');`,async db=>{
+      const options={now:new Date('2026-09-13T01:00:00Z'),portListeners:[{pid:123,port:19999}],tmuxPanes:[]}
+      await db.execute("UPDATE agent_runtime_instances SET host_id='foreign-host'")
+      expect((await buildRuntimeCleanupReport(db,options)).summary.executable_actions).toBe(0)
+      await db.execute('UPDATE agent_runtime_instances SET host_id=$1',[hostname()])
+      await db.execute(`INSERT INTO control_plane_leases(lease_id,lease_scope_type,lease_scope_id,lease_purpose,holder_agent_id,holder_runtime_instance_id,fencing_token,status,expires_at)
+        VALUES('held-lease','runtime_instance','held','worker','seat','held',1,'active','2026-09-13T02:00:00Z')`)
+      expect((await buildRuntimeCleanupReport(db,options)).summary.executable_actions).toBe(0)
+    })
+  })
   test('parses lsof listener evidence used by cleanup plans', () => {
     expect(parseLsofTcpListeners([
       'COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME',

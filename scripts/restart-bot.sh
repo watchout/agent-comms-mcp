@@ -2,8 +2,8 @@
 # restart-bot.sh — Safely restart a bot session from the DB bot profile.
 # Usage: ./scripts/restart-bot.sh <session-name-or-agent-id>
 # Example: ./scripts/restart-bot.sh discord-haishin
-# DB `agents` profile is the only source of truth. File registry/manual args are
-# intentionally not accepted because they can drift from runtime identity.
+# Stable identity comes from the enabled seat profile; actual provider history
+# selects the host runtime and the OS allocates its held bridge endpoint.
 
 set -euo pipefail
 
@@ -18,41 +18,10 @@ DEFAULT_CMD="claude --mcp-config .mcp.json --dangerously-skip-permissions"
 DEFAULT_AUN_DATABASE_URL="postgresql:///agent_comms?host=/tmp"
 BUN_BIN="${AGENT_COMMS_BUN_COMMAND:-/Users/yuji/.bun/bin/bun}"
 PROFILE_SOURCE=""
+RUNTIME_INTENT="${2:---runtime=auto}"
+RUNTIME_INTENT="${RUNTIME_INTENT#--runtime=}"
 
-# Load .mcp.json sync helper (ensures AGENT_ID/PORT/STATE_DIR match registry)
-source "${SCRIPT_DIR}/sync-mcp-config.sh"
 
-build_profile_command() {
-  local agent_id="$1" session="$2" port="$3" runtime_engine="${4:-}"
-  local database_url="${AGENT_COMMS_DATABASE_URL:-${DATABASE_URL:-$DEFAULT_AUN_DATABASE_URL}}"
-  local state_dir="/Users/yuji/.claude/channels/${session}"
-  local server_path="${AGENT_COMMS_SERVER_PATH:-${REPO_ROOT}/server.ts}"
-  local bun_command="$BUN_BIN"
-  case "$(printf '%s' "$runtime_engine" | tr '[:upper:]' '[:lower:]')" in
-    codex)
-      CLAUDE_CMD="codex --dangerously-bypass-approvals-and-sandbox"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.enabled=true'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.command=\"${bun_command}\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.args=[\"run\",\"${server_path}\"]'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_ID=\"${agent_id}\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_EXPECTED_AGENT_ID=\"${agent_id}\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DATABASE_URL=\"${database_url}\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED=\"0\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.WEBHOOK_PORT=\"${port}\"'"
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.DISCORD_STATE_DIR=\"${state_dir}\"'"
-      # Pin the session name explicitly. Left unset, the heartbeat falls back to
-      # TMUX_PANE and records a pane identifier instead of the session.
-      CLAUDE_CMD+=" -c 'mcp_servers.aun.env.AGENT_COM_RUNTIME_SESSION=\"${session}\"'"
-      ;;
-    claude | claude-code)
-      CLAUDE_CMD="$DEFAULT_CMD"
-      ;;
-    *)
-      echo "[restart-bot] ERROR: unknown runtime_engine_preference '${runtime_engine}', refusing DB-profile restart" >&2
-      exit 1
-      ;;
-  esac
-}
 
 load_db_profile() {
   if [ "${AGENT_COMMS_RESTART_DB:-1}" = "0" ]; then
@@ -72,8 +41,8 @@ SELECT
   COALESCE(metadata->>'tmux_session', '') AS session_name,
   COALESCE(home_directory, '') AS project_dir,
   agent_id,
-  COALESCE(channel_port::text, '') AS port,
-  COALESCE(runtime_engine_preference, '') AS runtime_engine
+  '0' AS port,
+  'observed' AS runtime_engine
 FROM agents
 WHERE agent_type NOT IN ('human', 'system')
   AND COALESCE(profile_enabled, true) = true
@@ -103,7 +72,31 @@ SQL
     exit 1
   fi
 
-  build_profile_command "$AGENT_ID" "$SESSION" "$PORT" "${RUNTIME_ENGINE:-}"
+  local runtime_binding
+  runtime_binding=$("$BUN_BIN" -e '
+    const {Client}=await import("pg");
+    const {resolveSeatProvider}=await import(process.argv[1]+"/core/seat-runtime-selection.ts");
+    const db=new Client({connectionString:process.argv[3]}); await db.connect();
+    try { const r=await resolveSeatProvider(db,{agentId:process.argv[2],allowHistory:true,intent:process.argv[4]==="auto"?null:process.argv[4]});
+      if(!r.ok) throw new Error(r.code);
+      const values=[r.provider,r.observation?.session_name||"",r.observation?.workspace||""];
+      if(values.some(value=>/[|\n\r]/.test(value))) throw new Error("invalid runtime binding");
+      process.stdout.write(values.join("|")); }
+    finally {await db.end();}
+  ' "$REPO_ROOT" "$AGENT_ID" "$database_url" "$RUNTIME_INTENT")
+  local observed_session observed_workspace
+  IFS='|' read -r RUNTIME_ENGINE observed_session observed_workspace <<< "$runtime_binding"
+  if [ -n "$observed_session" ]; then SESSION="$observed_session"; fi
+  if [ -n "$observed_workspace" ]; then PROJECT_DIR="$observed_workspace"; fi
+  CLAUDE_CMD=$("$BUN_BIN" -e '
+    const {start,buildStartLaunchArgv}=await import(process.argv[1]+"/bin/aun/start.ts");
+    const result=await start({agentId:process.argv[2],runtime:process.argv[3],cwd:process.argv[4],spawn:false,checkSignatures:false,
+      env:{...process.env,DATABASE_URL:process.argv[5],AGENT_COM_RUNTIME_SESSION:process.argv[6]}});
+    if(!result.ok) throw new Error(result.errors.join(","));
+    const quote=s=>String.fromCharCode(39)+s.replaceAll(String.fromCharCode(39),String.fromCharCode(39,34,39,34,39))+String.fromCharCode(39);
+    process.stdout.write(buildStartLaunchArgv(result).map(quote).join(" "));
+  ' "$REPO_ROOT" "$AGENT_ID" "$RUNTIME_ENGINE" "$PROJECT_DIR" "$database_url" "$SESSION")
+
 }
 
 load_db_profile
@@ -112,7 +105,7 @@ echo "[restart-bot] Restarting ${SESSION}..."
 echo "[restart-bot] Profile source: ${PROFILE_SOURCE}"
 echo "[restart-bot] Agent: ${AGENT_ID:-unknown}"
 echo "[restart-bot] Port: ${PORT:-none}"
-echo "[restart-bot] Command: ${CLAUDE_CMD}"
+echo "[restart-bot] Provider: ${RUNTIME_ENGINE}; invocation-scoped MCP configuration"
 
 "$BUN_BIN" "${SCRIPT_DIR}/startup-safety-preflight.ts" \
   --agent-id "${AGENT_ID:-}" \
@@ -128,23 +121,13 @@ if [ "${AGENT_COMMS_RESTART_DRY_RUN:-0}" = "1" ]; then
   exit 0
 fi
 
-# Step 1: Kill orphaned MCP process on port (canonical PPID==1 filter — Issue #248 cycle 3).
-# Pre-cycle-3 inline lsof | kill killed live-parent processes too, which is
-# the cascade-disconnect mechanism. Delegate to the canonical script so the
-# PPID==1 contract is enforced uniformly across every cleanup site.
-if [ -n "${PORT:-}" ]; then
-  bash "$(dirname "$0")/cleanup-orphan-ports.sh" "$PORT"
-fi
-
+# The replacement owns a new OS socket; no profile-port cleanup is performed.
 # Step 2: Kill tmux session
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 sleep 1
 
-# Step 3: Sync .mcp.json with the DB profile (compat export, not SSOT)
+# The argv already contains an isolated MCP projection; no account/project file writes.
 PROJECT_DIR_EXPANDED="$PROJECT_DIR"
-if [ -n "${AGENT_ID:-}" ] && [ -n "${PORT:-}" ]; then
-  sync_mcp_config "$SESSION" "$PROJECT_DIR_EXPANDED" "$AGENT_ID" "$PORT" "${RUNTIME_ENGINE:-}" || true
-fi
 
 # Step 4: Create new session and start Claude Code
 tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR_EXPANDED"
@@ -157,7 +140,7 @@ tmux send-keys -t "$TMUX_TARGET" Enter
 # that can submit the highlighted suggestion and end the just-started session.
 sleep 3
 PANE_TEXT=$(tmux capture-pane -pt "$TMUX_TARGET" -S -40 2>/dev/null || true)
-if printf '%s\n' "$CLAUDE_CMD" | grep -qE '(^|[[:space:]])codex([[:space:]]|$)' \
+if [ "$RUNTIME_ENGINE" = "codex" ] \
   && printf '%s\n' "$PANE_TEXT" | grep -q "Update now"; then
   # Codex update prompts default to updating; choose the non-update option.
   tmux send-keys -t "$TMUX_TARGET" 2 Enter

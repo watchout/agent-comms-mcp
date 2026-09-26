@@ -20,6 +20,7 @@
  * handler).
  */
 import type { Client } from 'pg'
+import { hostname } from 'node:os'
 
 export type BotHealthState =
   | 'healthy'
@@ -79,9 +80,19 @@ const QUERY = `
            MIN(cpl.expires_at) AS endpoint_lease_expires_at,
            MAX(cpl.heartbeat_at) AS endpoint_lease_heartbeat_at
       FROM connector_instances ci
+      LEFT JOIN agent_runtime_instances r ON r.runtime_instance_id = ci.runtime_instance_id
+        AND r.agent_id = ci.agent_id AND r.status IN ('running','active')
+        AND r.runtime_kind = 'local_process' AND r.host_id = $1
+        AND r.last_seen_at > NOW() - INTERVAL '30 minutes'
       LEFT JOIN control_plane_leases cpl
         ON cpl.lease_scope_type = 'runtime_instance'
        AND cpl.lease_scope_id = ci.runtime_instance_id::text
+       AND cpl.lease_purpose = 'worker'
+       AND cpl.holder_runtime_instance_id = r.runtime_instance_id
+       AND cpl.holder_agent_id = r.agent_id
+       AND cpl.metadata->>'endpoint_uri' = r.endpoint_uri
+       AND cpl.metadata->>'port' = r.port::text
+       AND cpl.metadata->>'process_id' = r.process_id::text
        AND cpl.status = 'active'
        AND cpl.expires_at > NOW()
      WHERE ci.status IN ('active')
@@ -154,7 +165,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     endpoint_lease_state: BotStatusDbRow['endpoint_lease_state']
     endpoint_lease_expires_at: Date | null
     endpoint_lease_heartbeat_at: Date | null
-  }>(QUERY)
+  }>(QUERY, [hostname()])
   const map = new Map<string, BotStatusDbRow>()
   for (const row of result.rows) {
     map.set(row.agent_id, {

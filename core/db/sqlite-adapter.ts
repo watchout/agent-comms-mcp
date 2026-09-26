@@ -72,7 +72,12 @@ export class SqliteAdapter implements DbAdapter {
   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
     const p = this.prepare(sql, params)
     try {
-      return this.db.prepare(p.sql).all(...p.params) as T[]
+      const statement = this.db.prepare(p.sql)
+      try {
+        return statement.all(...p.params) as T[]
+      } finally {
+        statement.finalize()
+      }
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
         return []
@@ -89,8 +94,13 @@ export class SqliteAdapter implements DbAdapter {
   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
     const p = this.prepare(sql, params)
     try {
-      const result = this.db.prepare(p.sql).run(...p.params)
-      return { rowCount: result.changes }
+      const statement = this.db.prepare(p.sql)
+      try {
+        const result = statement.run(...p.params)
+        return { rowCount: result.changes }
+      } finally {
+        statement.finalize()
+      }
     } catch (err: any) {
       if (err.message?.includes('not authorized') || err.message?.includes('LISTEN')) {
         return { rowCount: 0 }

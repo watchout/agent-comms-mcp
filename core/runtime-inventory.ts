@@ -1,3 +1,4 @@
+import { resolveSeatProvider, selectObservedProvider } from './seat-runtime-selection'
 import type { DbAdapter } from './db'
 import {
   ALL_AGENT_COMMUNICATION_ACTIVE_FUNCTIONS,
@@ -41,28 +42,11 @@ export function selectBootstrapRuntime(
   requested: 'auto' | BootstrapRuntimeKind,
   signals: BootstrapRuntimeSignal[],
 ): BootstrapRuntimeSelection {
-  const verified = signals.filter((signal) => signal.verified)
-  if (requested !== 'auto') {
-    const conflicting = verified.filter((signal) => signal.runtime !== requested)
-    if (conflicting.length > 0) {
-      return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-    }
-    return { ok: true, runtime: requested, reason: 'selected', signals }
-  }
+  // A profile is desired compatibility data, not a provider identity signal.
+  const processes = signals.filter(signal => signal.verified && signal.source === 'process_identity')
+  const selected = selectObservedProvider(processes.map(signal=>signal.runtime),requested === 'auto' ? null : requested)
+  return {ok:selected.ok,runtime:selected.provider,reason:selected.ok ? 'selected' : selected.code === 'PROVIDER_AMBIGUOUS' ? 'NO_GO_RUNTIME_AMBIGUOUS' : 'NO_GO_RUNTIME_UNDETECTED',signals}
 
-  const profiles = verified.filter((signal) => signal.source === 'agent_profile')
-  const processes = verified.filter((signal) => signal.source === 'process_identity')
-  const runtimes = new Set(verified.map((signal) => signal.runtime))
-  if (runtimes.size > 1 || profiles.length > 1 || processes.length > 1) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-  }
-  if (processes.length === 0) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_UNDETECTED', signals }
-  }
-  if (profiles.length === 1 && profiles[0].runtime !== processes[0].runtime) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-  }
-  return { ok: true, runtime: processes[0].runtime, reason: 'selected', signals }
 }
 import type { V2NativeMeshFrozenAgentV1 } from './eventlog/v2-native-ingress'
 
@@ -254,11 +238,16 @@ export async function readV2NativeFrozenEnabledSet(
     })
     if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
     const runtime = live[0]
-    const metadata = metadataObject(agent.metadata)
-    const companyDevOs = metadataObject(metadata.companyDevOs)
-    const engine = normalizeString(agent.runtime_engine_preference)
-      ?? normalizeString(companyDevOs.runtime_engine)
-      ?? normalizeString(runtime.runtime_engine)
+    // The S0 mesh executes a provider-free TurnRuntime. Its runtime identity
+    // is distinct from a Codex/Claude host and must not require an LLM ancestor.
+    // LLM seats still require current observation of the exact frozen instance.
+    const declaredEngine = normalizeString(runtime.runtime_engine)
+    const provider = declaredEngine === 'deterministic-s0' ? null
+      : await resolveSeatProvider(db, {agentId:String(agent.agent_id),now:new Date(nowMs)})
+    const engine = declaredEngine === 'deterministic-s0' ? declaredEngine
+      : provider?.ok && provider.code === 'SELECTED_LIVE'
+        && provider.observation?.runtime_instance_id === String(runtime.runtime_instance_id)
+        ? provider.provider : null
     const instanceId = normalizeString(runtime.runtime_instance_id)
     const checkoutRoot = normalizeString(runtime.checkout_path)
     const checkoutSha = normalizeString(runtime.commit_sha)
@@ -405,14 +394,9 @@ export async function generateAllAgentCommunicationManifestCandidates(
     if (live.length === 1 && !normalizeString(live[0]?.runtime_instance_id)) {
       agentBlockers.push('runtime_instance_id_missing')
     }
-    const profileEngine = manifestRuntimeEngine(agent.runtime_engine_preference)
-    const liveEngine = manifestRuntimeEngine(live[0]?.runtime_engine)
-    if (!profileEngine) agentBlockers.push('profile_runtime_engine_missing_or_unsupported')
-    if (!liveEngine) agentBlockers.push('live_runtime_engine_missing_or_unsupported')
-    if (profileEngine && liveEngine && profileEngine !== liveEngine) {
-      agentBlockers.push('runtime_engine_profile_mismatch')
-    }
-    const engine = profileEngine ?? liveEngine
+    const provider = await resolveSeatProvider(db,{agentId,now:new Date(nowMs)})
+    const engine = manifestRuntimeEngine(provider.provider)
+    if (!provider.ok || !engine) agentBlockers.push(provider.code)
     const profileRevision = Number(agent.profile_revision)
     if (!Number.isSafeInteger(profileRevision) || profileRevision <= 0) agentBlockers.push('profile_revision_missing_or_invalid')
 

@@ -1,0 +1,799 @@
+{
+  "schema_version": "shirube-machine-evidence/v1",
+  "evidence_id": "SEAT-CONTINUITY-AUN-MACHINE-EVIDENCE-20260913-001",
+  "scope": "Completed maker observations on the exact source below. Subsequent metadata-only heads inherit byte-identity evidence; no historical tests are relabeled. Independent source acceptance and current mandatory CI are separate.",
+  "tested_source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+  "tested_source_tree": "e7fdedd4767d6697bee77abc439bf63754f1a0e7",
+  "base_head": "0f772883db6f3b50772d3e4b82ce47795091f0a9",
+  "companion_source_head": "4cf952c7da186952180f81812c903a3f8434561d",
+  "observed_validation_evidence": [
+    {
+      "command": "/Users/yuji/.bun/bin/bun --no-env-file test --bail=1 tests/contract/test_aun_codex_runner.test.ts tests/contract/test_aun_receive_actionable.test.ts tests/contract/test_aun_codex_runner_preflight.test.ts tests/contract/test_session_start_drain.test.ts tests/contract/runtime-memory-ready-refresher-pg.test.ts tests/contract/test_aun_bootstrap_failure_matrix.test.ts tests/contract/test_aun_bootstrap_clean_host.test.ts",
+      "result": "PASS",
+      "source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+      "executed": 85,
+      "pass": 85,
+      "fail": 0,
+      "unchanged_skips": 1,
+      "assertions": 715,
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ci-fixture-correction/pinned-737d41a/own-native.log",
+      "sha256": "3c9bf3fb41da3d66a1c1d6e39b14b6df3eaa2b9e0e3ff2a1ce3ac848576818ea"
+    },
+    {
+      "command": "/Users/yuji/.bun/bin/bun --no-env-file test --bail=1 tests/runtime-inventory.test.ts tests/runtime-session-env-bridge.test.ts tests/aun-bootstrap-claude-adapter.test.ts tests/cli-sqlite-backend.test.ts tests/contract/test_routing_v3_stage_a.test.ts tests/contract/test_aun_port_collision.test.ts tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts tests/contract/state-daemon/test_wake_invocation_bounded.test.ts tests/contract/state-daemon/test_codex_runner_dispatch.test.ts tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts tests/contract/state-daemon/m3-heartbeat-liveness.test.ts tests/contract/state-daemon/m2-sweep.test.ts tests/unit/ports/bot-inventory-port.test.ts",
+      "result": "PASS",
+      "source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+      "executed": 217,
+      "pass": 217,
+      "fail": 0,
+      "unchanged_skips": 5,
+      "assertions": 1413,
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ci-fixture-correction/pinned-737d41a/inventory.log",
+      "sha256": "873259c54046822f455209e303478c316cf7ce0c4eccfc36eea250770a6f5bc6"
+    },
+    {
+      "command": "/Users/yuji/.bun/bin/bun --no-env-file test --bail=1 tests/contract/test_aun_configuration_runtime_diagnostics.test.ts",
+      "result": "PASS",
+      "source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+      "executed": 2,
+      "pass": 2,
+      "fail": 0,
+      "unchanged_skips": 0,
+      "assertions": 77,
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ci-fixture-correction/pinned-737d41a/diagnostics.log",
+      "sha256": "97baa94057bf936658b9bf17510dfeea9877e84d5cf637eb28a34bc012d71f74"
+    }
+  ],
+  "aggregate": {
+    "executed": 304,
+    "pass": 304,
+    "fail": 0,
+    "unchanged_skips": 6,
+    "assertions": 2205,
+    "selected_files": 23
+  },
+  "fixture_isolation": {
+    "postgres_tcp_listen_addresses": "",
+    "private_cluster_stopped": true,
+    "receipt_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ci-fixture-correction/pinned-737d41a/pg-receipt.json",
+    "receipt_sha256": "5de8f9a8a25b542e9409285b52967b86e47438c7a29a6b10c26c9b1e43780a01"
+  },
+  "task_file_sha256_at_test": {
+    ".github/workflows/pr-checks.yml": "13f494570f1228b075e25f7febe9a3fd31dd2f785a888aba8aec5bc70288f139",
+    "bin/aun-watchdog.ts": "dcc49e0596993ab927bf8e39e57570a8f8a5a5bbab83ba1389a30a6418456012",
+    "bin/aun.ts": "502dada5cad77c2dce0bbdfe475596a74b475cd30d3dde779586364c1061e8b2",
+    "bin/aun/bootstrap-adapter-codex.ts": "1e58d3199d20186b18fba761338442ba0f9d18fcc5868aa8097e922650915849",
+    "bin/aun/bootstrap-types.ts": "4cd4eaa404506f9930b25fe69f73efc8fe58b339d1462728fe153d4164f9dfe6",
+    "bin/aun/bootstrap.ts": "ef2ca11e08640cc840e833430b90c6731e1001533a18e34859bc5d214f63d384",
+    "bin/aun/memory-ready.ts": "c9317a527d945b1b8440cb20e0164b2910fb05b2faf8b3aa1c0d5b75a7ba8afb",
+    "bin/aun/start.ts": "fcb5f5a64606af907c232711255e5cb7f95bf0ef7c85c6cdfc695e73b6e05ce7",
+    "bin/state-daemon.ts": "35a0afe73356557dd13b2ed545d3a383f70c951c19b1d771fac75aed9e02ccaa",
+    "core/aun-configuration-candidate.ts": "f1be363a8df1c283b9dfb5ee6fc162ce3c0a498e158fecca05e32cbf91ff3eb9",
+    "core/aun-configuration-desired-state.ts": "c7a4840d7a3ddd9a9acab86e1455cd48b881a1a9a283a322429e93028e7762b5",
+    "core/bot-health.ts": "2b0690c2e5d5dfb639b8a563d989f3d647809aca2901fe8838aaadf54f5dc4ff",
+    "core/bot-lifecycle.ts": "14aedb8e3376494ecf977f201eb500f0c23a575e3c2f0e23f279dcdd2293a3c3",
+    "core/bot-status-db.ts": "727e5f2d6db6e140062deefa08f8c895e3c0382be58e27ceb5e988567c3df8d4",
+    "core/runtime-cleanup.ts": "99313b4efe994c8fa0be441010d6d3c94ef8cdd11867c91748146596c27f01f3",
+    "core/runtime-current-resolver.ts": "18b6b0483d845eb2060118af78d17e120b8863e45fd03681cf708ec984b37884",
+    "core/runtime-endpoint.ts": "89f9d7c0b6bbcf61248c02e01e59b2bf6e933f344abe9f8feab2dfd5197b55b3",
+    "core/runtime-heartbeat.ts": "ae42bea812056969b90d0f418fefb19aff3ac11e2d260f7a67b48618ae4e3cef",
+    "core/runtime-inventory.ts": "b164316184bff5733066ed4fc59ae28bbec023d3ffac5106b2da709d083d47b5",
+    "core/runtime-memory-ready-refresher.ts": "ffd618996140e6ceaf01f35d401e6a2ddd89cdb41f2c6304b1a6bbbe7eee1bce",
+    "core/runtime-memory-ready.ts": "448b3f470730e8f1fee0101823f39dd64b8db4aa7229fcf2ab0e9a5b59878fe6",
+    "core/seat-context-recovery.ts": "448d245c2f0226183e025c3c52a71a69d5a18c1e7478c46b5300a11acb5968fa",
+    "core/seat-runtime-selection.ts": "074520d923c5557ace67eb00d56f443b5ed8eff5e43e2375ae8671c2e858c313",
+    "core/startup-safety.ts": "d64aed1c88260cd1be479d0179780c66c2c68f4259d5a99c7c08c199260217ce",
+    "core/state-daemon/action-planner.ts": "90124cd8b4393672b26963b2a0045eeb481e10d588854c823a96aefe5e1e5da5",
+    "core/state-daemon/index.ts": "c5f00758600a9a0d15b4d350a1653bc62b55912a8a1d0118301ac0691c5e4a0b",
+    "core/state-daemon/stall-detector.ts": "6908ec58b962d0763ee99566173f17d3596b9e3e7a62d991f403442018c455e8",
+    "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql": "52ad73ce6b1b2b5304605836b4b94ef03d0e8334c99e008322391c35bc9d52d6",
+    "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql": "6550f70402bf10a65279a39c341dd82c62a33ca956dddc7acf062d972ce152e5",
+    "docs/SSOT.md": "3a55e0d4f3cc19714a56f560060956cfca3397a8fb837e043f2b2199fdff6e4d",
+    "docs/agent-com-message-queue-spec.md": "97fbb655e8cc25c7c0d555f4f101d3f27b1df623daaff4ab368a0bb541045264",
+    "docs/operations/aun-bootstrap.md": "38aa7a747bbab286327cc36f9f91e2b4df03642565d9a700b2b0b6facd13398e",
+    "docs/operations/runtime-health-monitoring.md": "bb354998cead8782ced84b3967c9b4d6817db7a856d000896045bf60a2383bf2",
+    "docs/spec/aun-runtime-supervisor-adapter-contract.md": "adee67f314836697b1b2923a7159b3b08e5ee50264f9b1ffdd6c42504ef96c56",
+    "docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md": "d2c4b039f48549e85ac5a1cccd6b94b2c5f3adcdf4c153758130613e9c080fa7",
+    "docs/spec/seat-runtime-continuity.md": "1d8649bfd220ee3d45c5074815c04d89358a2440a7b7ce76a7fd0078f5f7b624",
+    "scripts/prepare-seat-continuity-test-wasurezu.sh": "e5d6e60169387cb52c9a34c21e62e07c40ad06aecfd603857b5b1dcccbb42811",
+    "scripts/restart-bot.sh": "b8311f2fed6102f2535c22793f33be37d6d18a03cd48360180a604b05a834cbd",
+    "scripts/sync-mcp-config.sh": "349855dfb7b263d0f537a5a8618153db99fa9a31943d429672d0b192d347ba24",
+    "scripts/verify-seat-context-continuity.ts": "df613b28ab54818a315948e0266497c35bf66ac25c48081fa8f20931aa4a038b",
+    "scripts/watchdog.sh": "f93fdcead3da1d7326dea4fea438249fd91fb75d3e5fa1400571c8e5fafd263b",
+    "server.ts": "3914ddb3734bf77a847d9b29e50a3a09ec6e6ee0d22220291461bd148f78761b",
+    "tests/aun-bootstrap-claude-adapter.test.ts": "6240b9a8b0ac43e469ee22d6c31b668036ae2d1ce95fe6dc6ad8db2808d0a17c",
+    "tests/aun-bootstrap-codex-adapter.test.ts": "65f45e9b54e941a02e381a7ff3392dcd6ccf2433c83a364850cbde325020a7d8",
+    "tests/aun-bootstrap.test.ts": "1d4a7eb81dfc9b42bcbad7c76c5d6a18231025735e2a1d1af734bfacb37f70c2",
+    "tests/aun-configuration-candidate.test.ts": "d4bb41c759278e5f4efee8fb259d043b6509805f810c55f1140cbb77a4f4a2f3",
+    "tests/aun-configuration-desired-state.test.ts": "08a15160643dae441542116be814e9932fa7a506aa0dd44a883dfaa202ff0441",
+    "tests/bot-health.test.ts": "031fab0a625243611ce4f0b8126acfb14353b52b253456a933b039fce7a05e60",
+    "tests/cli-sqlite-backend.test.ts": "c712cf157ce2950db22eb6422ce533d362b627a412ee78996fa7dbb5d297d883",
+    "tests/contract/runtime-memory-ready-refresher-pg.test.ts": "d593094635b0288beb90ed717c75b5fab58fb9db676c216c2c26b96b999679e7",
+    "tests/contract/state-daemon/m2-sweep.test.ts": "daa9b908b37811f6576efc8c49a43d27be26fa6a76dd6294fb548fbfd99f9317",
+    "tests/contract/state-daemon/m3-heartbeat-liveness.test.ts": "0d193d45d222d492ce86aee7589a3ef88d314b8fdc4e357b57fb8d1c1a679906",
+    "tests/contract/state-daemon/seed.ts": "9c155512c52897104b662b0f8b1b725eb8ffa59f985ff25862f255aae229f59c",
+    "tests/contract/state-daemon/test_codex_runner_dispatch.test.ts": "b5e28747bdf5e81c7d76033ea3b03e4b1ed19c9101f1f52cfb5ed89a1d2506a2",
+    "tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts": "106099b4ca18fe19ee50ced6b20d8d73bb67fa80788e74ba9a5e22428345f80e",
+    "tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts": "1b56f974746b4753015f3055756bf110cd7d0af0d894f5e080a0b178005ac9dd",
+    "tests/contract/state-daemon/test_state_action_matrix.test.ts": "d2446c58db3c3b2832180173855c71d733cb07c46230dcee67a27e091db5cc39",
+    "tests/contract/state-daemon/test_wake_invocation_bounded.test.ts": "04a7056f923920d3e43e817fa66668ddd31d5610bf56bce1fa29d2fb81d8d9c5",
+    "tests/contract/test_aun_bootstrap_clean_host.test.ts": "0ddf115693d38fb8d01b43e5a5b66d7ee347928ca6d6380603e878a56fccad1a",
+    "tests/contract/test_aun_bootstrap_failure_matrix.test.ts": "f8aaff8c525f6bf0526c9602a0d319101ac173cfcf7cbab8ae71313f2d17449d",
+    "tests/contract/test_aun_codex_runner.test.ts": "ae767a558d88d6140a2b258fdd4fd3da3551e2efe03efda315a82bf328d9af81",
+    "tests/contract/test_aun_codex_runner_preflight.test.ts": "0607ac4a80f9361e9c74c4212ff10289a680c8a93d74cb5af83b5b28f366f902",
+    "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts": "b01fd500ef2367bec4aa51db08788fbdd7ba5845613af542397a641fbf5645ed",
+    "tests/contract/test_aun_port_collision.test.ts": "0d5fdbdcf33ba03121906c6d50d2411ca39760fb2e2cd645ce5c48778daa48a1",
+    "tests/contract/test_aun_receive_actionable.test.ts": "2b704978eaece4e43c3795521e8e3804b09cf0b58022e899c26faffad2250de7",
+    "tests/contract/test_aun_start_spawn_argv.test.ts": "8d14a6eab55114a6c20371833e2d42ed69c022e3718b9260c27338b8bf256b8f",
+    "tests/contract/test_routing_v3_stage_a.test.ts": "33257ec5c1f82727dac66bc91465d638bcb32bd5d14b49718141b111dd21083b",
+    "tests/contract/test_seat_runtime_continuity.test.ts": "cda7bdbb308f6797c6ddf9db22ab2b15c3814b3149bbec1c132ce1f152499197",
+    "tests/contract/test_session_start_drain.test.ts": "085ec3ce34fe0086d4ca90fef6806445d621f3a08578b2eb668b8085d4a02fda",
+    "tests/contract/test_watchdog.test.ts": "20bf87f9fbdcccf1625825085e429de8672ce34a1f17efb42b10df5c11eaf49b",
+    "tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts": "82e3cb7add3f47fa5759d04408b4ccb6a65fb5c3635bb0cd632c09a3dc1910dd",
+    "tests/helpers/seat-native-runtime-fixture.ts": "e4cfa87e3ffc573112227a2d873d89c817fa6f53e0847b4fd8c52e5d9a494d74",
+    "tests/migrations/aun-configuration-reconciliation.test.ts": "2f01dd3349c395dd6572e00fd20d8696ae3ec58cf66e1135aea3a2b03c5328e4",
+    "tests/norm-022-runtime-endpoint-lease.test.ts": "cdbb93fef51526ba295842c39f2cdf4057ee24cb309c94bd58aef427224126d8",
+    "tests/runtime-cleanup.test.ts": "21930328c3555c8b9fc45d58ac59bbabf1bb6e87ee71ed07fb3294af1e0c6177",
+    "tests/runtime-current-resolver.test.ts": "4e0ae98edbc9c609fada2e051134d4fe85afd2ad8c343b2e4780354d536f256d",
+    "tests/runtime-heartbeat.test.ts": "76e0c5a44344606e737a5bbe12c1cb9316bb53a8c8d6db21141db7448dbc06eb",
+    "tests/runtime-inventory.test.ts": "e2ec95c02e5e99ab0af6be7e148d740f350330673296b1d8406947695df05381",
+    "tests/runtime-memory-ready-identity.test.ts": "81a1df24c84ab4330215e6e3687c58223105332e4b88b0cb092eb6e0111b5dbd",
+    "tests/runtime-memory-ready-refresher.test.ts": "c20d6d98165f9d1898a5d85843f3c7b42e269c5298b9e5622e963fa98dc9e57a",
+    "tests/runtime-memory-ready.test.ts": "40fbb48ae5cb5758771da269f4431ba3bd9cfa36b65379092e0ef6419dda1721",
+    "tests/runtime-session-env-bridge.test.ts": "6a13b82eb7a2b99020f6847d00e827b01844196dda9225049299431523e8623e",
+    "tests/seat-context-recovery.test.ts": "c0350ab28f1c29f661c65172722a3f2362424bb47a63b020ed0a7863dd13b3dd",
+    "tests/seat-runtime-continuity.test.ts": "f66ba4f026937df31588e5f82436910ef1514cd58b637bb3eda2e94762f7dbae",
+    "tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts": "dd894d01e6bae23a0801310d3ff55d519673c55e5eed81ff21b6871d20c1b860",
+    "tests/spec-enforcement/watchdog-false-positive-guards.test.ts": "7d445e328b393fbefab03923ac9f418270874e252ad2dd1e632310ba0a30be83",
+    "tests/state-daemon-queue-work-scheduler.test.ts": "d92943198be68691db185d991ce9926111c389ace139b1d25943cc47b451fff6"
+  },
+  "historical_evidence": [
+    {
+      "source_head": "73dda864868989ab12752a63ccf9d6625309df22",
+      "pass": 331,
+      "fail": 0,
+      "skip": 0,
+      "assertions": 2049,
+      "receipt_sha256": "a71ef4d3715d8d1d09aee1e779d4fc7ddb6aa654bf8328c8fdbe2c521a48e6a9",
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/73dda/receipt.json"
+    },
+    {
+      "source_head": "4e3eccef09712c13cde5c299f3c24050ee32d19b",
+      "sqlite_tests": 26,
+      "sqlite_assertions": 104,
+      "pg_native_tests": 1,
+      "pg_native_assertions": 91,
+      "independent_gate_sha256": "9a7c0081a0e4803a897853c55aabad984a33ed823990f6ffeab9133a8f90ed20",
+      "review_comment_ref": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651333822",
+      "review_body_sha256": "a820381e1be5a66b10b5e67262ca6f3bc81de147863cfaf07fcea8487f7d721e"
+    }
+  ],
+  "mandatory_ci": {
+    "current_candidate_status": "PENDING_NEW_PUSH",
+    "historical_failed_run_ref": "https://github.com/watchout/agent-comms-mcp/actions/runs/34739844878",
+    "historical_subject": "4e3eccef09712c13cde5c299f3c24050ee32d19b",
+    "historical_pass": 2999,
+    "historical_fail": 99,
+    "historical_skip": 68,
+    "historical_total": 3166,
+    "historical_log_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-ci-full-test-4e3eccef.log"
+  },
+  "completed_static_checks": [
+    {
+      "command": "git diff --check",
+      "result": "PASS",
+      "source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+      "exit_code": 0
+    },
+    {
+      "command": "changed TypeScript parse and shell syntax",
+      "result": "PASS",
+      "source_head": "737d41af82b17eab9b143903c3be7ff5859647b8",
+      "parsed_typescript_files": 26,
+      "exit_code": 0
+    }
+  ],
+  "ci_fixture_supply": {
+    "command": "bash scripts/prepare-seat-continuity-test-wasurezu.sh",
+    "result": "PASS",
+    "wasurezu_head": "4cf952c7da186952180f81812c903a3f8434561d",
+    "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ci-fixture-correction/ci-supply.log",
+    "sha256": "16c07786703b00d364f046e254fa759604a42cfd5b0cebd5a642af2bfad94677",
+    "wrong_database_negative": {
+      "exit_code": 2,
+      "environment_output_created": false
+    }
+  },
+  "effects": {
+    "production_mutations": 0,
+    "provider_API_calls": 0,
+    "merge": 0,
+    "deployment": 0
+  },
+  "limitations": [
+    "Current mandatory CI and independent delta verdict pending; source is not applied.",
+    "Native fixtures classify a harmless Node parent as the provider while observing actual PID/start/ancestry, OS pipe delivery and durable registered MCP receipts. No installed LLM task delivery is claimed.",
+    "Six existing skipped tests remain skipped; they are excluded from the304 executed tests.",
+    "SQLite dry-run rejects WAL/journal databases before adapter open to preserve zero effects.",
+    "The Vice-only application excludes shared desired migration and shared daemon rollout."
+  ],
+  "control_handoff_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652166090",
+    "sha256": "f3b78b8d6fd8e851182c5430ef1149432e31a5dc4b254ea43978ee187626403c"
+  },
+  "mirrored_handoff_sha256": "ece9eb2d42b838edebb85f29eb77368254d801c443c9e8f0d1b625fbd0a08225",
+  "fixture_placement_correction": {
+    "source_head": "1cb3071af99d723bf84e62e2a146a48f0304abba",
+    "source_tree": "178b8cbb36ecca3ee1888d74f52f8767cc9c37a8",
+    "parent_head": "f3aada4f749b34f650a71f946abc03c894b19fe4",
+    "control_source_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5651614978",
+      "sha256": "7b3342f0ca739b3be2320b5193e6592e51048189925e062aae12be55c0058392"
+    },
+    "scope": "Four fixture-supply paths only; all product bytes unchanged. Tests executed on these exact bytes immediately before pinning; historical 737d304 remains historical.",
+    "changed_file_sha256": {
+      ".github/workflows/pr-checks.yml": "fadf1150a269a017f5206619cd498bc224e9ef75b0561a9b8a16d7c9598316ac",
+      "scripts/prepare-seat-continuity-test-wasurezu.sh": "721a87ee5f394ca45d68c20fb8f1611a0b374f0cd78f8677548fa53bdb22d8ba",
+      "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts": "92d51a7cf933ad906de2c74d9878474a391cb5fd94784ed1156a735cffc1416f",
+      "tests/helpers/seat-native-runtime-fixture.ts": "25dad84f9d00b76ee010930e616206f8647caec6611ecedd0fc07114383a26f5"
+    },
+    "lazy_native": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--timeout",
+        "30000",
+        "tests/contract/test_aun_receive_actionable.test.ts",
+        "--test-name-pattern",
+        "dry-run surfaces|claims only the selected actionable"
+      ],
+      "exit_code": 0,
+      "seconds": 6.106231124998885,
+      "log_sha256": "c5fff58cefe7d2ad02126075960e3b3ad2cd72e9b96d9b17429d97c5485ae7e1",
+      "build_count": 1,
+      "output_roots": [
+        "/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-lazy-was-xe16g8as/aun-wasurezu-lq51WF"
+      ],
+      "pass": 2,
+      "fail": 0,
+      "assertions": 12,
+      "filtered_out": 18
+    },
+    "diagnostics_ci_alias": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--bail=1",
+        "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts"
+      ],
+      "exit_code": 0,
+      "duration_seconds": 0.408,
+      "log": "diagnostics.log",
+      "sha256": "5a14dd560ecf1b086dd7313cff1948ffdd54277cabadf3e8343897a3ae4f03d8",
+      "pass": 2,
+      "fail": 0,
+      "skip": 0,
+      "executed": 2,
+      "failure_lines": [],
+      "assertions": 77,
+      "selected_files": [
+        "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts"
+      ],
+      "stopped_after_first_failure": false,
+      "isolated_cluster_stopped": true,
+      "receipt_sha256": "790dcb950a0932512101ef2da2763f8159e20605a0e1e01d0a9ea86c2117acea"
+    },
+    "expected_rejections": {
+      "cases": [
+        {
+          "name": "missing-private-ci-parent",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_PRIVATE_CI_NATIVE_FIXTURE_PARENT_REQUIRED",
+          "log_sha256": "e62d83809faa2cb9b06c2ec4d00cb98bf3eb8e2db2db7cc4bb0e9b32f62c02e4"
+        },
+        {
+          "name": "wrong-diagnostic-db",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED",
+          "log_sha256": "acd5f3719c76b39ff314490fb1b69aef43c820d21d59187e0fb151ae855a3e17"
+        },
+        {
+          "name": "non-ci-diagnostic-alias",
+          "exit_code": 1,
+          "expected_rejection": "EXPLICIT_ISOLATED_POSTGRES_TEST_URL_REQUIRED",
+          "log_sha256": "c1864d5a8c86250eb2e85e8a4e1e953a9e05f6146cb1831277807e9150c2a1d4"
+        },
+        {
+          "name": "outside-private-output",
+          "exit_code": 2,
+          "expected_rejection": null,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "build_count": 0,
+      "outside_output_created": false
+    },
+    "overlay": {
+      "result": "PASS",
+      "log_sha256": "69c503a1e6bf3ede301649c6bdc90cc0017527f7fc0edb854b929b471d6c3cb7",
+      "actual_current_pr_event": true
+    },
+    "mandatory_ci": "PENDING_NEW_PUSH",
+    "production_effects": 0
+  },
+  "companion_kernel_correction": {
+    "new_fixture_companion_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+    "new_fixture_companion_tree": "9d5dc2d9cbbef19d0e2a24281c78d768942f129c",
+    "scope": "Only existing pinned test companion source changes. Existing737d/283c observations retain original inputs; current AUN fullCI must run on the new pin.",
+    "companion_CI": {
+      "url": "https://github.com/watchout/agent-memory/actions/runs/34743923817",
+      "head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+      "conclusion": "success",
+      "jobs": [
+        "build-and-test (18)",
+        "build-and-test (20)",
+        "build-and-test (22)"
+      ],
+      "independent_source_admission": {
+        "verdict": "PASS",
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/was-source-independent-gate-e919c611.json",
+        "sha256": "6609a4cdd4b6d94c38a4c1aa5923cd5adeb9b9eb173a589dbad66bcc9a75d63a"
+      }
+    },
+    "local_actual_supply": {
+      "command": [
+        "/Users/yuji/.bun/bin/bun",
+        "--no-env-file",
+        "test",
+        "--timeout",
+        "30000",
+        "tests/contract/test_aun_receive_actionable.test.ts",
+        "--test-name-pattern",
+        "dry-run surfaces|claims only the selected actionable"
+      ],
+      "exit_code": 0,
+      "seconds": 6.633569040997827,
+      "log_sha256": "2e82fdb9026fc2ec9e757838f86ea06258ca946d1a726b944ff751c42763a5ef",
+      "build_count": 1,
+      "output_roots": [
+        "/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-lazy-e919-wxix5g7s/aun-wasurezu-zpNZrz"
+      ],
+      "script_sha256": "0816e57c29fb82553fcf91da8565c6e705d50ea2400812e2f57e0151f2a39fc6",
+      "source_working_diff_sha256": "734b864337c5a7092f4f11a5e1f4ecfa9b61419c3194b7b679ed1d92d4f02e52",
+      "prebuilt_input_present": false,
+      "built_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+      "built_tree": "9d5dc2d9cbbef19d0e2a24281c78d768942f129c",
+      "pass": 2,
+      "fail": 0,
+      "assertions": 12,
+      "filtered_out": 18,
+      "receipt_sha256": "b78c26cb1f4daaf030dea6d22a53b1334cf30a3c444c76ea30fd0ffe631caa74"
+    },
+    "historical_AUN_linux_failure": {
+      "head": "283c6a433c9d9c9042faa8a7160fe7773c5c062d",
+      "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34742695975",
+      "pass": 2978,
+      "fail": 133,
+      "skip": 59,
+      "assertions": 14107,
+      "executed": 3111,
+      "selected": 3170,
+      "files": 339,
+      "status": "FAIL; native receipt collector failure cascaded into helper consumers; not a waiver"
+    },
+    "current_AUN_mandatory_CI": "PENDING_NEW_PUSH",
+    "production_effects": 0
+  },
+  "b8_observation_dependency_correction": {
+    "source_head": "51b3bfe10c25e11f8c7ac1450688282551e89ec7",
+    "source_tree": "aa21be700fff1a3bf0cea085b1d854e3d0a83892",
+    "source_files": {
+      "bin/aun/bootstrap.ts": "30d2557e5fe07c02074ae564f9492c3e42da9e2111354f410bba5d7ab4ffc4c5",
+      "core/aun-configuration-candidate.ts": "9fb17fa6b898ab264746806c0334111e55ccb64766a2b0bcd8aa4ac5d1e00ec4",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts": "6613a40e456ace862364fdbc18b75b03c051de145745b46877c320cd0cdb2440"
+    },
+    "companion_source_head": "e919c6112185a2fe6637ac5d585fb2e65f567f8e",
+    "measurement": "Private Bun test runner reparented to PID 1 before spawning test, removing the real outer Codex controller ancestor. Default observation reproduced PROVIDER_MISSING with exact B8 error; injected observer preserved actual fixture PID/start/runtime/lease. B8 now forwards existing provider observer and bounded command reader. Production standalone/daemon defaults remain unchanged; bootstrap command reader retains explicit env/cwd.",
+    "orphan_failure": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-discriminator/pg-receipt.json",
+      "sha256": "31c32108e81eb8796d218a01bf3b9524012c7952e7a3877d4e71d09e2e42e8fb",
+      "working_diff_sha256": "39cb01a46d1e019c16c3467be8aaf4080466d6c545e5999d7f5c3e04c79f7547",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "--test-name-pattern",
+            "real default"
+          ],
+          "exit_code": 1,
+          "duration_seconds": 16.329,
+          "log": "clean-host.log",
+          "sha256": "c9eb88453a680df5dafaba2071858e90b5922ad62dd03f482a3bc073c9cca84c",
+          "pass": 2,
+          "fail": 1,
+          "skip": 0,
+          "executed": 3,
+          "failure_lines": [
+            "(fail) aun bootstrap clean-host journal > real default postgres path performs genuine MCP recovery and separate-process ordinary receive [3294.67ms]"
+          ],
+          "assertions": null,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": true
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "three_case_correction": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-b8-correction/pg-receipt.json",
+      "sha256": "329de31a79b37d3c6e54dccb1fe4ed27098e0036bc45c584689b1acc8384fa0a",
+      "working_diff_sha256": "15579e0c0499a469c5dbfe9a289b8d0e03b56e259cb1d488e6758766da8a58d4",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "--test-name-pattern",
+            "real default"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 16.905,
+          "log": "clean-host.log",
+          "sha256": "a4f4195ad7c06faee0d1ed3b9de5a3d385d430cfbd27fcb0ff5bdb283ca3888a",
+          "pass": 3,
+          "fail": 0,
+          "skip": 0,
+          "executed": 3,
+          "failure_lines": [],
+          "assertions": 118,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "expanded_sqlite_failure": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-b8-focused/pg-receipt.json",
+      "sha256": "1a2a78d5400802530492a84af33bd79ba49e0cad93dedea673ec40a6808910e9",
+      "working_diff_sha256": "15579e0c0499a469c5dbfe9a289b8d0e03b56e259cb1d488e6758766da8a58d4",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "exit_code": 1,
+          "duration_seconds": 29.495,
+          "log": "clean-host.log",
+          "sha256": "8d53c9d7e75e2a827d6f382167df93abccefc12482463058d039830be35829fe",
+          "pass": 42,
+          "fail": 1,
+          "skip": 0,
+          "executed": 43,
+          "failure_lines": [
+            "(fail) aun bootstrap clean-host journal > real default sqlite-existing path performs genuine MCP recovery and separate-process ordinary receive [5901.36ms]"
+          ],
+          "assertions": null,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "stopped_after_first_failure": true
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "latest_focused": {
+      "evidence_path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/orphan-profile-discriminator/pg-receipt.json",
+      "sha256": "8f3caf71f61f43192ee4c7272857703cc317eb0ae14bcfd8f580475c986f17e4",
+      "working_diff_sha256": "81c679b2132fcd3eaefa9cabaab72bfd91b3915cfc6f4decc868ecd55494e6ab",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 35.058,
+          "log": "clean-host.log",
+          "sha256": "909a86421328f60e1b585e0e62bbf181863b620fc19d666abf0bce037c2df8d7",
+          "pass": 48,
+          "fail": 0,
+          "skip": 0,
+          "executed": 48,
+          "failure_lines": [],
+          "assertions": 701,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "cluster_stopped": true
+    },
+    "test_subject_note": "Tests executed immediately before source commit on the recorded diff and source bytes. Commit pins those exact bytes; historical heads and results are not relabeled.",
+    "unresolved": "Historical ca8 Linux SQLite rollback failure is not declared fixed: expanded Mac run reproduced failed profile then DB rollback; latest added per-command/per-mutation diagnostic run passed. Actual current full Linux CI remains required.",
+    "historical_full_ci": {
+      "url": "https://github.com/watchout/agent-comms-mcp/actions/runs/34744115685",
+      "head": "ca8e9a842834f4b5cae58ca6649902d1f7a3bff1",
+      "pass": 3108,
+      "fail": 3,
+      "skip": 59,
+      "assertions": 15012,
+      "log_sha256": "b70484902b41ac736dae0c9b14d1f131bb1f7a2a0490144025b9f848127a01e7"
+    },
+    "live_effects": 0
+  },
+  "sqlite_statement_lifetime_correction": {
+    "source_head": "88bc38b9ab69fe967d252f73c1d6d15a28674995",
+    "source_tree": "2d3724d98ba7a6ba64ca85bffad271c9dee008de",
+    "source_files": {
+      "core/db/sqlite-adapter.ts": "f8e21e3d2527fa2338760a209029fd2901c46e3e56c3c428add974d6143a2769",
+      "docs/operations/aun-bootstrap.md": "748994586e8c6363051e92d1b26119ab1619ab923a8ac238b5c428aad1c1a075",
+      "tests/cli-sqlite-backend.test.ts": "7165e3e8d2a102bdf3fe4c0ba67a3261fbb28df99ce9ec5f523a6de43523a2c8",
+      "tests/contract/test_aun_bootstrap_clean_host.test.ts": "f33a6e9e82c8d75e33108b8255017a60e8d5342e2ddc527d97283bd51a372779"
+    },
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652025740",
+      "sha256": "a1b86bd055eefc71ce9a7b1cbbaa44ef77ee6709835660545c04444a8f569401"
+    },
+    "observed_problem": "Actual Bun1.3.11 adapter close retained its own DB descriptor; later statement GC changed DB/WAL/SHM bytes without application SQL. Current Linux5ca had only final DB rollback failures; prior Mac profile failure remains separately recorded, not assumed identical.",
+    "change": "Finalize each owned uncached query/execute statement in finally; no checkpoint, forced GC, sleeps, journal changes, strict-close change, or rollback-fence relaxation in product code.",
+    "before": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-finalize-discriminator.log",
+      "sha256": "81c8998700cb5370640bd43cb5847252f79875625001e243fd84382030cbecdb"
+    },
+    "red": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-lifetime-red.log",
+      "sha256": "b2da950379d2feba8a3a51aa1f2e73cd04e8aa5da97fde5d1bee359d28d83a6b",
+      "pass": 0,
+      "fail": 2,
+      "assertions": 8
+    },
+    "after": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-finalize-corrected.log",
+      "sha256": "2d8c2c59fb41644988f4504844c835f37d11cfb05adeb6bcbf2a075706b56fc0"
+    },
+    "green": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5ca-full-failure/sqlite-lifetime-green.log",
+      "sha256": "473be6ea1802cdb83913862f4e08704b99cf639630ecff8d475dcdf5023c8c90",
+      "pass": 2,
+      "fail": 0,
+      "assertions": 8
+    },
+    "focused": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/ca8-full-failure/sqlite-lifetime-correction/pg-receipt.json",
+        "sha256": "ce6860b7e21ca857771ad6d964003ba5d5a897dc05cc874de15ea34f0e45b14f"
+      },
+      "working_diff_sha256": "9e14fde0542c4c791fe775dec07c380d343c75cb192c13ddef0ffb604691bd5a",
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts",
+            "tests/cli-sqlite-backend.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 48.541,
+          "log": "clean-host.log",
+          "sha256": "0d7c039b21ff9dc7a53156473195335784d60508f61a99aaa23b4369fccfc0ab",
+          "pass": 100,
+          "fail": 0,
+          "skip": 0,
+          "executed": 100,
+          "failure_lines": [],
+          "assertions": 1147,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+            "tests/aun-configuration-candidate.test.ts",
+            "tests/aun-bootstrap.test.ts",
+            "tests/cli-sqlite-backend.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "pass": 100,
+      "fail": 0,
+      "skip": 0,
+      "assertions": 1147,
+      "selected_files": 4,
+      "cluster_stopped": true
+    },
+    "test_subject_note": "Focused tests executed immediately before source commit; receipt records parent and working diff, and the exact tested source bytes are pinned above. No historical-head results are relabeled.",
+    "external_modified_and_replaced_file_fences": "Actual existing rollback ports reject both and leave external bytes untouched (included in focused100).",
+    "historical_full_ci": {
+      "url": "https://github.com/watchout/agent-comms-mcp/actions/runs/34745332054",
+      "head": "5ca7c203dd8f71bd68f50ed5b09be03391b77693",
+      "pass": 3109,
+      "fail": 2,
+      "skip": 59,
+      "assertions": 15066,
+      "log_sha256": "7f5fb1bb902110f0aecf91727ba5adf0ea08791a8459d082b328e6c131aaff0d"
+    },
+    "mandatory_current_full_ci": "PENDING",
+    "independent_current_acceptance": "PENDING",
+    "live_effects": 0
+  },
+  "taxonomy_metadata_correction": {
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652166090",
+      "sha256": "f3b78b8d6fd8e851182c5430ef1149432e31a5dc4b254ea43978ee187626403c"
+    },
+    "unchanged_nonmetadata_subject_head": "daccf9b1cdcb8826ff7eb873872d98ae8e67fb2e",
+    "unchanged_nonmetadata_subject_tree": "94d2301951d4241dfaaea2e785ead3a73a1396eb",
+    "excluded_metadata_paths": [
+      ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json",
+      ".shirube/execution-contexts/seat-continuity-20260913.json",
+      ".shirube/evidence/seat-continuity-machine-evidence.json"
+    ],
+    "git_ls_tree_rz_excluding_metadata_sha256": "416387bbb9dd6e9667a9834313b6488243770dba8585e300ea406c4796ac3814",
+    "nonmetadata_entry_count": 1091,
+    "change": "Use existing protected-surface taxonomy and retain detailed protected meanings; no source/test/doc/lock/runtime changes.",
+    "historical_test_subjects_unchanged": true,
+    "current_workflow_result": "Pending current metadata push; original dacc executed evidence remains bound to dacc."
+  },
+  "companion_noop_initialization_correction": {
+    "scope_ref": {
+      "url": "https://github.com/watchout/agent-comms-mcp/pull/964#issuecomment-5652323482",
+      "sha256": "a78a47492fa6e830febda1071e662f8695f4562cf2a6786b6dac49f7b48e0433"
+    },
+    "parent_AUN_head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+    "companion_head": "e49abc24838227776dc01be111aeb035ec7c9aad",
+    "companion_tree": "a55dd96fe6a753ea2ab6bcb8134172ca0d086a42",
+    "remote_PR321_exact_head_verified": true,
+    "Was_maker_evidence": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/was-noop-initialize/maker-source-receipt.json",
+      "sha256": "af64e09d63223dc2ce4934da6c0a0cea90caa576938fa2decd7ff304bd97bb11"
+    },
+    "Was_source_independent_acceptance": "PENDING",
+    "Was_Linux_CI": {
+      "url": "https://github.com/watchout/agent-memory/actions/runs/34748757287",
+      "status_at_integration": "PENDING; no source acceptance inferred"
+    },
+    "change": "Only frozen Was commit/tree in existing private fixture preparation script. All AUN product/test/helper/workflow bytes remain unchanged.",
+    "fixture_script_sha256": "ffbf7a851cb93892626631414ffe5a113a097b77f6550d5b847e058b9a315e9a",
+    "public_frozen_build": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/e49-public-build.json",
+        "sha256": "2d936e649d8937ed2639b6e851cf59c3c72058e870a15d1bd43703cf96056c65"
+      },
+      "exit_code": 0,
+      "seconds": 3.6282790830009617,
+      "private_root": "/private/tmp/aun-init-e49-a7pnrit9",
+      "source_root": "/private/tmp/aun-init-e49-a7pnrit9/aun-wasurezu-PKs7EQ",
+      "log_sha256": "43d3d22a9d051dc80d35250db54f328830b71178d5803e2feb7e215aec170842",
+      "live_effects": 0
+    },
+    "historical_5d4_full_runs": [
+      {
+        "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34747419808",
+        "head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+        "pass": 3114,
+        "fail": 1,
+        "skip": 59,
+        "assertions": 15056,
+        "log": {
+          "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-ci-5d4-first-full-test.log",
+          "sha256": "9f753f291c1f07a1fbb82b194843a3ad3ac72de1ac16d2dafdee6b29d04d5435"
+        }
+      },
+      {
+        "run": "https://github.com/watchout/agent-comms-mcp/actions/runs/34747689987",
+        "head": "5d4f50018f41df2451acecf9bcc3cc85c949aa9c",
+        "pass": 3115,
+        "fail": 0,
+        "skip": 59,
+        "assertions": 15088,
+        "log": {
+          "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-ci-5d4-second-full-test.log",
+          "sha256": "19c03b191a117e4bb03922214b6967ec3c4cba41882ba00032ff272546040535"
+        }
+      }
+    ],
+    "observed_race": {
+      "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/diagnosis.json",
+      "sha256": "2b9bc6c2f564517a0481b2d7d45b300ee622ac74083dda783838ff281f2ccb9e"
+    },
+    "new_test_subject": "Actual parent AUN product/test bytes with the listed uncommitted two-line companion pin diff; final commit only pins these inputs and evidence. Historical counts remain attached to their original execution subjects.",
+    "private_validation": {
+      "receipt": {
+        "path": "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/corrected-candidate/pg-receipt.json",
+        "sha256": "c1d9f7e0976600cf89e90fc0b5294708f12bd624cbdb5e61544677d3619f1c55"
+      },
+      "groups": [
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--preload",
+            "/Users/yuji/Developer/codex/control-artifacts/seat-continuity/20260913/aun-candidate/5d4-b5-concurrency/observe-before-initialize.ts",
+            "--test-name-pattern",
+            "B5-CONCURRENCY",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 2.685,
+          "log": "before-initialize.log",
+          "sha256": "514cf235e3be41e3ad1a8be73300d061a0455ed329650fd6812c33753afce8bf",
+          "pass": 1,
+          "fail": 0,
+          "skip": 0,
+          "executed": 1,
+          "failure_lines": [],
+          "assertions": 36,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        },
+        {
+          "command": [
+            "/Users/yuji/.bun/bin/bun",
+            "--no-env-file",
+            "test",
+            "--bail=1",
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "exit_code": 0,
+          "duration_seconds": 29.291,
+          "log": "clean-host.log",
+          "sha256": "d6c627f3df31bacbde97b033ba68e2191257359337bcb510fad99753aa0bf81b",
+          "pass": 17,
+          "fail": 0,
+          "skip": 0,
+          "executed": 17,
+          "failure_lines": [],
+          "assertions": 377,
+          "selected_files": [
+            "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+          ],
+          "stopped_after_first_failure": false
+        }
+      ],
+      "normal_initialization": {
+        "lookup_success": 6,
+        "initialize_end": 6,
+        "persist_calls": 0,
+        "trace_sha256": "23aaa17af3d6f7085d08108cecc03e163dc0eb085ccaaef4ce0803605afbc3d8"
+      },
+      "barrier_position": "Before real initialize; no persistence or native receipt replacement; six genuine native lookups succeed with zero persistence calls",
+      "private_PG_stopped": true
+    },
+    "mandatory_current_AUN_full_CI": "PENDING_NEW_PUSH",
+    "live_effects": 0,
+    "provider_api_calls": 0
+  }
+}

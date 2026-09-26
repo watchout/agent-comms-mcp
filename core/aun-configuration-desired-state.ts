@@ -337,20 +337,6 @@ export function canonicalDesiredDocument(
   desired: Omit<AunConfigurationDesiredState, 'desiredRevision' | 'desiredDigest' | 'updatedAt' | 'updatedBy'>,
 ): Record<string, unknown> {
   if (!desired.agentId.trim()) throw new Error('AGENT_ID_REQUIRED')
-  if (!Number.isSafeInteger(desired.channelPort) || desired.channelPort < 1 || desired.channelPort > 65_535) {
-    throw new Error('CHANNEL_PORT_INVALID')
-  }
-  if (!isAbsolute(desired.canonicalWorkspace) || !isAbsolute(desired.canonicalHome)) {
-    throw new Error('CANONICAL_PATH_INVALID')
-  }
-  const providerRepoRoot = desired.ordinaryProjection.provider_repo_root
-  const providerConfigRoot = desired.ordinaryProjection.provider_config_root
-  const daemonCheckout = desired.ordinaryProjection.daemon_checkout
-  if (typeof providerRepoRoot !== 'string' || !isAbsolute(providerRepoRoot)
-    || typeof providerConfigRoot !== 'string' || !isAbsolute(providerConfigRoot)
-    || typeof daemonCheckout !== 'string' || !isAbsolute(daemonCheckout)) {
-    throw new Error('ORDINARY_PROJECTION_ROOTS_INCOMPLETE')
-  }
   assertNoRawSecretValue(desired.ordinaryProjection)
   assertExactDigest(desired.releaseCommit, 'RELEASE_COMMIT', 40)
   assertExactDigest(desired.releaseTree, 'RELEASE_TREE', 40)
@@ -358,18 +344,14 @@ export function canonicalDesiredDocument(
   assertReference(desired.providerTokenSourceRef, 'PROVIDER_TOKEN_SOURCE_REF')
   return {
     agent_id: desired.agentId,
-    canonical_home: desired.canonicalHome,
-    canonical_workspace: desired.canonicalWorkspace,
-    channel_port: desired.channelPort,
     control_refs: normalizeControlRefs(desired.controlRefs),
     expected_provider_identity_ref: desired.expectedProviderIdentityRef,
     ordinary_communication_enrollment: desired.ordinaryCommunicationEnrollment,
-    ordinary_projection: desired.ordinaryProjection,
+    ordinary_projection: Object.fromEntries(Object.entries(desired.ordinaryProjection).filter(([key])=>!['provider_repo_root','provider_config_root','daemon_checkout'].includes(key))),
     profile_enabled: desired.profileEnabled,
     provider_token_source_ref: desired.providerTokenSourceRef,
     release_commit: desired.releaseCommit,
     release_tree: desired.releaseTree,
-    runtime_engine_preference: desired.runtimeEnginePreference,
     supervisor_identity: desired.supervisorIdentity,
   }
 }

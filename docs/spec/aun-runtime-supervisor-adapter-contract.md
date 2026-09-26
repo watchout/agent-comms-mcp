@@ -5,6 +5,13 @@
 > Slice: runtime supervisor adapter contract + conformance tests
 > Last updated: 2026-06-02
 
+
+The 2026-09-13 [seat continuity amendment](seat-runtime-continuity.md) supersedes
+legacy preference/port selection: runtime kind identifies the namespace,
+verified provider ancestry selects the adapter, and an exact live endpoint
+lease supplies the address. Missing or ambiguous current evidence cannot fall
+through to a global provider or profile port.
+
 ## Purpose
 
 Full reboot recovery must not inherently depend on tmux, launchd, Claude Code,

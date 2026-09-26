@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { start, buildStartLaunchArgv } from '../bin/aun/start'
 
 // The heartbeat resolves its session name from AGENT_COM_RUNTIME_SESSION first and from
 // TMUX_PANE second. With the key unset, the MCP server inherits TMUX_PANE from the pane
@@ -52,7 +53,7 @@ describe('claude seats: sync-mcp-config writes the session into .mcp.json', () =
     expect(env.AGENT_COM_RUNTIME_SESSION).toBe('discord-auditor')
     // The pre-existing keys the helper is responsible for must still be right.
     expect(env.AGENT_ID).toBe('devauditor')
-    expect(env.WEBHOOK_PORT).toBe('8797')
+    expect(env.WEBHOOK_PORT).toBe('0')
   })
 
   test('an existing wrong value is corrected rather than preserved', async () => {
@@ -78,18 +79,47 @@ describe('claude seats: sync-mcp-config writes the session into .mcp.json', () =
     const written = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8'))
     expect(written.mcpServers['agent-comms'].env.DISCORD_BOT_TOKEN).toBe('keep-me')
   })
+
+  test('the aun alias retains identity while removing a legacy fixed port', async () => {
+    const dir = workspace()
+    const config = join(dir, '.mcp.json')
+    writeFileSync(config, JSON.stringify({ mcpServers: {
+      aun: { command: 'bun', args: ['run', '/old/server.ts'], env: {
+        AGENT_ID: 'devauditor', WEBHOOK_PORT: '8797', AUN_WEBHOOK_PORT: '8897',
+      } },
+      wasurezu: { command: 'node', args: ['/unchanged/memory.js'] },
+    } }))
+    const result = await sh(`source scripts/sync-mcp-config.sh && sync_mcp_config discord-auditor '${dir}' devauditor 8797 claude-code`)
+    expect(result.code).toBe(0)
+    const written = JSON.parse(readFileSync(config, 'utf8'))
+    expect(Object.keys(written.mcpServers)).toEqual(['aun', 'wasurezu'])
+    expect(written.mcpServers.aun.env).toMatchObject({
+      AGENT_ID: 'devauditor', AGENT_COM_EXPECTED_AGENT_ID: 'devauditor',
+      AGENT_COM_RUNTIME_SESSION: 'discord-auditor', WEBHOOK_PORT: '0',
+    })
+    expect(written.mcpServers.aun.env.AUN_WEBHOOK_PORT).toBeUndefined()
+    expect(written.mcpServers.wasurezu).toEqual({ command: 'node', args: ['/unchanged/memory.js'] })
+  })
 })
 
 describe('codex seats: restart-bot pins the session on the command line', () => {
   test('the built command carries AGENT_COM_RUNTIME_SESSION', async () => {
-    // restart-bot.sh runs top-level setup under `set -euo pipefail` and cannot be
-    // sourced in isolation, so the real function definition is extracted from the file
-    // and evaluated. This exercises the shipped text rather than a copy of it.
-    const result = await sh(
-      `eval "$(sed -n '/^build_profile_command()/,/^}/p' scripts/restart-bot.sh)";` +
-      ` BUN_BIN=/bin/bun DEFAULT_CMD=claude DEFAULT_AUN_DATABASE_URL=postgresql:///x REPO_ROOT=. ` +
-      ` build_profile_command devauditor discord-auditor 8797 codex; printf '%s' "$CLAUDE_CMD"`,
-    )
-    expect(result.stdout).toContain('mcp_servers.aun.env.AGENT_COM_RUNTIME_SESSION="discord-auditor"')
+    const dir = workspace()
+    // restart-bot now uses this canonical detached launch plan. Resolve an explicit
+    // cold-start intent with a read-only seat fixture; no native CLI is spawned.
+    const result = await start({ agentId: 'devauditor', project: 'fixture-project',
+      runtime: 'codex', cwd: dir, home: dir, spawn: false, checkSignatures: false,
+      env: { HOME: dir, AGENT_COM_RUNTIME_SESSION: 'discord-auditor' },
+      db: { query: async (sql: string) => sql.includes('FROM agents')
+        ? [{ agent_id: 'devauditor', profile_enabled: true, disabled_at: null, metadata: {} }] : [] } as any,
+    })
+    expect(result.ok).toBe(true)
+    expect(result.spawned).toBe(false)
+    const command = buildStartLaunchArgv(result)
+    expect(command).toContain('AGENT_COM_RUNTIME_SESSION=discord-auditor')
+    expect(command).toContain('mcp_servers.aun.env.AGENT_COM_RUNTIME_SESSION="discord-auditor"')
+    expect(command).toContain('mcp_servers.aun.env.WEBHOOK_PORT="0"')
+    expect(command.join(' ')).not.toContain('WEBHOOK_PORT="8797"')
+    expect(readFileSync(join(REPO, 'scripts/restart-bot.sh'), 'utf8')).toContain('buildStartLaunchArgv(result)')
   })
 })

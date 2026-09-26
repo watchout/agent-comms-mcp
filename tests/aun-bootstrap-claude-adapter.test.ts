@@ -14,14 +14,14 @@ Scope: ${changes.scope ?? 'User config'}
 Status: ${changes.status ?? '✔ Connected'}
 Type: ${changes.type ?? 'stdio'}
 Command: ${changes.command ?? '/bin/bun'}
-Args: ${changes.args ?? 'run --cwd /repo server.ts'}
+Args: ${changes.args ?? 'run --cwd /workspace /repo/server.ts'}
 Environment:
   AGENT_ID=${changes.agent ?? 'claude-probe'}
   AGENT_COM_EXPECTED_AGENT_ID=claude-probe
   DATABASE_URL=${changes.database ?? 'postgresql:///probe'}
   AGENT_COM_PG_NOTIFY=false
   AGENT_COMMS_TTL_SWEEP_DISABLED=1
-  AUN_WEBHOOK_PORT=${changes.port ?? '8892'}
+  AUN_WEBHOOK_PORT=${changes.port ?? '0'}
 `
 
 describe('aun bootstrap Claude adapter', () => {
@@ -46,7 +46,9 @@ describe('aun bootstrap Claude adapter', () => {
     const add = calls.find((args) => args[0] === 'mcp' && args[1] === 'add')!
     expect(add.slice(0, 6)).toEqual(['mcp', 'add', '--scope', 'user', '--transport', 'stdio'])
     expect(add).toContain('AGENT_ID=claude-probe')
-    expect(add.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/repo', 'server.ts'])
+    expect(add).toContain('AUN_WEBHOOK_PORT=0')
+    expect(add).not.toContain('AUN_WEBHOOK_PORT=8892')
+    expect(add.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/workspace', '/repo/server.ts'])
   })
 
   test('mcp add that mutates then exits nonzero returns an observed mutation and native rollback proof', async () => {

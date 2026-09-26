@@ -164,7 +164,7 @@ describe('runtime current resolver', () => {
     expect(resolution.current_runtime?.runtime_instance_id).toBe('newer-exact')
   })
 
-  test('de-prioritizes a newer profile mismatch when an exact live candidate exists', async () => {
+  test('selects the newer observed location without letting the old profile tuple win', async () => {
     await seedProfile('codex-cto')
     await seedRuntime({
       id: 'newest-profile-mismatch',
@@ -182,23 +182,15 @@ describe('runtime current resolver', () => {
     })
 
     expect(resolution.ok).toBe(true)
-    expect(resolution.current_runtime?.runtime_instance_id).toBe('older-exact-current')
-    expect(resolution.current_candidates.map(row => row.runtime_instance_id)).toEqual(['older-exact-current'])
-    expect(resolution.candidate_exclusions.find(row => row.runtime_instance_id === 'newest-profile-mismatch')).toMatchObject({
-      code: 'PROFILE_MISMATCH_DEPRIORITIZED',
-      live: true,
-      handling: 'WARN_ONLY_RANK_BELOW_EXACT',
-      mismatches: expect.arrayContaining([
-        expect.objectContaining({ field: 'session_name', expected: 'discord-cto', observed: null }),
-        expect.objectContaining({ field: 'checkout_path', expected: '/work/codex', observed: '/work/agent-comms-mcp' }),
-      ]),
-    })
+    expect(resolution.current_runtime?.runtime_instance_id).toBe('newest-profile-mismatch')
+    expect(resolution.current_candidates.map(row => row.runtime_instance_id)).toEqual(['newest-profile-mismatch','older-exact-current'])
+    expect(resolution.candidate_exclusions).toEqual([])
     expect(resolution.profile_mismatch_observations).toEqual([
       expect.objectContaining({
         code: 'REGISTRATION_PROFILE_MISMATCH',
         runtime_instance_id: 'newest-profile-mismatch',
-        current: false,
-        handling: 'WARN_ONLY_RANK_BELOW_EXACT',
+        current: true,
+        handling: 'WARN_ONLY_CURRENT_FALLBACK',
       }),
     ])
   })

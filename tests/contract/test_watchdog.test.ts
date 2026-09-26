@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Client } from 'pg'
@@ -187,6 +188,8 @@ describe('watchdog seven-dimension edge projection', () => {
       supervisorType: 'tmux',
       profilePort: '8810',
       runtimePort: '8810',
+      runtimeEndpointVerified:true,
+      runtimeProcessId:1234,
       expectedProviderIdentity: '{"provider":"discord"}',
       runtimeInstanceId: 'runtime-arc-1',
       runtimeStatus: 'running',
@@ -235,7 +238,7 @@ describe('watchdog seven-dimension edge projection', () => {
     })
   })
 
-  test('same-agent profile/runtime session-port drift fails closed without probing profile values', () => {
+  test('historical profile drift does not veto the current runtime session or endpoint', () => {
     const probeCalls = { supervisor: [] as string[], endpoint: [] as string[], ui: [] as string[] }
     const probes: RuntimeObservationProbes = {
       supervisorSession: (session) => {
@@ -267,20 +270,27 @@ describe('watchdog seven-dimension edge projection', () => {
 
     const dimensions = buildRuntimeHealthDimensionInputs(snapshot, probes, NOW_MS)
     expect(dimensions.find((candidate) => candidate.dimension === 'supervisor_session')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'SUPERVISOR_SESSION_PRESENT',
     })
     expect(dimensions.find((candidate) => candidate.dimension === 'endpoint_identity')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_PORT_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'ENDPOINT_EXPECTED_IDENTITY_PRESENT',
     })
     expect(dimensions.find((candidate) => candidate.dimension === 'ui_runner_reachability')).toMatchObject({
-      declared_state: 'UNKNOWN',
-      reason_code: 'RUNTIME_PROFILE_SESSION_MISMATCH',
+      declared_state: 'HEALTHY',
+      reason_code: 'UI_RUNNER_SURFACE_PRESENT',
     })
-    expect(probeCalls).toEqual({ supervisor: [], endpoint: [], ui: [] })
+    expect(probeCalls).toEqual({supervisor:['runtime-new-session'],endpoint:['9999'],ui:['runtime-new-session']})
   })
 
+  test('missing or foreign endpoint lease remains unknown and never probes a historical profile port',()=>{
+    const calls:string[]=[]
+    const probes=healthyProbes();probes.endpointIdentity=port=>{calls.push(port);return {probe_result:'ok',state:'HEALTHY',reason_code:'incorrect'}}
+    const dimensions=buildRuntimeHealthDimensionInputs({...healthySnapshot(),runtimeEndpointVerified:false,profilePort:'9999'},probes,NOW_MS)
+    expect(dimensions.find(row=>row.dimension==='endpoint_identity')?.declared_state).toBe('UNKNOWN')
+    expect(calls).toEqual([])
+  })
   test('agent-wide claim without selected runtime ownership stays UNKNOWN', () => {
     const snapshot = {
       ...healthySnapshot(),
@@ -386,6 +396,10 @@ describe('watchdog seven-dimension edge projection', () => {
       query: async (sql) => {
         sqlCalls.push(sql)
         if (!/^\s*SELECT\b/i.test(sql)) throw new Error(`mutation SQL refused: ${sql}`)
+        if(sql.includes('JOIN control_plane_leases')) return {rows:[{runtime_instance_id:'runtime-arc-1',agent_id:'arc',runtime_kind:'local_process',host_id:hostname(),
+          process_id:1234,session_name:'discord-arc',port:8810,endpoint_uri:'http://127.0.0.1:8810',runtime_status:'running',last_seen_at:NOW,
+          lease_id:'lease',fencing_token:1,holder_agent_id:'arc',holder_runtime_instance_id:'runtime-arc-1',lease_status:'active',expires_at:new Date(NOW_MS+60000).toISOString(),
+          lease_metadata:{port:8810,process_id:1234,endpoint_uri:'http://127.0.0.1:8810'}}]} as never
         return { rows: [rawRow] } as never
       },
     }
@@ -413,7 +427,7 @@ describe('watchdog seven-dimension edge projection', () => {
     expect(reports).toHaveLength(1)
     expect(reports[0].aggregate_state).toBe('HEALTHY')
     expect(reports[0].mutation_performed).toBe(false)
-    expect(sqlCalls).toHaveLength(1)
+    expect(sqlCalls).toHaveLength(2)
     expect(sqlCalls[0]).not.toMatch(/\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|ALTER|CREATE|DROP)\b/i)
     expect(sqlCalls[0]).toContain('mq.claimed_by = a.agent_id')
     expect(sqlCalls[0]).toContain('mq.claimed_runtime_instance_id::text = runtime.runtime_instance_id::text')

@@ -14,7 +14,7 @@
 import { describe, test, expect } from 'bun:test'
 import { checkBotHealth, type BotHealthDeps } from '../core/bot-health'
 
-const ENTRY = { session: 'discord-example', port: 8789 }
+const ENTRY = { session: 'discord-example', port: 8789, processId:12345 }
 
 function makeDeps(overrides: Partial<BotHealthDeps> = {}): BotHealthDeps {
   return {
@@ -38,7 +38,7 @@ describe('checkBotHealth — six branches', () => {
         },
       }),
     )
-    expect(r.status).toBe('healthy')
+    expect(r.status).toBe('initializing')
     expect(r.details).toContain('supervisor_type=stdio')
     expect(r.details).toContain('tmux diagnostics skipped')
     expect(tmuxChecked).toBe(false)
@@ -84,7 +84,7 @@ describe('checkBotHealth — six branches', () => {
 
   test('5. misconfigured — port in use but PID is not bun server.ts', () => {
     const r = checkBotHealth(
-      ENTRY,
+      {...ENTRY,processId:99999},
       makeDeps({
         getPids: () => ['99999'],
         psCommand: () => '/usr/bin/python3 -m http.server 8789',
@@ -116,7 +116,7 @@ describe('checkBotHealth — six branches', () => {
 
   test('6. healthy — multiple pids, at least one is bun server.ts', () => {
     const r = checkBotHealth(
-      ENTRY,
+      {...ENTRY,processId:22222},
       makeDeps({
         getPids: () => ['11111', '22222'],
         psCommand: (pid: string) =>

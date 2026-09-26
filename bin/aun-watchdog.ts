@@ -15,6 +15,7 @@
  */
 
 import { Client } from 'pg'
+import { resolveRuntimeEndpoint } from '../core/runtime-endpoint'
 import { spawnSync } from 'node:child_process'
 import {
   evaluateRuntimeHealth,
@@ -68,6 +69,8 @@ interface RuntimeHealthSnapshot {
   supervisorType: string
   profilePort: string
   runtimePort: string
+  runtimeEndpointVerified: boolean
+  runtimeProcessId?: number
   expectedProviderIdentity: string
   runtimeInstanceId: string | null
   runtimeStatus: string | null
@@ -93,7 +96,7 @@ interface ObservationProbe {
 
 interface RuntimeObservationProbes {
   supervisorSession(sessionName: string): ObservationProbe
-  endpointIdentity(port: string, expectedAgentId: string): ObservationProbe
+  endpointIdentity(port: string, expectedAgentId: string, expectedProcessId?: number): ObservationProbe
   uiRunnerSurface(sessionName: string): ObservationProbe
 }
 
@@ -300,7 +303,7 @@ function supervisorSessionProbe(sessionName: string): ObservationProbe {
     : { probe_result: 'ok', state: 'DOWN', reason_code: 'SUPERVISOR_SESSION_MISSING' }
 }
 
-function endpointIdentityProbe(port: string, expectedAgentId: string): ObservationProbe {
+function endpointIdentityProbe(port: string, expectedAgentId: string, expectedProcessId?: number): ObservationProbe {
   if (!/^\d+$/.test(port)) {
     return { probe_result: 'ok', state: 'UNKNOWN', reason_code: 'ENDPOINT_PORT_INVALID' }
   }
@@ -314,6 +317,7 @@ function endpointIdentityProbe(port: string, expectedAgentId: string): Observati
 
   let mismatchedIdentity: string | null = null
   for (const pid of pids) {
+    if(expectedProcessId && Number(pid)!==expectedProcessId) continue
     const psResult = spawnSync('ps', ['eww', '-p', pid, '-o', 'command='], { encoding: 'utf-8', timeout: 3000 })
     if (probeTimedOut(psResult)) return { probe_result: 'timeout', state: 'UNKNOWN', reason_code: 'ENDPOINT_IDENTITY_PROBE_TIMEOUT' }
     if (psResult.error) return { probe_result: 'exception', state: 'UNKNOWN', reason_code: 'ENDPOINT_IDENTITY_PROBE_EXCEPTION' }
@@ -362,7 +366,7 @@ const runtimeObservationProbes: RuntimeObservationProbes = {
   uiRunnerSurface: uiRunnerSurfaceProbe,
 }
 
-async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<RuntimeHealthSnapshot[]> {
+async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient,nowMs=Date.now()): Promise<RuntimeHealthSnapshot[]> {
   const result = await client.query<{
     agent_id: string
     agent_status: string | null
@@ -467,33 +471,37 @@ async function loadRuntimeHealthSnapshots(client: ReadOnlyQueryClient): Promise<
       ORDER BY a.agent_id`,
   )
 
-  return result.rows.map((row) => {
+  return Promise.all(result.rows.map(async(row) => {
+    const endpoint=await resolveRuntimeEndpoint(client,{agentId:row.agent_id,now:new Date(nowMs)})
+    const current=endpoint.endpoint
     const metadata = parseMetadata(row.metadata)
     return {
       agentId: row.agent_id,
       agentStatus: row.agent_status,
       agentLastSeenAt: toIso(row.agent_last_seen_at),
       profileSessionName: typeof metadata.tmux_session === 'string' ? metadata.tmux_session.trim() : '',
-      runtimeSessionName: row.runtime_session_name?.trim() ?? '',
+      runtimeSessionName: current?.sessionName ?? '',
       supervisorType: typeof metadata.supervisor_type === 'string' ? metadata.supervisor_type.trim().toLowerCase() : '',
       profilePort: row.channel_port === null || row.channel_port === undefined ? '' : String(row.channel_port),
-      runtimePort: row.runtime_port === null || row.runtime_port === undefined ? '' : String(row.runtime_port),
+      runtimePort: current ? String(current.port) : '',
+      runtimeEndpointVerified:endpoint.ok,
+      runtimeProcessId:current?.processId,
       expectedProviderIdentity: row.expected_provider_identity ?? '',
-      runtimeInstanceId: row.runtime_instance_id,
+      runtimeInstanceId: current?.runtimeInstanceId ?? row.runtime_instance_id,
       runtimeStatus: row.runtime_status,
-      runtimeLastSeenAt: toIso(row.runtime_last_seen_at),
-      runtimeEndpointUri: row.endpoint_uri,
+      runtimeLastSeenAt: current?.lastSeenAt ?? toIso(row.runtime_last_seen_at),
+      runtimeEndpointUri: current?.endpointUri ?? null,
       liveRuntimeCount: parseCount(row.live_runtime_count),
       pendingQueueCount: parseCount(row.pending_queue_count),
       actionablePendingCount: parseCount(row.actionable_pending_count),
       activeClaimCount: parseCount(row.active_claim_count),
       unboundActiveClaimCount: parseCount(row.unbound_active_claim_count),
-      memoryReady: Boolean(row.memory_ready),
+      memoryReady: Boolean(row.memory_ready) && current?.runtimeInstanceId === row.runtime_instance_id,
       discordConnectorCount: parseCount(row.discord_connector_count),
       discordConnectorStatus: row.discord_connector_status,
       discordConnectorLastSeenAt: toIso(row.discord_connector_last_seen_at),
     }
-  })
+  }))
 }
 
 function dimension(
@@ -544,13 +552,6 @@ function buildRuntimeHealthDimensionInputs(
           ? 'AGENT_HEARTBEAT_AND_RUNTIME_FRESH'
           : `RUNTIME_STATE_${(snapshot.runtimeStatus ?? 'UNKNOWN').toUpperCase()}`
 
-  const sessionProfileMismatch = Boolean(
-    snapshot.runtimeInstanceId
-    && snapshot.profileSessionName
-    && snapshot.runtimeSessionName
-    && snapshot.profileSessionName !== snapshot.runtimeSessionName,
-  )
-
   let supervisor = dimension(
     'supervisor_session',
     'UNKNOWN',
@@ -558,18 +559,7 @@ function buildRuntimeHealthDimensionInputs(
     observedNow,
     [`db:agent_runtime_instances:${snapshot.runtimeInstanceId ?? 'none'}:session_name`],
   )
-  if (sessionProfileMismatch) {
-    supervisor = dimension(
-      'supervisor_session',
-      'UNKNOWN',
-      'RUNTIME_PROFILE_SESSION_MISMATCH',
-      observedNow,
-      [
-        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=${snapshot.runtimeSessionName}`,
-        `db:agents:${snapshot.agentId}:tmux_session=${snapshot.profileSessionName}`,
-      ],
-    )
-  } else if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
+  if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
     const probe = probes.supervisorSession(snapshot.runtimeSessionName)
     supervisor = dimension(
       'supervisor_session',
@@ -602,11 +592,7 @@ function buildRuntimeHealthDimensionInputs(
   const uriPort = endpointUriPort(snapshot.runtimeEndpointUri)
   const selectedRuntimePort = snapshot.runtimePort || uriPort
   const runtimeEndpointMismatch = Boolean(snapshot.runtimePort && uriPort && snapshot.runtimePort !== uriPort)
-  const profileRuntimePortMismatch = Boolean(
-    snapshot.profilePort
-    && selectedRuntimePort
-    && snapshot.profilePort !== selectedRuntimePort,
-  )
+
 
   let endpoint = dimension(
     'endpoint_identity',
@@ -626,19 +612,8 @@ function buildRuntimeHealthDimensionInputs(
         `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:endpoint_uri=${snapshot.runtimeEndpointUri}`,
       ],
     )
-  } else if (snapshot.runtimeInstanceId && profileRuntimePortMismatch) {
-    endpoint = dimension(
-      'endpoint_identity',
-      'UNKNOWN',
-      'RUNTIME_PROFILE_PORT_MISMATCH',
-      observedNow,
-      [
-        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:port=${selectedRuntimePort}`,
-        `db:agents:${snapshot.agentId}:channel_port=${snapshot.profilePort}`,
-      ],
-    )
-  } else if (snapshot.runtimeInstanceId && selectedRuntimePort) {
-    const probe = probes.endpointIdentity(selectedRuntimePort, snapshot.agentId)
+  } else if (snapshot.runtimeInstanceId && selectedRuntimePort && snapshot.runtimeEndpointVerified) {
+    const probe = probes.endpointIdentity(selectedRuntimePort, snapshot.agentId,snapshot.runtimeProcessId)
     endpoint = dimension(
       'endpoint_identity',
       probe.state,
@@ -716,18 +691,7 @@ function buildRuntimeHealthDimensionInputs(
     observedNow,
     [],
   )
-  if (sessionProfileMismatch) {
-    ui = dimension(
-      'ui_runner_reachability',
-      'UNKNOWN',
-      'RUNTIME_PROFILE_SESSION_MISMATCH',
-      observedNow,
-      [
-        `db:agent_runtime_instances:${snapshot.runtimeInstanceId}:session_name=${snapshot.runtimeSessionName}`,
-        `db:agents:${snapshot.agentId}:tmux_session=${snapshot.profileSessionName}`,
-      ],
-    )
-  } else if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
+  if (snapshot.runtimeInstanceId && snapshot.runtimeSessionName) {
     const probe = probes.uiRunnerSurface(snapshot.runtimeSessionName)
     ui = dimension(
       'ui_runner_reachability',
@@ -805,7 +769,7 @@ async function collectRuntimeHealthReports(
   probes: RuntimeObservationProbes = runtimeObservationProbes,
   nowMs = Date.now(),
 ): Promise<RuntimeHealthReport[]> {
-  const snapshots = await loadRuntimeHealthSnapshots(client)
+  const snapshots = await loadRuntimeHealthSnapshots(client,nowMs)
   return snapshots.map((snapshot) => evaluateRuntimeHealth({
     agent_id: snapshot.agentId,
     runtime_instance_id: snapshot.runtimeInstanceId,
@@ -849,6 +813,14 @@ async function main(): Promise<void> {
   const client = new Client({ connectionString: DATABASE_URL })
   await client.connect()
 
+  if(process.argv.includes('--once')) {
+    try {
+      const reports=await tickOnce(client)
+      if(reports.length===0 || reports.some(report=>report.aggregate_state!=='HEALTHY')) process.exitCode=2
+    } catch(error) {logJson('tick-error',{reason_code:'OBSERVATION_EXCEPTION',message:String(error)});process.exitCode=1}
+    finally {await client.end()}
+    return
+  }
   let stopping = false
   const stop = () => {
     stopping = true
