@@ -8,6 +8,7 @@ import {
   inferWorkspaceName,
   normalizeCheckoutPath,
   parseRuntimePort,
+  RuntimeRegistrationProfileError,
 } from '../core/runtime-heartbeat'
 
 describe('runtime heartbeat evidence', () => {
@@ -17,6 +18,18 @@ describe('runtime heartbeat evidence', () => {
     const db = {
       async query(sql: string) {
         calls.push(sql)
+        if (sql.includes('FROM agents')) {
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/repo',
+              profile_revision: 1,
+              profile_source: 'test',
+              metadata: { tmux_session: 'discord-agent-com' },
+            }],
+            rowCount: 1,
+          }
+        }
         if (sql.includes('INSERT INTO agent_workspaces')) {
           return {
             rows: [{ workspace_id: 'local:workspace-1' }],
@@ -119,7 +132,16 @@ describe('runtime heartbeat evidence', () => {
       async query(sql: string, params: any[] = []) {
         calls.push({ sql, params })
         if (sql.includes('FROM agents')) {
-          return { rows: [], rowCount: 0 }
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/work/aun',
+              profile_revision: 1,
+              profile_source: 'test',
+              metadata: { tmux_session: 'discord-aun' },
+            }],
+            rowCount: 1,
+          }
         }
         if (sql.includes('INSERT INTO agent_runtime_instances')) {
           return {
@@ -181,7 +203,16 @@ describe('runtime heartbeat evidence', () => {
       async query(sql: string, params: any[] = []) {
         calls.push({ sql, params })
         if (sql.includes('FROM agents')) {
-          return { rows: [], rowCount: 0 }
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/work/agent-com-dev',
+              profile_revision: 1,
+              profile_source: 'test',
+              metadata: { tmux_session: 'discord-agent-com' },
+            }],
+            rowCount: 1,
+          }
         }
         if (sql.includes('INSERT INTO agent_runtime_instances')) {
           return {
@@ -254,7 +285,16 @@ describe('runtime heartbeat evidence', () => {
       async query(sql: string, params: any[] = []) {
         calls.push({ sql, params })
         if (sql.includes('FROM agents')) {
-          return { rows: [], rowCount: 0 }
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/work/agent-com-dev',
+              profile_revision: 1,
+              profile_source: 'test',
+              metadata: { tmux_session: 'discord-agent-com' },
+            }],
+            rowCount: 1,
+          }
         }
         if (sql.includes('INSERT INTO agent_runtime_instances')) {
           return {
@@ -376,8 +416,8 @@ describe('runtime heartbeat evidence', () => {
       runtimeInstanceId: '00000000-0000-4000-8000-000000000002',
       agentId: 'agent-mem-dev',
       runtimeEngine: 'codex',
-      sessionName: 'ambient-server-session',
-      checkoutPath: runtimeCheckout,
+      ambientSessionName: 'ambient-server-session',
+      ambientCheckoutPath: runtimeCheckout,
       metadata: { source: 'test' },
     })
 
@@ -397,9 +437,11 @@ describe('runtime heartbeat evidence', () => {
     expect(JSON.parse(runtimeInsertParams?.[12])).toMatchObject({
       source: 'test',
       registration_metadata_provenance: {
-        schema_version: 'runtime-registration-metadata-provenance/v1',
+        schema_version: 'runtime-registration-metadata-provenance/v2',
         agent_id: 'agent-mem-dev',
         profile_found: true,
+        resolution_status: 'resolved',
+        missing_fields: [],
         session_name: {
           source: 'registered',
           effective_value: 'discord-agent-memory',
@@ -478,8 +520,8 @@ describe('runtime heartbeat evidence', () => {
         agentId: 'codex-cto',
         runtimeEngine: 'TUI',
         runtimeKind: 'local_process',
-        sessionName: null,
-        checkoutPath: '/Users/yuji/Developer/agent-comms-mcp',
+        ambientSessionName: null,
+        ambientCheckoutPath: null,
         processId: 35296,
         port: 8808,
         metadata: { source: 'server.ts' },
@@ -503,22 +545,24 @@ describe('runtime heartbeat evidence', () => {
     expect(runtimeInsert?.params[6]).toBe('discord-cto')
     expect(runtimeInsert?.params[9]).toBe('/Users/yuji/Developer/codex')
     expect(JSON.parse(runtimeInsert?.params[12]).registration_metadata_provenance).toEqual({
-      schema_version: 'runtime-registration-metadata-provenance/v1',
+      schema_version: 'runtime-registration-metadata-provenance/v2',
       agent_id: 'codex-cto',
       profile_found: true,
+      resolution_status: 'resolved',
+      missing_fields: [],
       session_name: {
         source: 'registered',
         effective_value: 'discord-cto',
         registered_value: 'discord-cto',
         ambient_value: null,
-        mismatch: true,
+        mismatch: false,
       },
       checkout_path: {
         source: 'registered',
         effective_value: '/Users/yuji/Developer/codex',
         registered_value: '/Users/yuji/Developer/codex',
-        ambient_value: '/Users/yuji/Developer/agent-comms-mcp',
-        mismatch: true,
+        ambient_value: null,
+        mismatch: false,
       },
     })
     expect(result.registration_metadata_provenance.session_name.source).toBe('registered')
@@ -549,6 +593,191 @@ describe('runtime heartbeat evidence', () => {
         effective_value: '/tmp/sealed-bootstrap-checkout',
         registered_value: '/Users/yuji/Developer/codex',
       },
+    })
+  })
+
+  test('fails closed before runtime writes when the registered profile cannot be found', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('FROM agents')) return { rows: [], rowCount: 0 }
+        throw new Error(`unexpected write after missing profile: ${sql}`)
+      },
+    }
+
+    let failure: unknown
+    try {
+      await heartbeatRuntimeInstance(db, {
+        runtimeInstanceId: '00000000-0000-4000-8000-000000000090',
+        agentId: 'missing-profile',
+        runtimeEngine: 'TUI',
+        runtimeKind: 'local_process',
+        ambientSessionName: 'ambient-session',
+        ambientCheckoutPath: '/ambient/checkout',
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(RuntimeRegistrationProfileError)
+    expect((failure as RuntimeRegistrationProfileError).toJSON()).toMatchObject({
+      schema_version: 'runtime-registration-profile-error/v1',
+      code: 'RUNTIME_REGISTRATION_PROFILE_INCOMPLETE',
+      agent_id: 'missing-profile',
+      runtime_kind: 'local_process',
+      reason: 'PROFILE_NOT_FOUND',
+      missing_fields: ['agent_profile'],
+      registration_metadata_provenance: {
+        profile_found: false,
+        resolution_status: 'incomplete',
+        missing_fields: ['agent_profile'],
+        session_name: {
+          source: 'missing',
+          effective_value: null,
+          registered_value: null,
+          ambient_value: 'ambient-session',
+        },
+        checkout_path: {
+          source: 'missing',
+          effective_value: null,
+          registered_value: null,
+          ambient_value: '/ambient/checkout',
+        },
+      },
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('disabled_at IS NULL')
+  })
+
+  test('fails closed with exact missing registered fields instead of ambient fallback', async () => {
+    const calls: string[] = []
+    const db = {
+      async query(sql: string) {
+        calls.push(sql)
+        if (sql.includes('FROM agents')) {
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: null,
+              profile_revision: 1,
+              profile_source: 'test',
+              metadata: {},
+            }],
+            rowCount: 1,
+          }
+        }
+        throw new Error(`unexpected write after incomplete profile: ${sql}`)
+      },
+    }
+
+    let failure: unknown
+    try {
+      await heartbeatRuntimeInstance(db, {
+        runtimeInstanceId: '00000000-0000-4000-8000-000000000091',
+        agentId: 'incomplete-profile',
+        runtimeEngine: 'TUI',
+        runtimeKind: 'local_process',
+        ambientSessionName: 'ambient-session',
+        ambientCheckoutPath: '/ambient/checkout',
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toBeInstanceOf(RuntimeRegistrationProfileError)
+    expect((failure as RuntimeRegistrationProfileError).toJSON()).toMatchObject({
+      reason: 'PROFILE_FIELDS_MISSING',
+      missing_fields: ['home_directory', 'metadata.tmux_session'],
+      registration_metadata_provenance: {
+        profile_found: true,
+        resolution_status: 'incomplete',
+        missing_fields: ['home_directory', 'metadata.tmux_session'],
+        session_name: { source: 'missing', effective_value: null, ambient_value: 'ambient-session' },
+        checkout_path: { source: 'missing', effective_value: null, ambient_value: '/ambient/checkout' },
+      },
+    })
+    expect(calls).toHaveLength(1)
+  })
+
+  test('keeps a configured normal seat on registered authority without mismatch', async () => {
+    const calls: Array<{ sql: string; params: any[] }> = []
+    const db = {
+      async query(sql: string, params: any[] = []) {
+        calls.push({ sql, params })
+        if (sql.includes('FROM agents')) {
+          return {
+            rows: [{
+              org_id: 'default',
+              home_directory: '/Users/yuji/Developer/hotel',
+              profile_revision: 3,
+              profile_source: 'agent.profile.set',
+              metadata: { tmux_session: 'discord-hotel' },
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('INSERT INTO agent_workspaces')) return { rows: [{ workspace_id: 'local:hotel' }], rowCount: 1 }
+        if (sql.includes('INSERT INTO agent_workspace_bindings')) return { rows: [], rowCount: 1 }
+        if (sql.includes('INSERT INTO agent_runtime_instances')) {
+          return {
+            rows: [{
+              runtime_instance_id: '00000000-0000-4000-8000-000000000092',
+              agent_id: 'hotel-dev',
+              status: 'running',
+              last_seen_at: '2026-08-23T00:00:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        if (sql.includes('SELECT lease_id, fencing_token, expires_at')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT COALESCE(MAX(fencing_token), 0)')) return { rows: [{ max_token: 0 }], rowCount: 1 }
+        if (sql.includes('INSERT INTO control_plane_leases')) {
+          return {
+            rows: [{
+              lease_id: 'lease-hotel',
+              heartbeat_at: '2026-08-23T00:00:00.000Z',
+              expires_at: '2026-08-23T00:10:00.000Z',
+            }],
+            rowCount: 1,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+    }
+
+    const result = await heartbeatRuntimeInstance(
+      db,
+      {
+        runtimeInstanceId: '00000000-0000-4000-8000-000000000092',
+        agentId: 'hotel-dev',
+        runtimeEngine: 'TUI',
+        runtimeKind: 'local_process',
+        ambientSessionName: 'discord-hotel',
+        ambientCheckoutPath: '/Users/yuji/Developer/hotel',
+      },
+      {
+        reconcileMemoryReadyIdentity: async (_db, input) => ({
+          agent_id: input.agentId,
+          observed_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+          current_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+          previous_evidence_runtime_instance_id: input.observedRuntimeInstanceId ?? null,
+          status: 'UNCHANGED',
+          code: 'EVIDENCE_ALREADY_CURRENT',
+          evidence_id: 1,
+          evidence_log_id: null,
+          details: {},
+        }),
+      },
+    )
+
+    expect(result.registration_metadata_provenance).toMatchObject({
+      schema_version: 'runtime-registration-metadata-provenance/v2',
+      profile_found: true,
+      resolution_status: 'resolved',
+      missing_fields: [],
+      session_name: { source: 'registered', effective_value: 'discord-hotel', mismatch: false },
+      checkout_path: { source: 'registered', effective_value: '/Users/yuji/Developer/hotel', mismatch: false },
     })
   })
 
