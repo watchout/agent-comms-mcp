@@ -18,7 +18,11 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Client as PgClient } from 'pg'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
-const HTTP_PORT = 39000 + Math.floor(Math.random() * 700)
+const PORT_BLOCK_START = 12000
+const PORT_BLOCK_END = 18000
+const PORT_BLOCK_STRIDE = 8
+const SERVER_PORT_OFFSETS = [0, 2, 4] as const
+const WEBHOOK_PORT_OFFSET = 1000
 const PREFIX = `sd-test-httpmcp-${process.pid}`
 const BOT_A = `${PREFIX}-a`
 const BOT_B = `${PREFIX}-b`
@@ -28,18 +32,83 @@ const TOKENS: Record<string, string> = {
   [BOT_B]: `tok-${randomUUID()}`,
 }
 
+type PortReservation = { stop(closeActiveConnections?: boolean): Promise<void> }
+type ProcessDiagnostics = {
+  stderr: string
+  spawnError: string | null
+  exited: Promise<void>
+}
+
+function reservePort(port: number): PortReservation {
+  return Bun.serve({
+    port,
+    hostname: '127.0.0.1',
+    reusePort: false,
+    fetch() { return new Response('', { status: 503 }) },
+  })
+}
+
+function reserveInitialCandidate(): { base: number; reservation: PortReservation } {
+  for (let base = PORT_BLOCK_START; base <= PORT_BLOCK_END; base += PORT_BLOCK_STRIDE) {
+    try {
+      return { base, reservation: reservePort(base) }
+    } catch {}
+  }
+  throw new Error(`no candidate port available in ${PORT_BLOCK_START}-${PORT_BLOCK_END}`)
+}
+
+async function reservePortBlock(start: number): Promise<{ base: number; reservations: Map<number, PortReservation> }> {
+  candidate: for (let base = start; base <= PORT_BLOCK_END; base += PORT_BLOCK_STRIDE) {
+    const reservations = new Map<number, PortReservation>()
+    for (const offset of SERVER_PORT_OFFSETS) {
+      for (const port of [base + offset, base + offset + WEBHOOK_PORT_OFFSET]) {
+        try {
+          reservations.set(port, reservePort(port))
+        } catch {
+          await Promise.all([...reservations.values()].map((reservation) => reservation.stop(true)))
+          continue candidate
+        }
+      }
+    }
+    return { base, reservations }
+  }
+  throw new Error(`no six-port server block available in ${start}-${PORT_BLOCK_END + WEBHOOK_PORT_OFFSET + 4}`)
+}
+
+let BLOCKED_CANDIDATE_PORT = 0
+let HTTP_PORT = 0
+let portReservations = new Map<number, PortReservation>()
+
+async function releaseReservedPair(port: number): Promise<void> {
+  const released: PortReservation[] = []
+  for (const reservedPort of [port, port + WEBHOOK_PORT_OFFSET]) {
+    const reservation = portReservations.get(reservedPort)
+    if (!reservation) throw new Error(`missing reservation for child-server port ${reservedPort}`)
+    released.push(reservation)
+    portReservations.delete(reservedPort)
+  }
+  await Promise.all(released.map((reservation) => reservation.stop(true)))
+}
+
+async function releaseRemainingReservations(): Promise<void> {
+  const remaining = [...portReservations.values()]
+  portReservations.clear()
+  await Promise.all(remaining.map((reservation) => reservation.stop(true)))
+}
+
+const processDiagnostics = new WeakMap<ChildProcess, ProcessDiagnostics>()
 let serverProc: ChildProcess | null = null
 let pg: PgClient
 
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
-  return spawn('bun', ['run', 'server.ts'], {
+  const proc = spawn('bun', ['run', 'server.ts'], {
     cwd: `${import.meta.dir}/../..`,
     env: {
       ...process.env,
       AGENT_ID: `${PREFIX}-stdio`,
       AGENT_COM_EXPECTED_AGENT_ID: `${PREFIX}-stdio`,
       AGENT_COMMS_PORT: String(port),
-      WEBHOOK_PORT: String(port + 1000),
+      WEBHOOK_PORT: String(port + WEBHOOK_PORT_OFFSET),
       AGENT_COM_PG_NOTIFY: 'false',
       AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
       AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '1',
@@ -49,18 +118,71 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
+  let resolveExited!: () => void
+  const diagnostics: ProcessDiagnostics = {
+    stderr: '',
+    spawnError: null,
+    exited: new Promise<void>((resolve) => { resolveExited = resolve }),
+  }
+  processDiagnostics.set(proc, diagnostics)
+  proc.stderr?.setEncoding('utf8')
+  proc.stderr?.on('data', (chunk: string) => {
+    diagnostics.stderr = `${diagnostics.stderr}${chunk}`.slice(-16_000)
+  })
+  proc.once('error', (err) => {
+    diagnostics.spawnError = String(err)
+    resolveExited()
+  })
+  proc.once('exit', () => resolveExited())
+  return proc
 }
 
-async function waitHealth(port: number): Promise<void> {
+function processFailure(proc: ChildProcess, label: string, port: number): Error {
+  const diagnostics = processDiagnostics.get(proc)
+  return new Error(
+    `${label} failed on port ${port}: exit=${proc.exitCode ?? 'null'} signal=${proc.signalCode ?? 'null'}` +
+    `${diagnostics?.spawnError ? ` spawn_error=${diagnostics.spawnError}` : ''}` +
+    `\nstderr:\n${diagnostics?.stderr || '(empty)'}`,
+  )
+}
+
+async function waitHealth(
+  proc: ChildProcess,
+  port: number,
+  headers: Record<string, string> = {},
+  label = 'server /health',
+): Promise<void> {
   const deadline = Date.now() + 15000
   while (Date.now() < deadline) {
+    const diagnostics = processDiagnostics.get(proc)
+    if (proc.exitCode !== null || proc.signalCode !== null || diagnostics?.spawnError) {
+      throw processFailure(proc, label, port)
+    }
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`)
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { headers })
       if (res.ok) return
     } catch {}
     await new Promise((r) => setTimeout(r, 250))
   }
-  throw new Error('server /health never became ready')
+  throw processFailure(proc, `${label} never became ready`, port)
+}
+
+async function stopServer(proc: ChildProcess | null, timeoutMs = 8000): Promise<void> {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return
+  const diagnostics = processDiagnostics.get(proc)
+  if (!diagnostics) throw new Error('missing child-process diagnostics')
+  proc.kill('SIGTERM')
+  const exited = await Promise.race([
+    diagnostics.exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ])
+  if (exited) return
+  proc.kill('SIGKILL')
+  const killed = await Promise.race([
+    diagnostics.exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 2000)),
+  ])
+  if (!killed) throw processFailure(proc, 'server did not terminate', -1)
 }
 
 function initBody(): string {
@@ -99,6 +221,18 @@ async function seedBearerKey(client: PgClient, agentId: string, token: string): 
 }
 
 beforeAll(async () => {
+  // Reserve every port used by the three child servers up front. Keeping
+  // future pairs reserved prevents earlier localhost connections from taking
+  // them as ephemeral client ports. The deliberate first-port blocker proves
+  // that selection advances to a complete free block instead of trusting a
+  // random pick.
+  const blockedCandidate = reserveInitialCandidate()
+  const selectedPorts = await reservePortBlock(blockedCandidate.base)
+    .finally(() => blockedCandidate.reservation.stop(true))
+  BLOCKED_CANDIDATE_PORT = blockedCandidate.base
+  HTTP_PORT = selectedPorts.base
+  portReservations = selectedPorts.reservations
+
   pg = new PgClient({ connectionString: DATABASE_URL })
   await pg.connect()
   for (const id of [BOT_A, BOT_B]) {
@@ -111,12 +245,14 @@ beforeAll(async () => {
     await seedBearerKey(pg, id, TOKENS[id])
   }
 
+  await releaseReservedPair(HTTP_PORT)
   serverProc = bootServerWith({ AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1' }, HTTP_PORT)
-  await waitHealth(HTTP_PORT)
+  await waitHealth(serverProc, HTTP_PORT)
 }, 30000)
 
 afterAll(async () => {
-  serverProc?.kill('SIGTERM')
+  await stopServer(serverProc)
+  await releaseRemainingReservations()
   if (pg) {
     await pg.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agent_messages WHERE author_id LIKE $1`, [`${PREFIX}%`])
@@ -125,6 +261,13 @@ afterAll(async () => {
     await pg.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.end()
   }
+})
+
+describe('deterministic child-server port fixture', () => {
+  test('skips a deliberately occupied initial candidate and selects the next complete block', () => {
+    expect(HTTP_PORT).toBeGreaterThan(BLOCKED_CANDIDATE_PORT)
+    expect((HTTP_PORT - BLOCKED_CANDIDATE_PORT) % PORT_BLOCK_STRIDE).toBe(0)
+  })
 })
 
 describe('identity binding mode (default) — credential IS the identity', () => {
@@ -340,16 +483,18 @@ describe('health exposes source identity and per-session states (frozen reqs 3+5
 })
 
 describe('ARC gate — /mcp is off by default (no experimental flag)', () => {
-  const PORT = HTTP_PORT + 2
+  let PORT = 0
   let proc: ChildProcess | null = null
 
   beforeAll(async () => {
+    PORT = HTTP_PORT + 2
+    await releaseReservedPair(PORT)
     proc = bootServerWith({}, PORT)
-    await waitHealth(PORT)
+    await waitHealth(proc, PORT)
   }, 30000)
 
-  afterAll(() => {
-    proc?.kill('SIGTERM')
+  afterAll(async () => {
+    await stopServer(proc)
   })
 
   test('initialize POST to /mcp does not reach the MCP endpoint when the flag is off', async () => {
@@ -368,30 +513,24 @@ describe('ARC gate — /mcp is off by default (no experimental flag)', () => {
 })
 
 describe('spike-bot-id mode requires explicit opt-in (dev/test only)', () => {
-  const PORT = HTTP_PORT + 4
+  let PORT = 0
   const SHARED = `shared-${randomUUID()}`
   let proc: ChildProcess | null = null
 
   beforeAll(async () => {
+    PORT = HTTP_PORT + 4
+    await releaseReservedPair(PORT)
     proc = bootServerWith({
       AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1',
       AGENT_COMMS_HTTP_MCP_IDENTITY: 'spike-bot-id',
       AUTH_TOKEN: SHARED,
       AUTH_SKIP_LOCALHOST: 'false',
     }, PORT)
-    const deadline = Date.now() + 15000
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/health`, { headers: { Authorization: `Bearer ${SHARED}` } })
-        if (res.ok) return
-      } catch {}
-      await new Promise((r) => setTimeout(r, 250))
-    }
-    throw new Error('spike-mode server never became ready')
+    await waitHealth(proc, PORT, { Authorization: `Bearer ${SHARED}` }, 'spike-mode server /health')
   }, 30000)
 
-  afterAll(() => {
-    proc?.kill('SIGTERM')
+  afterAll(async () => {
+    await stopServer(proc)
   })
 
   test('shared AUTH_TOKEN + bot_id works only in explicit spike mode', async () => {
