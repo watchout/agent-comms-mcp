@@ -1,5 +1,10 @@
 # agent-com 仕様書（SSOT）
 
+> 2026-09-20 / [#966](https://github.com/watchout/agent-comms-mcp/issues/966):
+> [AUN先行の種類付き保護情報設計](./design/typed-protected-data-v1.md)を追加。
+> agent_messages / message_queue / outbound_queue / event_logと読取・配送を保護対象とする。
+> 以下は現行互換動作の記述。変更後の型付き記号・暗号化保存・認可付き復号は設計段階で、未適用。
+
 > この文書がagent-comの唯一の正（Single Source of Truth）。
 > 実装はこの仕様に従うこと。仕様変更はこの文書を先に更新すること。
 >

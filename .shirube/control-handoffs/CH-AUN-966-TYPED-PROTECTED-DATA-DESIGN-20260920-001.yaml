@@ -1,0 +1,152 @@
+schema_version: shirube-control-handoff/rapid-lite/v1
+mode: rapid-lite
+profile: hotel-lite
+control_handoff_id: CH-AUN-966-TYPED-PROTECTED-DATA-DESIGN-20260920-001
+parent_ssot: watchout/agent-comms-mcp#966
+framework_ref: watchout/ai-dev-framework@3b70d368bcbbcb1d200a941a8a0130aa54edf722
+repo_spec_ref: .shirube/repo-spec.yaml
+premise_ref: https://github.com/watchout/agent-comms-mcp/issues/966
+owner_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/966
+premise_confirmation_ref: https://github.com/watchout/agent-comms-mcp/issues/966
+spec_review_state: design_ready_for_independent_review
+handoff_ready_for_implementation: false
+repo: watchout/agent-comms-mcp
+repo_local_issue: https://github.com/watchout/agent-comms-mcp/issues/966
+owner:
+  role: repo_owner
+  actor: watchout
+implementation_actor: Work
+next_role: independent_audit
+protected_surfaces: []
+protected_surface_details:
+  - This pull request changes documentation and its repo-local control handoff only.
+  - Product source, runtime, API, database, migrations, stored data, keys, authorization configuration, external transmission, merge, and deployment are not touched or authorized.
+  - The design describes future protected surfaces; describing them is not implementation or activation.
+rps_scope:
+  shirube_owns:
+    - Bind this design pull request to its exact documentation paths and durable acceptance criteria.
+    - Require independent design audit and preserve owner exact-head decision before merge.
+  shirube_does_not_own:
+    - Product implementation, runtime activation, database or stored-data mutation, key creation, external transmission, merge, deployment, branch protection, rulesets, or owner approval.
+cell:
+  CELL-ID: CELL-AUN-966-TYPED-PROTECTED-DATA-DESIGN-20260920-001
+  cell_type: docs_only
+  risk_class: R4
+  goal: Define an independently reviewable AUN-first contract for typed protected references, encrypted eligible values, and authorized reveal before any AUN persistence, then make that contract consumable by Kusabi.
+  governance_route: independent design audit, required R4/CTO review, then owner exact-head decision before merge.
+  non_scope:
+    - product source implementation or product tests
+    - database schema, migration, stored-data rewrite, backup mutation, or key provisioning
+    - runtime, CLI, worker, provider, or external-AI activation
+    - merge, deployment, required-check activation, branch protection, or ruleset mutation
+    - substituting author validation for independent acceptance or owner approval
+  allowed_paths:
+    - docs/SSOT.md
+    - docs/agent-com-message-queue-spec.md
+    - docs/design/core/SSOT-4_DATA_MODEL.md
+    - docs/design/typed-protected-data-v1.md
+    - .shirube/control-handoffs/CH-AUN-966-TYPED-PROTECTED-DATA-DESIGN-20260920-001.yaml
+  forbidden_paths:
+    - server.ts
+    - core/**
+    - src/**
+    - app/**
+    - api/**
+    - lib/**
+    - db/**
+    - migrations/**
+    - tests/**
+    - scripts/**
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .env*
+    - secrets/**
+    - deploy/**
+    - .github/workflows/**
+  protected_surfaces:
+    declared: []
+    touched: false
+    details:
+      - Documentation describes future personal-data, cryptographic, authorization, and persistence boundaries, but this Cell does not change those surfaces.
+  stop_conditions:
+    - any product source, runtime, database, migration, key, authorization, external-transmission, workflow, package, deployment, or repository-protection change becomes necessary
+    - any changed file falls outside allowed_paths or matches forbidden_paths
+    - design scope is broadened beyond AUN-first persistence and the defined Kusabi consumer contract
+    - independent audit identifies a missing threat, persistence path, authorization boundary, or rollback condition requiring design revision
+    - owner exact-head decision is missing before merge
+implementation_boundary:
+  summary: Four design/SSOT documents plus this repo-local handoff; no product implementation or activation.
+  expected_pr_count: 1
+  forbidden_operations:
+    - approve
+    - merge
+    - draft removal
+    - product source or test modification
+    - runtime or CLI execution
+    - database, stored-data, backup, or migration mutation
+    - key, secret, authentication, or authorization mutation
+    - external transmission or deployment
+    - required-check activation
+    - branch protection or ruleset mutation
+acceptance_criteria:
+  - PM-01 preserves typed names, addresses, phones, emails, evidence-backed entity links, and multiple values.
+  - PM-02 preserves value_id and exact plaintext while classification revisions change.
+  - PM-03 prevents unsupported person merges for name matches or shared phone numbers.
+  - PM-04 returns the same value references after duplicate ingest or lost response.
+  - PM-05 round-trips eligible synthetic bytes exactly.
+  - PM-06 excludes API keys and hidden instructions from storage and output.
+  - PM-07 ignores caller-supplied agent_id or admin claims for reveal authority.
+  - PM-08 denies mixed-scope batches atomically without existence disclosure.
+  - PM-09 reveals only required fields to an authorized actor, purpose, and destination.
+  - PM-10 denies reveal after source revocation or purpose mismatch, including old packs.
+  - PM-11 has no plaintext fallback and no commit or ACK when keys or database writes fail.
+  - PM-12 rejects ciphertext, tag, AAD, or row substitution.
+  - PM-13 never treats marker-like user text as a trusted reference.
+  - PM-14 sends no plaintext to unavailable or unapproved Jev or LLM services and retains protected unknowns.
+  - PM-15 does not treat uninspected free text as non-sensitive.
+  - PM-16 does not let model confidence remove protection or grant authority.
+  - PM-17 preserves structurally public GitHub IDs, URLs, epochs, and backup fixtures.
+  - PM-18 does not concatenate the four known numeric fixtures into phone numbers.
+  - PM-19 preserves known hotel-ID and explicit phone-number expectations.
+  - PM-20 distinguishes irreversible legacy REDACTED data from authorized new references.
+  - PM-21 keeps plaintext, keys, and guessable plaintext hashes out of search, recovery, logs, embeddings, and traces.
+  - PM-22 proves reference/value consistency and observable failure across restore, rotation, and rollback.
+  - PM-23 prevents lifecycle or review handoff among AUN, Shirube, and Kodama from granting reveal authority.
+  - PM-24 fails closed and finitely for audit failure, invalid offsets, and oversized requests.
+  - PM-25 leaves zero plaintext copies across AUN message, queue, outbox, eventlog, metadata, and diagnostics for the same synthetic sensitive value.
+  - PM-26 preserves canonical payload identity, claim, lease, and dedup across reappend, redelivery, and key rotation without plaintext dual-write.
+  - PM-27 applies protection to full, preview, ancestor, external-history, and attachment paths without plaintext bypass.
+  - PM-28 preserves issuer distinction across AUN to Kusabi and reports missing source values when an issuer is unavailable.
+validation:
+  evidence_file_required: false
+  required_commands:
+    - git diff --check
+    - parse the control handoff as YAML
+    - run existing automatic Product PR Checks, Cell, and Rapid/Lite report workflows for the exact head
+  required_evidence:
+    - exact PR head supplied by GitHub runtime
+    - exact changed-file list limited to cell.allowed_paths
+    - cross-document link and current-versus-design boundary review
+    - PM-01 through PM-28 present as unexecuted design commitments
+    - automatic workflow URLs and aggregate gate verdict for the exact head
+    - independent design audit result before owner decision
+owner_decision:
+  required_before_merge: true
+  evidence_source: external_owner_decision_comment_or_workflow_input
+  committed_pending_policy_only: true
+  allowed_verdicts:
+    - APPROVED_EXACT_HEAD
+    - CHANGES_REQUIRED
+    - BLOCKED
+  exact_head_sha: null
+  decision_ref: null
+post_merge:
+  required_when_done_claimed: true
+  required_evidence:
+    - merge_commit
+    - merged_at
+    - post_merge_document_link_check
+    - next_step
+    - no_unresolved_follow_up_blocker
