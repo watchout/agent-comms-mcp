@@ -1,3 +1,4 @@
+import { unitRuntimeAuthority, unitRuntimeId, unitRuntimeInspector, unitNativeProof, unitLogicalProof } from './helpers/logical-runtime-unit-fixture'
 /**
  * E7 — bounded concurrent queue-work runners (issue #940 definition v2, R1).
  *
@@ -308,6 +309,7 @@ describe('queue-work concurrency bound (E7)', () => {
       channel_id: 'ch-1',
     }
     const pendingRowFrozen = JSON.stringify(pendingRow)
+    let providerObservationVerified = false
     const db = {
       query: async (sql: string, params?: unknown[]) => {
         if (/^\s*(UPDATE|INSERT|DELETE)/i.test(sql)) { mutations.push(sql.slice(0, 80)); return { rows: [], rowCount: 0 } }
@@ -318,7 +320,7 @@ describe('queue-work concurrency bound (E7)', () => {
           return {
             rows: [{
               agent_id: 'seat-b', runtime: 'codex', profile_revision: null, profile_source: null,
-              channel_port: null, home_directory: '/repo', metadata: { tmux_session: 'seat-b-session' },
+              channel_port: 19123, home_directory: '/repo', metadata: { tmux_session: 'seat-b-session' },
             }],
             rowCount: 1,
           }
@@ -340,28 +342,18 @@ describe('queue-work concurrency bound (E7)', () => {
             rowCount: 1,
           }
         }
-        if (sql.includes('FROM agent_runtime_instances')) {
-          return {
-            rows: [{
-              runtime_instance_id: 'rt-f5', agent_id: 'seat-b', runtime_engine: 'codex',
-              runtime_kind: 'local_process', session_name: 'seat-b-session', port: null,
-              checkout_path: '/repo', commit_sha: null,
-              started_at: '2026-08-27T00:00:00.000Z', last_seen_at: '2030-01-01T00:00:00.000Z',
-              status: 'running', metadata: {},
-            }],
-            rowCount: 1,
-          }
-        }
+        if (sql.includes('JOIN control_plane_leases')) return {rows: [unitRuntimeAuthority('seat-b')], rowCount: 1}
         if (sql.includes('FROM runtime_memory_ready_evidence')) {
           return {
             rows: [{
-              id: 1, agent_id: 'seat-b', project: 'agent-comms-mcp', runtime_instance_id: 'rt-f5',
-              profile_revision: null, profile_source: null, session_name: 'seat-b-session', port: null,
+              id: 1, agent_id: 'seat-b', project: 'agent-comms-mcp', runtime_instance_id: unitRuntimeId('seat-b'),
+              profile_revision: null, profile_source: null, session_name: 'seat-b-session', port: 19123,
               expected_agent_id: 'seat-b', checkout_path: '/repo', checkout_commit_sha: null,
               recovery_command: 'mcp__wasurezu__recover_context', result_status: 'ready',
               failure_reason: null, completed_at: '2026-08-27T23:55:00.000Z',
               evidence_path: null, evidence_log_id: null,
-              valid_until: '2030-01-01T00:00:00.000Z', source: 'wasurezu_boot_recovery', metadata: {},
+              valid_until: '2030-01-01T00:00:00.000Z', source: 'wasurezu_boot_recovery',
+              metadata: {seat_context_proof: unitLogicalProof('seat-b', 'agent-comms-mcp')},
             }],
             rowCount: 1,
           }
@@ -388,11 +380,24 @@ describe('queue-work concurrency bound (E7)', () => {
         queueWorkMaxConcurrentRunners: 1,
         pendingStaleAfter: '10 seconds',
       },
+      // The integrated AUN path requires observed provider identity and a
+      // consumed recovery receipt; legacy agent.runtime alone is insufficient.
+      runtimeInspector: input => providerObservationVerified ? unitRuntimeInspector(input) : {reasonCode: 'PROVIDER_UNVERIFIED', observations: []},
+      readNativeProof: unitNativeProof,
+
     })
+    let releaseSaturatingRunner!: () => void
+    const saturatingRunner = new Promise<void>((resolve) => { releaseSaturatingRunner = resolve })
     await daemon.start()
     try {
+      // A free slot cannot bypass AUN's observed-provider requirement.
+      clock.advance(30_000)
+      expect((await daemon.sweepStale()).rewoken).toBe(0)
+      expect(invoked).toEqual([])
+      expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'pending_runner_concurrency_deferred' })).toBe(0)
+      providerObservationVerified = true
       // saturate the single slot with a hung runner for another seat
-      expect((daemon as any).scheduleQueueWorkRunner('pending', row(1, 'seat-a'), () => new Promise<void>(() => {}))).toBe('invoked')
+      expect((daemon as any).scheduleQueueWorkRunner('pending', row(1, 'seat-a'), () => saturatingRunner)).toBe('invoked')
       // three production sweeps: the pending row is fetched each time and deferred each time
       for (let i = 0; i < 3; i++) {
         clock.advance(30_000)
@@ -403,8 +408,8 @@ describe('queue-work concurrency bound (E7)', () => {
       expect(mutations).toEqual([]) // zero DB writes: no attempt, claim, or payload consumed
       expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'pending_runner_concurrency_deferred' })).toBe(3)
       // release the slot; the next sweep invokes exactly once
-      ;(daemon as any).inflightQueueWork.clear()
-      ;(daemon as any).inflightQueueWorkIds.clear()
+      releaseSaturatingRunner()
+      await new Promise((r) => setTimeout(r, 0))
       clock.advance(30_000)
       const after = await daemon.sweepStale()
       expect(after.rewoken).toBe(1)
@@ -412,6 +417,7 @@ describe('queue-work concurrency bound (E7)', () => {
     } finally {
       // resolve the outstanding runner: stop()'s drain deadline uses the
       // injected clock, which FakeClock never advances
+      releaseSaturatingRunner()
       resolvers.forEach((r) => r())
       await new Promise((r) => setTimeout(r, 0))
       await daemon.stop()

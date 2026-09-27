@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/aun-bootstrap-codex-adapter.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "fc6ac9fff5ca64aa8f1cef85604f597894dc11e5c782ade84384284f36c0a3a6",
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "375e3fe43d881f656e1557335631294718ae540390ecff1a1d83ea79f74310bf",
+  "started_at": "2026-09-21T06:13:20.935298+00:00",
+  "ended_at": "2026-09-21T06:13:21.183021+00:00",
+  "exit_code": 0,
+  "log_sha256": "84ad4809c4e7fc28740f87c9722a828ca526586e0a9a12fb14481cdcb7cd344e"
+}

@@ -1,0 +1,28 @@
+{
+  "at": "2026-09-21T12:10:55.701886+00:00",
+  "identity": "aun_trial_ready|fixture||/private/tmp/aun-independent-pg-7i5o4k48/socket",
+  "database_inventory_before": [
+    "aun_trial_ready",
+    "np_0cd0dfb496694ed384dc3ddb80cbfc64",
+    "np_21219ea964234cc582cfd921a7b6513b",
+    "np_51cb026ceac942a0bf4be1848e9b0cc6",
+    "np_88d58b9201b74fb1a3096ba5935a2322",
+    "postgres"
+  ],
+  "failed_setup_databases_removed": [
+    "np_21219ea964234cc582cfd921a7b6513b",
+    "np_51cb026ceac942a0bf4be1848e9b0cc6",
+    "np_0cd0dfb496694ed384dc3ddb80cbfc64",
+    "np_88d58b9201b74fb1a3096ba5935a2322"
+  ],
+  "database_inventory_after": [
+    "aun_trial_ready",
+    "postgres"
+  ],
+  "stop_exit": 0,
+  "status_exit": 3,
+  "status": "pg_ctl: no server running",
+  "temporary_module_link_removed": true,
+  "module_target": "/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules",
+  "live_db_runtime_queue_operations": 0
+}

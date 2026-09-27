@@ -1,0 +1,6 @@
+bun test v1.3.11 (af24e281)
+{"case":"legacy-preservation","kind":"postgres","before_sha256":"9c6dc68ee2381eccfcb8f64f48d98af6cd7b2387beb2b806becb9e8e361526fc","after_sha256":"9c6dc68ee2381eccfcb8f64f48d98af6cd7b2387beb2b806becb9e8e361526fc","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+{"case":"guards-and-null-anchor","kind":"postgres","rejected_cases":10,"logical_audit_event_and_owner_content":"PRESERVED"}
+{"case":"rollback","kind":"postgres","before_sha256":"3b417257c90506257c9e5e0834bef6cda3d2492d3abab0dcb005b39d9f81a1e8","after_sha256":"3b417257c90506257c9e5e0834bef6cda3d2492d3abab0dcb005b39d9f81a1e8","schema_restored":true}
+{"case":"legacy-preservation","kind":"sqlite","before_sha256":"77d0e30a1b62dd1d843bdaaf27a87b70ee391a8c9da19cc66b77ca94c00771c0","after_sha256":"77d0e30a1b62dd1d843bdaaf27a87b70ee391a8c9da19cc66b77ca94c00771c0","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+{"case":"rollback","kind":"sqlite","before_sha256":"28d5a6eea3c3d1ffe02783b531f3f0072892a4572bebc1b6b664e38d455d89d4","after_sha256":"28d5a6eea3c3d1ffe02783b531f3f0072892a4572bebc1b6b664e38d455d89d4","schema_restored":true}

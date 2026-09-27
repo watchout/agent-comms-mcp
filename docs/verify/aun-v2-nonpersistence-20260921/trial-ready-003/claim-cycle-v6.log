@@ -1,0 +1,25 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_7ad32261be4b46b6943f6cdcabebe8f1","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+31 |       return (await f.query('SELECT id FROM message_queue WHERE message_id=$1',[message]))[0].id
+32 |     }
+33 |     const claim=async(id:number)=>{
+34 |       const result=await receiveTargeted({agentId:agent,queueId:String(id),env:{PATH:process.env.PATH,DATABASE_URL:url.href,
+35 |         AGENT_COM_DB:'postgres',AGENT_ID:agent,AGENT_COM_EXPECTED_AGENT_ID:agent,AGENT_COM_RUNTIME_INSTANCE_ID:host.runtimeId,AGENT_COMMS_CLAIM_TTL_SEC:'120'}})
+36 |       expect(result.ok,result.stderr+result.stdout).toBe(true)
+                                                         ^
+error: Error [TARGETED_RECEIVE_FAILED]: operator does not exist: uuid = text
+
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:36:53)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:45:38)
+(fail) NP02/08 receive new claim → refresh → done → finalize binds the actual incarnation; replacement cannot execute or finish old work [1878.69ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [1.97s]

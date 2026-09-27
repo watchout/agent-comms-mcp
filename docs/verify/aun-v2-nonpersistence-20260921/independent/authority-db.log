@@ -1,0 +1,32 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-CfTDim/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [3945.16ms]
+
+tests/contract/test_runtime_nonpersist_authority.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_a488ce5c3c4a4d96aece3eb9e3f12c05","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease [2724.68ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_e5b5ab2dbe6349058a5620557fb32842","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP03 lease-write failure rolls back the new logical anchor; only the owned socket remains [1368.56ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_f46f252567694619b954577cb5d0241f","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 fence replacement during observation and holder change after SQL both deny endpoint resolution [1590.11ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.11ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.16ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.34ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.06ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.44ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1112.33ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [807.90ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.23ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [1.95ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.50ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.04ms]
+
+ 15 pass
+ 0 fail
+ 91 expect() calls
+Ran 15 tests across 3 files. [11.66s]

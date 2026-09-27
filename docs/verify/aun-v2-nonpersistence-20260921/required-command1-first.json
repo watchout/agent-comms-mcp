@@ -1,0 +1,30 @@
+{
+  "started_at": "2026-09-21T05:01:37.604788+00:00",
+  "ended_at": "2026-09-21T05:01:57.904934+00:00",
+  "exit_code": 1,
+  "source": "307672d4 + current core/fixture delta before DB integration",
+  "command": [
+    "bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts",
+    "tests/runtime-heartbeat.test.ts",
+    "tests/seat-runtime-continuity.test.ts",
+    "tests/norm-022-runtime-endpoint-lease.test.ts",
+    "tests/runtime-current-resolver.test.ts",
+    "tests/state-daemon-queue-work-scheduler.test.ts",
+    "tests/queue-work.test.ts"
+  ],
+  "env_keys": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "AGENT_COM_DB",
+    "AGENT_COM_SQLITE_PATH",
+    "DATABASE_URL",
+    "AGENT_COM_TEST_DATABASE_URL",
+    "AGENT_COM_PG_NOTIFY",
+    "AUN_TEST_WASUREZU_ROOT"
+  ],
+  "timeout_seconds": 600
+}

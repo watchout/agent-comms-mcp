@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, linkSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readObservedProviderRoot } from '../core/seat-runtime-selection'
 import { bootstrapDigest } from '../core/aun-bootstrap-state'
 import { createCodexBootstrapAdapter, expectedBootstrapMcpTuple } from '../bin/aun/bootstrap-adapter-codex'
 import type { BootstrapStageContext } from '../bin/aun/bootstrap-types'
@@ -36,16 +37,18 @@ function withProviderAuthority(
 const environment = {
   AGENT_ID: 'codex-probe',
   AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe',
+  AGENT_COM_WORKSPACE: '/workspace',
+  AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
   DATABASE_URL: 'postgresql:///probe',
   AGENT_COM_PG_NOTIFY: 'false',
   AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
-  AUN_WEBHOOK_PORT: '8891',
+  AUN_WEBHOOK_PORT: '0',
 }
 
 function exactGet(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
     name: 'aun', enabled: true,
-    transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+    transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: environment },
     ...overrides,
   })
 }
@@ -83,6 +86,29 @@ function absentPrestateMutation(
 }
 
 describe('aun bootstrap Codex adapter', () => {
+  test('observed account root never permits a foreign global tuple to be rewritten and fences PID reuse',async()=>{
+    const root=realpathSync(mkdtempSync(join(tmpdir(),'aun-observed-root-')))
+    const started='2026-09-13T00:00:00.000Z'
+    const calls:string[][]=[]
+    let changed=false
+    const run=async (command:string,args:string[])=>{
+      calls.push(args)
+      if(command==='ps') return {exitCode:0,stderr:'',stdout:args.includes('lstart=')
+        ? changed?'2026-09-13T00:00:01.000Z':started:`/bin/codex CODEX_HOME=${root}`}
+      return {exitCode:0,stderr:'',stdout:args.includes('get')?exactGet({transport:{type:'stdio',command:'foreign',args:[],env:{AGENT_ID:'other'}}}):JSON.stringify([{name:'aun',enabled:true}])}
+    }
+    try {
+      const observed=await readObservedProviderRoot(run,{pid:123,startedAt:started,cwd:root,env:{}})
+      const candidate={...context,providerRootAuthority:{...withProviderAuthority(root).providerRootAuthority!,
+        existingTarget:true,canonicalSourceField:'observed_provider_process' as const,authorityTupleDigest:observed!.digest,
+        canonicalRealpathDigest:observed!.directoryDigest,observedProviderPid:123,observedProviderStartedAt:started}}
+      const adapter=createCodexBootstrapAdapter({bunPath:'/bin/bun',serverEntry:'server.ts',run})
+      expect((await adapter.applyMcpRegistration(candidate)).ok).toBe(false)
+      changed=true
+      expect((await adapter.applyMcpRegistration(candidate)).reasonCodes).toContain('NO_GO_PROVIDER_ROOT_CONFLICT')
+      expect(calls.some(args=>args.includes('add')||args.includes('remove'))).toBe(false)
+    } finally {rmSync(root,{recursive:true,force:true})}
+  })
   test('uses provider CLI registration and exact get/list readback', async () => {
     const calls: Array<{ command: string; args: string[] }> = []
     let added = false
@@ -104,8 +130,8 @@ describe('aun bootstrap Codex adapter', () => {
     const add = calls.find((call) => call.args.slice(0, 3).join(' ') === 'mcp add aun')!
     expect(add.command).toBe('codex')
     expect(add.args).toContain('AGENT_ID=codex-probe')
-    expect(add.args).toContain('AUN_WEBHOOK_PORT=8891')
-    expect(add.args.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/repo', 'server.ts'])
+    expect(add.args).toContain('AUN_WEBHOOK_PORT=0')
+    expect(add.args.slice(-6)).toEqual(['--', '/bin/bun', 'run', '--cwd', '/workspace', '/repo/server.ts'])
   })
 
   test('exact existing registration is idempotent and creates no mutation', async () => {
@@ -380,9 +406,10 @@ describe('aun bootstrap Codex adapter', () => {
       })
       const exactGet = JSON.stringify({
         name: 'aun', enabled: true,
-        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: {
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: {
           AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
-          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+          AGENT_COM_WORKSPACE: '/workspace', AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
+          AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
         } },
       })
       const adapter = source.createCodexBootstrapAdapter({
@@ -542,11 +569,12 @@ describe('aun bootstrap Codex adapter', () => {
       const tupleDigest = state.bootstrapDigest(tuple)
       const environment = {
         AGENT_ID: 'codex-probe', AGENT_COM_EXPECTED_AGENT_ID: 'codex-probe', DATABASE_URL: 'postgresql:///probe',
-        AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '8891',
+        AGENT_COM_WORKSPACE: '/workspace', AGENT_COM_RUNTIME_SESSION: 'runtime:codex-probe',
+        AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AUN_WEBHOOK_PORT: '0',
       }
       const exactGet = JSON.stringify({
         name: 'aun', enabled: true,
-        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/repo', 'server.ts'], env: environment },
+        transport: { type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', '/workspace', '/repo/server.ts'], env: environment },
       })
       const adapter = source.createCodexBootstrapAdapter({
         bunPath: '/bin/bun', serverEntry: 'server.ts',
@@ -762,6 +790,8 @@ describe('aun bootstrap Codex adapter', () => {
     ['wrong-command', (value: any) => ({ ...value, transport: { ...value.transport, command: '/wrong/bun' } })],
     ['wrong-argv', (value: any) => ({ ...value, transport: { ...value.transport, args: ['server.ts'] } })],
     ['wrong-agent', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_ID: 'wrong' } } })],
+    ['wrong-workspace', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_COM_WORKSPACE: '/foreign' } } })],
+    ['wrong-session', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AGENT_COM_RUNTIME_SESSION: 'foreign' } } })],
     ['wrong-database', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, DATABASE_URL: 'postgresql:///wrong' } } })],
     ['wrong-port', (value: any) => ({ ...value, transport: { ...value.transport, env: { ...value.transport.env, AUN_WEBHOOK_PORT: '1' } } })],
     ['wrong-repo', (value: any) => ({ ...value, transport: { ...value.transport, args: ['run', '--cwd', '/wrong', 'server.ts'] } })],

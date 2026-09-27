@@ -1,0 +1,82 @@
+bun test v1.3.11 (af24e281)
+
+tests/queue-work.test.ts:
+(pass) queue work envelope > builds a runtime envelope that forbids queue-control tools [0.54ms]
+(pass) queue work envelope > detects GitHub-backed phase handoff rows without echoing payload in planner-facing fields [0.05ms]
+(pass) queue work envelope > does not derive the reply contract from legacy no-reply fields or prose [0.02ms]
+(pass) queue work envelope > honors an explicit typed reply contract without inspecting prose [0.03ms]
+(pass) queue work envelope > detects an instruction-form evidence audit request as GitHub-backed [0.02ms]
+(pass) runReceivedQueueWork > advances received -> in_progress -> done and persists runner result [0.42ms]
+(pass) runReceivedQueueWork > codex output fallback success advances the row to done with fallback evidence [1.07ms]
+(pass) runReceivedQueueWork > expectedClaimSource leaves rows claimed by another path untouched (CLAIM_NOT_OWNED) [0.07ms]
+(pass) runReceivedQueueWork > expectedClaimSource processes rows whose receive_claim.source matches [0.11ms]
+(pass) runReceivedQueueWork > adapter failures leave the row in_progress with runner_error evidence [0.48ms]
+(pass) runReceivedQueueWork > non-ok result persistence returns its row for rows-length database adapters [0.23ms]
+(pass) runReceivedQueueWork > state-invariant typed adapter failure becomes failed immediately without retry or done evidence [0.11ms]
+(pass) runReceivedQueueWork > claude invalid MCP configuration is typed non-retryable and consumes no reclaim attempt [0.05ms]
+(pass) runReceivedQueueWork > exact claim fence prevents a stale runner from persisting done after ownership changes [0.15ms]
+(pass) runReceivedQueueWork > same-agent expiry, reclaim, and re-receive cannot persist or finalize the stale result [0.13ms]
+(pass) runReceivedQueueWork > fenced runner persists pre-invocation runtime authority and exact result claim [0.12ms]
+(pass) runReceivedQueueWork > a new fenced execution archives and clears the prior runner error before invocation [0.17ms]
+(pass) runReceivedQueueWork > exact claim fence prevents stale runner_error persistence after ownership changes [0.10ms]
+(pass) runReceivedQueueWork > claim expiry during terminal persistence prevents a stale done write [0.03ms]
+(pass) runReceivedQueueWork > claim expiry during error persistence prevents a stale runner_error write [0.24ms]
+(pass) runReceivedQueueWork > abort is a typed non-terminal outcome with no done or runner_error write [1.46ms]
+(pass) finalizeDoneQueueWork > claim/result fence blocks outbound and close for a stale same-agent result [0.80ms]
+(pass) finalizeDoneQueueWork > D1 done rows cannot close without an exact completed receipt DB fence [0.15ms]
+(pass) finalizeDoneQueueWork > holds the finalize transaction across select, reply send, and replied update [0.11ms]
+(pass) finalizeDoneQueueWork > releases the row lock for a sender-owned close and verifies exact reply readback [0.31ms]
+(pass) finalizeDoneQueueWork > persists mediated writeback receipt before sender-owned reply close [0.15ms]
+(pass) finalizeDoneQueueWork > sends the stored reply and closes done rows as replied [0.08ms]
+(pass) finalizeDoneQueueWork > rolls back without sending when a reply result has no reply sender [0.04ms]
+(pass) finalizeDoneQueueWork > closes non-reply results without calling a reply sender [0.06ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff results require a structured mediated writeback [0.05ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization delegates posting to a mediated sender [0.06ms]
+(pass) finalizeDoneQueueWork > GitHub-backed handoff finalization fails closed when mediated sender returns no posted URL [0.12ms]
+(pass) finalizeDoneQueueWork > does not terminal-close retry results until retry semantics exist [0.13ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > AUN per-engine override reaches both the child and the slot budget with the same value [0.07ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > STATE per-engine/generic overrides match between child and slot budget [0.07ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > conflicting overrides: slot budget never undercuts the largest legitimate child budget [0.02ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > canonical precedence: engine-specific beats generic; AUN beats STATE within each tier [0.03ms]
+(pass) queue-work timeout resolver — daemon slot budget and child budgets share one source (PR #958 F1) > malformed or non-positive timeouts are typed errors for both sides, never silent defaults [0.09ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > STATE generic timeout reaches the command-json child and equals the daemon slot budget [0.01ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > AUN generic beats STATE generic; engine-specific overrides never leak into the custom child but still raise the slot budget [0.04ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > unset generic timeout resolves to the documented default 600000 for the custom child [0.02ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > malformed STATE or AUN generic timeout is a typed QUEUE_WORK_TIMEOUT_CONFIG_INVALID failure before any child spawns [0.23ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > the resolved generic budget is the value actually enforced on the spawned child [205.81ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > bounded worker keeps the shared timeout and admission binding without receiving host credentials [23.00ms]
+(pass) command-json custom runner consumes the shared generic resolver at the actual adapter seam (PR #958 cycle-4 F1) > valid timeout does not let a malformed admission binding spawn a child [1.23ms]
+
+tests/contract/test_runtime_nonpersist_profile.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_04d77e475de2472097a5a665e1f0d552","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 postgres ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [789.33ms]
+219 | 
+220 | export function assertDestructiveMigrationAllowed(sql: string): void {
+221 |   const patterns = detectDestructivePatterns(sql)
+222 |   if (patterns.length === 0) return
+223 |   if (defaultConfigPort.getDestructiveMigrationFlagState().allowed) return
+224 |   throw new DestructiveMigrationBlockedError(
+              ^
+DestructiveMigrationBlockedError: Destructive migration blocked: ['DROP TABLE']. Set AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED=1 to proceed (production deploy only). incident #339 anchor.
+ patterns: [ "DROP TABLE" ],
+  envName: "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED",
+
+      at assertDestructiveMigrationAllowed (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/db/destructive-migration-gate.ts:224:9)
+      at exec (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/db/migrate-sqlite.ts:1273:35)
+      at applyRuntimeObservationNonpersistenceSqlite (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/db/migrate-sqlite.ts:1336:7)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/helpers/runtime-observation-nonpersistence-db-fixture.ts:55:85)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_profile.test.ts:8:27)
+(fail) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [76.30ms]
+
+tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_c02ef9d2172e455da9de005fc88d1d87","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"ordinary-claim-incarnation-cycle","recorded_invocations":4,"provider_invocations":0,"external_sends":0,"successful_claims":5,"replacement_denials":3,"claim_race_denials":1}
+(pass) NP02/08 receive new claim → refresh → done → finalize binds the actual incarnation; replacement cannot execute or finish old work [7975.17ms]
+
+1 tests failed:
+(fail) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [76.30ms]
+
+ 47 pass
+ 1 fail
+ 233 expect() calls
+Ran 48 tests across 3 files. [9.16s]

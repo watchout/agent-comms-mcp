@@ -1,0 +1,15 @@
+{
+  "stopped_at": "2026-09-21T10:44:19.729801+00:00",
+  "stop_command": [
+    "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+    "-D",
+    "/private/tmp/aun-independent-pg-7i5o4k48/data",
+    "stop",
+    "-m",
+    "fast"
+  ],
+  "stop_exit_code": 0,
+  "status_exit_code": 3,
+  "status": "pg_ctl: no server running\n",
+  "log_sha256": "62d019ffc3ee018aac321741dc5ab4ebff49625cf316333931a54f88f8f846ff"
+}

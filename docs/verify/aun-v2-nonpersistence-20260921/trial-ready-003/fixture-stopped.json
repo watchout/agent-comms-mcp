@@ -1,0 +1,8 @@
+{
+  "root": "/private/tmp/aun-independent-pg-7i5o4k48",
+  "stopped_at": "2026-09-21T10:28:55.449314+00:00",
+  "stop_exit_code": 0,
+  "status_exit_code": 3,
+  "status_output": "pg_ctl: no server running\n",
+  "stop_log_sha256": "ca19178a35ab4153b75b494963b66ce8243e1b94c173107c87b44d09db23652d"
+}

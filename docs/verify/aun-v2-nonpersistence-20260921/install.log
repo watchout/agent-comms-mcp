@@ -1,0 +1,12 @@
+bun install v1.3.11 (af24e281)
+
++ @types/pg@8.20.0
++ typescript@5.9.3
++ @anthropic-ai/sdk@0.80.0
++ @google/generative-ai@0.24.1
++ @modelcontextprotocol/sdk@1.28.0
++ discord.js@14.25.1
++ openai@6.33.0
++ pg@8.20.0
+
+138 packages installed [377.00ms]

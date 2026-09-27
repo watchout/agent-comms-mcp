@@ -1,0 +1,145 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-memory-ready.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-8z5XPs/test.db
+(pass) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [36.77ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-7AsUSh/test.db
+(pass) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [21.00ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-WYAELL/test.db
+977 |     session_name: runtime.session_name, port: endpoint.endpoint.port, checkout_path: runtime.checkout_path,
+978 |     checkout_commit_sha: runtime.commit_sha, completed_at: input.receipt.completed_at,
+979 |     valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
+980 |   }))
+981 |   const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
+982 |   if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}`)
+                                ^
+error: MEMORY_NATIVE_ORDINARY_GATE_FAILED:expired
+      at recordVerifiedNativeRuntimeMemoryReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-memory-ready.ts:982:27)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-memory-ready.test.ts:181:11)
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [19.58ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-d2EyHO/test.db
+(pass) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [21.74ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-lgGjfp/test.db
+(pass) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [20.55ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-RhzHiN/test.db
+(pass) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [19.26ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ilLPzr/test.db
+(pass) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [18.87ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-5YoqLF/test.db
+(pass) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [19.01ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-x7ZnOH/test.db
+(pass) runtime memory-ready evidence gate > gate follows current logical authority rather than evidence-bound precedence [19.67ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-p4jG7t/test.db
+(pass) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [18.38ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-mqLEvt/test.db
+(pass) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [19.03ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-bhSey4/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [18.54ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-5SSc9f/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [18.83ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-Mz3uXz/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [18.21ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-HKoscK/test.db
+(pass) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [19.33ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-CH4KVQ/test.db
+(pass) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [19.90ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-VrFGPC/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [19.56ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-4AUWl0/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [19.02ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-jdxzJI/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [19.57ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-h0MeWj/test.db
+(pass) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [19.10ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-3qRvfU/test.db
+(pass) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [21.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-bRY9Sa/test.db
+(pass) runtime memory-ready evidence gate > Wasurezu bootstrap evidence is queue-independent metadata [18.47ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-vLsUQ5/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run never creates a missing database or journal [19.78ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-Z5YX3Y/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [22.80ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-beTjDB/test.db
+633 |     expect(readFileSync(cleanPath)[18]).toBe(1)
+634 |     const snapshot=()=>Object.fromEntries(readdirSync(tmp).sort().map(name=>[name,createHash('sha256').update(readFileSync(join(tmp,name))).digest('hex')]))
+635 |     const before=snapshot()
+636 |     const result=await memoryReadyBootstrap({agentId:'wasurezu',project:'agent-comms-mcp',dryRun:true,
+637 |       env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:cleanPath,PATH:'/unavailable-native-tools'}})
+638 |     expect(result.code).toBe(0)
+                              ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-memory-ready.test.ts:638:25)
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [93.33ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-YKqMRA/test.db
+(pass) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [87.67ms]
+
+tests/runtime-current-resolver.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-qllCcc/test.db
+(pass) runtime current resolver > codex-cto sole live holder remains current and stale same-kind diagnostics cannot mutate anchors [19.12ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-sQNLzs/test.db
+(pass) runtime current resolver > two live holders fail closed and revocation selects the sole remaining holder [18.26ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-CMn6aa/test.db
+(pass) runtime current resolver > a legacy profile tuple cannot break two-holder ambiguity or block a sole relocated holder [17.69ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-37fP6v/test.db
+(pass) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [18.23ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-TSWpOG/test.db
+(pass) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [19.31ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-TFXVIn/test.db
+(pass) runtime current resolver > requested kind defines an independent ordinary ranking surface [18.12ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-Bvhbli/test.db
+(pass) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [17.07ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-4dvYUx/test.db
+(pass) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [17.08ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-HzIlc5/test.db
+(pass) runtime current resolver > unknown group uses the frozen 30m/24h defaults [17.81ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-KZDkQ2/test.db
+(pass) runtime current resolver > policy rejects unsupported or unsafe values [15.41ms]
+
+2 tests failed:
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [19.58ms]
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [93.33ms]
+
+ 34 pass
+ 2 fail
+ 142 expect() calls
+Ran 36 tests across 2 files. [954.00ms]

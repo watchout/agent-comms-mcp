@@ -5,6 +5,180 @@
 >
 > **本 SSOT.md に従属する詳細仕様** として `docs/agent-com-message-queue-spec.md` を参照。message-queue-spec は本 SSOT.md の権威下に置かれる詳細実装仕様であり、本文書と矛盾する場合は本 SSOT.md が優先する。
 
+Seat runtime continuity is defined by [seat-runtime-continuity.md](spec/seat-runtime-continuity.md).
+The owner-adopted AUN v2.0.0 amendment in that spec replaces physical runtime/endpoint
+DB registration and historical-provider selection with current OS/process/socket
+observation plus durable logical identity and authority. Provider/port/physical
+path/PID/liveness observations are not newly persisted in any AUN-owned DB sink,
+including metadata and copied receipts. Identity, permissions, messages/tasks,
+claim owner/token/expiry, logical runtime UUID/FK, lease/fence and history remain
+durable. The DB remains the authority for those durable facts; a visible process
+or socket alone never grants permission to execute work.
+
+The [D-OWN-1 ownership amendment](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5773292758)
+(body SHA256 `8849fb477a9cd9efff9947fb979e6a6b95d14197470b0c70fe2fcacc8b8805f4`)
+uses unique UUID matching, current scoped lease/holder/fence, request-local
+reobservation before effects and DB-enforced lease uniqueness. Process-start and
+lease-acquisition times do not prove ownership. UUID reuse fails at startup
+acquisition before endpoint publication or work. The dependent spec records the
+observation-only limitation and the revised NP04-a..e acceptance.
+
+The [D-CFG-1 / D-S0-1 contract](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5759277196)
+(body SHA256 `01f2259457e1b5c605a500c1db474bcaf374d5d9f0ab48a4e57192914e01a82b`)
+binds configuration leases to existing `agent_id`, keeps observed-state INSERTs
+denied and uses desired-outbox delivery as durable reconcile completion. Restart
+authority stores logical release/rollback commit and tree, never hostname or
+physical artifact digests. Provider-free S0 requires current exact-holder lease,
+fresh OS observation and durable build identity; its logical marker lives in
+non-worker lease metadata and never requires an LLM provider. The dependent spec
+defines the amendment and AC-CFG-1..5 / AC-S0-1..3 acceptance.
+
+D1–D4 were adopted by the [owner](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755364993)
+(raw SHA256 `8414bb149e2a8b9aee4fb62b87f11d6109d5bc9bf9beb67019e282e21bcc1791`).
+The [bounded implementation handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755382588)
+(raw SHA256 `26e3a3ff050f1522948abc03704d116e4296e27122ec8e5e80744c5f340c82a0`)
+authorizes source changes and isolated tests. The amendment was not implemented
+at baseline `9d7e6f5b06b0d9a4b13011760e543cfc8a795e14`; current source/tests are
+in progress and NP12 application remains unperformed. Neither design adoption nor
+this source branch grants live migration, merge, release, restart or queue effects.
+
+The independent executor's [current handoff](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755777052)
+(body SHA256 `8b135ba67e36071b94c834e02f5b78e9d7c8b298936163c155b33af520c778a4`)
+replaces the former Work-only maker restriction. Current implementation details
+and remaining coverage are recorded in the dependent continuity spec and its
+verification packet; local fixture success is not TRIAL_READY.
+
+The [cycle-3 corrective handoff](https://github.com/watchout/agent-comms-mcp/pull/968#issuecomment-5768672897)
+(body SHA256 `9c55621c662ce4dadc0d366766b8a7679863ecf1a31fbe0330c722b8aab1f3d2`) also requires F-CFG-OUTBOX-01 closure:
+older pending configuration events acquire a distinct superseded terminal state,
+never a false delivery timestamp. Current desired/holder/fence checks remain;
+newest-per-agent selection and bounded cleanup keep the current event and other
+due agents progressing. The continuity spec defines this logical-only amendment.
+
+The [current implementation cell](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5757589027)
+(body SHA256 `4923e637e2e2490e5a36f5201ffc35d3565dfb32828f481cab9c95ede3156f5e`)
+permits the independent executor to update PR #968. Its [verification packet](verify/aun-v2-nonpersistence-20260921/trial-ready-003/RETURN.md)
+separates ordinary claim/lifecycle regression evidence from the pending
+configuration deployment and provider-free S0 contracts and NP11 B3 recovery.
+
+After applicable design disposition and cutover, previous physical-runtime
+persistence/DB liveness clauses in this document and dependent specs describe
+legacy behavior only; they cannot authorize physical snapshots or fallback to
+old provider/port/status. All affected writers/readers and subordinate operational
+specs must be reconciled as one compatible implementation. Existing legacy rows,
+FKs and claims are preserved; deleting them or restoring an incompatible physical
+writer (including an unverified F522 fallback) does not satisfy non-persistence.
+Current-host native context delivery still governs memory-ready; original
+Kusabi/Wasurezu storage is not silently declared compliant by an AUN-only change.
+Physical diagnostics stay excluded from desired digest/revision/outbox. The
+existing legacy-format transition and incompatible-down guard remain distinct
+from this proposed non-persistence migration and require their own exact evidence.
+Schema initialization and re-entry also preserve NULL physical columns; a legacy
+runtime default backfill must never run against logical identities after cutover.
+Queue repair changes logical claim state. Status readers derive busy/idle from
+current claims and live observation; repair must not mirror that derived result
+into `agents.status`, `status_detail` or `status_updated_at`.
+The same rule applies to explicit `processing`, `done` and `record-no-reply`
+transitions: persist the queue lifecycle and terminal baton atomically without
+copying derived busy/idle state into the agent profile.
+Heartbeat reports scoped claim-owner and age refusals as skipped work, preserving
+the existing age-budget metric. Renewal timestamps use the database clock, and
+only the exact active runtime holder can renew an eligible claim.
+Queue-observation migration bootstrap includes enabled logical profiles and queue history,
+without a legacy status predicate. Sender feedback derives busy from unexpired active
+claims; only a fresh successful OS enumeration proving no live holder permits an
+offline advisory. Probe errors and ambiguous holders remain unknown. Busy feedback
+is out-of-band (no queue INSERT or status_detail copy).
+Mention lookup caches logical enabled membership, never DB liveness; a NULL historical status cannot make an enrolled target unknown.
+Receive routing, including Discord direct mentions, obtains the target runtime
+from fresh provider observation plus exact logical holder authority. A NULL
+legacy profile runtime is neither a routing denial nor permission to claim;
+unavailable current authority remains blocked at the ordinary claim fence.
+Bot-status keeps logical connector-to-runtime UUID coverage distinct from current
+endpoint authority: missing bindings and uncovered connectors cannot report full
+coverage, even when one runtime endpoint is available.
+Memory-ready fleet inventory selects enabled, non-disabled logical profiles (and
+non-human seats for refresh). It does not filter on legacy DB liveness; each
+selected seat must pass current host observation and logical holder authority,
+with unavailable seats reported explicitly. Absent legacy physical profile
+fields are not drift; historical non-NULL values may remain diagnostic-only.
+CLI status composes runtime, workspace, session and liveness from the same
+current provider authority. It retains logical queue/identity counts and outputs
+unknown/NULL when observation is unavailable; it never recovers a launch path
+from a removed DB field or an old registry file.
+OS enumeration may outlive an unrelated candidate process. Before its seat is
+known, an environment-read failure may be ignored only when a fresh PID listing
+proves that candidate has exited, within the original observation deadline.
+A still-present unreadable process, or any change after holder identification,
+continues to deny observation. No previous observation is reused.
+A process may also own the multi-bot MCP listener. Its current pre-exec
+AGENT_COMMS_PORT (or EXPECTED_BOTS with the server's default 8800) identifies
+that auxiliary listener only. The observer excludes that OS-owned port and
+requires exactly one remaining loopback runtime listener. Unrecognized extra
+listeners, invalid configuration, or a missing runtime socket deny observation;
+MCP configuration never grants a runtime lease or readiness.
+For a bearer-bound multi-bot connection, a queue claim resolves the target bot's
+current holder. The transport process UUID is used only for its own seat.
+Shutdown releases only a lease actually acquired by that process; a listener
+that never acquired authority has no release receipt and performs no revocation.
+The N1 active-seat query also uses enabled logical profiles with a currently
+observed exact runtime endpoint and worker lease. Its version identifies this
+change from persisted idle/busy values; the probe window, retries, channel and
+success/failure calculations are unchanged. Unobserved seats do not become
+active through a historical status or endpoint field.
+Bootstrap carries its freshly validated session into subsequent native MCP
+registration and readback in invocation memory; it does not save the session in
+the profile. Final readiness re-observes this session and verifies mutation
+digests against the current native original plus logical proof; NULL legacy
+profile fields and removed physical receipt metadata never supply readback.
+For a clean enrollment, the sealed invocation's canonical HOME/.codex root is
+its registration admission basis on both DB backends. Readback checks that root
+again; it does not require a copied provider root in PostgreSQL. Existing-seat
+registration stays read-only and requires fresh provider-root observation.
+Rollback retains its exact run, tuple, root and admission-digest fences.
+Workspace enrollment stores an opaque logical workspace ID and its active seat
+binding; the local identity declaration carries that ID. It never derives the ID
+from a path or writes the path to agent_workspaces. Re-enrollment uses the declared
+ID or an explicit --workspace-id and rejects another seat's active binding.
+Identity resolution joins that logical binding and independently verifies the
+current authorized provider at the requested canonical workspace. A copied
+identity file alone is insufficient; verified same-seat relocation is allowed.
+Full-channel smoke classifies runtime availability and endpoint readiness from
+current provider observation and the exact worker lease. Historical runtime or
+endpoint rows cannot make the smoke pass; logical delivery evidence is retained.
+The legacy wake-on-insert adapter retains its bounded notification/SQLite poll
+contract, but resolves a session only from fresh provider observation and an exact
+worker lease after checking logical profile eligibility. A stored tmux session or
+status cannot select the destination. Its real-tmux regression uses harmless owned
+processes and a current lease; it does not start a provider.
+The self-kick pending-count adapter uses the ordinary memory-ready gate before
+reading logical queue counts. SQL liveness and stored physical receipt fields
+cannot admit a kick; its existing bounded deadline and fail-closed count remain.
+The read-only watchdog's current seven-dimension report uses fresh runtime
+endpoint authority and logical queue ownership. Legacy heartbeat/profile readers
+remain explicit historical diagnostics only. Without a fresh memory or Discord
+connectivity probe it reports that evidence as unavailable; persisted liveness
+cannot make a current report healthy. Queue-visibility smoke requires an enabled,
+non-human logical target with no pending work or active claim; it neither requires
+nor starts a TUI. Runtime/session diagnostics are freshly observed when available
+and are not proof of queue processing or trial readiness.
+
+Regression fixtures seed logical identity under the active guard. Tests of live
+provider, endpoint or liveness behavior supply fresh observations at the existing
+OS boundary; historical migration tests retain their pre-cutover seed explicitly. The frozen
+fleet-runtime-v1 canary reader remains a legacy-only contract; it must not admit
+a new logical-only profile as an old physical canary. Its migration regression
+uses pre-cutover history, then installs the guard before queue/ABA assertions.
+
+The integrated local POC candidate retains both [bounded admission](design/aun-bounded-admission.md)
+and seat continuity. Provider and endpoint observations do not replace the immutable
+recipient/policy digest, claim owner/token/expiry, invocation fence or memory-ready gate.
+Source integration is bound by [I2](https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5656920748)
+(raw SHA256 `9eff608923ce62135e63192890dd101c24148e4078b689d3720229bc94f5c676`).
+Shared schema/desired-format application, distinct safe database principals,
+loaded shared daemon/reconciler and same-configuration ordinary QA use require
+separate applied evidence; a native-context fixture or one seat startup cannot close them.
+
 ## 1. プロダクト概要
 
 ### 1.1 名前
@@ -31,6 +205,10 @@ Claude Codeセッション間のエージェント通信を実現する統合プ
 6. **bashが実行できれば、どのLLM CLIでも接続可能**
 7. **PostgreSQLでもSQLiteでも同じCLIコマンドが動く**
 
+SQLite 接続は既存の `busy_timeout=5000` を WAL・外部キーの初期化より先に設定し、
+起動時のロック競合にも同じ待機上限を適用する。上限後のエラーは呼び出し元へ返す。
+readonly 接続では journal mode を変更しない。再試行ループや待機上限の延長は行わない。
+
 ### 1.5 AUN正常化フェーズゲート
 
 AUNの正常化は `docs/design/aun-normalization-roadmap.md` を従属する詳細仕様として扱う。
@@ -38,7 +216,7 @@ identity / runtime / workspace / connector / channel routing / queue /
 state-daemon / audit に関わる変更は、MVP / v1 / v2 のいずれのフェーズゲートを
 進めるのかを明示してから実装する。
 
-正常化MVPは、人間がDiscordやtmuxを見て判断する状態では完了としない。DB正本、
+正常化MVPは、人間がDiscordやtmuxを見て判断する状態では完了としない。永続identity/権限/仕事のDB正本と、現在のOS/process/socket観測、
 deterministic CLI output、CI、provider delivery evidence、audit evidenceにより
 `aun doctor --strict` 相当で機械判定できる状態を完了条件とする。
 
@@ -55,6 +233,28 @@ projection であり、core identity ではない。
 既存のlocal Discord運用はMVPの第一surfaceとして扱う。短期安定化のための修正でも、
 agent identity、runtime、connector、queue claim、lease、audit、secret handling、
 observability が将来のenterprise設計を壊さないことをPR単位で確認する。
+
+### 1.7 Opt-in bounded admission（MVP queue correctness）
+
+明示的に設定した一つの recipient partition について、通常の notify → genuine ID →
+enroll → claim → result → host reply を共通の PostgreSQL admission core で制御する。
+詳細は [aun-bounded-admission.md](design/aun-bounded-admission.md) を従属設計とする。
+既存 lease の期限切れを deny policy として流用しない。policy は sticky deny であり、
+旧 MCP/CLI/consumer の直接 SQL claim/reclaim も DB guard で拒否する。
+
+設定は max_tasks=2、WIP=1、invocation/finalizer/original projection の各 attempt=1。
+返信は論理 message/projection を1件に保ち、同一の保存済み request/delivery ID/nonce で
+物理 Discord POST のみ初回込み最大3回（SDK/fallbackを含む）、失敗後10秒/30秒以上かつ
+Retry-After以上待つ。成功応答後はPOSTせずDB保存だけ復旧する。DB不明時は送信停止。
+同一hostの永続receipt/排他と累積予約が再起動後も上限を保持し、不明・上限到達は
+needs-attentionと一つのsystem_error通知に止める。物理重複はあり得るがタスク再実行は禁止。
+task1 の独立受入後、同じ実効設定で通常送信された task2 を enroll する。
+done/replied は transport 状態であり、Shirube の案件受入やチーム完成ではない。
+通常の非対象 partition と SQLite の既存コマンドは変更しない。
+bounded mode は PostgreSQL と installed guard が必要で、初回 PREPARE は
+transaction_timeout を備える PostgreSQL 17 が必要。非対応時は effect 前に typed error。
+code rollback は guard と HALTED ledger を保持し、queue や claim を消さない。
+実 DB の migration/role/grant/consumer 更新・送信・適用は別の exact owner admission が必要。
 
 ---
 
@@ -554,8 +754,8 @@ npx agent-comms-mcp status   # health endpoint 問合せ
 # 社内 multi-bot 運用（bot-registry.txt 準拠）
 # WEBHOOK_PORT は bot ごとに registry の値を渡す。Issue #248 cycle 1 以降、
 # 暗黙 default の 8789 は撤廃 (CTO bot 衝突源)。env を渡さない場合は
-# server.ts が AUN_WEBHOOK_PORT > WEBHOOK_PORT > free-port detection
-# (8801-8900) の順で解決する。下記は CTO の社内運用例 (port 8889)。
+# 通常の server.ts は OS の port 0 を保持して bind し、実 port を runtime lease に登録する。
+# 既存 AUN_WEBHOOK_PORT / WEBHOOK_PORT は固定割当の権限ではない。下記の数値は旧運用例。
 AGENT_ID='bot-name' DATABASE_URL='postgresql://localhost/agent_comms' \
 WEBHOOK_PORT=8889 DISCORD_BOT_TOKEN='xxx' DISCORD_STATE_DIR='/path/to/state' \
 claude server:agent-comms \

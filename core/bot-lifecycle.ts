@@ -4,6 +4,7 @@ export interface BotLifecycleEntry {
   session?: string | null
   agentId: string
   port?: number | null
+  processId?: number | null
   supervisorType?: string | null
 }
 
@@ -72,7 +73,7 @@ export function evaluateCleanupPort(
   deps: CleanupPortDeps,
 ): CleanupPortEvaluation {
   if (!entry.port || entry.port <= 0) {
-    return { action: 'skip', reason: 'missing_channel_port', pids: [] }
+    return { action: 'skip', reason: 'runtime_endpoint_unavailable', pids: [] }
   }
 
   const supervisorType = normalizedSupervisorType(entry)
@@ -89,10 +90,13 @@ export function evaluateCleanupPort(
 
   const sessionExists = deps.hasTmuxSession(entry.session)
   const pids = deps.getProcessOnPort(entry.port)
+  if (pids.length && (!entry.processId || !pids.includes(String(entry.processId)))) {
+    return {action:'skip',reason:'runtime_endpoint_holder_unverified',pids}
+  }
   if (!sessionExists && pids.length > 0) {
     const gateFailure = endpointLeaseGateFailure(entry, dbRow)
     if (gateFailure) return { action: 'skip', reason: gateFailure, pids }
-    return { action: 'kill', reason: 'tmux_session_absent_with_port_owner', pids }
+    return { action: 'skip', reason: 'live_endpoint_lease_is_not_cleanup_authority', pids }
   }
   if (sessionExists && pids.length > 0) return { action: 'active', reason: 'active_tmux_session', pids }
   if (!sessionExists && pids.length === 0) return { action: 'free', reason: 'tmux_session_absent_port_free', pids }

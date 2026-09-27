@@ -14,7 +14,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -29,6 +29,7 @@ afterAll(async () => {
 })
 beforeEach(async () => {
   await cleanAll(pg)
+  enableNativeRuntimeFixtures(pg, '2026-05-18T00:00:00.000Z')
   await pg.query('BEGIN')
 })
 afterEach(async () => {
@@ -44,6 +45,8 @@ function daemon(
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const d = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux: new FakeTmux(),
@@ -67,7 +70,7 @@ async function seedPendingRow(agent: string) {
     status: 'pending',
     message_id: '22222222-2222-4222-8222-222222222222',
     payload: JSON.stringify({ author_id: 'codex-cto', content: 'do work', message_type: 'instruction' }),
-    created_at: new Date('2026-05-18T00:00:00.000Z'),
+    created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
   })
 }
 
@@ -78,17 +81,17 @@ function pendingEvent(id: string | number, agent: string) {
 describe('bounded wake invocation (issue #940: no row loops forever, none is parked silently)', () => {
   test('a pending row is invoked at most N times, then transitions to typed failed with one alert', async () => {
     const agent = makeAgentId('wake-bound')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedPendingRow(agent)
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner, { wakeInvocationMaxAttempts: 3 })
     await h.daemon.start()
     try {
@@ -128,16 +131,16 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('typed-failed rows are a queue-doctor blocker until repaired', async () => {
     const agent = makeAgentId('wake-doctor')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedPendingRow(agent)
     await pg.query(
@@ -152,16 +155,16 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     expect(blocker).toBeDefined()
     expect(blocker?.severity).toBe('blocker')
     expect(blocker?.count).toBeGreaterThanOrEqual(1)
-  })
+  }, 60000)
 
   test('fetchBotStatusFromDb carries typed_failed_count from the DB to the readiness row', async () => {
     const agent = makeAgentId('wake-botstatus')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedPendingRow(agent)
     await pg.query(
@@ -175,21 +178,21 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     const row = statusMap.get(agent)
     expect(row).toBeDefined()
     expect(row?.typed_failed_count).toBe(1)
-  })
+  }, 60000)
 
   test('requeue-failed reopens the row with a fresh attempt budget', async () => {
     const agent = makeAgentId('wake-requeue')
-    await seedAgent(pg, {
+    await seedAgent(pg, { observed_provider: 'codex',
       agent_id: agent,
       runtime: 'codex',
       tmux_session: null,
       status: 'online',
-      last_seen_at: '2026-05-18T00:00:01.000Z',
+      last_seen_at: fixtureDate(pg, '2026-05-18T00:00:01.000Z'),
     })
     const id = await seedPendingRow(agent)
 
     const runner = new FakeCodexRunner()
-    const clock = new FakeClock('2026-05-18T00:00:01.000Z')
+    const clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:01.000Z'))
     const h = daemon(clock, runner, { wakeInvocationMaxAttempts: 1 })
     await h.daemon.start()
     try {
@@ -223,5 +226,5 @@ describe('bounded wake invocation (issue #940: no row loops forever, none is par
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

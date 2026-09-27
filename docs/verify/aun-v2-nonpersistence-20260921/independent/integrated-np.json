@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "tests/contract/test_runtime_nonpersist_native.test.ts",
+    "tests/contract/test_runtime_nonpersist_authority.test.ts",
+    "tests/contract/test_runtime_nonpersist_cleanup.test.ts",
+    "tests/contract/test_runtime_nonpersist_durable_fields.test.ts",
+    "tests/contract/test_runtime_nonpersist_bootstrap.test.ts",
+    "tests/contract/test_runtime_nonpersist_daemon.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "d2352d212fe6466ef4e82632ed28c1e2e8bccb106819ec4f914f6c01835ecf48",
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "68c013aab25966e3648cbaa12ac65a29f6c46270bacbf4dde2c201114a576ba1",
+  "started_at": "2026-09-21T05:56:25.446915+00:00",
+  "ended_at": "2026-09-21T05:56:59.076035+00:00",
+  "exit_code": 0,
+  "log_sha256": "8d67e4c6a68215cdb57475501695bfb1fee5e4e4e496835c117a5951ce919348"
+}

@@ -165,11 +165,8 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
 
     await client.query(`DELETE FROM agents WHERE agent_id LIKE '__norm021_roundtrip_%'`)
     await client.query(
-      `INSERT INTO agents (
-         agent_id, display_name, agent_type, runtime,
-         expected_provider_identity, profile_enabled, profile_revision, profile_source
-       )
-       VALUES ($1, $1, 'dev', 'codex', NULL, NULL, NULL, '')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type, expected_provider_identity, profile_enabled, profile_revision, profile_source)
+       VALUES ($1, $1, 'dev', NULL, NULL, NULL, '')`,
       ['__norm021_roundtrip_up__'],
     )
     const upRow = await client.query(
@@ -193,8 +190,8 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(downFunction.rows[0].body).not.toContain('profile_enabled')
 
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime)
-       VALUES ($1, $1, 'dev', 'codex')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev')`,
       ['__norm021_roundtrip_down__'],
     )
 
@@ -208,11 +205,8 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
     expect(reUpFunction.rows[0].body).toContain('profile_enabled')
 
     await client.query(
-      `INSERT INTO agents (
-         agent_id, display_name, agent_type, runtime,
-         expected_provider_identity, profile_enabled, profile_revision, profile_source
-       )
-       VALUES ($1, $1, 'dev', 'codex', NULL, NULL, 0, '')`,
+      `INSERT INTO agents (agent_id, display_name, agent_type, expected_provider_identity, profile_enabled, profile_revision, profile_source)
+       VALUES ($1, $1, 'dev', NULL, NULL, 0, '')`,
       ['__norm021_roundtrip_reup__'],
     )
     const reUpRow = await client.query(
@@ -239,11 +233,8 @@ dbDescribe('Issue #278 §G-2 case 16 — paired migrations are reversible + idem
 
     await client.query(`DELETE FROM agents WHERE agent_id LIKE '__ui_identity_roundtrip_%'`)
     await client.query(
-      `INSERT INTO agents (
-         agent_id, display_name, agent_type, runtime,
-         metadata, ui_id, ui_handle, profile_enabled
-       )
-       VALUES ($1, $1, 'dev', 'codex', $2::jsonb, NULL, '', true)`,
+      `INSERT INTO agents (agent_id, display_name, agent_type, metadata, ui_id, ui_handle, profile_enabled)
+       VALUES ($1, $1, 'dev', $2::jsonb, NULL, '', true)`,
       ['__ui_identity_roundtrip_up__', JSON.stringify({ replaces: 'lead-ui-roundtrip' })],
     )
     const upRow = await client.query(

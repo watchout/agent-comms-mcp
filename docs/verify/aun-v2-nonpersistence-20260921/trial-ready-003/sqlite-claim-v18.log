@@ -1,0 +1,23 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:
+109 |     const claim=await claimUnboundedRuntimeQueue(db,{agentId:agent,queueId:row.id,ttlSeconds:120})
+110 |     await db.query('COMMIT')
+111 |     expect(claim.claimed_runtime_instance_id).toBe(host.runtimeId)
+112 |     const adapter:LlmRuntimeAdapter={runtime_id:'private-sqlite-recorder',capabilities:{input:'stdin_prompt',output:'schema_json',supportsBareMode:false,supportsResume:false,supportsToolAllowlist:false,supportsSandbox:false,supportsUsageMetadata:false},
+113 |       async invoke(){return {schema_version:'queue_work_result_v1',ok:true,summary:'done',next_action:'close'}}}
+114 |     expect((await runReceivedQueueWork(db,{queueId:row.id,adapter,runtimeInstanceId:host.runtimeId})).code).toBe('DONE')
+                                                                                                                  ^
+error: expect(received).toBe(expected)
+
+Expected: "DONE"
+Received: "CLAIM_OWNERSHIP_LOST"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:114:109)
+(fail) NP02/08 SQLite logical claim SQL and incarnation-bound done/finalize use the normal adapter [1823.97ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [1.90s]

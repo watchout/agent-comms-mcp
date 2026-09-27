@@ -1,0 +1,212 @@
+bun test v1.3.11 (af24e281)
+
+tests/agent-status-lifecycle.test.ts:
+(pass) agent status lifecycle — NP03 observation boundary > heartbeat preserves historical status and last-seen without issuing a writer [1.69ms]
+(pass) agent status lifecycle — NP03 observation boundary > shutdown does not infer permission to write offline from saved liveness [0.09ms]
+(pass) agent status lifecycle — NP03 observation boundary > runtime stop compatibility helper cannot rewrite runtime or profile history [0.07ms]
+
+tests/inbox-cursor-db-persist.test.ts:
+agent-comms: startup self-reclaim — 2 orphaned claims rolled back to 'pending' for test-bot
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 1 — reclaimSelfOrphanedClaims rolls own read claims back to pending [10.89ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 2 — reclaimSelfOrphanedClaims leaves other agents alone [8.34ms]
+agent-comms: periodic self-reclaim — 1 expired claims for test-bot → 'pending'
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 3 — startSelfReclaimSweeper reclaims only expired claims [125.66ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 4 — agents.inbox_cursor_{at,id} round-trips through DB [4.67ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 5 — pending rows are NOT reclaimed (predicate guards status=read) [4.05ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for test-bot
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 6 — reclaim is idempotent (second invocation reclaims 0) [4.04ms]
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /tmp/inbox-cursor-migrate-83234-1789992373504-8zyv53ne7p6.db
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 4 — SQLite migration executes and adds inbox_cursor columns [33.58ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 8 — next cursor advance writes composite (at, id) from agent_messages [3.66ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 9 — next cursor advance is no-op when agent_messages row is missing [3.91ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 7 — server.ts wires startup self-reclaim + periodic sweeper, paired migration files exist [3.77ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 10 — startup order: reclaim awaited before claim-ttl sweeper [3.60ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for me
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 11 — reclaim leaves historical status intact when no claims remain [3.48ms]
+agent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for me
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 12 — reclaim preserves historical status and the other current claim [3.52ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 13 — persistInboxCursorToDb is monotonic (older write is no-op) [3.70ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 14 — reclaimSelfOrphanedClaims throws on DB error (fail-closed) [3.37ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 16 — inbox → next → inbox sequence does not replay (cache + DB stay in sync) [7.67ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 17 — startup DB unavailable throws (fail-closed) [3.71ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 18 — persistInboxCursorToDb cache invariant: DB write success implies stored cursor matches input [3.64ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 19 — persistInboxCursorToDb throws when DB query throws (cache untouched) [4.12ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 20 — persistInboxCursorToDb returns updated:false when monotonic guard rejects [3.25ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 21 — fetchNewMessages does not pre-emptively assign inboxCursor (source pin) [3.27ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 22 — loadInboxCursorFromDb throws on DB SELECT error (no swallow) [4.12ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 23 — load wrapper throws on tryGetDb null (fail-closed contract) [2.93ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 24 — persist wrapper throws on tryGetDb null (fail-closed contract) [3.38ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 25 — load Core null (row absent) → wrapper latches with cursor null [3.24ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 26 — db/migrate.ts PG canonical schema declares inbox_cursor columns [3.74ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 27 — fetchNewMessages throws on tryGetDb null (no silent empty return) [4.20ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 28 — reclaim does not attempt a physical status synchronization query [4.04ms]
+agent-comms: periodic self-reclaim FAILED for me: simulated periodic self-reclaim failure
+agent-comms: periodic self-reclaim FAILED for me: simulated periodic self-reclaim failure
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 29 — startSelfReclaimSweeper invokes onError on query failure (fail-closed) [85.94ms]
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+agent-comms: claim ttl sweep FAILED: simulated claim-ttl sweep failure
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 30 — startClaimTtlSweeper invokes onError on query failure (fail-closed) [87.60ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 31 — per-agent cursor isolation across two bots (no cross-contamination) [6.90ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 32 — multi-bot recovery wiring + claim-TTL selfAgentIds protects every hosted bot [8.39ms]
+(pass) Issue #287 — DB-persisted inbox cursor + self-reclaim > case 33 — shared claim-TTL sweep clears claim metadata while preserving historical status [5.24ms]
+
+tests/inbox-cursor.test.ts:
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 1. UUID v4 lex ordering is not time-monotonic (concrete pair)
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 2. first call with no cursor — no cursor predicate in WHERE, returns rows + advances cursor [0.68ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 3. subsequent call emits row-value comparison predicate with (created_at, id) [0.19ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 4. #179 regression guard — new row with lex-smaller UUID + later created_at is NOT dropped [0.04ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 5. empty result preserves cursor (no advance, no skip on retry) [0.17ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 6. same-ms created_at — UUID tiebreaker advances past the larger-id row (mock-level ms case) [0.09ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 7. ORDER BY created_at ASC, id ASC is in the SELECT (monotonic delivery) [0.07ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 8. cursor advance handles ISO string created_at (DB driver returning text) [0.06ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 9. SELECT adds created_at::text AS created_at_text (cycle 3 µs-precision companion) [0.07ms]
+(pass) fetchNewMessages — composite cursor semantics (Issue #179) > 10. cursor prefers created_at_text over JS Date (µs-precision preserved) [0.06ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_43caee5b0f924deb8e3dbcfebe10a407","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) fetchNewMessages — DB integration (Issue #179) > composite cursor does not drop a lex-smaller UUID inserted later [214.32ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_3af8bef4a6814ac29fefd695cfd13e5e","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) fetchNewMessages — DB integration (Issue #179) > µs-precision round-trip — insert→fetch1→fetch2 empty (cycle 3 regression guard) [178.64ms]
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_b0ceb386abce41089e5f20dc6f29efdb","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"NP11-command-failure","command":"/Users/yuji/.bun/bin/bun","args":["cli/index.ts","agent","profile","get","boot-d3667452-56f8-42ae-87f0-722a85f3a747"],"stdout":"","stderr":"Error [AGENT_NOT_FOUND]: boot-d3667452-56f8-42ae-87f0-722a85f3a747\n"}
+{"case":"NP11-AC-CFG-3","b3":1,"b3_idempotent":1,"compatible_release_head":"0ee04fd51d2de6a9f2903bc603b5e290b49bfa3b","ready":1,"idempotent_ready":2,"missing_runtime_ready_denied":1,"observation_table_accesses":0,"starts":2,"stops":2,"restarts":1,"recovered_claims":1,"provider_invocations":0,"external_sends":0,"stderr":["agent-comms: bridge listening on http://127.0.0.1:55045\nagent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\nagent-comms: queue ttl sweeper started (interval=300000ms, ttl=24h)\nagent-comms: agent 'boot-d3667452-56f8-42ae-87f0-722a85f3a747' registered with logical identity\nagent-comms: startup self-reclaim complete (0 rows for boot-d3667452-56f8-42ae-87f0-722a85f3a747)\nagent-comms: self-reclaim sweeper started for boot-d3667452-56f8-42ae-87f0-722a85f3a747 (interval=60000ms)\nagent-comms: claim ttl sweeper started (interval=300000ms, selfAgentIds=[boot-d3667452-56f8-42ae-87f0-722a85f3a747])\nagent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\nagent-comms: PollingDriver started (poll=3000ms, heartbeat=30000ms)\n","agent-comms: bridge listening on http://127.0.0.1:55048\nagent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\nagent-comms: queue ttl sweeper started (interval=300000ms, ttl=24h)\nagent-comms: agent 'boot-d3667452-56f8-42ae-87f0-722a85f3a747' registered with logical identity\nagent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for boot-d3667452-56f8-42ae-87f0-722a85f3a747\nagent-comms: startup self-reclaim complete (1 rows for boot-d3667452-56f8-42ae-87f0-722a85f3a747)\nagent-comms: self-reclaim sweeper started for boot-d3667452-56f8-42ae-87f0-722a85f3a747 (interval=60000ms)\nagent-comms: claim ttl sweeper started (interval=300000ms, selfAgentIds=[boot-d3667452-56f8-42ae-87f0-722a85f3a747])\nDeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.\n      at <anonymous> (internal:util/deprecate:11:28)\n      at deprecated (internal:util/deprecate:20:29)\n      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:691:7)\n      at selectExpiredClaimAgents (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/claim-ttl.ts:160:27)\n      at sweepExpiredClaims (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/claim-ttl.ts:84:26)\n      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/claim-ttl.ts:190:31)\n\nagent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\nagent-comms: PollingDriver started (poll=3000ms, heartbeat=30000ms)\n"]}
+(pass) NP11/AC-CFG-3 compatible B3 profile → managed start → fresh READY/idempotent READY → restart and claim recovery with no physical writes [5170.43ms]
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-90hOPE/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [4665.57ms]
+(pass) NP07 real native absent original cannot produce a receipt [587.20ms]
+(pass) NP07 real native pending original cannot produce a receipt [766.90ms]
+
+tests/contract/test_runtime_nonpersist_authority.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_2def929206ab479f825aadb1894f3d86","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease [2604.33ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_1e21a7db9a26413fba3f33e253be17c3","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 lease-write failure rolls back the new logical anchor; only the owned socket remains [1315.66ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_c89fb3d102e140ac8e193c420f2147f0","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04 fence replacement during observation and holder change after SQL both deny endpoint resolution [1513.92ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_4bb766d3f0b3473e82c1607910921ebb","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04 SQL-time expiry advances during a transaction and delayed renewal has no effect [1737.25ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_9ffb9a32ecdd4b6bbdf370e29b21cd58","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04/06 inventory uses fresh host fields; release requires the acquisition fence and cannot resurrect the old UUID [2349.08ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_82ece38c25bd47bcbd471ead01068397","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04 valid UUID replay in a different actual process/workspace denies resolve, admission and renewal with the old lease surviving [2846.10ms]
+(pass) NP02/04 SQLite ordinary acquisition, renewal and release use the same physical-free authority contract [2015.82ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.10ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.05ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07 permitted metadata keys reject paths, malformed digests and incomplete logical proof [0.07ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.08ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.27ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.14ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1022.81ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [789.00ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.11ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [2.20ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.40ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.05ms]
+
+tests/contract/test_runtime_nonpersist_profile.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_93637f8c25384fd4a11e4b27d8d5fb00","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 postgres ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [749.64ms]
+(pass) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [599.31ms]
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_c91d06aac6ca4428a2589caac162e19e","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4127.40ms]
+
+tests/contract/test_runtime_nonpersist_s0_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_87e90d34380e4248a2b605031a9e1af9","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-1","selected":2,"build_mismatch_denied":1,"physical_reads":0,"provider_invocations":0}
+(pass) AC-S0-1 native selection uses logical build + lease + real socket; physical history is never queried [795.14ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_8b4442c00925457e9ed51ddd2fc194a1","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-2","admitted":1,"expire_denied":1,"fence_denied":1,"replacement_denied":1,"denied_dispatches":0,"provider_invocations":0}
+(pass) AC-S0-2 expire, changed fence and actual replacement deny S0 dispatch with no history fallback [580.87ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_62acef2fbbe844cab4475c5ad15b2d67","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-S0-3","provider_free_positive":1,"missing_marker_denied":1,"provider_names_generated":0,"provider_invocations":0}
+(pass) AC-S0-3 plain Bun needs no provider identity; missing logical marker never invents one [479.27ms]
+
+tests/contract/test_runtime_nonpersist_durable_fields.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_d00c974151554336a91e711987a1a310","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP01/10 postgres typed logical columns reject an observation hidden in an allowed key [167.41ms]
+(pass) NP01/10 sqlite typed logical columns reject an observation hidden in an allowed key [65.49ms]
+(pass) NP01 machine-field serializer rejects before SQL without altering original operator text [0.18ms]
+
+tests/contract/test_runtime_nonpersist_bootstrap.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-bootstrap-ETDMcc/aun.db
+(pass) NP01/07 B5 creates sealed and ordinary native readiness from a NULL physical anchor and preserves the seat [4334.94ms]
+
+tests/contract/test_runtime_nonpersist_daemon.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_c32265817dd143baa5552c7a19d7c593","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP02/04/08 daemon eligibility and claim renewal work with NULL physical rows and reject a changed fence [2538.51ms]
+
+tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_be1b4ef6bba2401a8a8e8f12ef3eb86a","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-1","hostname_in_candidate":0,"host_columns":0,"forbidden_host_denied":1}
+(pass) AC-CFG-1 fresh hostname stays outside candidate, logical scopes and durable records; supplied host is rejected [1406.87ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_4852c472c9674819a2896b97deef5fa9","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-2","applies":1,"fresh_readbacks":2,"delivered":1,"observation_table_accesses":0,"stale_completions":0}
+(pass) AC-CFG-2 ordinary reconcile delivers existing outbox with logical audit and no observation sink; stale fence cannot deliver [1386.46ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_92f5eeb8e9af4da597dc3de61d8eb885","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-4","logical_insert":1,"authenticated_claim":1,"ownerless_denied":1,"rollback_mismatch_denied":1,"duplicate_execution_denied":1,"expired_denied":1,"physical_denied":4,"restarts":0}
+(pass) AC-CFG-4 logical restart insert and authenticated one-shot execution pass; physical fields, ownerless and expired execution fail [201.74ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_f6101aa0d3a144b490e7bc96df9f3caa","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-5","submitted":2,"durable_requests":1,"foreign_holder_denied":1,"wrong_fence_denied":1,"idempotent_migration":1}
+(pass) AC-CFG-5 duplicate logical restart requests converge; a stale holder cannot create another request [192.41ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_44f92f8e711341a79d793d35efa1219f","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"restart-migration","kind":"postgres","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 postgres preserves existing request history, rejects duplicate migration and physical rewrites [189.45ms]
+{"case":"restart-migration","kind":"sqlite","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 sqlite preserves existing request history, rejects duplicate migration and physical rewrites [1.33ms]
+
+tests/contract/test_runtime_nonpersist_entrypoint.test.ts:
+(pass) NP04 managed pre-exec entry supplies a new UUID and exact identity on every actual child launch [48.44ms]
+
+tests/contract/test_runtime_observation_nonpersistence_db.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_ae47d1ee31634041b87e8ff51d503b5d","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"legacy-preservation","kind":"postgres","before_sha256":"372d23369de7173798b8264d42d332c18d5d5ccd3a36cfa816e3c57e79e05001","after_sha256":"372d23369de7173798b8264d42d332c18d5d5ccd3a36cfa816e3c57e79e05001","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+(pass) postgres runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [189.94ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_f12681c0e2304855bd3b4cd0933ef8dc","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"guards-and-null-anchor","kind":"postgres","rejected_cases":15,"logical_audit_event_and_owner_content":"PRESERVED"}
+(pass) postgres runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [201.63ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_c09cb5ddcd6b409ca2b7b80ff47f74c2","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"rollback","kind":"postgres","before_sha256":"1bcc7ab1538b22f150d14cefa55be3c99decea463779fe23939bdbd7420fc042","after_sha256":"1bcc7ab1538b22f150d14cefa55be3c99decea463779fe23939bdbd7420fc042","schema_restored":true}
+(pass) postgres runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [184.53ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_032627493df042769f9b05d8867fc600","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) postgres runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [178.34ms]
+{"case":"legacy-preservation","kind":"sqlite","before_sha256":"536eb6a34b731279859c2fc5636a3993907ecaad7b6134067d074122b5a2e93c","after_sha256":"536eb6a34b731279859c2fc5636a3993907ecaad7b6134067d074122b5a2e93c","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+(pass) sqlite runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [77.56ms]
+{"case":"guards-and-null-anchor","kind":"sqlite","rejected_cases":15,"logical_audit_event_and_owner_content":"PRESERVED"}
+(pass) sqlite runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [75.45ms]
+{"case":"rollback","kind":"sqlite","before_sha256":"c4ef388c50994bc5554d8c6fdc3980d0d33c3f74b255d8532420c9c5c3dcab92","after_sha256":"c4ef388c50994bc5554d8c6fdc3980d0d33c3f74b255d8532420c9c5c3dcab92","schema_restored":true}
+(pass) sqlite runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [72.75ms]
+(pass) sqlite runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [58.14ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_4b3b7d2f2c554e9bb63757d039e409d5","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) PostgreSQL old physical-writing rollback is explicitly refused [174.86ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_97893c455085405a90a6126672aef90f","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) desired-state trigger cannot recopy physical values; stable policy still advances once [181.67ms]
+
+tests/contract/test_runtime_nonpersist_cleanup.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_ae539c7f6f9149619da8e39796992a01","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04/08 cleanup denies unknown work, changed PID start, active lease and DB failure before any kill [1653.82ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_07302ed8bdf44a008993cc843a7df861","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP04/08 cleanup plan binds process start; expired holder stops exactly once without physical persistence [1549.43ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_fc38ab1d967d45a3859c7b2962882bd4","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP08 orphan kill-only and observation timeout never authorize an unbound process [945.26ms]
+
+tests/contract/test_runtime_nonpersist_claim_cycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_84ba503c79ec45359e75f2e4160d405f","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"ordinary-claim-incarnation-cycle","recorded_invocations":4,"provider_invocations":0,"external_sends":0,"successful_claims":5,"replacement_denials":3,"claim_race_denials":1}
+(pass) NP02/08 receive new claim → refresh → done → finalize binds the actual incarnation; replacement cannot execute or finish old work [8033.17ms]
+(pass) NP02/08 SQLite logical claim SQL and incarnation-bound done/finalize use the normal adapter [2243.17ms]
+
+ 104 pass
+ 0 fail
+ 699 expect() calls
+Ran 104 tests across 18 files. [62.05s]

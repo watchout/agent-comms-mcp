@@ -1,0 +1,30 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [1.01ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.13ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.44ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.15ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.50ms]
+(pass) NP implementation: observation and durable boundaries > NP11: compatibility is explicit and is not inferred from F522 or an evidence-free version string [0.24ms]
+76 |   })
+77 |   test('NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot',async()=>{
+78 |     const f=await nonpersistHostFixture()
+79 |     try {
+80 |       const first=inspectHostRuntime({agentId:f.agentId,runtimeInstanceId:f.runtimeId,logicalWorkspace:f.dir})
+81 |       expect(first.reasonCode).toBe('OBSERVED')
+                                    ^
+error: expect(received).toBe(expected)
+
+Expected: "OBSERVED"
+Received: "RUNTIME_IDENTITY_INCOMPLETE"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence.test.ts:81:32)
+(fail) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [925.64ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [776.26ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.16ms]
+
+ 8 pass
+ 1 fail
+ 31 expect() calls
+Ran 9 tests across 1 file. [1.72s]

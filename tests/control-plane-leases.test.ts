@@ -34,10 +34,8 @@ async function withLeaseDb<T>(
       'lease-channel',
       'Lease Channel',
     )
-    seed.prepare("INSERT INTO agent_runtime_instances (agent_id, runtime_engine, status) VALUES (?, ?, ?)").run(
+    seed.prepare("INSERT INTO agent_runtime_instances (agent_id) VALUES (?)").run(
       'lease-bot',
-      'codex',
-      'active',
     )
     const runtime = seed.prepare(
       "SELECT runtime_instance_id FROM agent_runtime_instances WHERE agent_id = ? ORDER BY started_at DESC LIMIT 1",

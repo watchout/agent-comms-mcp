@@ -121,7 +121,7 @@ export function commandHasForbiddenAgentCommsDisable(command: string): boolean {
 }
 
 function isCodexCommand(command: string): boolean {
-  return /(^|\s)codex(\s|$)/.test(command)
+  return /(^|\s)['"]?(?:[^\s'"]*\/)?codex['"]?(\s|$)/.test(command)
 }
 
 function finding(

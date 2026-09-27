@@ -6,6 +6,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
+import { createReadyNativeRuntime, stopNativeFixtures } from '../helpers/seat-native-runtime-fixture'
 import { renderAckContent, resolveCodexExecutable, resolveNestedBunExecutable } from '../../bin/aun/codex-runner'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -125,7 +126,7 @@ function seedTypedPending(opts: {
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-codex-runner-'))
   dbPath = join(tmpDir, 'test.db')
   env = {
@@ -141,27 +142,21 @@ beforeEach(() => {
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   dbExec(`
-    INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, home_directory)
-      VALUES ('codex-aun', 'codex-aun', 'dev', 'codex', 'idle', '{"discord_id":"999010","tmux_session":"codex-aun-session"}', '/tmp/codex-aun'),
-             ('codex-cto', 'codex-cto', 'cto', 'codex', 'idle', '{"discord_id":"999011"}', NULL);
-    UPDATE agents SET channel_port = 39002 WHERE agent_id = 'codex-aun';
-    INSERT INTO agent_runtime_instances
-      (runtime_instance_id, agent_id, runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha, status, started_at, last_seen_at)
-      VALUES ('runtime-codex-aun', 'codex-aun', 'codex', 'local_process', 'codex-aun-session', 39002, '/tmp/codex-aun', 'test-head', 'running', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 second'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-    INSERT INTO runtime_memory_ready_evidence
-      (agent_id, project, runtime_instance_id, profile_revision, profile_source, session_name, port, expected_agent_id,
-       checkout_path, checkout_commit_sha, recovery_command, result_status, completed_at, evidence_path, evidence_log_id, valid_until, source, metadata)
-      VALUES ('codex-aun', 'agent-comms-mcp', 'runtime-codex-aun', 1, 'legacy', 'codex-aun-session', 39002, 'codex-aun',
-       '/tmp/codex-aun', 'test-head', 'test:mcp__wasurezu__recover_context', 'ready', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-       '/tmp/codex-aun-memory-ready.json', 'sqlite-codex-aun-memory-ready', '2099-01-01T00:00:00.000Z', 'agent_memory_boot_recovery', '{}');
+    INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+      VALUES ('codex-aun', 'codex-aun', 'dev', '{"discord_id":"999010"}'),
+             ('codex-cto', 'codex-cto', 'cto', '{"discord_id":"999011"}');
     INSERT INTO channels (id, name, members)
       VALUES ('runner-ch', 'runner-ch', '["codex-aun","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('runner-ch', '["codex-aun","codex-cto"]', 'aun-codex-runner-test');
   `)
+  const native = await createReadyNativeRuntime(dbPath,tmpDir,'codex-aun',randomUUID())
+  env.PATH = native.cliPath + ':' + env.PATH
+  env.AGENT_COMMS_MEMORY_READY_PROJECT='agent-comms-mcp'
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await stopNativeFixtures()
   rmSync(tmpDir, { recursive: true, force: true })
 })
 

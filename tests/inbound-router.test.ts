@@ -159,24 +159,24 @@ describe('Inbound Router — DB Integration', () => {
 
       // Setup CEO agent (human type with discord_id)
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, metadata)
-         VALUES ($1, $1, 'discord', 'default', 'online', 'human', $2)
+        `INSERT INTO agents (agent_id, display_name, org_id, agent_type, metadata)
+         VALUES ($1, $1, 'default', 'human', $2)
          ON CONFLICT (agent_id) DO UPDATE SET agent_type = 'human', metadata = $2`,
         [CEO_AGENT, JSON.stringify({ discord_id: CEO_DISCORD_ID })]
       )
 
       // Setup test bot agent
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, active_thread)
-         VALUES ($1, $1, 'claude-code', 'default', 'online', 'bot', NULL)
+        `INSERT INTO agents (agent_id, display_name, org_id, agent_type, active_thread)
+         VALUES ($1, $1, 'default', 'bot', NULL)
          ON CONFLICT (agent_id) DO UPDATE SET active_thread = NULL, agent_type = 'bot'`,
         [TEST_AGENT]
       )
 
       // Setup non-member agent
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type)
-         VALUES ($1, $1, 'claude-code', 'default', 'online', 'bot')
+        `INSERT INTO agents (agent_id, display_name, org_id, agent_type)
+         VALUES ($1, $1, 'default', 'bot')
          ON CONFLICT (agent_id) DO NOTHING`,
         [NON_MEMBER_AGENT]
       )
@@ -396,8 +396,8 @@ describe('ADR-040 D7 — isHumanAgent / mention resolver type unification', () =
       await client.connect()
 
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, metadata)
-         VALUES ($1, $1, 'discord', 'default', 'online', 'human', $2::jsonb)
+        `INSERT INTO agents (agent_id, display_name, org_id, agent_type, metadata)
+         VALUES ($1, $1, 'default', 'human', $2::jsonb)
          ON CONFLICT (agent_id) DO UPDATE SET agent_type = 'human', metadata = $2::jsonb`,
         [TEST_HUMAN_AGENT, JSON.stringify({ discord_id: TEST_HUMAN_DISCORD })]
       )
@@ -487,10 +487,10 @@ describe('registerAgent — metadata merge (ADR-040 D8)', () => {
     // The DO UPDATE branch must merge old metadata with new, not replace it.
     // Without this, every bot restart wipes DB-only keys (e.g. discord_id
     // self-registered by D1) when the bot's local config has no metadata.
-    expect(body).toContain("metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)")
+    expect(body).toContain("metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)")
     // The INSERT branch must coerce NULL config to '{}'::jsonb so the column
     // never starts as NULL (otherwise the merge on a later restart is a no-op).
-    expect(body).toContain("COALESCE($5::jsonb, '{}'::jsonb)")
+    expect(body).toContain("COALESCE($4::jsonb, '{}'::jsonb)")
   })
 
   test('DB integration: existing discord_id survives a config-without-metadata UPSERT', async () => {
@@ -504,8 +504,8 @@ describe('registerAgent — metadata merge (ADR-040 D8)', () => {
       // Step 1: insert agent with discord_id (simulates a prior D1 self-registration
       // or the manual emergency patch we shipped on 2026-04-08)
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, runtime, org_id, status, agent_type, metadata)
-         VALUES ($1, $1, 'claude-code', 'default', 'online', 'dev', $2::jsonb)
+        `INSERT INTO agents (agent_id, display_name, org_id, agent_type, metadata)
+         VALUES ($1, $1, 'default', 'dev', $2::jsonb)
          ON CONFLICT (agent_id) DO UPDATE SET metadata = $2::jsonb`,
         [TEST_AGENT_ID, JSON.stringify({ discord_id: 'discord-1234567890' })]
       )
@@ -514,13 +514,12 @@ describe('registerAgent — metadata merge (ADR-040 D8)', () => {
       // (the bug case: bot's local config has no `metadata` block).
       // Use the SAME SQL shape as server.ts so the test fails if the source ever regresses.
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-         VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
          ON CONFLICT (agent_id) DO UPDATE SET
-           display_name = $2, agent_type = $3, runtime = $4,
-           status = 'online', last_seen_at = now(),
-           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
-        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', 'claude-code', null]
+           display_name = $2, agent_type = $3,
+           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)`,
+        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', null]
       )
 
       // Step 3: discord_id must still be there
@@ -530,26 +529,24 @@ describe('registerAgent — metadata merge (ADR-040 D8)', () => {
 
       // Step 4: a real metadata payload should still override the same key
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-         VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
          ON CONFLICT (agent_id) DO UPDATE SET
-           display_name = $2, agent_type = $3, runtime = $4,
-           status = 'online', last_seen_at = now(),
-           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
-        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', 'claude-code', JSON.stringify({ discord_id: 'discord-overridden' })]
+           display_name = $2, agent_type = $3,
+           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)`,
+        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', JSON.stringify({ discord_id: 'discord-overridden' })]
       )
       const r2 = await client.query("SELECT metadata->>'discord_id' AS discord_id FROM agents WHERE agent_id = $1", [TEST_AGENT_ID])
       expect(r2.rows[0].discord_id).toBe('discord-overridden')
 
       // Step 5: a partial payload (different key) merges, both keys present
       await client.query(
-        `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-         VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
+        `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+         VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
          ON CONFLICT (agent_id) DO UPDATE SET
-           display_name = $2, agent_type = $3, runtime = $4,
-           status = 'online', last_seen_at = now(),
-           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
-        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', 'claude-code', JSON.stringify({ team: 'platform' })]
+           display_name = $2, agent_type = $3,
+           metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)`,
+        [TEST_AGENT_ID, TEST_AGENT_ID, 'dev', JSON.stringify({ team: 'platform' })]
       )
       const r3 = await client.query("SELECT metadata FROM agents WHERE agent_id = $1", [TEST_AGENT_ID])
       const meta = typeof r3.rows[0].metadata === 'string' ? JSON.parse(r3.rows[0].metadata) : r3.rows[0].metadata

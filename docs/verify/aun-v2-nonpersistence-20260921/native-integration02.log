@@ -1,0 +1,23 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/aun.db
+112 |     publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
+113 |   `)
+114 |   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+115 |   nativeHosts.push(child)
+116 |   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+117 |   if(!existsSync(report))throw new Error('native fixture startup timeout: '+readFileSync(join(home,'native-host.err'),'utf8'))
+                                         ^
+error: native fixture startup timeout: dyld[25995]: Library not loaded: @rpath/libnode.141.dylib
+  Referenced from: <08C01B68-B4C2-3C65-9E3F-168E88B062B7> /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/codex
+  Reason: tried: '/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/libnode.141.dylib' (no such file), '/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/../lib/libnode.141.dylib' (no such file), '/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/libnode.141.dylib' (no such file), '/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-f0ZsSm/../lib/libnode.141.dylib' (no such file)
+
+      at nativeHostFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/seat-native-runtime-fixture.ts:117:36)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:20:25)
+(fail) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [10339.46ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [10.41s]

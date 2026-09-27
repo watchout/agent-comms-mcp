@@ -1,0 +1,76 @@
+{
+  "fixture": "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0",
+  "pgdata": "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/pgdata",
+  "socket": "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket",
+  "url": "postgresql://fixture@/aun_np_test?host=/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket",
+  "version": "postgres (PostgreSQL) 17.9 (Homebrew)",
+  "started_at": "2026-09-21T04:45:12.694306+00:00",
+  "env_keys": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "LC_ALL"
+  ],
+  "commands": [
+    {
+      "argv": [
+        "/opt/homebrew/opt/postgresql@17/bin/initdb",
+        "-D",
+        "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/pgdata",
+        "-U",
+        "fixture",
+        "--auth-local=trust",
+        "--auth-host=reject",
+        "--no-locale",
+        "--encoding=UTF8"
+      ],
+      "exit": 0,
+      "stdout": "The files belonging to this database system will be owned by user \"yuji\".\nThis user must also own the server process.\n\nThe database cluster will be initialized with locale \"C\".\nThe default text search configuration will be set to \"english\".\n\nData page checksums are disabled.\n\ncreating directory /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/pgdata ... ok\ncreating subdirectories ... ok\nselecting dynamic shared memory implementation ... posix\nselecting default \"max_connections\" ... 100\nselecting default \"shared_buffers\" ... 128MB\nselecting default time zone ... Asia/Tokyo\ncreating configuration files ... ok\nrunning bootstrap script ... ok\nperforming post-bootstrap initialization ... ok\nsyncing data to disk ... ok\n\nSuccess. You can now start the database server using:\n\n    '/opt/homebrew/opt/postgresql@17/bin/pg_ctl' -D /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/pgdata -l logfile start\n\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+        "-D",
+        "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/pgdata",
+        "-l",
+        "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/postgres.log",
+        "-w",
+        "start"
+      ],
+      "exit": 0,
+      "stdout": "waiting for server to start.... done\nserver started\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "/opt/homebrew/opt/postgresql@17/bin/createdb",
+        "-h",
+        "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket",
+        "-U",
+        "fixture",
+        "aun_np_test"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "/opt/homebrew/opt/postgresql@17/bin/psql",
+        "-h",
+        "/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket",
+        "-U",
+        "fixture",
+        "-d",
+        "aun_np_test",
+        "-Atc",
+        "select current_database(),current_user,current_setting('unix_socket_directories'),current_setting('listen_addresses'),version()"
+      ],
+      "exit": 0,
+      "stdout": "aun_np_test|fixture|/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-pg-x9x9u1j0/socket||PostgreSQL 17.9 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit\n",
+      "stderr": ""
+    }
+  ],
+  "scope": "synthetic DB only; no TCP listener"
+}

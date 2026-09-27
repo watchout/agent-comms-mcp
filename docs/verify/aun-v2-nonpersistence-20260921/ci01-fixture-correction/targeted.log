@@ -1,0 +1,11 @@
+bun test v1.4.2 (744846f84)
+
+tests/shirube-current-overlay-check.test.ts:
+(pass) CI-01 source admission before protected release > workflow keeps fatal source before quality, full after quality, and unchanged auto-merge [23.36ms]
+(pass) CI-01 source admission before protected release > declared workflow delta preserves exact history and refuses undeclared mutations [24.81ms]
+
+ 2 pass
+ 45 filtered out
+ 0 fail
+ 42 expect() calls
+Ran 2 tests across 1 file. [129.00ms]

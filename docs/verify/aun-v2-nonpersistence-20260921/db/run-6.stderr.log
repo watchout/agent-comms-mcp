@@ -1,0 +1,17 @@
+
+tests/contract/test_runtime_observation_nonpersistence_db.test.ts:
+(pass) postgres runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [224.55ms]
+(pass) postgres runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [211.79ms]
+(pass) postgres runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [180.76ms]
+(pass) postgres runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [169.08ms]
+(pass) sqlite runtime observation non-persistence > legacy rows and every runtime FK survive; reapply does not rewrite history; logical work still advances [92.71ms]
+(pass) sqlite runtime observation non-persistence > new logical anchor has NULL physical defaults; old writers and nested/aliased copies reject [78.81ms]
+(pass) sqlite runtime observation non-persistence > injected migration failure rolls back schema, every legacy row and FK [73.64ms]
+(pass) sqlite runtime observation non-persistence > fresh schema accepts a physical-free anchor and preserves ordinary lease metadata [70.46ms]
+(pass) PostgreSQL old physical-writing rollback is explicitly refused [180.98ms]
+(pass) desired-state trigger cannot recopy physical values; stable policy still advances once [184.29ms]
+
+ 10 pass
+ 0 fail
+ 105 expect() calls
+Ran 10 tests across 1 file. [1.50s]

@@ -214,16 +214,18 @@ describe('T4 — `agent-com next` reads from message_queue (Phase 2)', () => {
     // lead-ama's prescribed snippet) and FOR UPDATE SKIP LOCKED appended.
     expect(body).toMatch(/FROM message_queue\s*\n?\s*WHERE status = 'pending' AND agent_id = \$1\s*\n?\s*ORDER BY priority DESC, created_at ASC/)
   })
-  test('marks received + stamps the per-row claim + flips status to busy', () => {
+  test('marks received + stamps the per-row claim with exact runtime authority', () => {
     const body = nextMessageBody()
     // Issue #278 segment 3d — the in-flight pointer lives on the
     // message_queue row (claimed_by + claimed_at + claim_expires_at),
     // not on agents.current_message_id. The agents UPDATE only flips
     // status='busy' now.
-    expect(body).toMatch(/UPDATE message_queue\s*\n?\s*SET status\s*=\s*'received'[\s\S]*?claimed_by\s*=\s*\$1[\s\S]*?claimed_at\s*=\s*now\(\)[\s\S]*?claim_expires_at\s*=\s*\$2/)
-    expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+    expect(body).toContain('claimUnboundedRuntimeQueue')
+    const claim=readFileSync(join(REPO_ROOT,'core/runtime-queue-claim.ts'),'utf8')
+    expect(claim).toMatch(/UPDATE message_queue SET status='received'[\s\S]*claimed_by=\$1[\s\S]*claim_expires_at=\$2/)
+    expect(claim).toContain('claimed_runtime_instance_id=$5::uuid')
+    expect(claim).toContain('l.fencing_token=$7')
+    expect(body).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
     // Negative pin: the legacy single-slot stamp must not coexist.
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*\$1/)
   })
@@ -282,15 +284,13 @@ describe('T5 — `agent-com send` resolves target via per-row claim (Issue #278 
     expect(body).toMatch(/Error \[INVALID_REPLY_TO\]/)
     expect(body).not.toMatch(/Error \[NO_CURRENT_MESSAGE\]/)
   })
-  test('on success, queue mode UPDATEs message_queue to replied + idles the agent', () => {
+  test('on success, queue mode UPDATEs message_queue to replied without a profile status write', () => {
     const body = sendMessageBody()
     expect(body).toMatch(/UPDATE message_queue\s+SET\s+status\s*=\s*'replied',\s*replied_at\s*=\s*now\(\),\s*replied_with/)
     // Issue #278 segment 3d — agents.current_message_id is gone, so the
     // idle-flip UPDATE no longer touches that column. Negative pin
     // catches a refactor that brings the column write back.
-    expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+    expect(body).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
     expect(body).not.toMatch(/UPDATE agents SET current_message_id\s*=\s*NULL/)
   })
   test('on success, queue mode clears claim ownership on terminal replied rows', () => {

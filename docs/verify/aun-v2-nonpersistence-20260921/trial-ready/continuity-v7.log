@@ -1,0 +1,20 @@
+bun test v1.3.11 (af24e281)
+
+tests/seat-runtime-continuity.test.ts:
+(pass) SC1 stable seat provider selection > P01 target ancestry snapshots select either provider despite opposite legacy preference [2.02ms]
+(pass) SC1 stable seat provider selection > live provider root ignores caller context and rejects PID reuse, missing or conflicting evidence [0.90ms]
+(pass) SC1 stable seat provider selection > actual connected memory child must match the current provider and seat; private repaired lookup is insufficient [0.14ms]
+(pass) SC1 stable seat provider selection > P02 unknown, generic MCP, foreign seat, and multiple live owners cannot select [0.13ms]
+(pass) SC1 stable seat provider selection > P03 cold launch requires explicit intent; qualified/stale/profile-only/ambiguous history cannot launch [0.07ms]
+(pass) SC2 held OS endpoint and exact lease resolution > legacy generated port env never requests a fixed listener [0.04ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/seat-endpoint-1QuWa7/fixture.db
+(pass) SC2 held OS endpoint and exact lease resolution > P05-P07 held binds, exact publication, same-seat replacement and foreign/stale denial [32.15ms]
+(pass) SC2 held OS endpoint and exact lease resolution > P06 registration failure closes only its own held socket [1.57ms]
+(pass) native fixture report publication > partial staging bytes are invisible until the actual publisher completes [0.66ms]
+(pass) native fixture report publication > failed partial write or publication never exposes a complete report [0.60ms]
+
+ 10 pass
+ 0 fail
+ 83 expect() calls
+Ran 10 tests across 1 file. [99.00ms]

@@ -41,6 +41,8 @@ export interface StateDaemonConfig {
   wakeInvocationMaxAttempts: number // default 3; typed-fail a row after this many delivery invocations
   /** Exact canary control ref allowed one audited retry-budget extension. */
   queueWorkRecoveryControlRef: string | null
+  /** Immutable policy, not a message-ID fence; slot enrollment is runtime data. */
+  admissionBinding: import('../queue-admission').AdmissionBinding | null
 
   // 補強 #2 subprocess pool
   wakePoolMinCapacity: number       // default 5
@@ -190,6 +192,7 @@ export const DEFAULT_CONFIG: StateDaemonConfig = {
   queueWorkRunnerErrorMaxReclaims: 3,
   wakeInvocationMaxAttempts: 3,
   queueWorkRecoveryControlRef: null,
+  admissionBinding: null,
   wakePoolMinCapacity: 5,
   wakePoolMaxCapacity: 20,
   wakePoolGrowStep: 2,

@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_claim_cycle.test.ts",
+    "--test-name-pattern",
+    "SQLite"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "d9940752723b8ae6d9ec40be1d0b1b9e0c57b608d920ed046d496ed4854ccc5b",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "4b3eac143fe7aa5aacba6890ae4288eeb9360ee96181c412b0568b0f9f1399b5",
+  "started_at": "2026-09-21T10:13:15.406753+00:00",
+  "ended_at": "2026-09-21T10:13:18.131128+00:00",
+  "exit_code": 0,
+  "log_sha256": "72635d85926c5770b444bce25da4b43f0f48d1285d39cc285129bdae3d09d606"
+}

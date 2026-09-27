@@ -1,6 +1,8 @@
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { admissionBindingFromEnv, readAdmissionBinding, validateBoundedTransport, BoundedReceiptStore, currentBoundedOwner } from '../queue-admission'
 import { dirname, join, resolve, sep } from 'node:path'
+import { resolveQueueWorkCodexPermissions } from '../queue-work'
 import {
   SHIRUBE_D1_FLEET_ACTIVATION_REF,
   isExactShirubeD1Fleet,
@@ -559,10 +561,13 @@ export function validateStateDaemonCanaryOverlayEnv(
   }
 
   const subjectDigest = env.STATE_DAEMON_CANARY_OVERLAY_SUBJECT_DIGEST?.trim()
-  if (subjectDigest && subjectDigest !== STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST) {
+  let boundedSubject: string | null = null
+  try { boundedSubject=admissionBindingFromEnv(env)?.configDigest ?? null }
+  catch { issues.push({code:'bounded_admission_config_invalid',message:'Complete immutable admission binding is required.'}) }
+  if (subjectDigest && subjectDigest !== (boundedSubject ?? STATE_DAEMON_DB_SSOT_DESIGN_SUBJECT_DIGEST)) {
     issues.push({
       code: 'state_daemon_canary_overlay_subject_digest_mismatch',
-      message: 'Canary overlay subject digest does not match the admitted Issue #917 DesignPack.',
+      message: boundedSubject ? 'Canary overlay subject digest must match the exact bounded policy configuration.' : 'Canary overlay subject digest does not match the admitted Issue #917 DesignPack.',
     })
   }
 
@@ -732,6 +737,12 @@ export function validateStateDaemonLaunchAgentConfig(
   }
 
   errors.push(...validateShirubeD1LaunchAgentEnv(env))
+  let admissionBinding = null
+  try { admissionBinding = admissionBindingFromEnv(env) }
+  catch { errors.push({ code: 'bounded_admission_config_invalid', message: 'Bounded admission requires the complete immutable policy/source/cohort/runtime tuple, with no per-message fence or retry override.' }) }
+  if (admissionBinding && (env.STATE_DAEMON_QUEUE_WORK_RECOVER_EXPIRED_SCHEDULER_CLAIM === '1' || env.STATE_DAEMON_QUEUE_WORK_RESUME_DONE_FINALIZATION === '1')) {
+    errors.push({ code: 'bounded_admission_retry_forbidden', message: 'Bounded attempts cannot use expired-claim recovery or done-finalizer resume.' })
+  }
   errors.push(...validateAllAgentCommunicationManifestLaunchAgentEnv(env))
   errors.push(...validateStateDaemonCanaryOverlayEnv(env, options.now?.() ?? new Date()).issues)
   errors.push(...validateProviderEffectsZeroActivationConfig(env, {
@@ -908,7 +919,7 @@ export function validateStateDaemonLaunchAgentConfig(
         message: 'Expired scheduler claim recovery requires single-agent, single-queue, non-fleet fencing with a valid created-after timestamp.',
       })
     }
-    if (!fleetMode && fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
+    if (!fleetMode && !admissionBinding && fenceQueueIds.length === 0 && fenceMessageIds.length === 0 && !fenceCreatedAfter) {
       errors.push({
         code: 'queue_work_scheduler_requires_canary_fence',
         message: 'Queue-work scheduler activation must specify a queue-work fence so existing non-terminal rows cannot be processed by a bounded canary.',
@@ -968,6 +979,9 @@ export function validateStateDaemonLaunchAgentConfig(
       })
     }
     if (effectiveRuntime === 'codex-exec') {
+      try { resolveQueueWorkCodexPermissions(env) } catch {
+        errors.push({ code: 'queue_work_codex_permissions_selection_invalid', message: 'Codex permissions selection requires a valid config/permissions profile pair and no explicit sandbox.' })
+      }
       const schemaPath = env.STATE_DAEMON_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
         ?? env.AUN_QUEUE_WORK_CODEX_OUTPUT_SCHEMA
         ?? (workingDirectory ? join(workingDirectory, 'schemas', 'queue-work-result-v1.schema.json') : null)
@@ -1075,6 +1089,42 @@ export async function validateQueueWorkCanaryResiduePreflight(
 ): Promise<QueueWorkCanaryResiduePreflightResult> {
   const errors: StateDaemonPreflightIssue[] = []
   const warnings: StateDaemonPreflightIssue[] = []
+  const admission = admissionBindingFromEnv(env)
+  if (admission) {
+    try {
+      const state = await readAdmissionBinding(db, admission, env.STATE_DAEMON_AGENT_ALLOWLIST)
+      validateBoundedTransport(state.policy.config.transport)
+      // Read-only startup check: never create/repair the separately admitted
+      // host-local durable directory, and never reinterpret its policy pin.
+      const owner=currentBoundedOwner(admission.cohortDigest)
+      if(owner.host!==state.policy.config.transport.host)throw new Error('ADMISSION_OWNER_IDENTITY_MISMATCH')
+      new BoundedReceiptStore(state.policy.config.transport.receipt_dir,owner)
+      const affected = await db.query(`SELECT id FROM public.message_queue WHERE id=ANY($1::bigint[])
+        AND status IN ('received','in_progress','done') UNION ALL SELECT o.id FROM public.outbound_queue o
+        WHERE o.status='claimed' AND o.delivery_diagnostics @> $2::jsonb`, [state.tasks.map(t => t.queue_id),
+        JSON.stringify([{ code:'AUN_BOUNDED_ADMISSION',policy_id:admission.policyId }])])
+      if (affected.rows.length) throw new Error('ADMISSION_AFFECTED_WORK_PRESENT')
+      const restoringOldSource = env.STATE_DAEMON_RESTORE_COMMIT && env.STATE_DAEMON_RESTORE_COMMIT !== admission.sourceSha
+      if (restoringOldSource && (!['HALTED','CLOSED'].includes(state.policy.status)
+        || env.STATE_DAEMON_QUEUE_WORK_SCHEDULER_ENABLED !== '0' || env.STATE_DAEMON_CODEX_RUNNER_ENABLED !== '0')) {
+        throw new Error('ADMISSION_ROLLBACK_MUST_RETAIN_DENY')
+      }
+      if (!restoringOldSource && queueWorkSchedulerLaunchAgentEnabled(env)
+        && (!['PREPARED','ENABLED'].includes(state.policy.status) || Date.parse(state.policy.expires_at) <= Date.now() || !state.tasks.length)) {
+        throw new Error('ADMISSION_ACTIVATION_NOT_PREPARED')
+      }
+      // Only this read-only residue query uses current enrollment IDs. The
+      // returned deployment environment/plist never receives a task-ID fence.
+      const first = state.tasks[0]
+      if (first) env = { ...env,
+        STATE_DAEMON_QUEUE_WORK_FENCE_QUEUE_IDS:state.tasks.map(t => t.queue_id).join(','),
+        STATE_DAEMON_QUEUE_WORK_FENCE_MESSAGE_IDS:state.tasks.map(t => t.message_id).join(','),
+      }
+    } catch (error) {
+      errors.push({ code:'bounded_admission_readback_failed',message:error instanceof Error ? error.message : 'ADMISSION_READBACK_FAILED' })
+      return { ok:false,errors,warnings,residues:[] }
+    }
+  }
   if (!queueWorkSchedulerLaunchAgentEnabled(env)) {
     return { ok: true, errors, warnings, residues: [] }
   }

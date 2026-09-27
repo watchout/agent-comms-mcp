@@ -1,0 +1,32 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "tests/contract/test_runtime_nonpersist_native.test.ts",
+    "tests/contract/test_runtime_nonpersist_authority.test.ts",
+    "tests/contract/test_runtime_nonpersist_cleanup.test.ts",
+    "tests/contract/test_runtime_nonpersist_durable_fields.test.ts",
+    "tests/contract/test_runtime_nonpersist_bootstrap.test.ts",
+    "tests/contract/test_runtime_nonpersist_daemon.test.ts",
+    "tests/contract/test_runtime_nonpersist_entrypoint.test.ts",
+    "tests/contract/test_runtime_nonpersist_scheduler_native.test.ts",
+    "tests/contract/test_runtime_nonpersist_claim_cycle.test.ts",
+    "tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts",
+    "tests/contract/test_runtime_nonpersist_profile.test.ts",
+    "tests/inbox-cursor.test.ts",
+    "tests/inbox-cursor-db-persist.test.ts",
+    "tests/agent-status-lifecycle.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "40e6712842bfac470d0b82f78046e8c3599dec3f98f405800aaecb5d3b04fa24",
+  "source_head": "b4b62502f6f45618eda5bcad46aecf379a8cf095",
+  "working_diff_sha256": "523ba2722edad98bd9d1a4e68b8195d43ffcf3b959e7c65a9fa99264b2b93e00",
+  "started_at": "2026-09-21T10:24:56.414798+00:00",
+  "ended_at": "2026-09-21T10:25:51.863514+00:00",
+  "exit_code": 0,
+  "log_sha256": "8b20ac15031796ff3177bb0cd1ddd0ae7b6f50d2cd3df5f00df4ae92295033b6"
+}

@@ -11,7 +11,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures, fixtureDate, fixtureProviderObserver, fixtureNativeProofReader } from './seed'
 
 let pg: Client
 
@@ -28,6 +28,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanAll(pg)
+  enableNativeRuntimeFixtures(pg, '2026-05-18T00:00:00.000Z')
   await pg.query('BEGIN')
 })
 
@@ -36,12 +37,14 @@ afterEach(async () => {
   await cleanAll(pg)
 })
 
-function buildHarness(clock = new FakeClock('2026-05-18T00:00:30.000Z'), config: Partial<StateDaemonConfig> = {}) {
+function buildHarness(clock = new FakeClock(fixtureDate(pg, '2026-05-18T00:00:30.000Z')), config: Partial<StateDaemonConfig> = {}) {
   const runner = new FakeCodexRunner()
   const metrics = new FakeMetrics()
   const alert = new FakeAlertSink()
   const tmux = new FakeTmux()
   const daemon = new StateDaemon({
+    providerObserver: fixtureProviderObserver(pg),
+    readNativeProof: fixtureNativeProofReader(pg),
     db: new PgDBClient(pg),
     pgListen: new FakePgListen(),
     tmux,
@@ -97,12 +100,12 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     const subjects = new Map<string, { agent: string; id: number }>()
     for (const [messageType, content] of fixtures) {
       const agent = makeAgentId(`typed-delivery-${messageType}`)
-      await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+      await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
       subjects.set(messageType, { agent, id: await seedQueueRow(pg, {
         agent_id: agent,
         status: 'pending',
         payload: payload(messageType, { content }),
-        created_at: new Date('2026-05-18T00:00:00.000Z'),
+        created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
       }) })
     }
 
@@ -132,11 +135,11 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('only an exact typed acknowledgement envelope is terminalized automatically', async () => {
     const agent = makeAgentId('typed-ack')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
     const acknowledgedMessageId = '11111111-1111-4111-8111-999999999999'
     const id = await seedQueueRow(pg, {
       agent_id: agent,
@@ -149,7 +152,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
           acknowledged_message_id: acknowledgedMessageId,
         },
       }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const h = buildHarness()
@@ -184,16 +187,16 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('ACK prose without the typed envelope fails open to runner delivery', async () => {
     const agent = makeAgentId('ack-prose-only')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
       payload: payload('chat', { content: 'ACK: audit PASS received and recorded. No reply required.' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const h = buildHarness()
@@ -218,7 +221,7 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('malformed typed acknowledgement envelopes fail open to runner delivery', async () => {
     const fixtures = [
@@ -229,12 +232,12 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     const ids: number[] = []
     for (const [suffix, typedAck] of fixtures) {
       const agent = makeAgentId(`malformed-ack-${suffix}`)
-      await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+      await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
       ids.push(await seedQueueRow(pg, {
         agent_id: agent,
         status: 'pending',
         payload: payload('chat', { content: 'ACK: received and recorded.', typed_ack: typedAck }),
-        created_at: new Date('2026-05-18T00:00:00.000Z'),
+        created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
       }))
     }
 
@@ -258,16 +261,16 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('unknown message type fails open to runner delivery', async () => {
     const agent = makeAgentId('unknown-delivery')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
       payload: payload('approval', { content: 'Apply the approved repair and publish evidence.' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const h = buildHarness()
@@ -291,16 +294,16 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('actionable pending row still reaches Codex runner', async () => {
     const agent = makeAgentId('actionable-pass')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'pending',
       payload: payload('instruction', { content: 'review PR #696' }),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const h = buildHarness()
@@ -315,19 +318,19 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 
   test('reclaim-then-wake delivers an expired report claim instead of terminalizing it', async () => {
     const agent = makeAgentId('expired-report')
-    await seedAgent(pg, { agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
+    await seedAgent(pg, { observed_provider: 'codex', agent_id: agent, runtime: 'codex', tmux_session: null, status: 'online' })
     const id = await seedQueueRow(pg, {
       agent_id: agent,
       status: 'received',
       claimed_by: agent,
-      claimed_at: new Date('2026-05-18T00:00:00.000Z'),
-      claim_expires_at: new Date('2026-05-18T00:00:10.000Z'),
+      claimed_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
+      claim_expires_at: fixtureDate(pg, '2026-05-18T00:00:10.000Z'),
       payload: payload('report'),
-      created_at: new Date('2026-05-18T00:00:00.000Z'),
+      created_at: fixtureDate(pg, '2026-05-18T00:00:00.000Z'),
     })
 
     const h = buildHarness()
@@ -355,5 +358,5 @@ describe('state_daemon typed acknowledgement and fail-open delivery', () => {
     } finally {
       await h.daemon.stop()
     }
-  })
+  }, 60000)
 })

@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { claimUnboundedRuntimeQueue } from './core/runtime-queue-claim'
+import { buildStartLaunchArgv, start as planSeatStart } from './bin/aun/start'
 /**
  * Agent Communications MCP Plugin
  *
@@ -20,6 +22,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { Client } from 'pg'
+import { tryBoundedClaim } from './core/queue-admission'
 import { createDbAdapter, type DbAdapter as NewDbAdapter, toLegacy } from './core/db'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -172,6 +175,8 @@ import {
   inferRuntimeSessionName,
   parseRuntimePort,
 } from './core/runtime-heartbeat'
+import { bindRuntimeEndpoint, requestedRuntimePort, resolveRuntimeEndpoint, releaseRuntimeEndpoint } from './core/runtime-endpoint'
+import { observeSeatProvider, resolveSeatProvider } from './core/seat-runtime-selection'
 import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './core/git-checkout-evidence'
 import {
   heartbeatAgentStatus,
@@ -269,8 +274,10 @@ function loadConfig(): Config {
 
 const config = loadConfig()
 const AGENT_ID = config.agent_id
-const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID || randomUUID()
-process.env.AGENT_COM_RUNTIME_INSTANCE_ID = RUNTIME_INSTANCE_ID
+const RUNTIME_INSTANCE_ID = process.env.AGENT_COM_RUNTIME_INSTANCE_ID?.trim()
+if (!RUNTIME_INSTANCE_ID || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(RUNTIME_INSTANCE_ID)) {
+  throw new Error('RUNTIME_UUID_PREEXEC_REQUIRED')
+}
 const RUNTIME_HEARTBEAT_DISABLED = process.env.AGENT_COM_RUNTIME_HEARTBEAT_DISABLED === '1'
 const EXPECTED_AGENT_ID = process.env.AGENT_COM_EXPECTED_AGENT_ID
 if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
@@ -280,127 +287,10 @@ if (EXPECTED_AGENT_ID && AGENT_ID !== EXPECTED_AGENT_ID) {
   )
   process.exit(2)
 }
-const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')
-// Issue #248: port 8789 was the CTO bot's port; defaulting every plugin-form
-// install to 8789 caused all bots to fight for the same socket and trigger
-// orphan-kill of each other (cascade-disconnect). Resolution priority:
-//   AUN_WEBHOOK_PORT > WEBHOOK_PORT > free port in PORT_RANGE_START..PORT_RANGE_END
-// Orphan-kill only fires when the port came from explicit env (intent: clean
-// up our own previous instance). For free-port detection the picked port is
-// already vacant, so kill is unnecessary and would never target 8789 by default.
-// Range starts at 8801 — port 8800 is the AGENT_COMMS_PORT / SSE_PORT
-// default (server.ts L249). If the resolver picked 8800 for the webhook
-// bridge first, the SSE httpServer.listen(8800) later would EADDRINUSE
-// in MULTI_BOT_MODE (lead-ama L1 hidden impact, msg `fdab4db0`).
-const PORT_RANGE_START = 8801
-const PORT_RANGE_END = 8900
-
-// lsof-based hint. May falsely say "free" (lsof binary missing, errno != 1, or
-// the port owner has no listening socket lsof can see). Cycle 3 — never used as
-// the source of truth; tryBindSync is the real authority. lsof here is a
-// fast-skip optimization for the obviously-busy case.
-function isPortLikelyFreeSync(port: number): boolean {
-  try {
-    const out = execSync(`lsof -ti :${port}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    return out.length === 0
-  } catch {
-    // lsof failed (binary absent, EACCES, etc.) — defer the decision to the
-    // bind probe rather than trusting "free".
-    return true
-  }
-}
-
-// Real bind probe — opens then immediately stops a listener on `port`. The
-// race between this stop and the eventual bridgeServer bind is the smallest
-// window achievable without restructuring server startup. Auditor cycle 2
-// "best-effort race mitigation via bind retry" framing applies here.
-function tryBindSync(port: number): boolean {
-  try {
-    // reusePort: false disables SO_REUSEPORT so EADDRINUSE actually fires
-    // when something else (test fixture, sibling bot) is already on the port.
-    // Without this, two bots can both "succeed" the probe and pick the same
-    // port — exactly the race the cycle 3 mitigation is trying to close.
-    const probe = Bun.serve({
-      port,
-      hostname: '127.0.0.1',
-      reusePort: false,
-      fetch() { return new Response('') },
-    })
-    probe.stop(true)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// Cycle 3 — TOCTOU mitigation. Two passes:
-//   1. lsof-hint + bind verify (fast path; skips obviously busy ports)
-//   2. bind-only sweep (used when every port came back "lsof free" but the
-//      previous bind probes lost the race; this is also the lsof-failure path
-//      since failure is rendered as "likely free" above)
-function findFreePortSync(start: number, end: number): number | null {
-  for (let p = start; p <= end; p++) {
-    if (!isPortLikelyFreeSync(p)) continue
-    if (tryBindSync(p)) return p
-  }
-  for (let p = start; p <= end; p++) {
-    if (tryBindSync(p)) return p
-  }
-  return null
-}
-
-function resolveWebhookPort(): { port: number; explicit: boolean } {
-  const raw = process.env.AUN_WEBHOOK_PORT ?? process.env.WEBHOOK_PORT
-  if (raw !== undefined && raw !== '') {
-    const port = parseInt(raw, 10)
-    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-      throw new Error(`agent-comms: invalid port env value "${raw}"`)
-    }
-    process.stderr.write(`agent-comms: bound webhook port ${port} (explicit env)\n`)
-    return { port, explicit: true }
-  }
-  const port = findFreePortSync(PORT_RANGE_START, PORT_RANGE_END)
-  if (port === null) {
-    throw new Error(
-      `agent-comms: no free port available in range ${PORT_RANGE_START}-${PORT_RANGE_END}. ` +
-      `Set AUN_WEBHOOK_PORT to choose explicitly.`
-    )
-  }
-  process.stderr.write(`agent-comms: bound webhook port ${port} (free-port detection)\n`)
-  return { port, explicit: false }
-}
-
-const { port: WEBHOOK_PORT, explicit: WEBHOOK_PORT_EXPLICIT } = resolveWebhookPort()
-
-// Orphan-kill: only when env-explicit (caller's intent is to reuse a known port).
-// For free-port detection we already picked a vacant port, so killing would be
-// at best a no-op and at worst targets an unrelated process.
-// Issue #248 cycle 3 — PPID==1 filter. The pre-cycle-3 path SIGKILL'd any
-// PID lsof returned, which is exactly the cascade-disconnect mechanism
-// (concurrent bot startup → each kills the other). Now: only PIDs whose
-// parent is init (PID 1) — true orphans — get the kill. Live-parent PIDs
-// (= running MCP server) are skipped. Matches scripts/cleanup-orphan-ports.sh.
-if (WEBHOOK_PORT_EXPLICIT) {
-  if (isProtectedInfrastructurePort(WEBHOOK_PORT)) {
-    process.stderr.write(`agent-comms: refusing protected infrastructure port cleanup request: ${WEBHOOK_PORT}\n`)
-  } else
-  try {
-    const out = execSync(`lsof -ti :${WEBHOOK_PORT}`, { encoding: 'utf-8' }).trim()
-    const candidates = out ? out.split('\n').map(s => s.trim()).filter(Boolean) : []
-    for (const orphanPid of candidates) {
-      if (orphanPid === String(process.pid)) continue
-      let ppid = ''
-      try {
-        ppid = execSync(`ps -o ppid= -p ${orphanPid}`, { encoding: 'utf-8' }).trim()
-      } catch { continue }              // ps failed → can't prove orphan → skip
-      if (ppid !== '1') continue        // live parent → not a real orphan → skip
-      process.stderr.write(`agent-comms: killing orphan process ${orphanPid} on port ${WEBHOOK_PORT} (PPID==1 only)\n`)
-      try { process.kill(parseInt(orphanPid), 'SIGKILL') } catch {}
-    }
-  } catch {} // no process on port — expected
-}
-
-const DISCORD_OUTBOUND_PORT = parseInt(process.env.DISCORD_OUTBOUND_PORT ?? String(WEBHOOK_PORT + 1000), 10)
+const STATE_DIR = process.env.AGENT_COMMS_STATE_DIR ?? join(homedir(), '.agent-com')// Normal seats hold an OS-assigned socket. Old generated port env is compatibility history.
+const REQUESTED_WEBHOOK_PORT = requestedRuntimePort()
+let WEBHOOK_PORT = 0
+let DISCORD_OUTBOUND_PORT = Number(process.env.DISCORD_OUTBOUND_PORT ?? 0)
 const DISCORD_BOT_TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
 let resolvedDiscordBotToken = DISCORD_BOT_TOKEN
 let resolvedDiscordBotTokenSource = process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : process.env.DISCORD_BOT_TOKEN ? 'DISCORD_BOT_TOKEN' : null
@@ -445,18 +335,31 @@ async function ensureDiscordBotToken(client?: { query: (sql: string, params?: an
   return resolvedDiscordBotToken
 }
 
-async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
-  if (RUNTIME_HEARTBEAT_DISABLED) return
+let runtimeLeaseReceipt: {leaseId:string;fencingToken:number} | undefined
+let runtimeHeartbeatPending: Promise<void> | null = null
+function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  // Concurrent lifecycle callbacks share one acquisition/renewal operation.
+  if(!runtimeHeartbeatPending) runtimeHeartbeatPending=performRuntimeHeartbeat(client).finally(()=>{runtimeHeartbeatPending=null})
+  return runtimeHeartbeatPending
+}
+async function performRuntimeHeartbeat(client: { query: (sql: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> }): Promise<void> {
+  if (RUNTIME_HEARTBEAT_DISABLED) throw new Error('RUNTIME_AUTHORITY_DISABLED')
 
   await ensureDiscordBotToken(client)
   const discordTokenFingerprint = tokenFingerprint(resolvedDiscordBotToken)
   const registeredDiscordClient = discordClients.get(AGENT_ID) ?? null
   const runtimeSessionName = inferRuntimeSessionName()
-  const runtimePort = parseRuntimePort()
+  const runtimePort = bridgeEndpoint.port
+  const providerObservation = observeSeatProvider({ agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid, sessionName: runtimeSessionName ?? AGENT_ID, workspace: process.cwd() })
   const hasDiscordConnectorEvidence = Boolean(
-    discordTokenFingerprint && hasRuntimeConnectorIdentityEvidence(),
+    discordTokenFingerprint && runtimeSessionName && runtimePort > 0,
   )
-  await heartbeatRuntimeInstance(client, {
+  // BEGIN/COMMIT must not encompass unrelated operations on the server's
+  // shared connection. This connection belongs only to this authority change.
+  const authorityClient=new Client({connectionString:config.database_url,connectionTimeoutMillis:3000,statement_timeout:5000,query_timeout:10000})
+  try {
+  await authorityClient.connect()
+  const heartbeat = await bridgeEndpoint.publish(() => heartbeatRuntimeInstance(authorityClient, {
     runtimeInstanceId: RUNTIME_INSTANCE_ID,
     agentId: AGENT_ID,
     runtimeEngine: config.agent.runtime,
@@ -473,6 +376,7 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
     connectorTransport: hasDiscordConnectorEvidence ? 'discord_gateway' : null,
     metadata: {
       source: 'server.ts',
+      provider_observation: providerObservation,
       server_root: SERVER_ROOT,
       ...gitCheckoutMetadata(RUNTIME_CHECKOUT_EVIDENCE),
       discord_gateway_ready: registeredDiscordClient?.isConnected() ?? false,
@@ -484,9 +388,10 @@ async function heartbeatRuntimeEvidence(client: { query: (sql: string, params?: 
           token_source: resolvedDiscordBotTokenSource,
         }
       : undefined,
-  }).catch((err) => {
-    process.stderr.write(`agent-comms: runtime heartbeat evidence failed (non-fatal): ${err}\n`)
-  })
+  }, {lease:runtimeLeaseReceipt}))
+  if (!heartbeat.endpoint_lease_id) { bridgeEndpoint.server.stop(true); throw new Error('RUNTIME_ENDPOINT_LEASE_MISSING') }
+  runtimeLeaseReceipt={leaseId:heartbeat.endpoint_lease_id,fencingToken:heartbeat.endpoint_lease_fencing_token}
+  } finally {await authorityClient.end().catch(()=>{})}
 }
 
 // --- SSE Transport (Phase 3 → Phase C I5: unified, TRANSPORT_MODE removed) ---
@@ -1325,16 +1230,7 @@ let heartbeatInterval: ReturnType<typeof setInterval> | null = null
 
 async function registerAgent(): Promise<void> {
   const client = await tryGetDb()
-  if (!client) return
-
-  // Check for duplicate online agent
-  const existing = await client.query(
-    `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
-    [AGENT_ID]
-  )
-  if (existing.rows.length > 0 && existing.rows[0].status === 'online') {
-    process.stderr.write(`agent-comms: WARNING — agent '${AGENT_ID}' is already online (last seen: ${existing.rows[0].last_seen_at})\n`)
-  }
+  if (!client) throw new Error('RUNTIME_ENDPOINT_DATABASE_UNAVAILABLE')
 
   // UPSERT — merge metadata instead of overwriting so DB-only keys
   // (e.g. discord_id self-registered by D1) survive process restarts.
@@ -1342,29 +1238,27 @@ async function registerAgent(): Promise<void> {
   // existing keys not in $5 are preserved. This is what protects discord_id
   // when a bot's local config does not include it.
   await client.query(
-    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, last_seen_at, metadata)
-     VALUES ($1, $2, $3, $4, 'online', now(), COALESCE($5::jsonb, '{}'::jsonb))
+    `INSERT INTO agents (agent_id, display_name, agent_type, metadata)
+     VALUES ($1, $2, $3, COALESCE($4::jsonb, '{}'::jsonb))
      ON CONFLICT (agent_id) DO UPDATE SET
-       display_name = $2, agent_type = $3, runtime = $4,
-       status = 'online', last_seen_at = now(),
-       metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($5::jsonb, '{}'::jsonb)`,
-    [AGENT_ID, config.agent.display_name, config.agent.agent_type, config.agent.runtime,
-     config.agent.metadata ? JSON.stringify(config.agent.metadata) : null]
+       display_name = $2, agent_type = $3,
+       metadata = COALESCE(agents.metadata, '{}'::jsonb) || COALESCE($4::jsonb, '{}'::jsonb)`,
+    [AGENT_ID, config.agent.display_name, config.agent.agent_type,
+     null]
   )
-  process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered as online\n`)
+  process.stderr.write(`agent-comms: agent '${AGENT_ID}' registered with logical identity\n`)
   await heartbeatRuntimeEvidence(client)
 
   // pg_notify: agent.online + audit_log
   await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: AGENT_ID, org_id: 'default' }))
-  await writeAuditLog('agent.online', AGENT_ID, AGENT_ID, { runtime: config.agent.runtime })
+  // Runtime liveness is transient; do not copy it to audit history.
 
   // Heartbeat every 5 minutes
   heartbeatInterval = setInterval(async () => {
     const c = await tryGetDb()
     if (c) {
-      await c.query(`UPDATE agents SET last_seen_at = now() WHERE agent_id = $1`, [AGENT_ID]).catch(() => {})
       await heartbeatAgentStatus(c, AGENT_ID).catch(() => {})
-      await heartbeatRuntimeEvidence(c)
+      await heartbeatRuntimeEvidence(c).catch(()=>{process.stderr.write('agent-comms: runtime authority renewal unavailable\n')})
     }
   }, 5 * 60 * 1000)
 
@@ -1407,8 +1301,7 @@ async function registerAgent(): Promise<void> {
 // a transactional DB query on every call. If the buffer is empty at `next`
 // time, falls back to a direct DB query (same as the Phase 4 implementation).
 //
-// Also sends heartbeat (agents.last_seen_at UPDATE) every 30 seconds so the
-// watchdog and polling-driver clients know the bot is alive.
+// Runtime liveness is observed afresh; polling never persists agent liveness.
 //
 // Lifecycle:
 //   - pollingDriver.start(agentId) is called from registerAgent()
@@ -1422,14 +1315,7 @@ async function unregisterAgent(): Promise<void> {
   stopOutboundConsumer()
   const client = await tryGetDb()
   if (client) {
-    await client.query(
-      `UPDATE agent_runtime_instances
-          SET status = 'stopped',
-              stopped_at = now(),
-              last_seen_at = now()
-        WHERE runtime_instance_id = $1`,
-      [RUNTIME_INSTANCE_ID],
-    ).catch(() => {})
+    if (runtimeLeaseReceipt) await releaseRuntimeEndpoint(client, {agentId: AGENT_ID, runtimeInstanceId: RUNTIME_INSTANCE_ID, processId: process.pid, lease:runtimeLeaseReceipt})
     const markedOffline = await markAgentOfflineIfNoOtherLiveRuntime(client, {
       agentId: AGENT_ID,
       runtimeInstanceId: RUNTIME_INSTANCE_ID,
@@ -1896,7 +1782,6 @@ function gc() {
   for (const [k, v] of rateCounts) if (now - v.since > 60_000) rateCounts.delete(k)
   for (const [h, t] of recentHashes) if (now - t > DUPLICATE_WINDOW_MS) recentHashes.delete(h)
 }
-setInterval(gc, GC_INTERVAL_MS)
 
 // --- MCP Server ---
 // Spec v5 §1.4 instructions for bots that connect via claude/channel.
@@ -2222,6 +2107,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     try {
       await assertMessageQueueStatusVocabularyCompatible(client, { operation: 'mcp.next' })
+      const bounded = await tryBoundedClaim(client, agentId, { dialect: process.env.AGENT_COM_DB === 'sqlite' || !process.env.DATABASE_URL ? 'sqlite' : 'postgres' })
+      if (bounded) return { content: [{ type: 'text', text: JSON.stringify(bounded) }] }
       await client.query('BEGIN')
       // Issue #278 (A) segment 3c — legacy priorId IMPLICIT_ABANDON pattern
       // removed. The previous shape locked the agents row with FOR UPDATE,
@@ -2304,16 +2191,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // structural via the sweeper. TTL default 30s, env-overridable
       // per Issue #278 §5 Open decisions.
       const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-      await client.query(
-        `UPDATE message_queue
-            SET status = 'received',
-                read_at = now(),
-                claimed_by = $1,
-                claimed_at = now(),
-                claim_expires_at = now() + ($2 || ' seconds')::interval
-          WHERE id = $3`,
-        [agentId, String(claimTtlSec), row.id],
-      )
+      await claimUnboundedRuntimeQueue(client,{agentId,queueId:row.id,ttlSeconds:claimTtlSec,
+        runtimeInstanceId:agentId===AGENT_ID?RUNTIME_INSTANCE_ID:undefined})
       // spec §4.1 step 4 — mark agent busy while processing this message.
       // Issue #278 (A) cycle 1 (auditor BLOCK 1): with multi in-flight
       // semantics, busy/idle is derived from the actual open-claim set,
@@ -2321,14 +2200,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // so the EXISTS predicate is guaranteed true; we still go through
       // the CASE WHEN derivation so every agents.status writer in this
       // PR uses the same one-line idempotent shape.
-      await client.query(
-        `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-           status_updated_at = now()
-         WHERE agent_id = $1`,
-        [agentId],
-      )
+      // Busy/idle is composed from current claims at read time (D2).
       // PR-0 (Issue #287) cycle 8 — single cursor writer per spec §4.8.1
       // (CTO judgment 2026-05-01, auditor cycle 7 axis 1/2/4/5 BLOCK fix).
       // Both `inbox` and `next` cursor advances now go through
@@ -2997,14 +2869,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // busy. EXISTS-derive guarantees observability (sender-feedback /
     // heartbeat / bot_status all read agents.status) keeps tracking
     // the true state.
-    await txClient.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
+    // Closing a claim does not persist a liveness snapshot (D2).
 
     // spec §4.2 step 8 (reordered after 9-11 per Behavioral FAIL B2) — enqueue
     // outbound for each part. Resolution of channel_external_id is per-
@@ -3782,6 +3647,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params = new URLSearchParams({ channel_id })
         if (limit) params.set('limit', String(Math.min(limit, 100)))
         if (before) params.set('before', before)
+        if (!Number.isInteger(DISCORD_OUTBOUND_PORT) || DISCORD_OUTBOUND_PORT < 1) throw new Error('DISCORD_OUTBOUND_ENDPOINT_UNAVAILABLE')
         const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/history?${params}`)
         const result = await resp.json() as any
         if (!resp.ok) {
@@ -3975,14 +3841,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // rows back to 'pending', the agent may still hold OTHER
         // active claims that are not orphaned; EXISTS-derive keeps
         // those visible.
-        await client.query(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [targetAgent],
-        )
+        // Reclaimed queue state is authoritative; agent liveness is observed.
         await client.query('COMMIT')
         return {
           content: [{
@@ -4212,6 +4071,7 @@ server.setNotificationHandler(
     } catch (err) {
       // Fallback to HTTP if adapter not connected
       try {
+        if (!Number.isInteger(DISCORD_OUTBOUND_PORT) || DISCORD_OUTBOUND_PORT < 1) throw new Error('DISCORD_OUTBOUND_ENDPOINT_UNAVAILABLE')
         const resp = await fetch(`http://127.0.0.1:${DISCORD_OUTBOUND_PORT}/permission`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4264,6 +4124,7 @@ interface BotEntry {
   projectDir: string
   agentId: string
   port: number
+  processId?: number | null
   command: string
   supervisorType?: string
   source?: string
@@ -4340,16 +4201,16 @@ function buildProfileCommand(agentId: string, session: string, port: number, eng
         'codex --dangerously-bypass-approvals-and-sandbox',
         ...configArgs.map((arg) => `-c ${shellSingleQuote(arg)}`),
       ].join(' '),
-      source: 'agents.runtime_engine_preference',
+      source: 'observed_runtime_provider',
     }
   }
   if (normalizedEngine === 'claude-code' || normalizedEngine === 'claude') {
-    return { command: DEFAULT_CLAUDE_CMD, source: 'agents.runtime_engine_preference' }
+    return { command: DEFAULT_CLAUDE_CMD, source: 'observed_runtime_provider' }
   }
   return {
     command: '',
-    source: 'agents.runtime_engine_preference',
-    blocker: normalizedEngine ? `unknown_runtime_engine_preference:${normalizedEngine}` : 'missing_runtime_engine_preference',
+    source: 'observed_runtime_provider',
+    blocker: normalizedEngine ? `unsupported_observed_runtime_provider:${normalizedEngine}` : 'observed_runtime_provider_unavailable',
   }
 }
 
@@ -4375,32 +4236,34 @@ async function loadBotRegistry(): Promise<BotEntry[]> {
     for (const row of result.rows) {
       const agentId = String(row.agent_id)
       const metadata = parseBotMetadata(row.metadata)
+      const provider = await resolveSeatProvider(client, {agentId,allowHistory:true})
       const profileSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
         ? metadata.tmux_session.trim()
         : ''
-      const session = profileSession
+      const session = provider.observation?.session_name ?? profileSession
       const supervisorType = botSupervisorType(metadata, session)
-      const projectDir = (typeof row.home_directory === 'string' && row.home_directory.trim())
+      const projectDir = provider.observation?.workspace ?? ((typeof row.home_directory === 'string' && row.home_directory.trim())
         ? row.home_directory.trim()
-        : ''
-      const parsedPort = Number(row.channel_port)
-      const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 0
+        : '')
+      const endpoint = await resolveRuntimeEndpoint(client, {agentId})
+      const port = endpoint.endpoint?.port ?? 0
       const commandInfo = buildProfileCommand(
         agentId,
         session || agentId,
-        port,
-        row.runtime_engine_preference ?? row.runtime ?? null,
+        0,
+        provider.provider,
       )
       const blockers: string[] = []
       if (supervisorType === 'tmux' && !session) blockers.push('missing_tmux_session')
       if (!projectDir) blockers.push('missing_home_directory')
-      if (!port) blockers.push('missing_channel_port')
+      if (!provider.ok) blockers.push(provider.code)
       if (commandInfo.blocker) blockers.push(commandInfo.blocker)
       entries.push({
         session,
         projectDir,
         agentId,
         port,
+        processId: endpoint.endpoint?.processId ?? null,
         command: commandInfo.command,
         supervisorType,
         source: commandInfo.source,
@@ -4539,12 +4402,17 @@ function killPidsOnPort(port: number, excludeSelf = true): number {
 async function restartBotSession(entry: BotEntry): Promise<string> {
   const log: string[] = []
   const expandedDir = entry.projectDir.replace(/^~/, homedir())
+  const plan=await planSeatStart({agentId:entry.agentId,runtime:'auto',cwd:expandedDir,spawn:false,checkSignatures:false,
+    env:{...process.env,AGENT_COM_RUNTIME_SESSION:entry.session}})
+  if(!plan.ok) throw new Error(plan.errors.join(','))
+  const quote=(value:string)=>"'"+value.replaceAll("'", "'\"'\"'")+"'"
+  const command=buildStartLaunchArgv(plan).map(quote).join(' ')
   const startupSafety = evaluateStartupSafety({
     agentId: entry.agentId,
     expectedAgentId: entry.agentId,
     sessionName: entry.session,
     port: entry.port,
-    command: entry.command,
+    command,
     launcherRoot: SERVER_ROOT,
     managedCheckoutRoot: join(homedir(), '.agent-comms', 'state-daemon', 'checkouts'),
     currentCheckoutPath: join(homedir(), '.agent-comms', 'state-daemon', 'current'),
@@ -4558,9 +4426,7 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   }
   log.push(`Startup safety preflight PASS`)
 
-  // 1. Kill orphan on port
-  const killed = killPidsOnPort(entry.port)
-  if (killed > 0) log.push(`Killed ${killed} orphan process(es) on port ${entry.port}`)
+  // Replacement binds its own socket; the old endpoint grants no kill authority.
 
   // 2. Kill existing tmux session
   tmuxExec(['kill-session', '-t', entry.session])
@@ -4568,18 +4434,18 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   log.push(`Killed old tmux session (if any)`)
 
   // 3. Create new session and start Claude Code
-  tmuxExec(['new-session', '-d', '-s', entry.session, '-c', expandedDir])
+  tmuxExec(['new-session', '-d', '-s', entry.session, '-c', plan.launch!.cwd])
   const tmuxTarget = `${entry.session}:0.0`
   Bun.sleepSync(1000)
-  tmuxExec(['send-keys', '-t', tmuxTarget, '-l', entry.command])
+  tmuxExec(['send-keys', '-t', tmuxTarget, '-l', command])
   tmuxExec(['send-keys', '-t', tmuxTarget, 'Enter'])
-  log.push(`Started: ${entry.command}`)
+  log.push(`Started seat ${entry.agentId}`)
 
   // 4. Wait for Codex update prompt and explicitly skip it. Do not send an
   // extra Enter on the normal Codex start screen; it can submit a suggestion.
   Bun.sleepSync(3000)
   const paneText = tmuxCapture(tmuxTarget)
-  if (/\bcodex\b/.test(entry.command) && paneText.includes('Update now')) {
+  if (/\bcodex\b/.test(command) && paneText.includes('Update now')) {
     tmuxExec(['send-keys', '-t', tmuxTarget, '2', 'Enter'])
     log.push(`Skipped Codex update prompt`)
   }
@@ -4588,12 +4454,10 @@ async function restartBotSession(entry: BotEntry): Promise<string> {
   // expected port instead of the retired "Listening for channel
   // messages" string (emitted by the old channel-server only).
   Bun.sleepSync(5000)
-  const pids = getProcessOnPort(entry.port)
-  if (pids.length > 0) {
-    log.push(`✅ Confirmed: bun server.ts listening on port ${entry.port} (PID: ${pids.join(',')})`)
-  } else {
-    log.push(`⚠️ Not yet confirmed — port ${entry.port} still free (may still be initializing)`)
-  }
+  const client = await tryGetDb()
+  const endpoint = client ? await resolveRuntimeEndpoint(client, {agentId:entry.agentId}) : null
+  if (endpoint?.ok) log.push(`Confirmed runtime endpoint ${endpoint.endpoint!.endpointUri}`)
+  else log.push('Runtime endpoint not yet registered')
 
   return log.join('\n')
 }
@@ -4619,19 +4483,13 @@ function killProcessOnPort(port: number): boolean {
 }
 
 // --- Integrated Bridge: HTTP server for push notifications + permission responses ---
-// Pre-check: kill any stale process occupying our port — but only when the
-// port came from explicit env (mirrors the cycle 1 contract at L274). For
-// the free-port path the port was already bind-verified vacant by
-// `tryBindSync`; an unconditional kill here would re-introduce the cascade
-// vector by SIGKILL'ing whoever raced into the port between probe.stop()
-// and Bun.serve() (auditor cycle 7 finding, msg `c01e55b6`).
-if (WEBHOOK_PORT_EXPLICIT) {
-  killProcessOnPort(WEBHOOK_PORT)
-}
-
-const bridgeServer = Bun.serve({
-  port: WEBHOOK_PORT,
-  hostname: '127.0.0.1',
+const bridgeEndpoint = bindRuntimeEndpoint({
+  port: REQUESTED_WEBHOOK_PORT,
+  async authorize() {
+    const db=await tryGetDb(); if(!db) return false
+    const endpoint=await resolveRuntimeEndpoint(db,{agentId:AGENT_ID,runtimeInstanceId:RUNTIME_INSTANCE_ID})
+    return endpoint.ok && endpoint.endpoint?.processId===process.pid && endpoint.endpoint.port===bridgeEndpoint.port
+  },
   async fetch(req) {
     if (req.method !== 'POST') {
       return new Response('Method not allowed', { status: 405 })
@@ -4720,6 +4578,9 @@ const bridgeServer = Bun.serve({
   },
 })
 
+const bridgeServer = bridgeEndpoint.server
+WEBHOOK_PORT = bridgeEndpoint.port
+// The legacy external adapter is opt-in; do not derive an unrelated port from this socket.
 process.stderr.write(`agent-comms: bridge listening on http://127.0.0.1:${WEBHOOK_PORT}\n`)
 
 // --- Post-connect setup (Phase C I5: slim — agent registration only) ---
@@ -4735,12 +4596,7 @@ async function postConnect() {
   if (config.auth.mode === 'enforce' && !authSecret) {
     process.stderr.write('agent-comms: ERROR — auth.mode is "enforce" but no secret found. Set AGENT_COMMS_SECRET or create secret file via: bun cli/auth-init.ts\n')
   }
-  // Register agent (non-fatal on failure)
-  try {
-    await registerAgent()
-  } catch (err) {
-    process.stderr.write(`agent-comms: WARNING — agent registration failed (non-fatal): ${err}\n`)
-  }
+  try { await registerAgent() } catch (err) { bridgeServer.stop(true); throw err }
 }
 
 // --- SSE Transport: Auth middleware ---
@@ -5048,6 +4904,19 @@ async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, u
 
 let httpServer: ReturnType<typeof createServer> | null = null
 
+// D-OWN-1 / SC-2: no transport, shared startup worker or inbox cleanup may
+// race a failed UUID/lease acquisition. The held bridge itself returns 503
+// until publish() commits and reobserves the exact holder.
+try {
+  await postConnect()
+} catch (error) {
+  bridgeServer.stop(true)
+  const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : 'unavailable'
+  process.stderr.write(`agent-comms: runtime startup failed: ${error}; cause=${cause}\n`)
+  process.exit(1)
+}
+setInterval(gc, GC_INTERVAL_MS)
+
 if (MULTI_BOT_MODE) {
   httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
@@ -5220,9 +5089,9 @@ if (MULTI_BOT_MODE) {
           const client = await tryGetDb()
           if (client) {
             await client.query(
-              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
-               VALUES ($1, 'default', $1, 'dev', 'claude-code', 'online', now(), now())
-               ON CONFLICT (agent_id) DO UPDATE SET status = 'online', last_seen_at = now()`,
+              `INSERT INTO agents (agent_id, org_id, display_name, agent_type, registered_at)
+               VALUES ($1, 'default', $1, 'dev', now())
+               ON CONFLICT (agent_id) DO NOTHING`,
               [botId]
             )
             await pgNotify(client, 'agent_events', JSON.stringify({ event: 'agent.online', agent_id: botId, org_id: 'default' }))
@@ -5396,6 +5265,7 @@ export function parseLegacyGatewayEnv(raw: string | undefined): boolean {
     // the top-level `.catch(err => process.exit(1))`, so connection
     // failure at boot is loud rather than hidden.
     const reclaimDb = await requireDbForStartup()
+    Object.assign(reclaimDb, { dialect: process.env.AGENT_COM_DB === 'sqlite' || !process.env.DATABASE_URL ? 'sqlite' : 'postgres' })
     // PR-0 cycle 16 axis 1+3+4+5 BLOCK fix — per-bot recovery wiring.
     // The cycle 7-15 implementation only ran startup self-reclaim +
     // periodic sweeper for the primary `AGENT_ID`. In multi-bot
@@ -5551,7 +5421,7 @@ const shutdown = async () => {
     process.stderr.write(`agent-comms: per-bot Discord disconnected for ${botId} (shutdown)\n`)
   }
   discordClients.clear()
-  bridgeServer.stop()
+  // Retain the socket until exact-holder lease release below.
   // Close all per-bot transports (multi-bot SSE)
   for (const [, ctx] of botContexts) {
     if (ctx.transport) await ctx.transport.close().catch(() => {})
@@ -5562,12 +5432,13 @@ const shutdown = async () => {
         runtimeInstanceId: RUNTIME_INSTANCE_ID,
       }).catch(() => false)
       if (markedOffline) {
-      await client.query(`UPDATE agents SET status = 'offline' WHERE agent_id = $1`, [ctx.botId]).catch(() => {})
+      // Disconnect is observed, not persisted as agent authority.
       }
     }
   }
   if (httpServer) httpServer.close()
   await unregisterAgent()
+  bridgeServer.stop()
   if (db) await db.end().catch(() => {})
   process.exit(0)
 }

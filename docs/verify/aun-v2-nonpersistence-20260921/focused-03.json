@@ -1,0 +1,22 @@
+{
+  "started_at": "2026-09-21T04:40:30.543568+00:00",
+  "ended_at": "2026-09-21T04:40:32.414682+00:00",
+  "exit_code": 0,
+  "changed_input": "Trim OS environment output before extraction and disable lsof DNS/service name resolution",
+  "command": [
+    "bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts"
+  ],
+  "env_keys": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "AGENT_COM_DB",
+    "AGENT_COM_SQLITE_PATH",
+    "DATABASE_URL",
+    "AGENT_COM_TEST_DATABASE_URL",
+    "AGENT_COM_PG_NOTIFY"
+  ],
+  "timeout_seconds": 90
+}

@@ -1,0 +1,19 @@
+{
+  "tests/unit/server-legacy-gateway-env.test.ts": {
+    "original_assertion_lines": 15,
+    "missing_assertion_lines": [],
+    "added_assertion_lines": []
+  },
+  "tests/contract/test_aun_configuration_outbox_supersession.test.ts": {
+    "original_assertion_lines": 39,
+    "missing_assertion_lines": [],
+    "added_assertion_lines": [
+      "expect(expired).toBe(true)"
+    ]
+  },
+  "server.ts": {
+    "whole_file_unchanged": true,
+    "parse_function_sha256": "3b1db40be0456f51748b40829a344d1d00db300dc697a39f6edc7712e1abf277"
+  },
+  "test_aun_port_collision": "Case names and assertion count retained; D-OWN-1 changes only the acquired_at predicate from negative-loop rejection to separate positive time-irrelevance assertion."
+}

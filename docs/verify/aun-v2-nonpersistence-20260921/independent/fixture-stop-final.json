@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+    "-D",
+    "/private/tmp/aun-independent-pg-vfe9q16y/data",
+    "-m",
+    "fast",
+    "-w",
+    "stop"
+  ],
+  "exit_code": 0,
+  "postmaster_pid": 41309,
+  "postmaster_pid_file_exists": false,
+  "status_exit_code": 3,
+  "status_output": "pg_ctl: no server running\n",
+  "remaining_scoped_fixture_processes": [],
+  "at": "2026-09-21T06:24:31.917234+00:00"
+}

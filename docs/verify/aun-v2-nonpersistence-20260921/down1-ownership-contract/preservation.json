@@ -1,0 +1,244 @@
+{
+  "baseline": "465f26208554f6d3e90406c875bb033823820c22",
+  "authority_before": 9,
+  "authority_after": 14,
+  "authorized_case_mapping": {
+    "second-resolution OS start acquisition waits for a provable grant and preserves renewal time": "NP04-e second-resolution OS start never gates acquisition or renewal by a time interval",
+    "NP04 valid UUID replay in a different actual process/workspace denies resolve, admission and renewal with the old lease surviving": "NP04 valid UUID replay in a different actual process/workspace fails typed startup with endpoint publication 0 and work 0"
+  },
+  "additional_cases": [
+    "NP04-a/b unique observed UUID and current lease holder are required",
+    "NP04-d pre-effect identity or fence change prevents the published endpoint handler from running",
+    "NP04-e resolve paths do not read acquired_at or call process-start interval ownership helpers",
+    "NP04-c actual server UUID replay exits before transports, shared startup and queued work",
+    "NP04-c server startup acquisition precedes every transport and background work entry"
+  ],
+  "same_name_changed_predicate": "NP02/04 real UUID acquisition: the former time-denial assertion now requires time-independent resolution under D-OWN-1. Other receipt/UUID/physical-NULL assertions retained.",
+  "dual_run_assertion_lines_retained": 11,
+  "unchanged_paths": [
+    {
+      "path": ".github/workflows/pr-checks.yml",
+      "sha256": "b555e0b6ca4b8b5d08740b871f915974de410d60387570fc0ac72911c620480b"
+    },
+    {
+      "path": "core/host-runtime-observer.ts",
+      "sha256": "e6e7a29924d28be4a0b17bff308edac035430f3ef3c9c65a6c8bc8473a2444cc"
+    },
+    {
+      "path": "db/migrations/2026-04-30-routing-v3-stage-b.down.sql",
+      "sha256": "135c376f843c171e8aa93e94457a0f0c4ea4d71f9583129d5e119a37a26b7d7a"
+    },
+    {
+      "path": "db/migrations/2026-04-30-routing-v3-stage-b.up.sql",
+      "sha256": "67705c0f6765846c0b3e84a021ffb3a3b47fc75ed59f948c38242066674c0b0e"
+    },
+    {
+      "path": "db/migrations/2026-04-30-stage-b-drop-current-message-id.down.sql",
+      "sha256": "6590fcefd4f26c255edf709846dc12d906035a467ea35f8119b83def7ffdeb92"
+    },
+    {
+      "path": "db/migrations/2026-04-30-stage-b-drop-current-message-id.up.sql",
+      "sha256": "830efbb88c96f21cf334be4434a7a1c372401514f2e9bcc821302eb84b4cf9db"
+    },
+    {
+      "path": "db/migrations/2026-05-01-inbox-cursor-db-persist.down.sql",
+      "sha256": "7f7cba52df71b468fa2360c52df3b8108dcd3da84755758ad84e32f34ca6d8b5"
+    },
+    {
+      "path": "db/migrations/2026-05-01-inbox-cursor-db-persist.up.sql",
+      "sha256": "fa89e390c9c5bff7e4bac6bedb4199291bc172587de5c02dcbc9793dfb50a5da"
+    },
+    {
+      "path": "db/migrations/2026-05-08-state-daemon-323.down.sql",
+      "sha256": "3e9f8a656204803df86b78f52e7838e51ab06daf5b6711b483865e2e5eccecfe"
+    },
+    {
+      "path": "db/migrations/2026-05-08-state-daemon-323.up.sql",
+      "sha256": "e79a5690a32cd40d74c566ec7b056e2b2a315d1fdedf0bc4364e69e68c38d3d3"
+    },
+    {
+      "path": "db/migrations/2026-05-13-status-enum-v0.9-destructive.down.sql",
+      "sha256": "2a14ac27baf133dc584e4bd978b843f6c0d1c982312951dbc7f8978d5e3c2c6e"
+    },
+    {
+      "path": "db/migrations/2026-05-13-status-enum-v0.9-destructive.up.sql",
+      "sha256": "04b98a6176fed49944b369aec98cb11fe0a8e05b4bfef4c87556af6e5858a5fd"
+    },
+    {
+      "path": "db/migrations/2026-05-14-agent-wake-suppression-ssot.down.sql",
+      "sha256": "427f77bf445d149161a65bc4a450d61fae0d002d3042bfb1553f0bc987083c41"
+    },
+    {
+      "path": "db/migrations/2026-05-14-agent-wake-suppression-ssot.up.sql",
+      "sha256": "bde925706768fd9e85dd4d64fa11283bf2b3311dd25703643747c75d280750e5"
+    },
+    {
+      "path": "db/migrations/2026-05-22-agent-identity-runtime-foundation.down.sql",
+      "sha256": "26a9d0e7b434cd2927f8b3dd352b8cc07cc74785fb5012b6196a8894f6331288"
+    },
+    {
+      "path": "db/migrations/2026-05-22-agent-identity-runtime-foundation.up.sql",
+      "sha256": "a603465f82925ebca7adf9da8019cd289c55feada14a6b82f40ed596b4a8685b"
+    },
+    {
+      "path": "db/migrations/2026-05-22-channel-routing-policy.down.sql",
+      "sha256": "c80ae546742deaccb9ba05ab7fec91b5ffcb6445603bf85802ed2d20eb77a2cd"
+    },
+    {
+      "path": "db/migrations/2026-05-22-channel-routing-policy.up.sql",
+      "sha256": "dd5b88b5f33634bd34eae58b85e99c534212a69608fb5069dfd5fd2039a81570"
+    },
+    {
+      "path": "db/migrations/2026-05-22-distributed-control-plane-foundation.down.sql",
+      "sha256": "8368758e09d6de5a82de8f50e5e5908dc82978f8692f9a14387c53ed5ec879ad"
+    },
+    {
+      "path": "db/migrations/2026-05-22-distributed-control-plane-foundation.up.sql",
+      "sha256": "267783554fe7236c1a70c1b5e733d89e55c3bb4b19ea47d0a2ae6d3b1dde127f"
+    },
+    {
+      "path": "db/migrations/2026-05-25-bot-profile-ssot.down.sql",
+      "sha256": "7d6f86581e99c2668b8a7cff18d19f08e41eb5625c9e6c1eaf49c8528f74a88f"
+    },
+    {
+      "path": "db/migrations/2026-05-25-bot-profile-ssot.up.sql",
+      "sha256": "c77c6325bc28f8c9eaf62c6968578fc50c3b3e01d88b9cec8e81833a8738e5b4"
+    },
+    {
+      "path": "db/migrations/2026-05-26-agent-ui-identity-binding.down.sql",
+      "sha256": "b4a33718eec2518c5317ab8d0cf87a73aa6c6e1f5573182c371713dcedb2dbef"
+    },
+    {
+      "path": "db/migrations/2026-05-26-agent-ui-identity-binding.up.sql",
+      "sha256": "29947f3d997ed4815eb1df010f7b6d4a8b26f05a597ed37ba048ea296bd74e3c"
+    },
+    {
+      "path": "db/migrations/2026-05-26-token-management-inventory.down.sql",
+      "sha256": "53fbde9898fd2e523bfffc24017610d284c30bd4814d7c77ec04231c2a8d5552"
+    },
+    {
+      "path": "db/migrations/2026-05-26-token-management-inventory.up.sql",
+      "sha256": "d3a5c8ae47642318a950a66880edc9a28164ce2e3900670aab28a6d8ed77ff6b"
+    },
+    {
+      "path": "db/migrations/2026-05-26-worker-activity-visibility.down.sql",
+      "sha256": "e1c6559ba3a9bbb1144b74b81535af114aa2042ec225b54e3644138826744ac3"
+    },
+    {
+      "path": "db/migrations/2026-05-26-worker-activity-visibility.up.sql",
+      "sha256": "40c66c2f719b88987a435a372c7438f368041310a8c916fd1fa5b554c18ffc3b"
+    },
+    {
+      "path": "db/migrations/2026-06-06-runtime-memory-ready-evidence.down.sql",
+      "sha256": "9fe74494da4af2a61e066fbd74963d6a8927388af31f9168da572b10bffb7008"
+    },
+    {
+      "path": "db/migrations/2026-06-06-runtime-memory-ready-evidence.up.sql",
+      "sha256": "7c3a1bb3550965e861bd65c549de352ccc6aa300b288a6e2fb39d0fdd604c56c"
+    },
+    {
+      "path": "db/migrations/2026-06-12-oauth21-baseline.down.sql",
+      "sha256": "07212038e5557528faa3463126a8596492bc92f62663e383654f353916e163ec"
+    },
+    {
+      "path": "db/migrations/2026-06-12-oauth21-baseline.up.sql",
+      "sha256": "3a4c38a4d0d6aac48f7dc21b10e980227806b7a19113807b180b8a564fef5ebc"
+    },
+    {
+      "path": "db/migrations/2026-07-16-aun-k1-event-projection-claim.down.sql",
+      "sha256": "08cb8f202d6f6366c1a0ea37ecdd92cb57166cc98bfe586a82368328a18cf50c"
+    },
+    {
+      "path": "db/migrations/2026-07-16-aun-k1-event-projection-claim.up.sql",
+      "sha256": "ac2879e9406fb851deedc7cba219722b22857430eb4490be7f8893a23daa6cb6"
+    },
+    {
+      "path": "db/migrations/2026-07-16-aun-k2-runtime-supervision.down.sql",
+      "sha256": "930bcccb9cf50931a4a2c793ab9dd07b4495bb183547ab6a401830781fab508e"
+    },
+    {
+      "path": "db/migrations/2026-07-16-aun-k2-runtime-supervision.up.sql",
+      "sha256": "d5e467dbe48b7e73233930df53beb1d7c828473cdc3c3895e0c2b11df91cba96"
+    },
+    {
+      "path": "db/migrations/2026-07-21-shirube-d1-execution.down.sql",
+      "sha256": "8f4378e116f97caf54dbfd6c9664d6816e9a8c9d930187a9a46b6edef72aa35a"
+    },
+    {
+      "path": "db/migrations/2026-07-21-shirube-d1-execution.up.sql",
+      "sha256": "373a4a6cd928b9740782970875bbeeffb52994f574a76c86d4b1418807865f23"
+    },
+    {
+      "path": "db/migrations/2026-07-26-all-agent-communication-manifest.down.sql",
+      "sha256": "61bb07775fabd0799bb449ce8439c48610be24306052f3c8c33202b5158778da"
+    },
+    {
+      "path": "db/migrations/2026-07-26-all-agent-communication-manifest.up.sql",
+      "sha256": "0b7c7d9b830a19687274f938918aa5ade1060f9f43631da3ff73446b171ef274"
+    },
+    {
+      "path": "db/migrations/2026-07-26-aun-configuration-reconciliation.down.sql",
+      "sha256": "de4e4e3c596567ec0c4cad28425490ae73439be6a2c6022f2812262115ece01a"
+    },
+    {
+      "path": "db/migrations/2026-07-26-aun-configuration-reconciliation.up.sql",
+      "sha256": "e02562bb8f4cdd34223c316c4acde954e59cc303c1d4bb35019e33f3fcf06872"
+    },
+    {
+      "path": "db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.down.sql",
+      "sha256": "d3408fcde26c1403f0bdc8c8612989839790816585b04fc11a5b14f58a788c9c"
+    },
+    {
+      "path": "db/migrations/2026-08-16-fleet-runtime-queue-observation-v2.up.sql",
+      "sha256": "d79990c24759c6212e318a79ecb7862d3b76bfb132d6890e77bf798f6b91c4f7"
+    },
+    {
+      "path": "db/migrations/2026-09-08-queue-bounded-admission.down.sql",
+      "sha256": "9e80054e62b69efb024390875123f324d7d782b53d58371a03563f41963ec89d"
+    },
+    {
+      "path": "db/migrations/2026-09-08-queue-bounded-admission.up.sql",
+      "sha256": "8997efb60fca170fdeef4bd18b266d97c148008f5c1703ef2c0e9092506226b2"
+    },
+    {
+      "path": "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql",
+      "sha256": "52ad73ce6b1b2b5304605836b4b94ef03d0e8334c99e008322391c35bc9d52d6"
+    },
+    {
+      "path": "db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql",
+      "sha256": "6550f70402bf10a65279a39c341dd82c62a33ca956dddc7acf062d972ce152e5"
+    },
+    {
+      "path": "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql",
+      "sha256": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139"
+    },
+    {
+      "path": "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql",
+      "sha256": "95d7ed252a0183ff184e512488da7eb4a5d1d05303db1909da7eb88838b879e0"
+    },
+    {
+      "path": "db/migrations/2026-09-21-runtime-observation-restart-contract.down.sql",
+      "sha256": "2316024f14d68287397711c89dceae67293452cb02231a55b363bcd5775b5c7f"
+    },
+    {
+      "path": "db/migrations/2026-09-21-runtime-observation-restart-contract.up.sql",
+      "sha256": "cf50e276c57bb7a196b63caa71eb75dd2a14fe47170b28c17b7d6855022494aa"
+    },
+    {
+      "path": "db/migrations/2026-09-22-configuration-outbox-supersession.down.sql",
+      "sha256": "fda0293469b5500c5c8a64a0dcb425bb3f8ae92ec4753f42a527a0b4a3d7a257"
+    },
+    {
+      "path": "db/migrations/2026-09-22-configuration-outbox-supersession.up.sql",
+      "sha256": "c6d29c20d8ae43ee017214b895bb5a69b2240b9d6efb16a06a97bda898d74e27"
+    },
+    {
+      "path": "tests/fixtures/ci01-declared-reproducibility-workflow.json",
+      "sha256": "df1838d69c9cf1d3efec2dfbb167278e8e3f1199b344ad36ca14c0304ae32555"
+    },
+    {
+      "path": "tests/shirube-current-overlay-check.test.ts",
+      "sha256": "d26cc4c7066c4a39f97da20f39873349ea1312f4765d10f5812898fc95811c79"
+    }
+  ]
+}

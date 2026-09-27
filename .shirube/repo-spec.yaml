@@ -1,97 +1,304 @@
+---
 schema_version: shirube-repo-spec/v1
 repo: "watchout/agent-comms-mcp"
-repo_id: "watchout/agent-comms-mcp"
-owner: "watchout"
-canonical_core: "watchout/agent-comms-mcp@56a1940fa4cbc32d74927595dcb20a1d8cceb0fe"
-purpose: >
-  Adopt Shirube Rapid/Lite as a report-only control-plane overlay for AgentCommsMcp
-  while keeping product runtime, API, DB, package, deploy, required checks, branch
-  protection, and rulesets out of this adoption PR.
+repo_id: watchout/agent-comms-mcp
+owner: watchout
+canonical_core: watchout/agent-comms-mcp@56a1940fa4cbc32d74927595dcb20a1d8cceb0fe
+purpose: 'Framework-neutral AUN task completion with the existing bounded admission/retry/continuing-use
+  correction, integrated with Shirube development and acceptance control under #940.
+  Preserve productizable interfaces and the original USE01 through USE09 acceptance.'
 scope:
-  - Repo-local Shirube overlay metadata.
-  - "Source mirror of watchout/agent-comms-mcp#802."
-  - Report-only owner-observed control policy.
-  - Optional report-only thin workflow caller pinned to ADF.
-  - Repo-local Layer 0 gate alignment with the current Shirube overlay.
+- 'Existing #940 frozen corrective cell and independently admitted generation-5 design,
+  plus authenticated later same-cell amendments.'
+- All 127 historical integration paths plus 8 faithful current control metadata paths,
+  135 cumulative; historical I25-A2 delta is exactly 12 paths, while the current
+  I26/A1/A2 successor delta is exactly 7 paths.
 non_goals:
-  - Runtime code changes are not part of this adoption pack.
-  - API handlers, DB schema, migrations, package files, deploy files, branch protection, rulesets, and required checks are not changed by this pack.
-  - LLM output is never final authority.
-  - This pack does not claim final framework readiness, enforcement, full-control readiness, or protected-check status.
+- No runtime application, queue activation, live database/profile/schema change or
+  merge authority through metadata.
+- No new roles, trust, enforcement, framework, rules, acceptance or product-design
+  boundary.
+- No full-team readiness claim or false current quality/audit/owner approval.
 design_principles:
-  - Machine-readable evidence is primary.
-  - GitHub Control issue/comment evidence may be mirrored but the mirror is not independent truth.
-  - Owner exact-head decision is required before merge when a gate would block.
-  - Adoption PRs must not mix runtime, API, DB, package, deploy, branch protection, ruleset, or required-check changes.
+- Machine-readable evidence and authenticated published control source remain primary.
+- Mirror and LLM summaries never become independent authority.
+- Approved design and actual implementation remain consistent; independently audit
+  current scope and quality.
+- Exact-head owner decision remains required for protected merge/application; ordinary
+  metadata corrections follow authenticated CTO handoffs.
 development_flow: docs/standards/shirube-ai-development-governance-standard-v1.md
 required_gates:
-  - execution_context
-  - adoption
-  - lifecycle
-  - gate_contract
-  - design_rules
-  - enforcement_policy
-  - control_state_completeness
+- execution_context
+- adoption
+- lifecycle
+- gate_contract
+- design_rules
+- enforcement_policy
+- control_state_completeness
 source_of_truth_policy:
-  primary_control_source: "watchout/agent-comms-mcp#802"
-  source_mirror_ref: .shirube/source-mirrors/control-issue.yaml
+  primary_control_source: "watchout/agent-comms-mcp#940"
+  source_mirror_ref: ".shirube/source-mirrors/control-issue.yaml"
   mirror_is_truth: false
   llm_final_authority: false
   owner_confirmation_required: true
-rps_id: "RPS-AGENT-COMMS-MCP-001"
+rps_id: RPS-AGENT-COMMS-MCP-001
 rps_scope:
   repo_owns:
-    - "AgentCommsMcp repo-local implementation and evidence after explicit handoff."
-    - Repo-local Shirube overlay artifacts under .shirube/**.
+  - Framework-neutral AUN implementation and evidence under exact handoffs.
+  - Repository-local Shirube metadata faithfully projecting existing control authority.
   repo_does_not_own:
-    - ADF framework scripts and standards.
-    - Control-source issue authority.
-    - External repo mutation.
-    - Branch protection, rulesets, required checks, and production activation in this slice.
+  - Shirube framework policy or trusted runtime modification under this handoff.
+  - Control-source issue authority or LLM final authority.
+  - External repo mutation.
+  - Merge, live activation, queue, database/profile/schema effects without their exact
+    later authority.
 protected_surfaces:
   declared:
-    - runtime code
-    - api
-    - database
-    - migrations
-    - secrets
-    - active workflows
-    - required checks
-    - branch protection
-    - rulesets
-    - production
+  - runtime
+  - api
+  - database
+  - migrations
+  - active workflows
+  - required checks
+  - permissions
 confirmation_evidence:
   rps_readiness:
     required: true
     authority_role: owner
     authority_actor: watchout
-    verdict: CONFIRMED
+    verdict: PENDING_INDEPENDENT_MAPPING_OF_EXISTING_OWNER_DIRECTION
     evidence_refs:
-      - https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+    - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+    - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+    - https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    scope_note: These genuine refs confirm bounded owner/design direction and metadata
+      scope; author does not synthesize owner confirmation of this complete current
+      RPS or exact-head merge approval.
 required_evidence:
   adoption:
-    - .shirube/execution-context.yaml
-    - .shirube/adoption-intake.yaml
-    - .shirube/existing-state-scan.yaml
-    - .shirube/repo-spec.yaml
-    - .shirube/source-mirrors/control-issue.yaml
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
   merge:
-    - validation evidence
-    - owner exact-head decision
-    - control-state completeness report
+  - validation evidence
+  - owner exact-head decision
+  - control-state completeness report
   post_merge:
-    - merge commit
-    - merged_at
-    - post-merge evidence before COMPLETE
+  - merge commit
+  - merged_at
+  - post-merge evidence before COMPLETE
 agent_permission_boundary:
   allowed_paths:
-    - .shirube/**
+  - ".github/workflows/pr-checks.yml"
+  - ".shirube/control-handoffs/CH-SEAT-CONTINUITY-20260913-001.json"
+  - ".shirube/evidence/seat-continuity-machine-evidence.json"
+  - ".shirube/execution-contexts/seat-continuity-20260913.json"
+  - adapters/discord.ts
+  - adapters/outbound-consumer.ts
+  - bin/aun-watchdog.ts
+  - bin/aun.ts
+  - bin/aun/admission.ts
+  - bin/aun/bootstrap-adapter-codex.ts
+  - bin/aun/bootstrap-types.ts
+  - bin/aun/bootstrap.ts
+  - bin/aun/memory-ready.ts
+  - bin/aun/receive.ts
+  - bin/aun/run-queue-work.ts
+  - bin/aun/start.ts
+  - bin/state-daemon.ts
+  - cli/index.ts
+  - core/aun-configuration-candidate.ts
+  - core/aun-configuration-desired-state.ts
+  - core/bot-health.ts
+  - core/bot-lifecycle.ts
+  - core/bot-status-db.ts
+  - core/claim-ttl.ts
+  - core/db/sqlite-adapter.ts
+  - core/inbox-cursor.ts
+  - core/queue-admission.ts
+  - core/queue-work.ts
+  - core/runtime-cleanup.ts
+  - core/runtime-current-resolver.ts
+  - core/runtime-endpoint.ts
+  - core/runtime-heartbeat.ts
+  - core/runtime-inventory.ts
+  - core/runtime-memory-ready-identity.ts
+  - core/runtime-memory-ready-refresher.ts
+  - core/runtime-memory-ready.ts
+  - core/seat-context-recovery.ts
+  - core/seat-runtime-selection.ts
+  - core/startup-safety.ts
+  - core/state-daemon/action-planner.ts
+  - core/state-daemon/index.ts
+  - core/state-daemon/launchagent.ts
+  - core/state-daemon/queue-work-activation-plan.ts
+  - core/state-daemon/stall-detector.ts
+  - core/state-daemon/types.ts
+  - db/migrate-sqlite.ts
+  - db/migrate.ts
+  - db/migrations/2026-09-08-queue-bounded-admission.down.sql
+  - db/migrations/2026-09-08-queue-bounded-admission.up.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.down.sql
+  - db/migrations/2026-09-13-seat-runtime-continuity-diagnostics.up.sql
+  - docs/SSOT.md
+  - docs/agent-com-message-queue-spec.md
+  - docs/design/aun-bounded-admission.md
+  - docs/operations/aun-bootstrap.md
+  - docs/operations/memory-ready-refresh.md
+  - docs/operations/runtime-health-monitoring.md
+  - docs/shirube/README.md
+  - docs/spec/aun-runtime-supervisor-adapter-contract.md
+  - docs/spec/norm-022-runtime-endpoint-lease-supervisor-adapter-impl.md
+  - docs/spec/seat-runtime-continuity.md
+  - scripts/prepare-seat-continuity-test-wasurezu.sh
+  - scripts/restart-bot.sh
+  - scripts/shirube-current-overlay-check.mjs
+  - scripts/state-daemon-launchagent.ts
+  - scripts/sync-mcp-config.sh
+  - scripts/verify-seat-context-continuity.ts
+  - scripts/watchdog.sh
+  - server.ts
+  - tests/aun-bootstrap-claude-adapter.test.ts
+  - tests/aun-bootstrap-codex-adapter.test.ts
+  - tests/aun-bootstrap.test.ts
+  - tests/aun-configuration-candidate.test.ts
+  - tests/aun-configuration-desired-state.test.ts
+  - tests/aun-runtime-v2.test.ts
+  - tests/bot-health.test.ts
+  - tests/cli-sqlite-backend.test.ts
+  - tests/contract/runtime-memory-ready-refresher-pg.test.ts
+  - tests/contract/state-daemon/m2-sweep.test.ts
+  - tests/contract/state-daemon/m3-heartbeat-liveness.test.ts
+  - tests/contract/state-daemon/seed.ts
+  - tests/contract/state-daemon/test_codex_runner_dispatch.test.ts
+  - tests/contract/state-daemon/test_host_runtime_adapter_gate.test.ts
+  - tests/contract/state-daemon/test_launchagent_restore.test.ts
+  - tests/contract/state-daemon/test_non_actionable_stop_bleed.test.ts
+  - tests/contract/state-daemon/test_shirube_d1_auto_receive.test.ts
+  - tests/contract/state-daemon/test_state_action_matrix.test.ts
+  - tests/contract/state-daemon/test_wake_invocation_bounded.test.ts
+  - tests/contract/test_aun_bootstrap_clean_host.test.ts
+  - tests/contract/test_aun_bootstrap_failure_matrix.test.ts
+  - tests/contract/test_aun_codex_runner.test.ts
+  - tests/contract/test_aun_codex_runner_preflight.test.ts
+  - tests/contract/test_aun_configuration_runtime_diagnostics.test.ts
+  - tests/contract/test_aun_port_collision.test.ts
+  - tests/contract/test_aun_receive_actionable.test.ts
+  - tests/contract/test_aun_start_spawn_argv.test.ts
+  - tests/contract/test_queue_bounded_admission.test.ts
+  - tests/contract/test_queue_bounded_admission_postgres.test.ts
+  - tests/contract/test_queue_bounded_retry.test.ts
+  - tests/contract/test_queue_bounded_use_trace.test.ts
+  - tests/contract/test_routing_v3_stage_a.test.ts
+  - tests/contract/test_seat_runtime_continuity.test.ts
+  - tests/contract/test_session_start_drain.test.ts
+  - tests/contract/test_watchdog.test.ts
+  - tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts
+  - tests/helpers/seat-native-runtime-fixture.ts
+  - tests/migrations/aun-configuration-reconciliation.test.ts
+  - tests/norm-022-runtime-endpoint-lease.test.ts
+  - tests/queue-work.test.ts
+  - tests/run-queue-work-plan.test.ts
+  - tests/runtime-cleanup.test.ts
+  - tests/runtime-current-resolver.test.ts
+  - tests/runtime-heartbeat.test.ts
+  - tests/runtime-inventory.test.ts
+  - tests/runtime-memory-ready-identity.test.ts
+  - tests/runtime-memory-ready-refresher.test.ts
+  - tests/runtime-memory-ready.test.ts
+  - tests/runtime-session-env-bridge.test.ts
+  - tests/seat-context-recovery.test.ts
+  - tests/seat-runtime-continuity.test.ts
+  - tests/shirube-current-overlay-check.test.ts
+  - tests/spec-enforcement/outbound-queue-phase3.test.ts
+  - tests/spec-enforcement/s2a-daemon-owns-outbound.test.ts
+  - tests/spec-enforcement/watchdog-false-positive-guards.test.ts
+  - tests/state-daemon-queue-work-activation-plan.test.ts
+  - tests/state-daemon-queue-work-scheduler.test.ts
+  - tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+  - ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/lifecycle-state.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
+  - ".shirube/spec-reconciliation-plan.yaml"
+  forbidden_paths:
+  - package.json
+  - bun.lock
+  - package-lock.json
+  - pnpm-lock.yaml
+  - yarn.lock
+  - ".env*"
+  - secrets/**
+  - config/launchd/**
+  - ".shirube/runtime/**"
+  - scripts/lib/cell-conformance.mjs
+  - scripts/detect-breaking-changes.sh
+  - ".github/workflows/cell-conformance.yml"
+  - ".github/workflows/shirube-external-gate-subject-request.yml"
+  - AGENTS.md
+  allowed_commands: []
+  forbidden_commands: []
+  allowed_mcp_tools: []
+  approval_required_mcp_tools: []
+  forbidden_mcp_tools: []
+  current_delta_allowed_paths:
+  - scripts/shirube-current-overlay-check.mjs
+  - tests/shirube-current-overlay-check.test.ts
+  - docs/design/aun-bounded-admission.md
+  - docs/shirube/README.md
+  - .shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml
+  - .shirube/execution-context.yaml
+  - .shirube/repo-spec.yaml
+  authority_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5726585940
+    sha256: 05b111c3a5f4929401d177695187890c8431f916879b97d1892b3681e457dd85
+historical_adoption:
+  purpose: 'Adopt Shirube Rapid/Lite as a report-only control-plane overlay for AgentCommsMcp
+    while keeping product runtime, API, DB, package, deploy, required checks, branch
+    protection, and rulesets out of this adoption PR.
+
+'
+  scope:
+  - Repo-local Shirube overlay metadata.
+  - Source mirror of watchout/agent-comms-mcp#802.
+  - Report-only owner-observed control policy.
+  - Optional report-only thin workflow caller pinned to ADF.
+  - Repo-local Layer 0 gate alignment with the current Shirube overlay.
+  non_goals:
+  - Runtime code changes are not part of this adoption pack.
+  - API handlers, DB schema, migrations, package files, deploy files, branch protection,
+    rulesets, and required checks are not changed by this pack.
+  - LLM output is never final authority.
+  - This pack does not claim final framework readiness, enforcement, full-control
+    readiness, or protected-check status.
+  source_of_truth_policy:
+    primary_control_source: watchout/agent-comms-mcp#802
+    source_mirror_ref: ".shirube/source-mirrors/control-issue.yaml"
+    mirror_is_truth: false
+    llm_final_authority: false
+    owner_confirmation_required: true
+  confirmation_evidence:
+    rps_readiness:
+      required: true
+      authority_role: owner
+      authority_actor: watchout
+      verdict: CONFIRMED
+      evidence_refs:
+      - https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+  agent_permission_boundary:
+    allowed_paths:
+    - ".shirube/**"
     - docs/shirube/**
-    - .github/workflows/shirube-rapid-lite-gates-report.yml
-    - .github/workflows/pr-checks.yml
+    - ".github/workflows/shirube-rapid-lite-gates-report.yml"
+    - ".github/workflows/pr-checks.yml"
     - scripts/shirube-current-overlay-check.mjs
     - scripts/shirube-full-adoption-check.mjs
-  forbidden_paths:
+    forbidden_paths:
     - scripts/shirube/**
     - src/**
     - app/**
@@ -103,10 +310,29 @@ agent_permission_boundary:
     - package-lock.json
     - pnpm-lock.yaml
     - yarn.lock
-    - .env*
+    - ".env*"
     - deploy/**
-  allowed_commands: []
-  forbidden_commands: []
-  allowed_mcp_tools: []
-  approval_required_mcp_tools: []
-  forbidden_mcp_tools: []
+    allowed_commands: []
+    forbidden_commands: []
+    allowed_mcp_tools: []
+    approval_required_mcp_tools: []
+    forbidden_mcp_tools: []
+  status: HISTORICAL_802_OVERLAY_ONLY_NO_CURRENT_AUTHORITY
+
+historical_I25_scope:
+  delta_allowed_paths:
+  - docs/design/aun-bounded-admission.md
+  - scripts/shirube-current-overlay-check.mjs
+  - tests/shirube-current-overlay-check.test.ts
+  - docs/shirube/README.md
+  - ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+  - ".shirube/execution-context.yaml"
+  - ".shirube/adoption-intake.yaml"
+  - ".shirube/existing-state-scan.yaml"
+  - ".shirube/lifecycle-state.yaml"
+  - ".shirube/repo-spec.yaml"
+  - ".shirube/source-mirrors/control-issue.yaml"
+  - ".shirube/spec-reconciliation-plan.yaml"
+  authority_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4

@@ -14,7 +14,7 @@
  *     is missing
  *   - case 10 (cycle 7): startup order — reclaim await BEFORE claim-ttl
  *     sweeper, plus claim-ttl `selfAgentId` predicate skips own rows
- *   - cases 11–12 (cycle 7): reclaim updates `agents.status` to idle/busy
+ *   - cases 11–12: reclaim changes claims while preserving historical agent observations
  *   - case 13 (cycle 7): `persistInboxCursorToDb` is monotonic — covers BOTH
  *     `inbox` and `next` writers after cycle 8 unified them
  *   - case 14 (cycle 8): `reclaimSelfOrphanedClaims` throws on DB error
@@ -361,11 +361,8 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(after[0].status).toBe('received') // not flipped to 'failed' — protected for self-reclaim
   })
 
-  // PR-0 cycle 7 axis 2/3 BLOCK fix — reclaim path derives agents.status
-  // from the live claim set. Two scenarios:
-  //   (a) all reclaimed → no remaining 'received' claim → status='idle'
-  //   (b) one row left in 'received' (other agent / fresh claim) → status='busy'
-  test('case 11 — reclaim updates agents.status to idle when no claims remain', async () => {
+  // NP03: preserve historical status; busy/idle is derived from the current claim set.
+  test('case 11 — reclaim leaves historical status intact when no claims remain', async () => {
     await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
@@ -375,11 +372,12 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     const after = await db.query<{ status: string; status_detail: string | null }>(
       `SELECT status, status_detail FROM agents WHERE agent_id = 'me'`,
     )
-    expect(after[0].status).toBe('idle')
+    expect(after[0].status).toBe('busy')
+    expect((await db.query<{n:number}>("SELECT count(*) n FROM message_queue WHERE status='received'"))[0].n).toBe(0)
     expect(after[0].status_detail).toBeNull()
   })
 
-  test('case 12 — reclaim leaves agents.status busy when other claim remains', async () => {
+  test('case 12 — reclaim preserves historical status and the other current claim', async () => {
     await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('me', 'busy')`)
     await db.execute(
       `INSERT INTO message_queue (id, agent_id, status, claimed_by, read_at)
@@ -786,38 +784,20 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(window).not.toContain('return []')
   })
 
-  // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — `syncAgentStatusFromClaims`
-  // (called inside `reclaimSelfOrphanedClaims` and the periodic sweeper)
-  // no longer swallows DB errors. A throw must bubble up through the
-  // caller so a status-sync failure surfaces rather than masking
-  // sender-feedback / bot_status as healthy. Test contract: when the
-  // status UPDATE throws, the caller (reclaimSelfOrphanedClaims)
-  // also throws and the message_queue UPDATE that ran first is left
-  // visible for diagnosis (no rollback semantics here — the contract
-  // is "errors are loud").
-  test('case 28 — syncAgentStatusFromClaims errors propagate through reclaimSelfOrphanedClaims', async () => {
-    let queryCount = 0
+  // Durable claim errors still propagate (case 14); no second physical-status write is allowed.
+  test('case 28 — reclaim does not attempt a physical status synchronization query', async () => {
+    const queries:string[]=[]
     const partialDb: import('../core/inbox-cursor').ReclaimDb = {
-      async query(sql: string, _params?: any[]): Promise<any> {
-        queryCount += 1
-        if (queryCount === 1) {
-          // First call = the message_queue UPDATE. Pretend the
-          // reclaim itself succeeded (no rows affected, but no error).
-          return { rows: [], rowCount: 0 }
-        }
-        // Second call = syncAgentStatusFromClaims's UPDATE. Throw to
-        // simulate a transient DB error during status derivation.
-        throw new Error('simulated agents.status sync failure')
+      async query(sql:string):Promise<any> {
+        queries.push(sql)
+        if(queries.length>1)throw new Error('unexpected physical status synchronization')
+        return {rows:[],rowCount:0}
       },
     }
-    let caught: Error | null = null
-    try {
-      await reclaimSelfOrphanedClaims(partialDb, 'me')
-    } catch (err) {
-      caught = err as Error
-    }
-    expect(caught).not.toBeNull()
-    expect(caught?.message).toContain('simulated agents.status sync failure')
+    expect(await reclaimSelfOrphanedClaims(partialDb,'me')).toBe(0)
+    expect(queries).toHaveLength(1)
+    expect(queries[0]).toContain('UPDATE message_queue')
+    expect(queries[0]).not.toContain('UPDATE agents')
   })
 
   // PR-0 cycle 14 axis 2/3/4/5/6 BLOCK fix — periodic self-reclaim
@@ -968,7 +948,7 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
     expect(byId['foreign-expired']).toBe('pending')  // foreign claim reset for retry (v0.9)
   })
 
-  test('case 33 — shared claim-TTL sweep clears claim metadata and resyncs agents.status', async () => {
+  test('case 33 — shared claim-TTL sweep clears claim metadata while preserving historical status', async () => {
     const { sweepExpiredClaims } = await import('../core/claim-ttl')
     await db.execute(
       `INSERT INTO agents (agent_id, status, status_detail)
@@ -1016,8 +996,8 @@ describe('Issue #287 — DB-persisted inbox cursor + self-reclaim', () => {
         ORDER BY agent_id`,
     )
     const agentById = Object.fromEntries(agents.map((agent) => [agent.agent_id, agent]))
-    expect(agentById['expired-only'].status).toBe('idle')
-    expect(agentById['expired-only'].status_detail).toBe(null)
+    expect(agentById['expired-only'].status).toBe('busy')
+    expect(agentById['expired-only'].status_detail).toBe('メッセージ処理中')
     expect(agentById['still-busy'].status).toBe('busy')
     expect(agentById['still-busy'].status_detail).toBe('メッセージ処理中')
   })

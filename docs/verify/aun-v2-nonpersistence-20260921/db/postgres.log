@@ -1,0 +1,1407 @@
+2026-09-21 13:54:48.813 JST [67142] LOG:  starting PostgreSQL 17.9 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-09-21 13:54:48.813 JST [67142] LOG:  listening on Unix socket "/private/tmp/aun-np-db-n_mu4fk1/socket/.s.PGSQL.5432"
+2026-09-21 13:54:48.815 JST [67145] LOG:  database system was shut down at 2026-09-21 13:54:48 JST
+2026-09-21 13:54:48.817 JST [67142] LOG:  database system is ready to accept connections
+2026-09-21 13:55:36.260 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:55:36.261 JST [67143] LOG:  checkpoint complete: wrote 15 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=12, longest=0.001 s, average=0.001 s; distance=6420 kB, estimate=6420 kB; lsn=0/1B5DBD0, redo lsn=0/1B5DB78
+2026-09-21 13:55:36.444 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.runtime_engine
+2026-09-21 13:55:36.444 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:55:36.444 JST [69665] STATEMENT:  INSERT INTO agent_runtime_instances (runtime_instance_id,agent_id,runtime_engine) VALUES ($1,$2,$3)
+2026-09-21 13:55:36.446 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.port
+2026-09-21 13:55:36.446 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:55:36.446 JST [69665] STATEMENT:  UPDATE agent_runtime_instances SET port=45556 WHERE runtime_instance_id=$1
+2026-09-21 13:55:36.447 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 13:55:36.447 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:55:36.447 JST [69665] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 13:55:36.448 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 13:55:36.448 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:55:36.448 JST [69665] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 13:55:36.449 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:control_plane_leases.metadata
+2026-09-21 13:55:36.449 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:55:36.449 JST [69665] STATEMENT:  UPDATE control_plane_leases SET metadata=$1 WHERE lease_id=$2
+2026-09-21 13:55:36.451 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 13:55:36.451 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:55:36.451 JST [69665] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 13:55:36.452 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_workspaces.local_path
+2026-09-21 13:55:36.452 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:55:36.452 JST [69665] STATEMENT:  UPDATE agent_workspaces SET local_path='/new/path' WHERE workspace_id='logical-workspace'
+2026-09-21 13:55:36.453 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit_log.detail
+2026-09-21 13:55:36.453 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 13:55:36.453 JST [69665] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 13:55:36.454 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target
+2026-09-21 13:55:36.454 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 22 at RAISE
+2026-09-21 13:55:36.454 JST [69665] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 13:55:36.455 JST [69665] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 13:55:36.455 JST [69665] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 13:55:36.455 JST [69665] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 13:55:36.456 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:55:36.457 JST [67143] LOG:  checkpoint complete: wrote 9 buffers (0.1%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=8, longest=0.001 s, average=0.001 s; distance=6419 kB, estimate=6420 kB; lsn=0/21A2B90, redo lsn=0/21A2B38
+2026-09-21 13:55:36.628 JST [69671] ERROR:  division by zero
+2026-09-21 13:55:36.628 JST [69671] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF value IS NOT NULL AND jsonb_typeof(value) IN ('object','array') AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' THEN
+	     FOR k IN SELECT generate_series(0,jsonb_array_length(n)-1)::text LOOP
+	       IF NOT aun_np_json_valid(n->k::int,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"string","mcp_runtime_instance_id":"string","source_commit":"string","source_tree":"string"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"string","pack_id":"string","work_digest":"string","invocation_digest":"string","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"number|string","status":"string","action_kind":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"string"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"string"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 13:55:36.629 JST [69671] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 13:55:36.629 JST [69671] DETAIL:  Failing row contains (2, fixture-agent, p, ad0e066a-6f05-41f9-b483-afb06459dc81, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 13:55:36.629902+09).
+2026-09-21 13:55:36.629 JST [69671] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 13:55:36.631 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:55:36.632 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6417 kB, estimate=6420 kB; lsn=0/27E72E0, redo lsn=0/27E7288
+2026-09-21 13:55:36.794 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:55:36.795 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6142 kB, estimate=6392 kB; lsn=0/2DE6E60, redo lsn=0/2DE6E08
+2026-09-21 13:55:37.251 JST [69695] ERROR:  AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE
+2026-09-21 13:55:37.251 JST [69695] CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-09-21 13:55:37.251 JST [69695] STATEMENT:  -- D4: restoring a physical-writing version is not a compatible rollback.
+	DO $$ BEGIN RAISE EXCEPTION 'AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE'; END $$;
+	
+2026-09-21 13:55:37.253 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:55:37.254 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6424 kB, estimate=6424 kB; lsn=0/342D1B8, redo lsn=0/342D160
+2026-09-21 13:56:28.644 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:56:28.646 JST [67143] LOG:  checkpoint complete: wrote 12 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=10, longest=0.001 s, average=0.001 s; distance=6440 kB, estimate=6440 kB; lsn=0/3A77598, redo lsn=0/3A77540
+2026-09-21 13:56:28.826 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.runtime_engine
+2026-09-21 13:56:28.826 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:56:28.826 JST [71205] STATEMENT:  INSERT INTO agent_runtime_instances (runtime_instance_id,agent_id,runtime_engine) VALUES ($1,$2,$3)
+2026-09-21 13:56:28.829 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.port
+2026-09-21 13:56:28.829 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:56:28.829 JST [71205] STATEMENT:  UPDATE agent_runtime_instances SET port=45556 WHERE runtime_instance_id=$1
+2026-09-21 13:56:28.830 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 13:56:28.830 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:56:28.830 JST [71205] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 13:56:28.832 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 13:56:28.832 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:56:28.832 JST [71205] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 13:56:28.834 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:control_plane_leases.metadata
+2026-09-21 13:56:28.834 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:56:28.834 JST [71205] STATEMENT:  UPDATE control_plane_leases SET metadata=$1 WHERE lease_id=$2
+2026-09-21 13:56:28.835 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 13:56:28.835 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 13:56:28.835 JST [71205] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 13:56:28.837 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_workspaces.local_path
+2026-09-21 13:56:28.837 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 13:56:28.837 JST [71205] STATEMENT:  UPDATE agent_workspaces SET local_path='/new/path' WHERE workspace_id='logical-workspace'
+2026-09-21 13:56:28.838 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit_log.detail
+2026-09-21 13:56:28.838 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 13:56:28.838 JST [71205] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 13:56:28.839 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target
+2026-09-21 13:56:28.839 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 22 at RAISE
+2026-09-21 13:56:28.839 JST [71205] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 13:56:28.841 JST [71205] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 13:56:28.841 JST [71205] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 13:56:28.841 JST [71205] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 13:56:28.842 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:56:28.843 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6421 kB, estimate=6438 kB; lsn=0/40BC9B0, redo lsn=0/40BC958
+2026-09-21 13:56:29.034 JST [71212] ERROR:  division by zero
+2026-09-21 13:56:29.034 JST [71212] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF value IS NOT NULL AND jsonb_typeof(value) IN ('object','array') AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' THEN
+	     FOR k IN SELECT generate_series(0,jsonb_array_length(n)-1)::text LOOP
+	       IF NOT aun_np_json_valid(n->k::int,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"string","mcp_runtime_instance_id":"string","source_commit":"string","source_tree":"string"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"string","pack_id":"string","work_digest":"string","invocation_digest":"string","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"number|string","status":"string","action_kind":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"string"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"string"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 13:56:29.036 JST [71212] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 13:56:29.036 JST [71212] DETAIL:  Failing row contains (2, fixture-agent, p, fd369e80-0985-4409-96ee-7da748b2948f, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 13:56:29.036336+09).
+2026-09-21 13:56:29.036 JST [71212] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 13:56:29.037 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:56:29.038 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6418 kB, estimate=6436 kB; lsn=0/4701540, redo lsn=0/47014E8
+2026-09-21 13:56:29.210 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:56:29.211 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6143 kB, estimate=6407 kB; lsn=0/4D014F8, redo lsn=0/4D014A0
+2026-09-21 13:56:29.721 JST [71236] ERROR:  AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE
+2026-09-21 13:56:29.721 JST [71236] CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-09-21 13:56:29.721 JST [71236] STATEMENT:  -- D4: restoring a physical-writing version is not a compatible rollback.
+	DO $$ BEGIN RAISE EXCEPTION 'AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE'; END $$;
+	
+2026-09-21 13:56:29.722 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 13:56:29.723 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6425 kB, estimate=6425 kB; lsn=0/5347CA0, redo lsn=0/5347C48
+2026-09-21 14:01:29.728 JST [67143] LOG:  checkpoint starting: time
+2026-09-21 14:01:34.945 JST [67143] LOG:  checkpoint complete: wrote 52 buffers (0.3%); 0 WAL file(s) added, 0 removed, 0 recycled; write=5.213 s, sync=0.002 s, total=5.218 s; sync files=16, longest=0.001 s, average=0.001 s; distance=309 kB, estimate=5814 kB; lsn=0/5395278, redo lsn=0/5395220
+2026-09-21 14:02:04.123 JST [86321] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:04.123 JST [86321] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	COMMIT;
+	
+2026-09-21 14:02:04.124 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:04.126 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6403 kB, estimate=6403 kB; lsn=0/59D6148, redo lsn=0/59D60F0
+2026-09-21 14:02:04.309 JST [86327] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:04.309 JST [86327] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	COMMIT;
+	
+2026-09-21 14:02:04.309 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:04.310 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6409 kB, estimate=6409 kB; lsn=0/60187C8, redo lsn=0/6018770
+2026-09-21 14:02:04.496 JST [86335] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:04.496 JST [86335] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 14:02:04.498 JST [86335] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 14:02:04.498 JST [86335] DETAIL:  Failing row contains (2, fixture-agent, p, 225e6121-6c87-4bee-9cf8-1df7acd7379d, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 14:02:04.498046+09).
+2026-09-21 14:02:04.498 JST [86335] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 14:02:04.499 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:04.500 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6415 kB, estimate=6415 kB; lsn=0/665C680, redo lsn=0/665C628
+2026-09-21 14:02:04.664 JST [86340] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:04.664 JST [86340] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	COMMIT;
+	
+2026-09-21 14:02:05.127 JST [86358] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:05.127 JST [86358] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	COMMIT;
+	
+2026-09-21 14:02:05.128 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:05.155 JST [67143] LOG:  checkpoint complete: wrote 1098 buffers (6.7%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.019 s, sync=0.008 s, total=0.028 s; sync files=578, longest=0.001 s, average=0.001 s; distance=12534 kB, estimate=12534 kB; lsn=0/729A150, redo lsn=0/729A0F8
+2026-09-21 14:02:05.320 JST [86364] ERROR:  syntax error at end of input at character 3105
+2026-09-21 14:02:05.320 JST [86364] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	COMMIT;
+	
+2026-09-21 14:02:05.321 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:05.322 JST [67143] LOG:  checkpoint complete: wrote 9 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=8, longest=0.001 s, average=0.001 s; distance=6424 kB, estimate=11923 kB; lsn=0/78E03B8, redo lsn=0/78E0360
+2026-09-21 14:02:55.121 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:55.128 JST [67143] LOG:  checkpoint complete: wrote 125 buffers (0.8%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.007 s, sync=0.001 s, total=0.008 s; sync files=26, longest=0.001 s, average=0.001 s; distance=6763 kB, estimate=11407 kB; lsn=0/7F7B088, redo lsn=0/7F7B030
+2026-09-21 14:02:55.319 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.runtime_engine
+2026-09-21 14:02:55.319 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:02:55.319 JST [88001] STATEMENT:  INSERT INTO agent_runtime_instances (runtime_instance_id,agent_id,runtime_engine) VALUES ($1,$2,$3)
+2026-09-21 14:02:55.321 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.port
+2026-09-21 14:02:55.321 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:02:55.321 JST [88001] STATEMENT:  UPDATE agent_runtime_instances SET port=45556 WHERE runtime_instance_id=$1
+2026-09-21 14:02:55.322 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:02:55.322 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.322 JST [88001] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:02:55.324 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:02:55.324 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.324 JST [88001] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:02:55.325 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:02:55.325 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.325 JST [88001] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:02:55.327 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:02:55.327 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.327 JST [88001] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:02:55.328 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:02:55.328 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.328 JST [88001] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:02:55.330 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:02:55.330 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.330 JST [88001] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:02:55.332 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:control_plane_leases.metadata
+2026-09-21 14:02:55.332 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.332 JST [88001] STATEMENT:  UPDATE control_plane_leases SET metadata=$1 WHERE lease_id=$2
+2026-09-21 14:02:55.334 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:02:55.334 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:55.334 JST [88001] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:02:55.335 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_workspaces.local_path
+2026-09-21 14:02:55.335 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:02:55.335 JST [88001] STATEMENT:  UPDATE agent_workspaces SET local_path='/new/path' WHERE workspace_id='logical-workspace'
+2026-09-21 14:02:55.336 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit_log.detail
+2026-09-21 14:02:55.336 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:02:55.336 JST [88001] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:02:55.338 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target
+2026-09-21 14:02:55.338 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 22 at RAISE
+2026-09-21 14:02:55.338 JST [88001] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:02:55.339 JST [88001] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:02:55.339 JST [88001] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:02:55.339 JST [88001] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:02:55.341 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:55.342 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6444 kB, estimate=10911 kB; lsn=0/85C61F8, redo lsn=0/85C61A0
+2026-09-21 14:02:55.531 JST [88007] ERROR:  division by zero
+2026-09-21 14:02:55.531 JST [88007] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ (CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END) THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 14:02:55.533 JST [88007] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 14:02:55.533 JST [88007] DETAIL:  Failing row contains (2, fixture-agent, p, 3cd97b4e-0141-4202-8ac2-65abf612bf0c, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 14:02:55.533396+09).
+2026-09-21 14:02:55.533 JST [88007] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 14:02:55.534 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:55.535 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6437 kB, estimate=10463 kB; lsn=0/8C0F828, redo lsn=0/8C0F7D0
+2026-09-21 14:02:55.712 JST [88013] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:02:55.712 JST [88013] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:02:55.712 JST [88013] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:02:55.713 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:55.714 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6164 kB, estimate=10033 kB; lsn=0/9214920, redo lsn=0/92148C8
+2026-09-21 14:02:56.227 JST [88031] ERROR:  AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE
+2026-09-21 14:02:56.227 JST [88031] CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-09-21 14:02:56.227 JST [88031] STATEMENT:  -- D4: restoring a physical-writing version is not a compatible rollback.
+	DO $$ BEGIN RAISE EXCEPTION 'AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE'; END $$;
+	
+2026-09-21 14:02:56.228 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:56.229 JST [67143] LOG:  checkpoint complete: wrote 12 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=8, longest=0.001 s, average=0.001 s; distance=6445 kB, estimate=9675 kB; lsn=0/985FD38, redo lsn=0/985FCE0
+2026-09-21 14:02:56.417 JST [88037] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.home_directory
+2026-09-21 14:02:56.417 JST [88037] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:02:56.417 JST [88037] STATEMENT:  UPDATE agents SET home_directory='/new/runtime/path' WHERE agent_id='fixture-agent'
+2026-09-21 14:02:56.418 JST [88037] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.ordinary_projection
+2026-09-21 14:02:56.418 JST [88037] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:02:56.418 JST [88037] STATEMENT:  UPDATE agents SET ordinary_projection=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:02:56.421 JST [88037] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state.candidate_digest
+2026-09-21 14:02:56.421 JST [88037] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:02:56.421 JST [88037] STATEMENT:  UPDATE aun_configuration_observed_state SET candidate_digest=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:02:56.422 JST [88037] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state
+2026-09-21 14:02:56.422 JST [88037] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 5 at RAISE
+2026-09-21 14:02:56.422 JST [88037] STATEMENT:  INSERT INTO aun_configuration_observed_state SELECT 'new-host',agent_id,observed_revision,observed_desired_digest,candidate_digest,release_commit,release_tree,provider_native_digest,launchagent_plist_digest,launchctl_environment_digest,runtime_identity_digest,reconcile_status,drift_reason_codes,lease_id,fencing_token,observed_at FROM aun_configuration_observed_state
+2026-09-21 14:02:56.423 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:02:56.424 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6444 kB, estimate=9351 kB; lsn=0/9EAADA8, redo lsn=0/9EAAD50
+2026-09-21 14:04:45.758 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:45.761 JST [67143] LOG:  checkpoint complete: wrote 17 buffers (0.1%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.003 s, sync=0.001 s, total=0.004 s; sync files=13, longest=0.001 s, average=0.001 s; distance=6474 kB, estimate=9064 kB; lsn=0/A4FD688, redo lsn=0/A4FD630
+2026-09-21 14:04:45.950 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.runtime_engine
+2026-09-21 14:04:45.950 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:04:45.950 JST [93204] STATEMENT:  INSERT INTO agent_runtime_instances (runtime_instance_id,agent_id,runtime_engine) VALUES ($1,$2,$3)
+2026-09-21 14:04:45.951 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.port
+2026-09-21 14:04:45.951 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:04:45.951 JST [93204] STATEMENT:  UPDATE agent_runtime_instances SET port=45556 WHERE runtime_instance_id=$1
+2026-09-21 14:04:45.953 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:04:45.953 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.953 JST [93204] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.954 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:04:45.954 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.954 JST [93204] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.956 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:04:45.956 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.956 JST [93204] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.957 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:04:45.957 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.957 JST [93204] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.959 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:04:45.959 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.959 JST [93204] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.960 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:04:45.960 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.960 JST [93204] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:04:45.961 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:04:45.961 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.961 JST [93204] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:04:45.963 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:control_plane_leases.metadata
+2026-09-21 14:04:45.963 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.963 JST [93204] STATEMENT:  UPDATE control_plane_leases SET metadata=$1 WHERE lease_id=$2
+2026-09-21 14:04:45.966 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:04:45.966 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:45.966 JST [93204] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:04:45.967 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_workspaces.local_path
+2026-09-21 14:04:45.967 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:04:45.967 JST [93204] STATEMENT:  UPDATE agent_workspaces SET local_path='/new/path' WHERE workspace_id='logical-workspace'
+2026-09-21 14:04:45.969 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit_log.detail
+2026-09-21 14:04:45.969 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:04:45.969 JST [93204] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:04:45.970 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target
+2026-09-21 14:04:45.970 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 22 at RAISE
+2026-09-21 14:04:45.970 JST [93204] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:04:45.971 JST [93204] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:04:45.971 JST [93204] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:04:45.971 JST [93204] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:04:45.972 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:45.973 JST [67143] LOG:  checkpoint complete: wrote 9 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6447 kB, estimate=8802 kB; lsn=0/AB49448, redo lsn=0/AB493F0
+2026-09-21 14:04:46.153 JST [93210] ERROR:  division by zero
+2026-09-21 14:04:46.153 JST [93210] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ (CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END) THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb AND NOT (TG_TABLE_NAME='agents' AND col='channel_port' AND n->col='0'::jsonb)) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 14:04:46.153 JST [93210] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 14:04:46.153 JST [93210] DETAIL:  Failing row contains (2, fixture-agent, p, 216ec01b-07d0-4632-b109-99f3c8222ea1, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 14:04:46.153952+09).
+2026-09-21 14:04:46.153 JST [93210] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 14:04:46.155 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:46.156 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6440 kB, estimate=8566 kB; lsn=0/B193610, redo lsn=0/B1935B8
+2026-09-21 14:04:46.324 JST [93216] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:04:46.324 JST [93216] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:04:46.324 JST [93216] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:04:46.325 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:46.326 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6167 kB, estimate=8326 kB; lsn=0/B799278, redo lsn=0/B799220
+2026-09-21 14:04:46.819 JST [93234] ERROR:  AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE
+2026-09-21 14:04:46.819 JST [93234] CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-09-21 14:04:46.819 JST [93234] STATEMENT:  -- D4: restoring a physical-writing version is not a compatible rollback.
+	DO $$ BEGIN RAISE EXCEPTION 'AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE'; END $$;
+	
+2026-09-21 14:04:46.820 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:46.821 JST [67143] LOG:  checkpoint complete: wrote 12 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=8, longest=0.001 s, average=0.001 s; distance=6447 kB, estimate=8138 kB; lsn=0/BDE5228, redo lsn=0/BDE51D0
+2026-09-21 14:04:46.999 JST [93240] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.home_directory
+2026-09-21 14:04:46.999 JST [93240] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:04:46.999 JST [93240] STATEMENT:  UPDATE agents SET home_directory='/new/runtime/path' WHERE agent_id='fixture-agent'
+2026-09-21 14:04:47.000 JST [93240] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.ordinary_projection
+2026-09-21 14:04:47.000 JST [93240] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:04:47.000 JST [93240] STATEMENT:  UPDATE agents SET ordinary_projection=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:04:47.003 JST [93240] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state.candidate_digest
+2026-09-21 14:04:47.003 JST [93240] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:04:47.003 JST [93240] STATEMENT:  UPDATE aun_configuration_observed_state SET candidate_digest=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:04:47.003 JST [93240] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state
+2026-09-21 14:04:47.003 JST [93240] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 5 at RAISE
+2026-09-21 14:04:47.003 JST [93240] STATEMENT:  INSERT INTO aun_configuration_observed_state SELECT 'new-host',agent_id,observed_revision,observed_desired_digest,candidate_digest,release_commit,release_tree,provider_native_digest,launchagent_plist_digest,launchctl_environment_digest,runtime_identity_digest,reconcile_status,drift_reason_codes,lease_id,fencing_token,observed_at FROM aun_configuration_observed_state
+2026-09-21 14:04:47.004 JST [67143] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:04:47.005 JST [67143] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6446 kB, estimate=7969 kB; lsn=0/C430E00, redo lsn=0/C430DA8
+2026-09-21 14:06:34.609 JST [67142] LOG:  received smart shutdown request
+2026-09-21 14:06:34.610 JST [67142] LOG:  background worker "logical replication launcher" (PID 67148) exited with exit code 1
+2026-09-21 14:06:34.610 JST [67143] LOG:  shutting down
+2026-09-21 14:06:34.610 JST [67143] LOG:  checkpoint starting: shutdown immediate
+2026-09-21 14:06:34.613 JST [67143] LOG:  checkpoint complete: wrote 14 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.003 s; sync files=10, longest=0.001 s, average=0.001 s; distance=42 kB, estimate=7176 kB; lsn=0/C43B6E0, redo lsn=0/C43B6E0
+2026-09-21 14:06:34.614 JST [67142] LOG:  database system is shut down
+2026-09-21 14:07:47.694 JST [2803] LOG:  starting PostgreSQL 17.9 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-09-21 14:07:47.694 JST [2803] LOG:  listening on Unix socket "/private/tmp/aun-np-db-n_mu4fk1/socket/.s.PGSQL.5432"
+2026-09-21 14:07:47.698 JST [2813] LOG:  database system was shut down at 2026-09-21 14:06:34 JST
+2026-09-21 14:07:47.702 JST [2803] LOG:  database system is ready to accept connections
+2026-09-21 14:07:48.097 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:48.098 JST [2811] LOG:  checkpoint complete: wrote 10 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=9, longest=0.001 s, average=0.001 s; distance=6448 kB, estimate=6448 kB; lsn=0/CA87738, redo lsn=0/CA876E0
+2026-09-21 14:07:48.296 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.runtime_engine
+2026-09-21 14:07:48.296 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:07:48.296 JST [3160] STATEMENT:  INSERT INTO agent_runtime_instances (runtime_instance_id,agent_id,runtime_engine) VALUES ($1,$2,$3)
+2026-09-21 14:07:48.298 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.port
+2026-09-21 14:07:48.298 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:07:48.298 JST [3160] STATEMENT:  UPDATE agent_runtime_instances SET port=45556 WHERE runtime_instance_id=$1
+2026-09-21 14:07:48.300 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:07:48.300 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.300 JST [3160] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.301 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:07:48.301 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.301 JST [3160] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.303 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:07:48.303 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.303 JST [3160] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.304 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_runtime_instances.metadata
+2026-09-21 14:07:48.304 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.304 JST [3160] STATEMENT:  UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.305 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:07:48.305 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.305 JST [3160] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.307 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:07:48.307 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.307 JST [3160] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:07:48.309 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:runtime_memory_ready_evidence.metadata
+2026-09-21 14:07:48.309 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.309 JST [3160] STATEMENT:  UPDATE runtime_memory_ready_evidence SET metadata=$1 WHERE runtime_instance_id=$2
+2026-09-21 14:07:48.311 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:control_plane_leases.metadata
+2026-09-21 14:07:48.311 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.311 JST [3160] STATEMENT:  UPDATE control_plane_leases SET metadata=$1 WHERE lease_id=$2
+2026-09-21 14:07:48.313 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.metadata
+2026-09-21 14:07:48.313 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:48.313 JST [3160] STATEMENT:  UPDATE agents SET metadata=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:07:48.314 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agent_workspaces.local_path
+2026-09-21 14:07:48.314 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:07:48.314 JST [3160] STATEMENT:  UPDATE agent_workspaces SET local_path='/new/path' WHERE workspace_id='logical-workspace'
+2026-09-21 14:07:48.315 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit_log.detail
+2026-09-21 14:07:48.315 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:07:48.315 JST [3160] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:07:48.317 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target
+2026-09-21 14:07:48.317 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 22 at RAISE
+2026-09-21 14:07:48.317 JST [3160] STATEMENT:  INSERT INTO audit_log (event_type,target,detail) VALUES ($1,$2,$3)
+2026-09-21 14:07:48.319 JST [3160] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:07:48.319 JST [3160] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:07:48.319 JST [3160] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:07:48.321 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:48.322 JST [2811] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6453 kB, estimate=6453 kB; lsn=0/D0D4CC8, redo lsn=0/D0D4C70
+2026-09-21 14:07:48.514 JST [3282] ERROR:  division by zero
+2026-09-21 14:07:48.514 JST [3282] STATEMENT:  -- Owner adopted D1-D4: no observation writes; existing physical/history bytes retained.
+	-- One transaction; no UPDATE/DELETE of historical rows, no runtime-row replacement.
+	BEGIN;
+	CREATE OR REPLACE FUNCTION aun_np_json_valid(n jsonb, o jsonb, spec jsonb)
+	RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+	DECLARE k text; t jsonb; kind text; previous jsonb; value jsonb;
+	BEGIN
+	 n:=COALESCE(n,'{}'::jsonb); o:=COALESCE(o,'{}'::jsonb);
+	 IF n=o THEN RETURN true; END IF;
+	 IF spec='"logical"'::jsonb THEN
+	   IF jsonb_typeof(n)='object' OR jsonb_typeof(o)='object' THEN
+	     FOR k IN SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(n)='object' THEN n ELSE '{}'::jsonb END||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	       value:=n->k; previous:=o->k;
+	       IF lower(replace(replace(k,'_',''),'-',''))=ANY(ARRAY['provider','actualprovider','providerobservation','nativedelivery','providerpid','providerstartedat','providerexecutablesha256','workspacesha256','pipesha256','hostsessionid','runtimeengine','runtime','hostid','pid','processid','port','endpoint','endpointuri','sessionname','tmuxsession','checkoutpath','runtimecheckoutpath','localpath','homedirectory','canonicalhome','canonicalworkspace','providerreporoot','providerconfigroot','daemoncheckout','startedat','stoppedat','lastseenat','liveness','recoverycommand','evidencepath','error']) THEN
+	         IF value IS DISTINCT FROM previous THEN RETURN false; END IF;
+	       ELSIF (jsonb_typeof(value) IN ('object','array') OR jsonb_typeof(previous) IN ('object','array')) AND NOT aun_np_json_valid(value,previous,spec) THEN RETURN false;
+	       END IF;
+	     END LOOP;
+	   ELSIF jsonb_typeof(n)='array' OR jsonb_typeof(o)='array' THEN
+	     FOR k IN SELECT generate_series(0,GREATEST(CASE WHEN jsonb_typeof(n)='array' THEN jsonb_array_length(n) ELSE 0 END,CASE WHEN jsonb_typeof(o)='array' THEN jsonb_array_length(o) ELSE 0 END)-1)::text LOOP
+	       IF NOT aun_np_json_valid(CASE WHEN jsonb_typeof(n)='array' THEN n->k::int ELSE NULL END,CASE WHEN jsonb_typeof(o)='array' THEN o->k::int ELSE NULL END,spec) THEN RETURN false; END IF;
+	     END LOOP;
+	   END IF;
+	   RETURN true;
+	 END IF;
+	 IF jsonb_typeof(n)<>'object' OR jsonb_typeof(spec)<>'object' THEN RETURN false; END IF;
+	 FOR k IN SELECT jsonb_object_keys(n||CASE WHEN jsonb_typeof(o)='object' THEN o ELSE '{}'::jsonb END) LOOP
+	   value:=n->k; previous:=o->k; t:=spec->k;
+	   IF t IS NULL THEN IF value IS DISTINCT FROM previous THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NULL THEN IF jsonb_typeof(t)='object' AND jsonb_typeof(previous)='object' AND NOT aun_np_json_valid('{}'::jsonb,previous,t) THEN RETURN false; END IF; CONTINUE; END IF;
+	   IF value IS NOT DISTINCT FROM previous THEN CONTINUE; END IF;
+	   IF jsonb_typeof(t)='object' THEN
+	     IF NOT aun_np_json_valid(value,previous,t) THEN RETURN false; END IF;
+	   ELSE
+	     kind:=t#>>'{}';
+	     IF left(kind,1)='=' THEN IF value<>to_jsonb(substr(kind,2)) THEN RETURN false; END IF;
+	     ELSIF kind IN ('sha1','sha256') THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ (CASE WHEN kind='sha1' THEN '^[0-9a-f]{40}$' ELSE '^[0-9a-f]{64}$' END) THEN RETURN false; END IF;
+	     ELSIF kind='uuid' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='bootstrap_id' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^bootstrap-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN RETURN false; END IF;
+	     ELSIF kind='reason_code' THEN IF jsonb_typeof(value)<>'string' OR NOT (value#>>'{}') ~ '^[A-Z][A-Z0-9_]*$' THEN RETURN false; END IF;
+	     ELSIF kind='delivery_code' THEN IF jsonb_typeof(value)<>'string' OR value#>>'{}' NOT IN ('DELIVERY_PERMANENT_FAILURE','DELIVERY_RETRYABLE_FAILURE') THEN RETURN false; END IF;
+	     ELSIF kind='scopevalues' THEN IF jsonb_typeof(value)='array' THEN IF EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e) NOT IN ('string','number')) THEN RETURN false; END IF; ELSIF jsonb_typeof(value) NOT IN ('string','number') THEN RETURN false; END IF;
+	     ELSIF kind='strings' THEN IF jsonb_typeof(value)<>'array' OR EXISTS(SELECT 1 FROM jsonb_array_elements(value) e WHERE jsonb_typeof(e)<>'string') THEN RETURN false; END IF;
+	     ELSIF NOT jsonb_typeof(value)=ANY(string_to_array(kind,'|')) THEN RETURN false;
+	     END IF;
+	   END IF;
+	 END LOOP;
+	 RETURN true;
+	END $$;
+	
+	CREATE OR REPLACE FUNCTION aun_guard_runtime_nonpersistence()
+	RETURNS trigger LANGUAGE plpgsql AS $$
+	DECLARE spec jsonb:=TG_ARGV[0]::jsonb; n jsonb:=to_jsonb(NEW); o jsonb; col text; shape jsonb; event_shapes jsonb;
+	BEGIN
+	 o:=CASE WHEN TG_OP='UPDATE' THEN to_jsonb(OLD) ELSE '{}'::jsonb END;
+	 IF TG_OP='INSERT' AND COALESCE((spec->>'deny_insert')::boolean,false) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%',TG_TABLE_NAME; END IF;
+	 FOR col IN SELECT jsonb_array_elements_text(spec->'physical') LOOP
+	   IF n ? col AND ((TG_OP='INSERT' AND n->col <> 'null'::jsonb AND NOT (TG_TABLE_NAME='agents' AND col='channel_port' AND n->col='0'::jsonb)) OR (TG_OP='UPDATE' AND n->col IS DISTINCT FROM o->col)) THEN
+	     RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col;
+	   END IF;
+	 END LOOP;
+	 FOR col,shape IN SELECT key,value FROM jsonb_each(spec->'json') LOOP
+	   IF TG_TABLE_NAME='control_plane_leases' AND col='metadata' AND NOT (n->>'lease_scope_type'='runtime_instance' AND n->>'lease_purpose'='worker') THEN shape:='"logical"'::jsonb; END IF;
+	   IF n ? col AND ((n->col<>'null'::jsonb AND jsonb_typeof(n->col)<>'object') OR NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape)) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	 END LOOP;
+	 event_shapes:=spec->'events'->(n->>'event_type');
+	 IF event_shapes IS NOT NULL THEN
+	   FOR col,shape IN SELECT key,value FROM jsonb_each(event_shapes) LOOP
+	     IF NOT aun_np_json_valid(NULLIF(n->col,'null'::jsonb),NULLIF(o->col,'null'::jsonb),shape) THEN RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:%.%',TG_TABLE_NAME,col; END IF;
+	   END LOOP;
+	 END IF;
+	 IF TG_TABLE_NAME='audit_log' AND n->>'event_type' IN ('runtime.cleanup_target','runtime.cleanup_execute') AND n->>'target' ~ '^(listener|tmux):' AND n->'target' IS DISTINCT FROM o->'target' THEN
+	   RAISE EXCEPTION 'AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:audit.target';
+	 END IF;
+	 RETURN NEW;
+	END $$;
+	DO $$
+	DECLARE v_table text; col text; shape jsonb; specs jsonb:='{"agent_runtime_instances":{"physical":["runtime_engine","host_id","session_name","process_id","port","checkout_path","endpoint_uri","status","started_at","stopped_at","last_seen_at"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","bootstrap_run_id":"bootstrap_id","mcp_runtime_instance_id":"uuid","source_commit":"sha1","source_tree":"sha1"}}},"runtime_memory_ready_evidence":{"physical":["session_name","port","checkout_path","recovery_command","evidence_path"],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1","seat_context_proof":{"agent_id":"string","project":"string","runtime_instance_id":"uuid","pack_id":"string","work_digest":"sha256","invocation_digest":"sha256","completed_at":"string"},"actor":"string","reason":"string","timestamp":"string","target_agent":"string","target_agent_id":"string","expires_at":"string","expiry":"string","expiry_at":"string","queue_scope":{"queue_id":"scopevalues","queue_ids":"scopevalues","status":"scopevalues","statuses":"scopevalues","action_kind":"scopevalues","action_kinds":"scopevalues","agent_id":"string","target_agent":"string","target_agent_id":"string"},"bootstrap_run_id":"bootstrap_id","target":{"agent_id":"string"}}}},"control_plane_leases":{"physical":[],"json":{"metadata":{"schema_version":"=aun-runtime-nonpersistence/v1"}}},"agents":{"physical":["runtime","cli_type","status","status_detail","status_updated_at","last_seen_at","heartbeat_at","channel_port","home_directory","runtime_engine_preference","canonical_home","canonical_workspace"],"json":{"metadata":"logical","ordinary_projection":"logical"}},"agent_workspaces":{"physical":["local_path"],"json":{"metadata":"logical"}},"connector_instances":{"physical":["last_seen_at"],"json":{"metadata":"logical"}},"agent_endpoints":{"physical":["endpoint_uri"],"json":{"metadata":"logical"}},"aun_configuration_observed_state":{"physical":["host_id","runtime_identity_digest","candidate_digest","provider_native_digest","launchagent_plist_digest","launchctl_environment_digest","observed_at"],"json":{},"deny_insert":true},"aun_configuration_restart_requests":{"physical":["host_id","candidate_digest","rollback_artifact_digest"],"json":{},"deny_insert":true},"audit_log":{"physical":[],"json":{},"events":{"runtime.memory_ready_identity":{"detail":{"code":"reason_code"}},"runtime.cleanup_target":{"detail":{"dry_run":"boolean","classification":"string","risk":"string","runtime_instance_id":"string|null","action_kinds":"strings"}},"runtime.cleanup_execute":{"detail":{"executable_actions":"number","cleanup_targets":"number","unknown_risk_targets":"number"}},"runtime.memory_ready":{"detail":{"project":"string|number","runtime_instance_id":"string|number","result_status":"string|number","source":"string|number","evidence_id":"string|number","evidence_log_id":"string|number|null"}}}},"event_log":{"physical":[],"json":{},"events":{"reply.failed":{"payload":{"kind":"string","code":"delivery_code"}}}}}'::jsonb;
+	BEGIN
+	 FOR v_table,shape IN SELECT key,value FROM jsonb_each(specs) LOOP
+	   IF to_regclass(v_table) IS NULL THEN CONTINUE; END IF;
+	   FOR col IN SELECT jsonb_array_elements_text(shape->'physical') LOOP
+	     IF EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema=current_schema() AND c.table_name=v_table AND c.column_name=col) AND NOT (v_table IN ('aun_configuration_observed_state','aun_configuration_restart_requests') AND col='host_id') THEN
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP NOT NULL',v_table,col);
+	       EXECUTE format('ALTER TABLE %I ALTER COLUMN %I DROP DEFAULT',v_table,col);
+	     END IF;
+	   END LOOP;
+	   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(v_table) AND tgname='zz_aun_runtime_nonpersistence' AND NOT tgisinternal) THEN
+	     EXECUTE format('CREATE TRIGGER zz_aun_runtime_nonpersistence AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION aun_guard_runtime_nonpersistence(%L)',v_table,shape::text);
+	   END IF;
+	 END LOOP;
+	END $$;
+	SELECT 1/0;
+	COMMIT;
+	
+2026-09-21 14:07:48.515 JST [3282] ERROR:  null value in column "session_name" of relation "runtime_memory_ready_evidence" violates not-null constraint
+2026-09-21 14:07:48.515 JST [3282] DETAIL:  Failing row contains (2, fixture-agent, p, 6c0966b0-27b3-47f2-9e64-7417154818ca, null, null, null, null, fixture-agent, null, null, null, ready, null, 2026-09-21 09:00:00+09, null, null, 2099-01-01 09:00:00+09, fixture, {}, 2026-09-21 14:07:48.515802+09).
+2026-09-21 14:07:48.515 JST [3282] STATEMENT:  INSERT INTO runtime_memory_ready_evidence (agent_id,project,runtime_instance_id,expected_agent_id,result_status,completed_at,valid_until,source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+2026-09-21 14:07:48.517 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:48.518 JST [2811] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6446 kB, estimate=6452 kB; lsn=0/D720640, redo lsn=0/D7205E8
+2026-09-21 14:07:48.701 JST [3393] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:event_log.payload
+2026-09-21 14:07:48.701 JST [3393] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 18 at RAISE
+2026-09-21 14:07:48.701 JST [3393] STATEMENT:  INSERT INTO event_log (event_id,event_type,payload) VALUES ($1,$2,$3)
+2026-09-21 14:07:48.702 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:48.703 JST [2811] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6173 kB, estimate=6424 kB; lsn=0/DD27A50, redo lsn=0/DD279F8
+2026-09-21 14:07:49.206 JST [3679] ERROR:  AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE
+2026-09-21 14:07:49.206 JST [3679] CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+2026-09-21 14:07:49.206 JST [3679] STATEMENT:  -- D4: restoring a physical-writing version is not a compatible rollback.
+	DO $$ BEGIN RAISE EXCEPTION 'AUN_NONPERSISTENCE_ROLLBACK_INCOMPATIBLE'; END $$;
+	
+2026-09-21 14:07:49.208 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:49.209 JST [2811] LOG:  checkpoint complete: wrote 12 buffers (0.1%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.002 s; sync files=8, longest=0.001 s, average=0.001 s; distance=6453 kB, estimate=6453 kB; lsn=0/E3751D0, redo lsn=0/E375178
+2026-09-21 14:07:49.399 JST [3784] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.home_directory
+2026-09-21 14:07:49.399 JST [3784] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:07:49.399 JST [3784] STATEMENT:  UPDATE agents SET home_directory='/new/runtime/path' WHERE agent_id='fixture-agent'
+2026-09-21 14:07:49.401 JST [3784] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.ordinary_projection
+2026-09-21 14:07:49.401 JST [3784] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 13 at RAISE
+2026-09-21 14:07:49.401 JST [3784] STATEMENT:  UPDATE agents SET ordinary_projection=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:07:49.404 JST [3784] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state.candidate_digest
+2026-09-21 14:07:49.404 JST [3784] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE
+2026-09-21 14:07:49.404 JST [3784] STATEMENT:  UPDATE aun_configuration_observed_state SET candidate_digest=$1 WHERE agent_id='fixture-agent'
+2026-09-21 14:07:49.405 JST [3784] ERROR:  AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:aun_configuration_observed_state
+2026-09-21 14:07:49.405 JST [3784] CONTEXT:  PL/pgSQL function aun_guard_runtime_nonpersistence() line 5 at RAISE
+2026-09-21 14:07:49.405 JST [3784] STATEMENT:  INSERT INTO aun_configuration_observed_state SELECT 'new-host',agent_id,observed_revision,observed_desired_digest,candidate_digest,release_commit,release_tree,provider_native_digest,launchagent_plist_digest,launchctl_environment_digest,runtime_identity_digest,reconcile_status,drift_reason_codes,lease_id,fencing_token,observed_at FROM aun_configuration_observed_state
+2026-09-21 14:07:49.406 JST [2811] LOG:  checkpoint starting: immediate force wait
+2026-09-21 14:07:49.407 JST [2811] LOG:  checkpoint complete: wrote 8 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=7, longest=0.001 s, average=0.001 s; distance=6452 kB, estimate=6453 kB; lsn=0/E9C2558, redo lsn=0/E9C2500
+2026-09-21 14:07:49.443 JST [2803] LOG:  received smart shutdown request
+2026-09-21 14:07:49.444 JST [2803] LOG:  background worker "logical replication launcher" (PID 2821) exited with exit code 1
+2026-09-21 14:07:49.444 JST [2811] LOG:  shutting down
+2026-09-21 14:07:49.444 JST [2811] LOG:  checkpoint starting: shutdown immediate
+2026-09-21 14:07:49.444 JST [2811] LOG:  checkpoint complete: wrote 1 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=1, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=5808 kB; lsn=0/E9C2670, redo lsn=0/E9C2670
+2026-09-21 14:07:49.446 JST [2803] LOG:  database system is shut down

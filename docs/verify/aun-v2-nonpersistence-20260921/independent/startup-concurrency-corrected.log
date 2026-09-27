@@ -1,0 +1,90 @@
+bun test v1.3.11 (af24e281)
+
+tests/startup-safety.test.ts:
+(pass) startup safety contract > blocks the Codex 0.139 invalid-transport override [0.69ms]
+(pass) startup safety contract > extracts command-level Codex startup identity [0.04ms]
+(pass) startup safety contract > blocks AGENT_ID / AGENT_COM_EXPECTED_AGENT_ID mismatch [0.01ms]
+(pass) startup safety contract > blocks command identity drift from DB profile identity [0.02ms]
+(pass) startup safety contract > blocks stale managed checkout launchers while allowing current checkout [0.02ms]
+(pass) startup safety contract > blocks unapproved launcher root when explicit approved roots are supplied [0.12ms]
+(pass) startup safety contract > port checks distinguish same-agent, different-agent, orphan, and unknown owner [0.07ms]
+(pass) startup safety contract > blocks tmux session already bound to another agent [0.06ms]
+(pass) startup safety contract > blocks unconditional Enter on normal Codex start screen [0.02ms]
+
+tests/aun-bootstrap.test.ts:
+(pass) aun bootstrap B0-B8 state machine > F1 canonical provider identity collapses 100 object-key permutations without raw config persistence [5.64ms]
+(pass) aun bootstrap B0-B8 state machine > F2 every semantic provider tuple change produces a distinct canonical identity [0.30ms]
+(pass) aun bootstrap B0-B8 state machine > successful malformed provider JSON fails closed before any stage mutation [0.13ms]
+(pass) aun bootstrap B0-B8 state machine > clean-host Codex root is canonical HOME/.codex and caller CODEX_HOME is evidence-only [0.54ms]
+(pass) aun bootstrap B0-B8 state machine > B5-COEXIST-001 preserves ordinary active rows and creates a bootstrap receipt [0.12ms]
+(pass) aun bootstrap B0-B8 state machine > B5-COEXIST-002 reuses exactly one compatible bootstrap receipt beside ordinary rows [0.09ms]
+(pass) aun bootstrap B0-B8 state machine > B5-FAIL-CLOSED-001 rejects one incompatible bootstrap receipt before mutation [0.02ms]
+(pass) aun bootstrap B0-B8 state machine > B5-FAIL-CLOSED-002 rejects multiple bootstrap receipts even when both match [0.06ms]
+(pass) aun bootstrap B0-B8 state machine > genuine Wasurezu MCP protocol rejects missing/error/wrong-project/fabricated/timeout receipts [119.43ms]
+(pass) aun bootstrap B0-B8 state machine > timed-out child is SIGKILLed and cannot perform a later write before runner resolves [5056.33ms]
+(pass) aun bootstrap B0-B8 state machine > auto runtime selects actual provider over stale preference and rejects real provider conflicts [0.32ms]
+(pass) aun bootstrap B0-B8 state machine > returns READY only after every deterministic stage passes [6.78ms]
+(pass) aun bootstrap B0-B8 state machine > dry-run plans B0-B8 without persisting a run journal [0.71ms]
+(pass) aun bootstrap B0-B8 state machine > a failed memory predicate is terminal NO_GO and instructs a new run, never resume [1.53ms]
+(pass) aun bootstrap B0-B8 state machine > a failed run cannot re-enter stages under --resume [1.47ms]
+(pass) aun bootstrap B0-B8 state machine > terminal failed-run rejection precedes changed external input probes [1.74ms]
+(pass) aun bootstrap B0-B8 state machine > failed mutating stage is journaled and rolled back before the per-agent lock is released [3.25ms]
+(pass) aun bootstrap B0-B8 state machine > B3 and B4 recovery admissions are durable before the protected effect boundary and block resume re-entry [3.99ms]
+(pass) aun bootstrap B0-B8 state machine > F11 forced B5, B6, B7, and B8 failures restore downstream then B4 and ordered B3 mutations [7.61ms]
+(pass) aun bootstrap B0-B8 state machine > B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release [30.37ms]
+(pass) aun bootstrap B0-B8 state machine > unresolved stage-deadline mutation is durably recovery-required before lock release [13.21ms]
+(pass) aun bootstrap B0-B8 state machine > rollback executes only recorded mutations in reverse order [3.02ms]
+(pass) aun bootstrap B0-B8 state machine > same-agent concurrent run fails closed with NO_GO_BOOTSTRAP_BUSY [1.07ms]
+
+tests/state-daemon-queue-work-concurrency.test.ts:
+(pass) queue-work concurrency bound (E7) > runners over the bound are deferred with a visible metric, not invoked [0.85ms]
+(pass) queue-work concurrency bound (E7) > a completed runner frees a slot for the next sweep [2.68ms]
+(pass) queue-work concurrency bound (E7) > per-agent dedup still applies inside the bound (same agent is busy-deferred, not double-run) [0.04ms]
+(pass) queue-work concurrency bound (E7) > deferral does not touch the row or consume attempts (scheduler untouched rows stay schedulable) [0.06ms]
+(pass) queue-work concurrency bound (E7) > F1: all-slots-hung with eligible pending strikes and exits — deferral metrics are not progress [0.50ms]
+(pass) queue-work concurrency bound (E7) > F1: three healthy long-running runners within the child budget never false-strike [0.29ms]
+(pass) queue-work concurrency bound (E7) > F1: deferral metric is outside the D2 progress family [0.09ms]
+(pass) queue-work concurrency bound (E7) > F3: D1 dispatch obeys the same global bound (generic first, D1 deferred) [0.27ms]
+(pass) queue-work concurrency bound (E7) > F3: D1 first consumes generic capacity (reverse order) and keys never collide [0.20ms]
+(pass) queue-work concurrency bound (E7) > F4/F5: production dispatch seam returns acted=false on deferral, row and DB untouched; slot release invokes once [1.54ms]
+(pass) queue-work concurrency bound (E7) > F4: received/done deferrals also report non-invoked results [0.13ms]
+438 |         const result = await daemon.sweepStale()
+439 |         expect(result.rewoken).toBe(0) // F4 accounting at the production seam
+440 |       }
+441 |       expect(invoked).toEqual([]) // runner never started for the deferred row
+442 |       expect(mutations).toEqual([]) // zero DB writes: no attempt, claim, or payload consumed
+443 |       expect(metrics.countInc('state_daemon_queue_work_backpressure_total', { result: 'pending_runner_concurrency_deferred' })).toBe(3)
+                                                                                                                                      ^
+error: expect(received).toBe(expected)
+
+Expected: 3
+Received: 0
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/state-daemon-queue-work-concurrency.test.ts:443:129)
+(fail) queue-work concurrency bound (E7) > F5: production sweepStale — repeated deferral leaves the DB row untouched, rewoken=0; release invokes exactly once [474.09ms]
+
+tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts:
+(pass) V2-native S0 cutover and zero-effect fences > native execution leaves V1 and provider surfaces at exact zero delta [11.86ms]
+(pass) V2-native S0 cutover and zero-effect fences > daemon and supervisor remain default-off/read-only and fail on drift [3.47ms]
+(pass) V2-native S0 cutover and zero-effect fences > canonical selector freezes every enabled non-human agent with one exact ready runtime [4.33ms]
+253 |         ? provider.provider : null
+254 |     const instanceId = normalizeString(runtime.runtime_instance_id)
+255 |     const checkoutRoot = normalizeString(runtime.checkout_path)
+256 |     const checkoutSha = normalizeString(runtime.commit_sha)
+257 |     if (!engine || !instanceId || !checkoutRoot || !checkoutSha || !/^[0-9a-f]{40}$/.test(checkoutSha)) {
+258 |       throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
+                      ^
+error: V2_NATIVE_FROZEN_SET_BLOCKED: alpha runtime identity is incomplete
+      at readV2NativeFrozenEnabledSet (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-inventory.ts:258:17)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts:193:28)
+(fail) V2-native S0 cutover and zero-effect fences > LLM selector requires the observed provider of the exact frozen instance [4.08ms]
+(pass) V2-native S0 cutover and zero-effect fences > provider or V1 escape literals fail before the first event [3.67ms]
+
+2 tests failed:
+(fail) queue-work concurrency bound (E7) > F5: production sweepStale — repeated deferral leaves the DB row untouched, rewoken=0; release invokes exactly once [474.09ms]
+(fail) V2-native S0 cutover and zero-effect fences > LLM selector requires the observed provider of the exact frozen instance [4.08ms]
+
+ 47 pass
+ 2 fail
+ 438 expect() calls
+Ran 49 tests across 4 files. [5.84s]

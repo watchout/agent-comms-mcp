@@ -225,8 +225,8 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
     // Register the test agent so any FK / status check resolves. Using
     // ON CONFLICT here keeps the test idempotent across re-runs.
     await client!.query(
-      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
-         VALUES ($1, $1, 'online', 'agent', 'bun')
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'agent')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [HARD_AGENT_T1],
     )
@@ -315,8 +315,8 @@ describe('§2 B-1 — outbound 2-stage split (T-1: stage 2 failure leaves row se
 
     await cleanupHardFixtures(client!)
     await client!.query(
-      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
-         VALUES ($1, $1, 'online', 'agent', 'bun')
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'agent')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [HARD_AGENT_T1],
     )
@@ -371,8 +371,8 @@ describe('§2 B-2 — orphan reclaim attempts cap (T-2: exhausted rows go to fai
 
     await cleanupHardFixtures(client!)
     await client!.query(
-      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
-         VALUES ($1, $1, 'online', 'agent', 'bun')
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'agent')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [HARD_AGENT_T2],
     )
@@ -410,8 +410,8 @@ describe('§2 B-2 — orphan reclaim attempts cap (T-2: exhausted rows go to fai
 
     await cleanupHardFixtures(client!)
     await client!.query(
-      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
-         VALUES ($1, $1, 'online', 'agent', 'bun')
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'agent')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [HARD_AGENT_T2],
     )

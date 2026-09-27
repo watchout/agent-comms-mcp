@@ -33,8 +33,8 @@ describe.skipIf(!HAS_DB)('ADR-050 §6b — bot inbound persistence works without
     await pg.connect()
     // Register the probe agent (online) so any FK / status check resolves.
     await pg.query(
-      `INSERT INTO agents (agent_id, display_name, status, agent_type, runtime)
-         VALUES ($1, $1, 'online', 'agent', 'bun')
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+         VALUES ($1, $1, 'agent')
          ON CONFLICT (agent_id) DO UPDATE SET status = 'online'`,
       [probeAgent],
     )

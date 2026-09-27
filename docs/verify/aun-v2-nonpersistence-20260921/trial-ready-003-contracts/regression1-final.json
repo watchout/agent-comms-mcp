@@ -1,0 +1,23 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts",
+    "tests/runtime-heartbeat.test.ts",
+    "tests/seat-runtime-continuity.test.ts",
+    "tests/norm-022-runtime-endpoint-lease.test.ts",
+    "tests/runtime-current-resolver.test.ts",
+    "tests/state-daemon-queue-work-scheduler.test.ts",
+    "tests/queue-work.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "9804212b79858df9153376f5b77c39aa6392a53422e37980570642229a013ad8",
+  "source_head": "4a69acd4351f99738389882a58644800a682d176",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "started_at": "2026-09-21T12:08:49.828306+00:00",
+  "ended_at": "2026-09-21T12:09:10.834614+00:00",
+  "exit_code": 0,
+  "log_sha256": "c17e1fccf4fc1ee2b6ca613b3f838f91a9406a31a66e88f3b97e1fbd2d88a1ab"
+}

@@ -1,0 +1,25 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_0edf0cb8b0db428ea096108ff198737b","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"server-shutdown-failure","stderr":"agent-comms: bridge listening on http://127.0.0.1:64271\nagent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\nagent-comms: queue ttl sweeper started (interval=300000ms, ttl=24h)\nagent-comms: agent 'boot-465d9a0d-cfbf-45d4-b396-0605c6298102' registered with logical identity\nagent-comms: startup self-reclaim complete (0 rows for boot-465d9a0d-cfbf-45d4-b396-0605c6298102)\nagent-comms: self-reclaim sweeper started for boot-465d9a0d-cfbf-45d4-b396-0605c6298102 (interval=60000ms)\nagent-comms: claim ttl sweeper started (interval=300000ms, selfAgentIds=[boot-465d9a0d-cfbf-45d4-b396-0605c6298102])\nagent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\nagent-comms: PollingDriver started (poll=3000ms, heartbeat=30000ms)\n84 | export async function releaseRuntimeEndpoint(db: RuntimeEndpointDb, input: {\n85 |   agentId:string;runtimeInstanceId:string;processId:number;lease?:{leaseId:string;fencingToken:number}\n86 | }): Promise<void> {\n87 |   if(!input.lease)throw new Error('RUNTIME_RELEASE_ACQUISITION_RECEIPT_REQUIRED')\n88 |   const resolved=await resolveRuntimeEndpoint(db,input)\n89 |   if(!resolved.ok || resolved.endpoint?.processId!==input.processId) throw new Error('RUNTIME_RELEASE_HOLDER_UNVERIFIED')\n                                                                                    ^\nerror: RUNTIME_RELEASE_HOLDER_UNVERIFIED\n      at releaseRuntimeEndpoint (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/runtime-endpoint.ts:89:80)\n      at async unregisterAgent (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/server.ts:1318:11)\n      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/server.ts:5428:9)\n\nBun v1.3.11 (macOS arm64)\n"}
+43 |     }
+44 |     const stop=async(p:ReturnType<typeof Bun.spawn>)=>{
+45 |       p.kill('SIGTERM')
+46 |       const code=await Promise.race([p.exited,Bun.sleep(10000).then(()=>{throw Error('SERVER_STOP_TIMEOUT')})])
+47 |       if(code!==0)console.log(JSON.stringify({case:'server-shutdown-failure',stderr:await logs.at(-1)}))
+48 |       expect(code).toBe(0)
+                        ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:48:20)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:50:37)
+(fail) NP04 actual managed server starts, releases while it owns the socket, and restarts with a new incarnation without physical DB writes [1965.10ms]
+
+ 0 pass
+ 1 fail
+ 4 expect() calls
+Ran 1 test across 1 file. [1.99s]

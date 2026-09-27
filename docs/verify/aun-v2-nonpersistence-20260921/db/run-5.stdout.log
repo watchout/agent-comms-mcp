@@ -1,0 +1,13 @@
+bun test v1.3.11 (af24e281)
+{"case":"fixture-identity","kind":"postgres","name":"np_e56ce130e6a3452ebd539223147c1129","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"legacy-preservation","kind":"postgres","before_sha256":"da11e4b467585761e2284c0b8bdf804e7e7192dc0e9f854abc1c88e79966855d","after_sha256":"da11e4b467585761e2284c0b8bdf804e7e7192dc0e9f854abc1c88e79966855d","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+{"case":"fixture-identity","kind":"postgres","name":"np_2b1aada0fac94780a5bec3f01de65a2f","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"guards-and-null-anchor","kind":"postgres","rejected_cases":14,"logical_audit_event_and_owner_content":"PRESERVED"}
+{"case":"fixture-identity","kind":"postgres","name":"np_0d5a3f0b265846ecac10334862f930f0","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"rollback","kind":"postgres","before_sha256":"a5461290405d5dbf36f42777ab85af0a1b4d085629a0f86c88ce9a7c1411a0ba","after_sha256":"a5461290405d5dbf36f42777ab85af0a1b4d085629a0f86c88ce9a7c1411a0ba","schema_restored":true}
+{"case":"fixture-identity","kind":"postgres","name":"np_3c4438bd437b4fee8af39c71d653c628","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"legacy-preservation","kind":"sqlite","before_sha256":"463c9ce10be37d2d621670e85d0415a56a48ef0a9821e543c83e50f43dff0b71","after_sha256":"463c9ce10be37d2d621670e85d0415a56a48ef0a9821e543c83e50f43dff0b71","runtime_fk_assertions":6,"reapply":"UNCHANGED","logical_queue_and_lease":"PASS"}
+{"case":"guards-and-null-anchor","kind":"sqlite","rejected_cases":14,"logical_audit_event_and_owner_content":"PRESERVED"}
+{"case":"rollback","kind":"sqlite","before_sha256":"a83da082c7a95bf19f87a58149fd009f2fea07146230313219c1870c74053f36","after_sha256":"a83da082c7a95bf19f87a58149fd009f2fea07146230313219c1870c74053f36","schema_restored":true}
+{"case":"fixture-identity","kind":"postgres","name":"np_564f748543fc45c9966a72129c4ee644","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}
+{"case":"fixture-identity","kind":"postgres","name":"np_665e824ff53747c6b6eea2eaa4adaf0f","db":"postgres","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-np-db-n_mu4fk1/socket","listen":""}

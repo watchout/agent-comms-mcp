@@ -1,0 +1,196 @@
+{
+  "source_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5753716854",
+    "sha256": "c375849c4a8e50f1624b7f6ab3930bcdfc70213f22bcce42bce583da8ad2f81c"
+  },
+  "denominator_trial_ready": 21,
+  "denominator_trial_passed": 2,
+  "rows": [
+    {
+      "id": "AUN2-01",
+      "title": "受信から保存・返信・完了",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-02",
+      "title": "framework/LLMに固定しないtask契約",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-03",
+      "title": "provider・port・一時状態のDB非保存",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "BLOCKED",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-04",
+      "title": "永続データと履歴の保全",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-05",
+      "title": "OSポート割当と所有権",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-06",
+      "title": "現在のPID・席・workspace・providerへ配送",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-07",
+      "title": "claim・排他・二重effect防止",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-08",
+      "title": "timeoutと再起動時の境界",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-09",
+      "title": "人待ち・非進捗・失敗で有限停止",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-10",
+      "title": "native記憶のidentityとdelivery",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-11",
+      "title": "保存・交換・復帰の同一文脈",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-12",
+      "title": "E7共有slotと同時上限",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-13",
+      "title": "deferralを進捗/試行消費にしない",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-14",
+      "title": "credentialと子process隔離",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-15",
+      "title": "exact候補全体と品質・独立受入の一致",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "BLOCKED",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-16",
+      "title": "migration・互換・rollback guard",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-17",
+      "title": "外部導入を妨げない構成",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-18",
+      "title": "v2配布物とsource版の固定",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-19",
+      "title": "対象席・operator/checker・必要Was/A2",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "BLOCKED",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-20",
+      "title": "適用前の有効な操作枠・停止・復旧",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "BLOCKED",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-21",
+      "title": "適用後・Task1前の実起動版とGoalRun",
+      "required_for": "TRIAL_READY",
+      "canonical_status_at_read": "BLOCKED",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-22",
+      "title": "実案件1の受入",
+      "required_for": "TRIAL_PASSED",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    },
+    {
+      "id": "AUN2-23",
+      "title": "同構成案件2・復旧と試運転終端",
+      "required_for": "TRIAL_PASSED",
+      "canonical_status_at_read": "NOT_RUN",
+      "current_candidate_acceptance": "NOT_ACCEPTED",
+      "current_evidence_ref": "INDEPENDENT-RETURN.md#np-and-checklist-disposition"
+    }
+  ],
+  "trial_ready": false,
+  "trial_passed": false
+}

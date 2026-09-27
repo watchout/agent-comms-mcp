@@ -44,7 +44,7 @@ SELECT active.migration_epoch, initial_agents.agent_id, 0
      FROM agents
     WHERE profile_enabled = true
       AND disabled_at IS NULL
-      AND status <> 'disabled'
+
       AND agent_id IS NOT NULL
       AND agent_id <> ''
    UNION
@@ -125,7 +125,7 @@ BEGIN
     FROM (
       SELECT agent_id
         FROM agents
-       WHERE profile_enabled = true AND disabled_at IS NULL AND status <> 'disabled'
+       WHERE profile_enabled = true AND disabled_at IS NULL
          AND agent_id IS NOT NULL AND agent_id <> ''
       UNION
       SELECT agent_id FROM message_queue WHERE agent_id IS NOT NULL AND agent_id <> ''

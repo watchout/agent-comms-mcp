@@ -1,3 +1,7 @@
+import { type HostRuntimeInspector, type HostRuntimeObservation, type NativeHostRuntimeInspector } from './host-runtime-observer'
+import { resolveNativeRuntimeAuthority, NATIVE_RUNTIME_KIND } from './runtime-native-authority'
+import { collectGitCheckoutEvidence, gitCheckoutMetadata } from './git-checkout-evidence'
+import { resolveSeatProvider, selectObservedProvider } from './seat-runtime-selection'
 import type { DbAdapter } from './db'
 import {
   ALL_AGENT_COMMUNICATION_ACTIVE_FUNCTIONS,
@@ -41,34 +45,18 @@ export function selectBootstrapRuntime(
   requested: 'auto' | BootstrapRuntimeKind,
   signals: BootstrapRuntimeSignal[],
 ): BootstrapRuntimeSelection {
-  const verified = signals.filter((signal) => signal.verified)
-  if (requested !== 'auto') {
-    const conflicting = verified.filter((signal) => signal.runtime !== requested)
-    if (conflicting.length > 0) {
-      return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-    }
-    return { ok: true, runtime: requested, reason: 'selected', signals }
-  }
+  // A profile is desired compatibility data, not a provider identity signal.
+  const processes = signals.filter(signal => signal.verified && signal.source === 'process_identity')
+  const selected = selectObservedProvider(processes.map(signal=>signal.runtime),requested === 'auto' ? null : requested)
+  return {ok:selected.ok,runtime:selected.provider,reason:selected.ok ? 'selected' : selected.code === 'PROVIDER_AMBIGUOUS' ? 'NO_GO_RUNTIME_AMBIGUOUS' : 'NO_GO_RUNTIME_UNDETECTED',signals}
 
-  const profiles = verified.filter((signal) => signal.source === 'agent_profile')
-  const processes = verified.filter((signal) => signal.source === 'process_identity')
-  const runtimes = new Set(verified.map((signal) => signal.runtime))
-  if (runtimes.size > 1 || profiles.length > 1 || processes.length > 1) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-  }
-  if (processes.length === 0) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_UNDETECTED', signals }
-  }
-  if (profiles.length === 1 && profiles[0].runtime !== processes[0].runtime) {
-    return { ok: false, runtime: null, reason: 'NO_GO_RUNTIME_AMBIGUOUS', signals }
-  }
-  return { ok: true, runtime: processes[0].runtime, reason: 'selected', signals }
 }
 import type { V2NativeMeshFrozenAgentV1 } from './eventlog/v2-native-ingress'
 
 type RuntimeFreshness = 'fresh' | 'stale' | 'missing_heartbeat' | 'stopped' | 'unknown'
 
 type RuntimeInventoryOptions = {
+  inspect?: HostRuntimeInspector
   staleMinutes?: number
   expectedCommit?: string | null
   approvedCheckoutRoots?: string[] | null
@@ -168,11 +156,14 @@ export type RuntimeInventoryReport = {
 }
 
 export interface V2NativeFrozenSetReadOptions {
+  nativeInspect?: NativeHostRuntimeInspector
+  inspect?: HostRuntimeInspector
   nowMs?: number
   maxHeartbeatAgeMs?: number
 }
 
 export interface AllAgentCommunicationCandidateOptions {
+  inspect?: HostRuntimeInspector
   nowMs?: number
   maxHeartbeatAgeMs?: number
   controlSourceByAgent: Record<string, string>
@@ -218,7 +209,7 @@ export async function readV2NativeFrozenEnabledSet(
   const nowMs = options.nowMs ?? Date.now()
   const maxAgeMs = options.maxHeartbeatAgeMs ?? 15 * 60_000
   const rows = await db.query<any>(
-    `SELECT agent_id, profile_revision, runtime_engine_preference, metadata,
+    `SELECT agent_id, profile_revision, metadata,
             profile_enabled, disabled_at, agent_type
        FROM agents
       ORDER BY agent_id`,
@@ -237,42 +228,33 @@ export async function readV2NativeFrozenEnabledSet(
 
   const result: V2NativeMeshFrozenAgentV1[] = []
   for (const agent of selected) {
-    const runtimes = await db.query<any>(
-      `SELECT runtime_instance_id, runtime_engine, checkout_path, commit_sha,
-              status, stopped_at, last_seen_at
-         FROM agent_runtime_instances
-        WHERE agent_id = $1
-        ORDER BY started_at DESC`,
-      [agent.agent_id],
-    )
-    const live = runtimes.filter(runtime => {
-      const seen = parseTimestampMs(runtime.last_seen_at)
-      return runtime.stopped_at === null
-        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
-        && seen !== null
-        && nowMs - seen <= maxAgeMs
-    })
-    if (live.length !== 1) throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} has ${live.length} selected live runtimes`)
-    const runtime = live[0]
-    const metadata = metadataObject(agent.metadata)
-    const companyDevOs = metadataObject(metadata.companyDevOs)
-    const engine = normalizeString(agent.runtime_engine_preference)
-      ?? normalizeString(companyDevOs.runtime_engine)
-      ?? normalizeString(runtime.runtime_engine)
-    const instanceId = normalizeString(runtime.runtime_instance_id)
-    const checkoutRoot = normalizeString(runtime.checkout_path)
-    const checkoutSha = normalizeString(runtime.commit_sha)
-    if (!engine || !instanceId || !checkoutRoot || !checkoutSha || !/^[0-9a-f]{40}$/.test(checkoutSha)) {
-      throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
+    const native=await resolveNativeRuntimeAuthority(db,{agentId:String(agent.agent_id),inspect:options.nativeInspect})
+    if(native.ok && native.observation) {
+      result.push({agent_id:String(agent.agent_id),profile_revision:String(agent.profile_revision),
+        runtime_engine:NATIVE_RUNTIME_KIND,runtime_instance_id:native.runtimeInstanceId!,
+        runtime_checkout_root:native.observation.workspace,runtime_checkout_sha:native.sourceCommit!})
+      continue
     }
-    result.push({
-      agent_id: String(agent.agent_id),
-      profile_revision: String(agent.profile_revision),
-      runtime_engine: engine,
-      runtime_instance_id: instanceId,
-      runtime_checkout_root: checkoutRoot,
-      runtime_checkout_sha: checkoutSha,
-    })
+    if(native.code!=='NATIVE_AUTHORITY_ABSENT') {
+      throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} ${native.code}`)
+    }
+    // LLM membership is resolved from logical authority and current OS state.
+    // No saved PID/path/status/provider or reader's ambient checkout supplies it.
+    const selectedProvider = await resolveSeatProvider(db, {agentId:String(agent.agent_id), inspect:options.inspect})
+    const observed = selectedProvider.observation
+    if (selectedProvider.ok && observed) {
+      const checkout = collectGitCheckoutEvidence(observed.workspace, {})
+      const observedAt = parseTimestampMs(observed.observed_at)
+      if (!checkout.commit_sha || !/^[0-9a-f]{40}$/.test(checkout.commit_sha)
+        || observedAt === null || nowMs - observedAt > maxAgeMs) {
+        throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} runtime identity is incomplete`)
+      }
+      result.push({agent_id:String(agent.agent_id), profile_revision:String(agent.profile_revision),
+        runtime_engine:observed.provider, runtime_instance_id:observed.runtime_instance_id,
+        runtime_checkout_root:observed.workspace, runtime_checkout_sha:checkout.commit_sha})
+      continue
+    }
+    throw new Error(`V2_NATIVE_FROZEN_SET_BLOCKED: ${agent.agent_id} current runtime unavailable`)
   }
   return result
 }
@@ -371,8 +353,9 @@ export async function generateAllAgentCommunicationManifestCandidates(
       agentBlockers.push('discord_mode_missing_or_unknown')
     }
 
+    const provider = await resolveSeatProvider(db,{agentId,inspect:options.inspect})
     const workspaces = await db.query<any>(
-      `SELECT w.workspace_id, w.local_path, w.repo_url
+      `SELECT w.workspace_id, w.repo_url
          FROM agent_workspace_bindings b
          JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
         WHERE b.agent_id = $1 AND b.active = true AND b.binding_role = 'primary'
@@ -381,38 +364,21 @@ export async function generateAllAgentCommunicationManifestCandidates(
     )
     if (workspaces.length !== 1) agentBlockers.push(`primary_workspace_count_${workspaces.length}`)
     const workspace = workspaces[0]
-    const workspacePath = normalizeString(workspace?.local_path)
+    const workspacePath = normalizeString(provider.observation?.workspace)
     const repository = normalizeRepository(workspace?.repo_url)
     if (!workspacePath || !workspacePath.startsWith('/')) agentBlockers.push('workspace_path_missing_or_non_absolute')
     if (!repository) agentBlockers.push('target_repository_missing_or_invalid')
 
     const runtimes = await db.query<any>(
-      `SELECT runtime_instance_id, workspace_id, runtime_engine, status, stopped_at, last_seen_at
-         FROM agent_runtime_instances
-        WHERE agent_id = $1
-        ORDER BY started_at DESC`,
-      [agentId],
-    )
-    const live = runtimes.filter(runtime => {
-      const seen = parseTimestampMs(runtime.last_seen_at)
-      return runtime.stopped_at === null
-        && ['ready', 'running', 'active', 'online'].includes(String(runtime.status))
-        && seen !== null
-        && nowMs - seen <= maxAgeMs
-        && String(runtime.workspace_id ?? '') === String(workspace?.workspace_id ?? '')
-    })
-    if (live.length !== 1) agentBlockers.push(`selected_runtime_count_${live.length}`)
-    if (live.length === 1 && !normalizeString(live[0]?.runtime_instance_id)) {
-      agentBlockers.push('runtime_instance_id_missing')
-    }
-    const profileEngine = manifestRuntimeEngine(agent.runtime_engine_preference)
-    const liveEngine = manifestRuntimeEngine(live[0]?.runtime_engine)
-    if (!profileEngine) agentBlockers.push('profile_runtime_engine_missing_or_unsupported')
-    if (!liveEngine) agentBlockers.push('live_runtime_engine_missing_or_unsupported')
-    if (profileEngine && liveEngine && profileEngine !== liveEngine) {
-      agentBlockers.push('runtime_engine_profile_mismatch')
-    }
-    const engine = profileEngine ?? liveEngine
+      `SELECT runtime_instance_id, workspace_id FROM agent_runtime_instances WHERE agent_id = $1`, [agentId])
+    const current = runtimes.filter(runtime => provider.ok && provider.observation
+      && String(runtime.runtime_instance_id) === provider.observation.runtime_instance_id
+      && String(runtime.workspace_id ?? '') === String(workspace?.workspace_id ?? ''))
+    if (current.length !== 1) agentBlockers.push(`selected_runtime_count_${current.length}`)
+    const observedAt = parseTimestampMs(provider.observation?.observed_at)
+    if (observedAt === null || nowMs - observedAt > maxAgeMs) agentBlockers.push('runtime_observation_stale')
+    const engine = manifestRuntimeEngine(provider.provider)
+    if (!provider.ok || !engine) agentBlockers.push(provider.code)
     const profileRevision = Number(agent.profile_revision)
     if (!Number.isSafeInteger(profileRevision) || profileRevision <= 0) agentBlockers.push('profile_revision_missing_or_invalid')
 
@@ -547,6 +513,7 @@ function runtimeWarningsForDrift(
 }
 
 function blockerFromWarning(agentId: string, warning: string): string | null {
+  if (warning === 'runtime_observation_unavailable') return `${agentId}:runtime_observation_unavailable`
   if (warning === 'runtime_stale') return `${agentId}:runtime_stale`
   if (warning === 'runtime_commit_missing') return `${agentId}:runtime_commit_missing`
   if (warning === 'runtime_commit_mismatch') return `${agentId}:runtime_commit_mismatch`
@@ -557,21 +524,7 @@ function blockerFromWarning(agentId: string, warning: string): string | null {
 }
 
 async function queryAgentRows(db: DbAdapter): Promise<any[]> {
-  try {
-    return await db.query(
-      `SELECT agent_id, agent_type, runtime, status
-         FROM agents
-        ORDER BY agent_id`,
-    )
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    if (!/runtime/i.test(message)) throw err
-    return await db.query(
-      `SELECT agent_id, agent_type, cli_type AS runtime, status
-         FROM agents
-        ORDER BY agent_id`,
-    )
-  }
+  return db.query(`SELECT agent_id, agent_type FROM agents ORDER BY agent_id`)
 }
 
 export async function buildRuntimeInventoryReport(
@@ -590,13 +543,27 @@ export async function buildRuntimeInventoryReport(
   // read-only operator report; deterministic correctness matters more than
   // parallel query speed.
   const agentRows = await queryAgentRows(db)
-  const runtimeRows = await db.query(
-    `SELECT runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
-            host_id, session_name, process_id, port, checkout_path, commit_sha,
-            endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata
-       FROM agent_runtime_instances
-      ORDER BY agent_id, started_at DESC`,
-  )
+  const anchors=await db.query<any>(`SELECT runtime_instance_id,agent_id,workspace_id,runtime_kind,metadata
+    FROM agent_runtime_instances ORDER BY agent_id,runtime_instance_id`)
+  const runtimeRows:any[]=[]
+  const observationFailures=new Map<string,string>()
+  for(const agent of agentRows) {
+    if(agent.agent_type==='human')continue
+    const selected=await resolveSeatProvider(db,{agentId:String(agent.agent_id),inspect:options.inspect})
+    const observed=selected.observation as HostRuntimeObservation|null
+    const owned=observed?anchors.filter(row=>String(row.runtime_instance_id)===observed.runtime_instance_id && row.agent_id===agent.agent_id):[]
+    if(!selected.ok || !observed || owned.length!==1) {
+      observationFailures.set(String(agent.agent_id),'runtime_observation_unavailable')
+      continue
+    }
+    // Checkout diagnostics are request-local. Never use this reader's ambient
+    // commit or copy git/process observations into the durable anchor.
+    const checkout=collectGitCheckoutEvidence(observed.workspace,{})
+    runtimeRows.push({...owned[0],runtime_engine:observed.provider,host_id:observed.host_id,session_name:observed.session_name,
+      process_id:observed.process_id,port:observed.port,checkout_path:observed.workspace,commit_sha:checkout.commit_sha,
+      endpoint_uri:observed.endpoint_uri,status:'active',started_at:observed.process_started_at,stopped_at:null,
+      last_seen_at:observed.observed_at,metadata:gitCheckoutMetadata(checkout)})
+  }
   const connectorRows = await db.query(
     `SELECT connector_instance_id, agent_id, runtime_instance_id, provider, connector_uri,
             status, trust_status, created_at, updated_at, last_seen_at, disabled_at
@@ -663,10 +630,11 @@ export async function buildRuntimeInventoryReport(
       approvedCheckoutRoots,
     })
     const warnings = runtimeWarningsForDrift(latest, freshness, checkoutDrift)
+    if(observationFailures.has(agentId))warnings.push(observationFailures.get(agentId)!)
     return {
       agent_id: agentId,
-      agent_status: String(row.status ?? ''),
-      declared_runtime: String(row.runtime ?? ''),
+      agent_status: latest?'observed':'unknown',
+      declared_runtime: normalizeString(latest?.runtime_engine) ?? '',
       runtime_instance_count: runtimes.length,
       latest_runtime_instance_id: latest ? String(latest.runtime_instance_id) : null,
       runtime_status: normalizeString(latest?.status),
@@ -714,7 +682,7 @@ export async function buildRuntimeInventoryReport(
       runtime_instance_id: runtimeId,
       runtime_freshness: freshness,
       active_binding_count: activeBindingCountByConnector.get(String(row.connector_instance_id)) ?? 0,
-      last_seen_at: timestampString(row.last_seen_at),
+      last_seen_at: timestampString(runtime?.last_seen_at),
       warnings,
     }
   })
@@ -802,7 +770,7 @@ export async function buildRuntimeInventoryReport(
     generated_at: new Date(nowMs).toISOString(),
     policy: {
       db_is_source_of_truth: true,
-      runtime_identity: 'agent_id is logical identity; runtime_instance_id is concrete process/session evidence',
+      runtime_identity: 'DB supplies logical seat/UUID/authority; physical runtime fields are fresh host observations',
       final_design_guardrail: 'read-only inventory; do not infer trust from local path, tmux name, or Discord identity',
     },
     options: {

@@ -1,0 +1,12 @@
+{
+  "started_at": "2026-09-21T05:17:20.201908+00:00",
+  "ended_at": "2026-09-21T05:17:22.511156+00:00",
+  "command": [
+    "bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_native.test.ts"
+  ],
+  "changed_input": "fixture Node symlink preserves actual dylib location",
+  "exit_code": 1
+}

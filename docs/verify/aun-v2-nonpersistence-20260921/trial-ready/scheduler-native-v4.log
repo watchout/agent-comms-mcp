@@ -1,0 +1,29 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_5063827d458a4ef9b735af7bd3aacf45","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+1 | "use strict";
+    ^
+error: inconsistent types deduced for parameter $1
+     length: 142,
+   severity: "ERROR",
+     detail: "uuid versus text",
+       hint: undefined,
+   position: "219",
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: undefined,
+      table: undefined,
+   dataType: undefined,
+ constraint: undefined,
+       file: "parse_param.c",
+    routine: "variable_coerce_param_hook",
+       code: "42P08"
+
+      at /Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg-protocol/dist/parser.js:1:1
+(fail) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [1246.57ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [1341.00ms]

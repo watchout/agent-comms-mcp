@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_profile.test.ts",
+    "tests/inbox-cursor-db-persist.test.ts",
+    "tests/inbox-cursor.test.ts",
+    "tests/agent-status-lifecycle.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "e0bd18ae6210bc007db798f0f2a8e40a824c7fc504eb43f55756fa217dab823f",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "6d5cc9ac8c2ea7f2e576146bd1cc533b286a07629ab75939ea63b5c1d65f0eac",
+  "started_at": "2026-09-21T10:06:24.710359+00:00",
+  "ended_at": "2026-09-21T10:06:26.601170+00:00",
+  "exit_code": 1,
+  "log_sha256": "1d1302c906eaeaae8b0bf659388e53e95041fb34d320fddc62983c47c57ab189"
+}

@@ -166,13 +166,15 @@ export type BootstrapStageContext = {
   cancelRecoveryAdmission?: (ownerKey: string) => void
   providerRootAuthority?: {
     existingTarget: boolean
-    canonicalSourceField: 'metadata.codex_home' | 'clean_host_default'
+    canonicalSourceField: 'metadata.codex_home' | 'clean_host_default' | 'observed_provider_process'
     canonicalRoot: string
     canonicalRootDigest: string
     canonicalRealpathDigest: string
     projectionMatches: boolean
     callerMismatch: boolean
     authorityTupleDigest?: string
+    observedProviderPid?: number
+    observedProviderStartedAt?: string
   }
 }
 

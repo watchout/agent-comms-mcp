@@ -1,0 +1,23 @@
+{
+  "started_at": "2026-09-21T05:15:37.448437+00:00",
+  "ended_at": "2026-09-21T05:15:49.761456+00:00",
+  "command": [
+    "bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_native.test.ts",
+    "tests/contract/test_runtime_observation_nonpersistence.test.ts"
+  ],
+  "env_keys": [
+    "PATH",
+    "LANG",
+    "TMPDIR",
+    "AGENT_COM_DB",
+    "AGENT_COM_SQLITE_PATH",
+    "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED",
+    "AUN_TEST_WASUREZU_ROOT",
+    "AGENT_COM_PG_NOTIFY"
+  ],
+  "exit_code": 1,
+  "source": "55c3900f plus scoped dirty core/daemon/native integration"
+}

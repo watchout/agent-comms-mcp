@@ -45,6 +45,14 @@ Ordinary runtime heartbeats repair the latter through the single-seat
 refresher, and state-daemon startup runs the same idempotent reconciliation once
 to cover rotations that predate deployment.
 
+Startup reconciliation honors the daemon's already validated `agentAllowlist`
+canary scope before resolving, auditing, or refreshing any seat. A configured
+allowlist only narrows the existing enabled `idle`/`busy`, non-disabled,
+non-human inventory; it never makes a seat eligible. At the fleet helper
+boundary, an explicit empty list selects no seats, while an omitted or null
+list retains the normal fleet behavior. The direct-entry canary owner checks
+and ordinary single-seat heartbeat reconciliation remain unchanged.
+
 ## Render and install the LaunchAgent
 
 The retired STATE_DAEMON_AGENT_DENYLIST is no longer read or rendered; seat

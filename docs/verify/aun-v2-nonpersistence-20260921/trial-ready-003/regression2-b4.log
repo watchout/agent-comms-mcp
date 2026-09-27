@@ -1,0 +1,129 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-memory-ready.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-pIPBhp/test.db
+(pass) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [35.99ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-xByjte/test.db
+(pass) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [24.08ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-60tzQC/test.db
+(pass) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [28.40ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-a4m60P/test.db
+(pass) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [23.00ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-mhagRL/test.db
+(pass) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [23.89ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-fvm5s6/test.db
+(pass) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [22.69ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-BVTiMu/test.db
+(pass) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [27.83ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-b1KjHb/test.db
+(pass) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [23.57ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-bAQIVO/test.db
+(pass) runtime memory-ready evidence gate > gate follows current logical authority rather than evidence-bound precedence [25.12ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-k1lGaH/test.db
+(pass) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [23.30ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ydH5ZM/test.db
+(pass) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [22.14ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-uczEwX/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [21.59ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-DxG7dv/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [21.97ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-jaA9Y2/test.db
+(pass) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [22.76ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-fwSmNE/test.db
+(pass) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [21.80ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-pCqQnD/test.db
+(pass) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [22.76ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-UNmZ0r/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [21.32ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-YJTRgP/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [22.25ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-NppeyX/test.db
+(pass) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [21.10ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-u2W9kV/test.db
+(pass) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [20.85ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-YvpyEo/test.db
+(pass) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [22.75ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-iz8jw9/test.db
+(pass) runtime memory-ready evidence gate > Wasurezu bootstrap evidence is queue-independent metadata [18.25ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-go97OL/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run never creates a missing database or journal [17.68ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-OTG0Ln/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [26.46ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-WeO5oa/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [1185.60ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-tGveHO/test.db
+(pass) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [95.21ms]
+
+tests/seat-context-recovery.test.ts:
+(pass) seat context recovery > binds exact target last without modifying the configured transport [0.05ms]
+(pass) seat context recovery > prepares semantic context without issuing a consumption receipt [2.42ms]
+(pass) seat context recovery > requires exact host input acknowledgement and never transfers a prior runtime receipt [0.48ms]
+(pass) seat context recovery > rejects foreign seat before any host output [0.08ms]
+(pass) seat context recovery > rejects foreign project before any host output [0.05ms]
+(pass) seat context recovery > rejects foreign provider before any host output [0.02ms]
+(pass) seat context recovery > rejects project-substring recovery, missing next action and untrusted instruction promotion [0.03ms]
+(pass) seat context recovery > times out missing memory without ready or consumption [5.34ms]
+(pass) native context receipt lookup > maps stored native proof to exact fresh runtime without re-reading or writing context [0.49ms]
+(pass) native context receipt lookup > rejects unavailable, foreign, reused PID, session and attempt evidence [0.22ms]
+
+tests/aun-configuration-desired-state.test.ts:
+(pass) AUN configuration desired-state canonical contract > is byte deterministic and excludes mutable observation metadata [0.43ms]
+(pass) AUN configuration desired-state canonical contract > runtime-only provider, port and path changes leave the stable desired digest unchanged [0.18ms]
+(pass) AUN configuration desired-state canonical contract > rejects raw secret material while allowing secret references [0.03ms]
+(pass) AUN configuration desired-state canonical contract > normalizes a DB row and proves stored digest byte-for-byte [0.21ms]
+
+tests/contract/test_aun_configuration_restart_gate.test.ts:
+(pass) AUN configuration reconciler > applies one unprotected candidate and requires exact native readback before READY [1.20ms]
+(pass) AUN configuration reconciler > an equal second run performs zero mutations and still fresh-readbacks [0.23ms]
+(pass) AUN configuration reconciler > discards a stale candidate before any apply [0.31ms]
+(pass) AUN configuration reconciler > lease loss inside a successful adapter call rejects the effect before commit [0.25ms]
+(pass) AUN configuration reconciler > lease loss inside a partial adapter call cannot commit or invoke stale rollback [0.24ms]
+(pass) AUN configuration reconciler > never closes an outbox event when the stale observed receipt is fence-rejected [0.16ms]
+(pass) AUN configuration reconciler > a failed candidate render stays undelivered and does not reject the sweep [0.49ms]
+(pass) AUN configuration reconciler > partial apply and rollback failure fail closed with no automatic retry [0.31ms]
+(pass) AUN configuration reconciler > coalesces concurrent same-key work into one apply [0.26ms]
+(pass) AUN configuration reconciler > heartbeats an in-flight reconciliation at the sealed 15-second target [0.25ms]
+(pass) restart-required reconciliation emits approval request and performs zero restart [0.24ms]
+(pass) revision drift during native readback creates no restart request [0.15ms]
+(pass) a durable exact CTO claim permits one fake restart and exact terminal readback [0.09ms]
+(pass) rejected, expired, superseded, or drifted durable restart claims perform zero effects [0.40ms]
+(pass) an ineligible exact maintenance-lease holder cannot claim or restart [0.21ms]
+(pass) lease loss after durable claim records failure and performs zero restart [0.12ms]
+(pass) terminal ACK loss cannot claim or restart the same request twice [0.15ms]
+
+tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_72d72d57b2914bc4b45a4f18387b7919","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) stable seat desired document PostgreSQL compatibility > new enrollment accepts unset/zero diagnostics and SQL/TS stable digest parity [240.97ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_c16605a659d04a1cbbe5a003e5cda0c1","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) stable seat desired document PostgreSQL compatibility > populated legacy transition is once-only and preserves runtime, identity, queues and history [241.90ms]
+
+ 59 pass
+ 0 fail
+ 308 expect() calls
+Ran 59 tests across 5 files. [2.42s]

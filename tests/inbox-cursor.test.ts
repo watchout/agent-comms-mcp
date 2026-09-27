@@ -1,3 +1,5 @@
+import { fixture, insert } from './helpers/runtime-observation-nonpersistence-db-fixture'
+import { randomUUID } from 'node:crypto'
 /**
  * Issue #179 behavioral coverage — fetchNewMessages composite
  * (created_at, id) cursor.
@@ -267,32 +269,34 @@ describe('fetchNewMessages — composite cursor semantics (Issue #179)', () => {
 const DB_URL = process.env.DATABASE_URL
 describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () => {
   test('composite cursor does not drop a lex-smaller UUID inserted later', async () => {
-    const { Client } = await import('pg')
-    const client = new Client({ connectionString: DB_URL })
-    await client.connect()
+    const f=await fixture('postgres',true)
+    const client={async query(sql:string,params?:unknown[]){return {rows:await f.query(sql,params)}}}
+    const channel=randomUUID()
+    await insert(f,'channels',{id:channel,name:'private cursor'})
     try {
       await client.query('BEGIN')
       const agentA = `test-inbox-cursor-a-${Date.now()}`
       const agentB = `test-inbox-cursor-b-${Date.now()}`
+      for(const agentId of [agentA,agentB])await insert(f,'agents',{agent_id:agentId,display_name:agentId,agent_type:'dev'})
       // Insert row 1 (EARLIER_CREATED_LATER_UUID) at T0.
       await client.query(
         `INSERT INTO agent_messages (id, channel_id, author_id, content, metadata, created_at)
-         VALUES ($1::uuid, 'ch-test', $2, 'early post', jsonb_build_object('to', $3::text), '2026-01-01T00:00:00Z')`,
-        [EARLIER_CREATED_LATER_UUID, agentA, agentB],
+         VALUES ($1::uuid, $4::uuid, $2, 'early post', jsonb_build_object('to', $3::text), '2026-01-01T00:00:00Z')`,
+        [EARLIER_CREATED_LATER_UUID, agentA, agentB,channel],
       )
       // Insert row 2 (LATER_CREATED_EARLIER_UUID) at T1 > T0.
       await client.query(
         `INSERT INTO agent_messages (id, channel_id, author_id, content, metadata, created_at)
-         VALUES ($1::uuid, 'ch-test', $2, 'later post', jsonb_build_object('to', $3::text), '2026-01-02T00:00:00Z')`,
-        [LATER_CREATED_EARLIER_UUID, agentA, agentB],
+         VALUES ($1::uuid, $4::uuid, $2, 'later post', jsonb_build_object('to', $3::text), '2026-01-02T00:00:00Z')`,
+        [LATER_CREATED_EARLIER_UUID, agentA, agentB,channel],
       )
       // Cycle 2 Finding 1 — fetchNewMessages now joins through
       // message_queue, so the visibility row must exist for agentB
       // before the SELECT returns either agent_messages row.
       await client.query(
         `INSERT INTO message_queue (agent_id, message_id, payload, status)
-         VALUES ($1, $2::text, '{}'::jsonb, 'pending'),
-                ($1, $3::text, '{}'::jsonb, 'pending')`,
+         VALUES ($1, $2::uuid, '{}'::jsonb, 'pending'),
+                ($1, $3::uuid, '{}'::jsonb, 'pending')`,
         [agentB, EARLIER_CREATED_LATER_UUID, LATER_CREATED_EARLIER_UUID],
       )
 
@@ -317,7 +321,7 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
       expect(second.rows.map(r => r.id)).toEqual([LATER_CREATED_EARLIER_UUID])
     } finally {
       await client.query('ROLLBACK')
-      await client.end()
+      await f.close()
     }
   })
 
@@ -331,24 +335,26 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
     // cursor.createdAt was `.123+00` (ms) and `.123456 > .123` is
     // true. Under the cycle 3 fix (`created_at::text AS created_at_text`
     // preserves µs into the cursor), fetch2 returns empty.
-    const { Client } = await import('pg')
-    const client = new Client({ connectionString: DB_URL })
-    await client.connect()
+    const f=await fixture('postgres',true)
+    const client={async query(sql:string,params?:unknown[]){return {rows:await f.query(sql,params)}}}
+    const channel=randomUUID()
+    await insert(f,'channels',{id:channel,name:'private cursor'})
     try {
       await client.query('BEGIN')
       const agent = `test-inbox-us-${Date.now()}`
       const sender = `test-sender-us-${Date.now()}`
+      for(const agentId of [agent,sender])await insert(f,'agents',{agent_id:agentId,display_name:agentId,agent_type:'dev'})
       const rowId = '11111111-2222-4333-8444-555555555555'
       await client.query(
         `INSERT INTO agent_messages (id, channel_id, author_id, content, metadata, created_at)
-         VALUES ($1::uuid, 'ch-test', $2, 'us-precise post', jsonb_build_object('to', $3::text),
+         VALUES ($1::uuid, $4::uuid, $2, 'us-precise post', jsonb_build_object('to', $3::text),
                  '2026-01-03 00:00:00.123456+00'::timestamptz)`,
-        [rowId, sender, agent],
+        [rowId, sender, agent,channel],
       )
       // Cycle 2 Finding 1 — visibility row in message_queue.
       await client.query(
         `INSERT INTO message_queue (agent_id, message_id, payload, status)
-         VALUES ($1, $2::text, '{}'::jsonb, 'pending')`,
+         VALUES ($1, $2::uuid, '{}'::jsonb, 'pending')`,
         [agent, rowId],
       )
 
@@ -379,7 +385,7 @@ describe.skipIf(!DB_URL)('fetchNewMessages — DB integration (Issue #179)', () 
       expect(second.nextCursor).toEqual(first.nextCursor)
     } finally {
       await client.query('ROLLBACK')
-      await client.end()
+      await f.close()
     }
   })
 })

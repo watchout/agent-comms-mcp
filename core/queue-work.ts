@@ -1,4 +1,26 @@
+import { resolveRuntimeEndpoint } from './runtime-endpoint'
 import { createHash } from 'node:crypto'
+import { admissionInstalled, admissionForAgent, admissionStatus, admissionTransition, type AdmissionState } from './queue-admission'
+
+/** Operator selectors only. Native Codex resolves permissions; this does not prove confinement. */
+export function resolveQueueWorkCodexPermissions(env: NodeJS.ProcessEnv): {
+  sandbox: string | null; profile: string | undefined; permissionsProfile: string | null
+} {
+  const read = (suffix: string) => env[`AUN_QUEUE_WORK_CODEX_${suffix}`]
+    ?? env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+  const optedIn = ['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_PERMISSIONS_PROFILE`] !== undefined)
+  if (!optedIn) return { sandbox: read('SANDBOX') ?? 'read-only', profile: read('PROFILE'), permissionsProfile: null }
+  const invalid = () => { throw new Error('queue_work_codex_permissions_selection_invalid') }
+  const pair = (suffix: string): string => {
+    const a = env[`AUN_QUEUE_WORK_CODEX_${suffix}`], b = env[`STATE_DAEMON_QUEUE_WORK_CODEX_${suffix}`]
+    if ((a !== undefined && !a) || (b !== undefined && !b) || (a && b && a !== b)) invalid()
+    const value = a ?? b
+    if (!value || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) invalid()
+    return value!
+  }
+  if (['AUN', 'STATE_DAEMON'].some(prefix => env[`${prefix}_QUEUE_WORK_CODEX_SANDBOX`] !== undefined)) invalid()
+  return { sandbox: null, profile: pair('PROFILE'), permissionsProfile: pair('PERMISSIONS_PROFILE') }
+}
 
 export const QUEUE_WORK_ENVELOPE_VERSION = 'queue_work_envelope_v1' as const
 export const QUEUE_WORK_RESULT_VERSION = 'queue_work_result_v1' as const
@@ -175,6 +197,13 @@ export function databaseClockSql(db: QueueWorkDb): string {
     : 'clock_timestamp()'
 }
 
+/** SQLite accepts both historical SQL timestamps and ISO claim timestamps. */
+function unexpiredAuthoritySql(db: QueueWorkDb, column: string): string {
+  return db.dialect === 'sqlite'
+    ? `julianday(${column}) > julianday('now')`
+    : `${column} > clock_timestamp()`
+}
+
 export interface QueueWorkRow {
   id: string | number
   agent_id: string
@@ -183,6 +212,7 @@ export interface QueueWorkRow {
   status: string
   priority?: number | null
   created_at?: Date | string | null
+  claimed_runtime_instance_id?: string | null
   claimed_by?: string | null
   claimed_at?: Date | string | null
   claim_expires_at?: Date | string | null
@@ -193,6 +223,31 @@ export interface QueueWorkRow {
 export interface QueueWorkClaimFence {
   claimedBy: string
   claimedAt: string
+  runtimeInstanceId?: string
+  leaseId?: string
+  fencingToken?: number
+}
+
+function runtimeClaimGuard(db: QueueWorkDb, params: unknown[], fence?: QueueWorkClaimFence): string {
+  if(!fence?.runtimeInstanceId)return ''
+  const runtime=params.push(fence.runtimeInstanceId), lease=params.push(fence.leaseId), token=params.push(fence.fencingToken)
+  const owner=params.push(fence.claimedBy), claimedAt=params.push(fence.claimedAt)
+  return ` AND claimed_by=$${owner} AND claimed_at=$${claimedAt}
+    AND claimed_runtime_instance_id=$${runtime}::uuid
+    AND EXISTS (SELECT 1 FROM control_plane_leases l WHERE l.lease_scope_type='runtime_instance'
+      AND l.lease_scope_id=$${runtime}::text AND l.holder_runtime_instance_id=$${runtime}::uuid
+      AND l.holder_agent_id=message_queue.agent_id AND l.lease_purpose='worker'
+      AND l.lease_id=$${lease} AND l.fencing_token=$${token} AND l.status='active'
+      AND ${unexpiredAuthoritySql(db,'l.expires_at')})`
+}
+
+async function currentRuntimeFence(db: QueueWorkDb, row: QueueWorkRow, expected?: string): Promise<QueueWorkClaimFence | null> {
+  if(!row.claimed_runtime_instance_id || (expected && expected!==row.claimed_runtime_instance_id)
+    || !row.claimed_by || !exactInstantText(row.claimed_at))return null
+  const resolved=await resolveRuntimeEndpoint(db,{agentId:row.agent_id})
+  if(!resolved.ok || resolved.endpoint?.runtimeInstanceId!==row.claimed_runtime_instance_id)return null
+  return {claimedBy:row.claimed_by,claimedAt:exactInstantText(row.claimed_at)!,runtimeInstanceId:resolved.endpoint.runtimeInstanceId,
+    leaseId:resolved.endpoint.leaseId,fencingToken:resolved.endpoint.fencingToken}
 }
 
 export type QueueWorkRunOutcome =
@@ -222,6 +277,8 @@ export type QueueWorkRunOutcome =
     }
 
 export interface RunReceivedQueueWorkOptions {
+  runtimeInstanceId?: string
+  githubWritebackMode?: QueueWorkWritebackMode
   queueId?: string | number
   agentId?: string
   adapter: LlmRuntimeAdapter
@@ -306,6 +363,7 @@ export function computeQueueWorkD1InvocationKey(input: {
 }
 
 export interface FinalizeDoneQueueWorkOptions {
+  runtimeInstanceId?: string
   queueId: string | number
   messageId?: string | null
   d1CompletionFence?: QueueWorkD1CompletionFence
@@ -586,7 +644,7 @@ async function selectReceivedRow(
   if (opts.queueId !== undefined) {
     const selected = await db.query<QueueWorkRow>(
       `SELECT id, agent_id, message_id, payload, status, priority, created_at,
-              claimed_by, claimed_at::text AS claimed_at, claim_expires_at
+              claimed_by, claimed_runtime_instance_id, claimed_at::text AS claimed_at, claim_expires_at
          FROM message_queue
         WHERE id = $1
         FOR UPDATE`,
@@ -601,7 +659,7 @@ async function selectReceivedRow(
 
   const selected = await db.query<QueueWorkRow>(
     `SELECT id, agent_id, message_id, payload, status, priority, created_at,
-            claimed_by, claimed_at::text AS claimed_at, claim_expires_at
+            claimed_by, claimed_runtime_instance_id, claimed_at::text AS claimed_at, claim_expires_at
        FROM message_queue
       WHERE agent_id = $1
         AND status = 'received'
@@ -618,6 +676,13 @@ async function lockExactClaimRow(
   queueId: string | number,
   claimFence: NonNullable<RunReceivedQueueWorkOptions['claimFence']>,
 ): Promise<boolean> {
+  if(claimFence.runtimeInstanceId) {
+    const current=await resolveRuntimeEndpoint(db,{agentId:claimFence.claimedBy})
+    if(!current.ok || current.endpoint?.runtimeInstanceId!==claimFence.runtimeInstanceId
+      || current.endpoint.leaseId!==claimFence.leaseId || current.endpoint.fencingToken!==claimFence.fencingToken)return false
+  }
+  const params: unknown[]=[queueId,claimFence.claimedBy,claimFence.claimedAt]
+  const runtimeGuard=runtimeClaimGuard(db,params,claimFence)
   // PostgreSQL can evaluate a clock_timestamp() fence before waiting on the
   // UPDATE row lock. Acquire ownership first so the following statement's
   // lease check is necessarily evaluated after the wait.
@@ -627,8 +692,9 @@ async function lockExactClaimRow(
       WHERE id = $1
         AND claimed_by = $2
         AND claimed_at = $3
+        ${runtimeGuard}
       FOR UPDATE`,
-    [queueId, claimFence.claimedBy, claimFence.claimedAt],
+    params,
   )
   return rowCount(locked) === 1
 }
@@ -655,6 +721,7 @@ async function persistRunnerError(
       claim_fence: {
         claimed_by: claimFence.claimedBy,
         claimed_at: claimFence.claimedAt,
+              ...(claimFence.runtimeInstanceId ? {runtime_instance_id:claimFence.runtimeInstanceId} : {}),
       },
     } : {}),
   }
@@ -698,8 +765,9 @@ async function persistRunnerError(
     sql += `
         AND claimed_by = $${claimedByIndex}
         AND claimed_at = $${claimedAtIndex}
-        AND claim_expires_at > ${databaseClockSql(db)}`
+        AND ${unexpiredAuthoritySql(db,'claim_expires_at')}`
   }
+  sql += runtimeClaimGuard(db,params,claimFence)
   sql += '\n        RETURNING id'
   if (!claimFence) {
     const persisted = await db.query(sql, params).catch(() => ({ rows: [], rowCount: 0 }))
@@ -736,6 +804,118 @@ function executionAbortDetail(signal: AbortSignal): string {
   return reason === undefined ? 'runtime execution aborted' : String(reason)
 }
 
+interface BoundedQueueWork { state: AdmissionState; row: QueueWorkRow; task: AdmissionState['tasks'][number] }
+async function boundedQueueWork(db: QueueWorkDb, queueId?: string | number, agentId?: string): Promise<BoundedQueueWork | null> {
+  if (db.dialect !== 'postgres' || !await admissionInstalled(db, db.dialect)) return null
+  // Nonlocking identification only; the SQL core obtains policy -> slot -> row.
+  const selected = await db.query<QueueWorkRow>(queueId !== undefined
+    ? 'SELECT * FROM message_queue WHERE id=$1' : "SELECT * FROM message_queue WHERE agent_id=$1 AND status IN ('received','in_progress','done') ORDER BY id LIMIT 1", [queueId ?? agentId])
+  const row = selected.rows[0]
+  if (!row) return null
+  const state = await admissionForAgent(db, row.agent_id)
+  if (!state) return null
+  const task = state.tasks.find(t => String(t.queue_id) === String(row.id))
+  if (!task) throw new Error('ADMISSION_TASK_NOT_ENROLLED')
+  return { state, row, task }
+}
+async function haltBoundedWork(db: QueueWorkDb, state: AdmissionState, reason: string): Promise<void> {
+  const current = await admissionStatus(db, state.policy.policy_id)
+  if (!current) throw new Error('ADMISSION_POLICY_NOT_VISIBLE')
+  await admissionTransition(db, current, 'failure', { reason })
+}
+async function runBoundedQueueWork(db: QueueWorkDb, opts: RunReceivedQueueWorkOptions, bound: BoundedQueueWork): Promise<QueueWorkRunOutcome> {
+  const { row, task } = bound
+  const queueId = String(row.id)
+  let state = bound.state
+  if (opts.signal?.aborted) return { ok: false, code: 'EXECUTION_ABORTED', queue_id: queueId }
+  if (opts.adapter.runtime_id !== state.policy.config.runtime_id) return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_RUNTIME_MISMATCH' }
+  if (!Number.isFinite(opts.adapter.execution_timeout_ms) || opts.adapter.execution_timeout_ms! <= 0
+    || opts.adapter.execution_timeout_ms! > state.policy.config.worker_timeout_seconds * 1000) {
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_WORKER_TIMEOUT_UNPROVEN' }
+  }
+  const envelope = buildQueueWorkEnvelope(row)
+  // Existing classification is retained; a GitHub handoff is never relabelled.
+  if (parsePayload(row.payload).shirube_v4_d1) {
+    // D1 has its own invocation/effect receipt protocol. Never short-circuit
+    // that protocol through this two-slot normal-reply trial.
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_D1_EFFECT_ROUTE_NOT_ADMITTED' }
+  }
+  if (opts.expectedClaimSource && opts.expectedClaimSource !== 'bounded-admission') {
+    return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_CLAIM_SOURCE_MISMATCH' }
+  }
+  if (opts.claimFence && (opts.claimFence.claimedBy !== task.claim_fence?.claimed_by
+    || Date.parse(opts.claimFence.claimedAt) !== Date.parse(String(task.claim_fence?.claimed_at)))) {
+    return { ok: false, code: 'CLAIM_NOT_OWNED', queue_id: queueId, detail: 'ADMISSION_CLAIM_FENCE_MISMATCH' }
+  }
+  if (envelope.handoff_contract.github_backed && opts.githubWritebackMode !== 'mediated') {
+    return { ok: false, code: 'ADAPTER_CONFIGURATION_INVALID', queue_id: queueId, detail: 'ADMISSION_MEDIATED_HANDOFF_REQUIRED' }
+  }
+  envelope.handoff_contract.posting_mode = opts.githubWritebackMode ?? 'none'
+  state = await admissionTransition(db, state, 'invoke', { ordinal: task.ordinal, claim_fence: task.claim_fence })
+  let result: QueueWorkResult
+  try {
+    result = await invokeRuntimeAdapter(opts.adapter, envelope, opts.signal)
+    await opts.onInvocationSettled?.()
+    if (!resultLooksValid(result)) throw new Error('ADAPTER_RESULT_INVALID')
+    if (opts.signal?.aborted) throw new Error('EXECUTION_ABORTED')
+  } catch (error) {
+    await haltBoundedWork(db, state, error instanceof Error ? error.message : 'ADAPTER_ERROR')
+    return { ok: false, code: 'ADAPTER_ERROR', queue_id: queueId, detail: 'bounded attempt consumed; no reclaim' }
+  }
+  state = (await admissionStatus(db, state.policy.policy_id))!
+  await admissionTransition(db, state, 'result', { ordinal: task.ordinal, claim_fence: task.claim_fence, result: {
+    ...result, runtime_id: opts.adapter.runtime_id, invocation_source: opts.invocationSource ?? 'bounded-admission',
+    completed_at: new Date().toISOString(), claim_fence: task.claim_fence,
+  } })
+  if (!result.ok) return { ok: false, code: 'ADAPTER_RESULT_NOT_OK', queue_id: queueId, detail: result.summary }
+  const after = await admissionStatus(db, state.policy.policy_id)
+  if (after?.tasks.find(t => t.ordinal === task.ordinal)?.stage !== 'RESULT_SAVED') return { ok: false, code: 'EXECUTION_ABORTED', queue_id: queueId, detail: 'expired or halted; result evidence saved without another effect' }
+  return { ok: true, code: 'DONE', queue_id: queueId, final_status: 'done', result }
+}
+async function finalizeBoundedQueueWork(db: QueueWorkDb, opts: FinalizeDoneQueueWorkOptions, bound: BoundedQueueWork): Promise<QueueWorkFinalizeOutcome> {
+  const { row, task } = bound
+  const queueId = String(row.id)
+  if (task.stage === 'REPLIED' || task.stage === 'ACCEPTED') return { ok: true, code: 'ALREADY_REPLIED', queue_id: queueId, replied_with: task.reply_id }
+  const payload = parsePayload(row.payload)
+  const result = payload.runner_result as QueueWorkResult
+  const envelope = buildQueueWorkEnvelope(row)
+  if (payload.shirube_v4_d1) return { ok: false, code: 'D1_COMPLETION_RECEIPT_REQUIRED', queue_id: queueId, detail: 'ADMISSION_D1_EFFECT_ROUTE_NOT_ADMITTED' }
+  if (opts.writebackSender) envelope.handoff_contract.posting_mode = 'mediated'
+  if (!resultLooksValid(result) || !result.ok) return { ok: false, code: 'INVALID_STATE', queue_id: queueId, status: row.status }
+  const validation = opts.resultValidator?.({ row, payload, result, handoffContract: envelope.handoff_contract })
+  if (validation && !validation.ok) return { ok: false, code: 'TERMINAL_EVIDENCE_INVALID', queue_id: queueId, detail: validation.detail }
+  if (result.next_action !== 'reply' || !result.reply?.trim() || opts.replySender?.queue_close_mode !== 'sender') {
+    return { ok: false, code: 'MISSING_REPLY_SENDER', queue_id: queueId }
+  }
+  if (envelope.handoff_contract.github_backed && (!result.writeback || !opts.writebackSender)) {
+    return { ok: false, code: 'MISSING_WRITEBACK_SENDER', queue_id: queueId }
+  }
+  const state = await admissionTransition(db, bound.state, 'begin_finalize', { ordinal: task.ordinal, claim_fence: task.claim_fence, result_digest: task.result_digest })
+  try {
+    if (envelope.handoff_contract.github_backed) {
+      const receipt = await opts.writebackSender!.sendWriteback({ queue_id: queueId, agent_id: row.agent_id, message_id: row.message_id,
+        handoff_contract: envelope.handoff_contract, writeback: result.writeback!, runtime_result_summary: {
+          ok: result.ok, summary: result.summary, next_action: result.next_action, evidence: result.evidence ?? [],
+        } })
+      if (!receipt.posted_with) throw new Error('WRITEBACK_RECEIPT_MISSING')
+      const afterWriteback = await admissionStatus(db, state.policy.policy_id)
+      if (!afterWriteback) throw new Error('ADMISSION_POLICY_NOT_VISIBLE')
+      await admissionTransition(db, afterWriteback, 'writeback_receipt', { ordinal: task.ordinal, claim_fence: task.claim_fence,
+        result_digest: task.result_digest, posted_with: receipt.posted_with,
+        body_sha256: receipt.body_sha256 ?? createHash('sha256').update(result.writeback!.body).digest('hex') })
+    }
+    const sent = await opts.replySender!.sendReply({ queue_id: queueId, agent_id: row.agent_id, message_id: row.message_id,
+      content: result.reply!, mention: envelope.reply_contract.mention })
+    const after = await admissionStatus(db, state.policy.policy_id)
+    const actual = after?.tasks.find(t => t.ordinal === task.ordinal)
+    if (!sent.queue_closed || !sent.message_id || actual?.stage !== 'REPLIED' || actual.reply_id !== sent.message_id) throw new Error('ADMISSION_HOST_REPLY_READBACK_MISMATCH')
+    return { ok: true, code: 'REPLIED', queue_id: queueId, replied_with: sent.message_id }
+  } catch (error) {
+    await haltBoundedWork(db, state, error instanceof Error ? error.message : 'FINALIZER_ERROR')
+    return { ok: false, code: 'REPLY_SEND_FAILED', queue_id: queueId, detail: 'bounded finalizer attempt consumed; no resume/retry' }
+  }
+}
+
 async function invokeRuntimeAdapter(
   adapter: LlmRuntimeAdapter,
   envelope: QueueWorkEnvelope,
@@ -761,6 +941,8 @@ export async function runReceivedQueueWork(
   db: QueueWorkDb,
   opts: RunReceivedQueueWorkOptions,
 ): Promise<QueueWorkRunOutcome> {
+  const bounded = await boundedQueueWork(db, opts.queueId, opts.agentId)
+  if (bounded) return runBoundedQueueWork(db, opts, bounded)
   if (opts.signal?.aborted) {
     return {
       ok: false,
@@ -815,6 +997,16 @@ export async function runReceivedQueueWork(
           detail: 'receive_claim agent_id/queue_id does not match selected row',
         }
       }
+    }
+
+    if(row.claimed_runtime_instance_id || opts.runtimeInstanceId) {
+      const holder=await currentRuntimeFence(db,row,opts.runtimeInstanceId)
+      if(!holder || (claimFence && (claimFence.claimedBy!==holder.claimedBy || claimFence.claimedAt!==holder.claimedAt
+        || (claimFence.runtimeInstanceId && claimFence.runtimeInstanceId!==holder.runtimeInstanceId)))) {
+        await db.query('ROLLBACK')
+        return {ok:false,code:'CLAIM_NOT_OWNED',queue_id:queueIdOf(row),detail:'runtime incarnation is not the current claim holder'}
+      }
+      claimFence=holder
     }
 
     if (!claimFence && opts.requireClaimFence) {
@@ -874,6 +1066,7 @@ export async function runReceivedQueueWork(
             replaced_by_claim_fence: claimFence ? {
               claimed_by: claimFence.claimedBy,
               claimed_at: claimFence.claimedAt,
+              ...(claimFence.runtimeInstanceId ? {runtime_instance_id:claimFence.runtimeInstanceId} : {}),
             } : null,
           },
         ].slice(-16)
@@ -891,6 +1084,7 @@ export async function runReceivedQueueWork(
             runtime_id: opts.adapter.runtime_id,
             claimed_by: claimFence.claimedBy,
             claimed_at: claimFence.claimedAt,
+              ...(claimFence.runtimeInstanceId ? {runtime_instance_id:claimFence.runtimeInstanceId} : {}),
             started_at: now.toISOString(),
           },
         })
@@ -907,8 +1101,9 @@ export async function runReceivedQueueWork(
       advanceSql += `
           AND claimed_by = $4
           AND claimed_at = $5
-          AND claim_expires_at > ${databaseClockSql(db)}`
+          AND ${unexpiredAuthoritySql(db,'claim_expires_at')}`
     }
+    advanceSql += runtimeClaimGuard(db,advanceParams,claimFence)
     advanceSql += '\n        RETURNING id'
     const advanced = await db.query<{ id: string | number }>(advanceSql, advanceParams)
     if (rowCount(advanced) === 0) {
@@ -1046,6 +1241,7 @@ export async function runReceivedQueueWork(
       claim_fence: {
         claimed_by: claimFence.claimedBy,
         claimed_at: claimFence.claimedAt,
+              ...(claimFence.runtimeInstanceId ? {runtime_instance_id:claimFence.runtimeInstanceId} : {}),
       },
     } : {}),
   })
@@ -1071,8 +1267,9 @@ export async function runReceivedQueueWork(
       doneSql += `
           AND claimed_by = $4
           AND claimed_at = $5
-          AND claim_expires_at > ${databaseClockSql(db)}`
+          AND ${unexpiredAuthoritySql(db,'claim_expires_at')}`
     }
+    doneSql += runtimeClaimGuard(db,doneParams,claimFence)
     doneSql += '\n        RETURNING id'
     const done = await db.query<{ id: string | number }>(doneSql, doneParams)
     if (rowCount(done) === 0) {
@@ -1102,12 +1299,14 @@ export async function finalizeDoneQueueWork(
   db: QueueWorkDb,
   opts: FinalizeDoneQueueWorkOptions,
 ): Promise<QueueWorkFinalizeOutcome> {
+  const bounded = await boundedQueueWork(db, opts.queueId)
+  if (bounded) return finalizeBoundedQueueWork(db, opts, bounded)
   await db.query('BEGIN')
   let committed = false
   try {
     const selected = await db.query<QueueWorkRow>(
       `SELECT id, agent_id, message_id, payload, status, priority, created_at,
-              claimed_by, claimed_at::text AS claimed_at, claim_expires_at, done_at,
+              claimed_by, claimed_runtime_instance_id, claimed_at::text AS claimed_at, claim_expires_at, done_at,
               CURRENT_TIMESTAMP AS database_now
          FROM message_queue
         WHERE id = $1
@@ -1163,12 +1362,37 @@ export async function finalizeDoneQueueWork(
       }
     }
 
+    let runtimeFence: QueueWorkClaimFence | undefined
+    if(row.claimed_runtime_instance_id || opts.runtimeInstanceId) {
+      const current=await currentRuntimeFence(db,row,opts.runtimeInstanceId)
+      const recorded=recordValue(result.claim_fence)
+      if(!current || recorded.runtime_instance_id!==current.runtimeInstanceId
+        || recorded.claimed_by!==current.claimedBy || exactInstantText(recorded.claimed_at)!==current.claimedAt) {
+        await db.query('ROLLBACK'); committed=true
+        return {ok:false,code:'TERMINAL_EVIDENCE_INVALID',queue_id:queueIdOf(row),detail:'runtime incarnation/result fence mismatch'}
+      }
+      runtimeFence=current
+    }
+
+    const runtimeStillCurrent = async (): Promise<boolean> => {
+      if(!runtimeFence)return true
+      const current=await currentRuntimeFence(db,row,runtimeFence.runtimeInstanceId)
+      return !!current && current.leaseId===runtimeFence.leaseId && current.fencingToken===runtimeFence.fencingToken
+    }
+
     const closeDirectly = async (
       repliedWith: string | null,
       code: 'REPLIED' | 'CLOSED' | 'WRITEBACK_POSTED',
       writebackPostedWith?: string | null,
       writebackBodySha256?: string | null,
     ): Promise<QueueWorkFinalizeOutcome> => {
+      if(runtimeFence) {
+        const current=await currentRuntimeFence(db,row,runtimeFence.runtimeInstanceId)
+        if(!current || current.leaseId!==runtimeFence.leaseId || current.fencingToken!==runtimeFence.fencingToken) {
+          await db.query('ROLLBACK');committed=true
+          return {ok:false,code:'FINALIZE_RACE',queue_id:queueIdOf(row)}
+        }
+      }
       const closedAt = opts.now?.() ?? new Date()
       const { finalizer_error: _staleFinalizerError, ...successfulPayload } = payload
       const nextPayload = JSON.stringify(writebackPostedWith
@@ -1203,6 +1427,7 @@ export async function finalizeDoneQueueWork(
         claimGuard = `AND claimed_by = $${ownerParam}
             AND claimed_at = $${claimedAtParam}`
       }
+      claimGuard += runtimeClaimGuard(db,closeParams,runtimeFence)
       const updated = await db.query<{ id: string | number }>(
         `UPDATE message_queue
             SET status = 'replied',
@@ -1260,6 +1485,10 @@ export async function finalizeDoneQueueWork(
       code: Extract<QueueWorkFinalizeOutcome, { ok: false }>['code'],
       detail?: string,
     ): Promise<QueueWorkFinalizeOutcome> => {
+      if(!await runtimeStillCurrent()) {
+        await db.query('ROLLBACK'); committed=true
+        return {ok:false,code:'FINALIZE_RACE',queue_id:queueIdOf(row)}
+      }
       const failedAt = opts.now?.() ?? new Date()
       const previousFinalizerError = recordValue(payload.finalizer_error)
       const previousAttempts = Number(previousFinalizerError.attempts)
@@ -1275,14 +1504,20 @@ export async function finalizeDoneQueueWork(
           attempts,
         },
       })
-      await db.query(
+      const params:unknown[]=[row.id,nextPayload,failedAt.toISOString()]
+      const guard=runtimeClaimGuard(db,params,runtimeFence)
+      const updated=await db.query(
         `UPDATE message_queue
             SET payload = $2,
                 last_heartbeat_at = $3
           WHERE id = $1
-            AND status = 'done'`,
-        [row.id, nextPayload, failedAt.toISOString()],
+            AND status = 'done' ${guard} RETURNING id`,
+        params,
       )
+      if(runtimeFence && rowCount(updated)!==1) {
+        await db.query('ROLLBACK');committed=true
+        return {ok:false,code:'FINALIZE_RACE',queue_id:queueIdOf(row)}
+      }
       await db.query('COMMIT')
       committed = true
       return { ok: false, code, queue_id: queueIdOf(row), detail }
@@ -1451,6 +1686,7 @@ export async function finalizeDoneQueueWork(
           return failClosed('MISSING_WRITEBACK_SENDER')
         }
         let writebackFailure: string | null = null
+        if(!await runtimeStillCurrent())return failClosed('TERMINAL_EVIDENCE_INVALID','runtime holder changed before writeback')
         const sent = await opts.writebackSender.sendWriteback({
           queue_id: queueIdOf(row),
           agent_id: row.agent_id,
@@ -1521,6 +1757,7 @@ export async function finalizeDoneQueueWork(
           claimGuard = `AND claimed_by = $${ownerParam}
               AND claimed_at = $${claimedAtParam}`
         }
+        claimGuard += runtimeClaimGuard(db,preparedParams,runtimeFence)
         const prepared = await db.query<{ id: string | number }>(
           `UPDATE message_queue
               SET payload = $2,
@@ -1547,6 +1784,10 @@ export async function finalizeDoneQueueWork(
         committed = true
         let sent: { message_id?: string | null; queue_closed?: boolean }
         try {
+          if(!await runtimeStillCurrent()) {
+            await db.query('BEGIN');committed=false
+            return failClosed('TERMINAL_EVIDENCE_INVALID','runtime holder changed before reply')
+          }
           sent = await opts.replySender!.sendReply({
             queue_id: queueIdOf(row),
             agent_id: row.agent_id,
@@ -1605,6 +1846,7 @@ export async function finalizeDoneQueueWork(
         }
       }
       const envelope = buildQueueWorkEnvelope(row)
+      if(!await runtimeStillCurrent())return failClosed('TERMINAL_EVIDENCE_INVALID','runtime holder changed before reply')
       const sent = await opts.replySender!.sendReply({
         queue_id: queueIdOf(row),
         agent_id: row.agent_id,

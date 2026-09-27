@@ -1,9 +1,11 @@
+import { resolveRuntimeEndpoint } from '../../core/runtime-endpoint'
+import type { HostRuntimeInspector } from '../../core/host-runtime-observer'
 import { randomUUID } from 'node:crypto'
 
 export const N1_PROBE_MESSAGE_TYPE = 'probe' as const
 export const N1_PROBE_SCHEMA_VERSION = 'aun-n1-slo-probe/v1' as const
 export const N1_REPORT_SCHEMA_VERSION = 'aun-n1-slo-report/v1' as const
-export const N1_ACTIVE_SEAT_QUERY_VERSION = 'agents-idle-busy-valid-runtime-endpoint-lease/v2' as const
+export const N1_ACTIVE_SEAT_QUERY_VERSION = 'logical-profile-current-runtime-endpoint-lease/v3' as const
 export const N1_PROBE_PREFIX = '[AUN-N1-SLO-PROBE/v1]'
 export const N1_PROBE_CHANNEL_ID = 'pdca-daily' as const
 export const N1_OBSERVATION_WINDOW_MS = 5_000
@@ -96,6 +98,7 @@ export interface N1ProbeProcessorContext {
 export type N1ProbeProcessor = (context: N1ProbeProcessorContext) => Promise<void>
 
 export interface RunN1MeasurementOptions {
+  inspect?: HostRuntimeInspector
   sourceCommit: string
   runId?: string
   observationWindowMs?: number
@@ -124,6 +127,7 @@ function sleepDefault(ms: number): Promise<void> {
 export async function listCanonicalActiveSeats(
   db: N1Queryable,
   observedAt: Date = new Date(),
+  inspect?: HostRuntimeInspector,
 ): Promise<N1ActiveSeat[]> {
   const result = await db.query(
     `SELECT DISTINCT ON (a.agent_id)
@@ -142,16 +146,17 @@ export async function listCanonicalActiveSeats(
          ON ri.runtime_instance_id = lease.holder_runtime_instance_id
         AND ri.runtime_instance_id::text = lease.lease_scope_id
         AND ri.agent_id = a.agent_id
-      WHERE a.status IN ('idle', 'busy')
+      WHERE COALESCE(a.profile_enabled,true)=true AND a.disabled_at IS NULL
       ORDER BY a.agent_id, lease.expires_at DESC, lease.fencing_token DESC`,
     [observedAt.toISOString()],
   )
-  return result.rows.map(row => ({
-    agent_id: String(row.agent_id),
-    runtime_instance_id: String(row.runtime_instance_id),
-    lease_id: String(row.lease_id),
-    lease_expires_at: iso(row.expires_at),
-  }))
+  const seats:N1ActiveSeat[]=[]
+  for(const row of result.rows) {
+    const endpoint=await resolveRuntimeEndpoint(db,{agentId:String(row.agent_id),runtimeInstanceId:String(row.runtime_instance_id),inspect})
+    if(!endpoint.ok || endpoint.endpoint?.leaseId!==String(row.lease_id))continue
+    seats.push({agent_id:String(row.agent_id),runtime_instance_id:String(row.runtime_instance_id),lease_id:String(row.lease_id),lease_expires_at:iso(row.expires_at)})
+  }
+  return seats
 }
 
 async function inTransaction<T>(db: N1Queryable, operation: () => Promise<T>): Promise<T> {
@@ -498,7 +503,7 @@ export async function runN1Measurement(
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(runId)) {
     throw new Error('N1_RUN_ID_INVALID')
   }
-  const seats = await listCanonicalActiveSeats(db, now())
+  const seats = await listCanonicalActiveSeats(db, now(),options.inspect)
   const results: N1SeatResult[] = []
   for (const seat of seats) {
     results.push(await runSeatProbe(db, seat, runId, {

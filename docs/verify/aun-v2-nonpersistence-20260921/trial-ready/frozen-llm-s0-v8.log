@@ -1,0 +1,13 @@
+bun test v1.3.11 (af24e281)
+
+tests/eventlog/eventlog-v2-native-agent-mesh-cutover.test.ts:
+(pass) V2-native S0 cutover and zero-effect fences > native execution leaves V1 and provider surfaces at exact zero delta [15.44ms]
+(pass) V2-native S0 cutover and zero-effect fences > daemon and supervisor remain default-off/read-only and fail on drift [4.83ms]
+(pass) V2-native S0 cutover and zero-effect fences > canonical selector freezes every enabled non-human agent with one exact ready runtime [5.98ms]
+(pass) V2-native S0 cutover and zero-effect fences > LLM selector uses fresh provider and checkout with NULL physical anchors, never historical preference [69.71ms]
+(pass) V2-native S0 cutover and zero-effect fences > provider or V1 escape literals fail before the first event [5.26ms]
+
+ 5 pass
+ 0 fail
+ 23 expect() calls
+Ran 5 tests across 1 file. [119.00ms]

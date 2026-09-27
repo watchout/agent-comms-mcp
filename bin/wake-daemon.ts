@@ -3,13 +3,12 @@
  * PR #0 — wake-on-insert daemon (spec v3 Phase C Gap 1 fix).
  *
  * Single responsibility: detect `message_queue` INSERT (PG NOTIFY or SQLite
- * polling fallback), resolve the target bot's tmux session from the DB
- * `agents` profile, and send Enter to wake the Claude Code REPL so the bot
+ * polling fallback), resolve the target bot's session from current provider/lease authority, and send Enter to wake the Claude Code REPL so the bot
  * picks up its queue via the `auto-next` hook.
  *
  * Scope (frozen §1.1 / §1.2):
  *   - DB LISTEN `mq_enqueued` (PG) or `message_queue` polling (SQLite)
- *   - tmux send-keys to `agents.metadata.tmux_session`
+ *   - tmux send-keys to the freshly observed session
  *   - Sliding-window de-dup on `message_id` (N=512)
  *   - SIGINT/SIGTERM → clean exit ≤30 s (LISTEN unsubscribe + conn close)
  *
@@ -20,6 +19,8 @@
  *   - No `process.exit(0)` on normal path (SIGTERM/SIGINT only)
  */
 import { Client as PgClient } from 'pg'
+import { SqliteAdapter } from '../core/db/sqlite-adapter'
+import { resolveSeatProvider } from '../core/seat-runtime-selection'
 import { Database as SqliteDatabase } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -102,34 +103,25 @@ async function resolveSession(agentId: string, resolveProfileSession: SessionRes
 }
 
 async function resolvePgProfileSession(client: PgClient, agentId: string): Promise<string | null> {
-  const result = await client.query<{ tmux_session: string | null }>(
-    `SELECT metadata->>'tmux_session' AS tmux_session
-       FROM agents
-      WHERE agent_id = $1
-        AND agent_type NOT IN ('human', 'system')
-        AND COALESCE(profile_enabled, true) = true
-        AND disabled_at IS NULL
-        AND status IS DISTINCT FROM 'disabled'
-      LIMIT 1`,
-    [agentId],
+  const result = await client.query(
+    `SELECT agent_id FROM agents WHERE agent_id=$1
+      AND agent_type NOT IN ('human', 'system')
+      AND COALESCE(profile_enabled, true) = true AND disabled_at IS NULL LIMIT 1`, [agentId],
   )
-  const value = result.rows[0]?.tmux_session
-  return typeof value === 'string' && value.trim() ? value.trim() : null
+  if (!result.rows.length) return null
+  const current=await resolveSeatProvider(client,{agentId})
+  return current.ok ? current.observation?.session_name ?? null : null
 }
 
-function resolveSqliteProfileSession(db: SqliteDatabase, agentId: string): string | null {
-  const row = db.query<{ tmux_session: string | null }, [string]>(
-    `SELECT json_extract(metadata, '$.tmux_session') AS tmux_session
-       FROM agents
-      WHERE agent_id = ?
-        AND agent_type NOT IN ('human', 'system')
-        AND COALESCE(profile_enabled, 1) = 1
-        AND disabled_at IS NULL
-        AND (status IS NULL OR status <> 'disabled')
-      LIMIT 1`,
-  ).get(agentId)
-  const value = row?.tmux_session
-  return typeof value === 'string' && value.trim() ? value.trim() : null
+async function resolveSqliteProfileSession(db: SqliteAdapter, agentId: string): Promise<string | null> {
+  const rows=await db.query(
+    `SELECT agent_id FROM agents WHERE agent_id=$1
+      AND agent_type NOT IN ('human', 'system')
+      AND COALESCE(profile_enabled, 1) = 1 AND disabled_at IS NULL LIMIT 1`, [agentId],
+  )
+  if (!rows.length) return null
+  const current=await resolveSeatProvider(db,{agentId})
+  return current.ok ? current.observation?.session_name ?? null : null
 }
 
 // ---------- tmux send-keys (wake trigger) ----------
@@ -154,7 +146,7 @@ async function wake(agentId: string, messageId: string, resolveProfileSession: S
   }
   const session = await resolveSession(agentId, resolveProfileSession)
   if (!session) {
-    log('warn', `no active DB-profile tmux session for agent ${agentId}`)
+    log('warn', `no current authorized tmux session for agent ${agentId}`)
     return
   }
   tmuxWake(session)
@@ -263,6 +255,8 @@ async function runSqlite(): Promise<void> {
     process.exit(1)
   }
   const db = new SqliteDatabase(path, { readonly: true })
+  const logical = new SqliteAdapter(path)
+  cleanups.push(() => logical.close())
   cleanups.push(() => { db.close() })
 
   // Start cursor at current tail so we don't replay historical rows on startup.
@@ -281,7 +275,7 @@ async function runSqlite(): Promise<void> {
     try {
       const rows = stmt.all(lastId)
       for (const row of rows) {
-        if (row.message_id) await wake(row.agent_id, row.message_id, (agentId) => resolveSqliteProfileSession(db, agentId))
+        if (row.message_id) await wake(row.agent_id, row.message_id, (agentId) => resolveSqliteProfileSession(logical, agentId))
         lastId = row.id
       }
     } catch (err) {

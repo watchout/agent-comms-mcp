@@ -12,7 +12,7 @@ test('lost notification is recovered by the bounded sweep within the sealed dead
   const store = new FakeStore()
   store.events = [eventFixture(store.desired)]
   const port = new FakeProjection()
-  const results = await new AunConfigurationReconciler('host-a', store, new FakeLease(), port).sweepOnce()
+  const results = await new AunConfigurationReconciler(store, new FakeLease(), port).sweepOnce()
   expect(CONFIGURATION_RECONCILER_SWEEP_MS).toBe(30_000)
   expect(CONFIGURATION_RECONCILER_HEARTBEAT_MS).toBe(15_000)
   expect(CONFIGURATION_RECONCILER_HEARTBEAT_MS * 3).toBe(CONFIGURATION_RECONCILER_LEASE_TTL_MS)

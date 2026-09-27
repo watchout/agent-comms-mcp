@@ -1,27 +1,10 @@
-/**
- * Issue #277 (D) — bot_status postgres truth.
- *
- * Single SQL that joins agents + message_queue and returns per-agent:
- *   - pending_count: pending message_queue rows
- *   - oldest_pending_at: oldest pending row created_at (NULL if none)
- *   - heartbeat_ok: agents.last_seen_at within 60s
- *   - health_state: derived enum
- *   - endpoint_lease_state: active connector runtime endpoint lease readiness
- *
- * `health_state` enum:
- *   - 'crashed'     — last_seen_at < NOW() - 5min
- *   - 'busy_stuck'  — status='busy' AND last_seen_at < NOW() - 2h
- *   - 'busy_active' — status='busy' AND last_seen_at within 60s
- *   - 'healthy'     — otherwise
- *
- * The SQL is deliberately a single statement (N+1 forbidden, perf budget < 100ms
- * per Issue #277 §2). Process-level health (registry / tmux / port) lives in
- * `core/bot-health.ts` and is composed at the caller (server.ts bot_status
- * handler).
- */
 import type { Client } from 'pg'
+import { resolveSeatProvider } from './seat-runtime-selection'
+import { resolveRuntimeEndpoint } from './runtime-endpoint'
+import type { HostRuntimeInspector } from './host-runtime-observer'
 
 export type BotHealthState =
+  | 'unknown'
   | 'healthy'
   | 'busy_active'
   | 'busy_stuck'
@@ -34,6 +17,7 @@ export interface BotStatusDbRow {
   profile_enabled: boolean | null
   disabled_at: string | null
   runtime: string | null
+  observed_runtime_provider: string | null
   runtime_engine_preference: string | null
   status: string | null
   last_seen_at: string | null
@@ -51,88 +35,29 @@ export interface BotStatusDbRow {
   endpoint_lease_heartbeat_at: string | null
 }
 
+/** Queue/identity are durable. Runtime health is composed only after fresh OS + fence checks. */
 const QUERY = `
-  WITH queue_status AS (
-    SELECT mq.agent_id,
-           COUNT(mq.id) FILTER (WHERE mq.status = 'pending') AS pending_count,
-           MIN(mq.created_at) FILTER (WHERE mq.status = 'pending') AS oldest_pending_at,
-           COUNT(mq.id) FILTER (
-             WHERE mq.status IN ('received', 'in_progress')
-               AND mq.claimed_by = mq.agent_id
-           ) AS active_claim_count,
-           COUNT(mq.id) FILTER (
-             WHERE mq.status = 'failed'
-               AND mq.failed_reason IN ('WAKE_INVOCATION_RETRY_EXHAUSTED', 'QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')
-           ) AS typed_failed_count
-      FROM message_queue mq
-     GROUP BY mq.agent_id
-  ),
-  endpoint_status AS (
-    SELECT ci.agent_id,
-           COUNT(DISTINCT ci.connector_instance_id) AS active_connector_count,
-           COUNT(DISTINCT ci.connector_instance_id) FILTER (
-             WHERE ci.runtime_instance_id IS NOT NULL
-           ) AS runtime_linked_connector_count,
-           COUNT(DISTINCT ci.connector_instance_id) FILTER (
-             WHERE cpl.lease_id IS NOT NULL
-           ) AS active_endpoint_lease_count,
-           MIN(cpl.expires_at) AS endpoint_lease_expires_at,
-           MAX(cpl.heartbeat_at) AS endpoint_lease_heartbeat_at
-      FROM connector_instances ci
-      LEFT JOIN control_plane_leases cpl
-        ON cpl.lease_scope_type = 'runtime_instance'
-       AND cpl.lease_scope_id = ci.runtime_instance_id::text
-       AND cpl.status = 'active'
-       AND cpl.expires_at > NOW()
-     WHERE ci.status IN ('active')
-     GROUP BY ci.agent_id
-  )
-  SELECT a.agent_id,
-         a.agent_type,
-         a.profile_enabled,
-         a.disabled_at,
-         a.runtime,
-         a.runtime_engine_preference,
-         a.status,
-         a.last_seen_at,
-         (a.last_seen_at > NOW() - INTERVAL '60 seconds') AS heartbeat_ok,
-         COALESCE(q.pending_count, 0) AS pending_count,
-         q.oldest_pending_at,
-         COALESCE(q.active_claim_count, 0) AS active_claim_count,
-         COALESCE(q.typed_failed_count, 0) AS typed_failed_count,
-         CASE
-           WHEN a.last_seen_at IS NULL THEN 'offline'
-           -- Order matters: busy_stuck must be checked before crashed, otherwise
-           -- a bot busy for >5min always falls into crashed first (auditor BLOCK
-           -- fix, msg 55f54af5). The CASE arms are evaluated top-to-bottom so a
-           -- busy bot never reaches the generic crashed arm; an idle bot that
-           -- has not heartbeat in 5min still classifies as crashed.
-           WHEN a.status = 'busy' AND a.last_seen_at < NOW() - INTERVAL '2 hours' THEN 'busy_stuck'
-           WHEN a.last_seen_at < NOW() - INTERVAL '5 minutes' THEN 'crashed'
-           WHEN a.status = 'busy' AND a.last_seen_at > NOW() - INTERVAL '60 seconds' THEN 'busy_active'
-           ELSE 'healthy'
-         END AS health_state,
-         COALESCE(e.active_connector_count, 0) AS active_connector_count,
-         COALESCE(e.runtime_linked_connector_count, 0) AS runtime_linked_connector_count,
-         COALESCE(e.active_endpoint_lease_count, 0) AS active_endpoint_lease_count,
-         CASE
-           WHEN COALESCE(e.active_connector_count, 0) = 0 THEN 'not_applicable'
-           WHEN COALESCE(e.runtime_linked_connector_count, 0) < COALESCE(e.active_connector_count, 0) THEN 'missing_runtime'
-           WHEN COALESCE(e.active_endpoint_lease_count, 0) < COALESCE(e.active_connector_count, 0) THEN 'missing_lease'
-           ELSE 'ok'
-         END AS endpoint_lease_state,
-         e.endpoint_lease_expires_at,
-         e.endpoint_lease_heartbeat_at
-    FROM agents a
-    LEFT JOIN queue_status q ON q.agent_id = a.agent_id
-    LEFT JOIN endpoint_status e ON e.agent_id = a.agent_id
+WITH queue_status AS (
+ SELECT mq.agent_id,
+ COUNT(mq.id) FILTER (WHERE mq.status='pending') AS pending_count,
+ MIN(mq.created_at) FILTER (WHERE mq.status='pending') AS oldest_pending_at,
+ COUNT(mq.id) FILTER (WHERE mq.status IN ('received','in_progress') AND mq.claimed_by=mq.agent_id) AS active_claim_count,
+ COUNT(mq.id) FILTER (WHERE mq.status='failed' AND mq.failed_reason IN ('WAKE_INVOCATION_RETRY_EXHAUSTED','QUEUE_WORK_RUNNER_ERROR_RETRY_EXHAUSTED')) AS typed_failed_count
+ FROM message_queue mq GROUP BY mq.agent_id
+)
+SELECT a.agent_id,a.agent_type,a.profile_enabled,a.disabled_at,
+ COALESCE(q.pending_count,0) AS pending_count,q.oldest_pending_at,
+ COALESCE(q.active_claim_count,0) AS active_claim_count,COALESCE(q.typed_failed_count,0) AS typed_failed_count,
+ (SELECT COUNT(*) FROM connector_instances ci WHERE ci.agent_id=a.agent_id AND ci.status='active') AS active_connector_count,
+ (SELECT array_agg(ci.runtime_instance_id::text) FROM connector_instances ci WHERE ci.agent_id=a.agent_id AND ci.status='active') AS connector_runtime_ids
+ FROM agents a LEFT JOIN queue_status q ON q.agent_id=a.agent_id
 `
 
 function parseCount(value: string | number): number {
   return typeof value === 'string' ? parseInt(value, 10) : value
 }
 
-export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, BotStatusDbRow>> {
+export async function fetchBotStatusFromDb(client: Client, options:{inspect?:HostRuntimeInspector}={}): Promise<Map<string, BotStatusDbRow>> {
   const result = await client.query<{
     agent_id: string
     agent_type: string | null
@@ -148,6 +73,7 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
     oldest_pending_at: Date | null
     active_claim_count: string | number
     health_state: BotHealthState
+    connector_runtime_ids?: Array<string|null>
     active_connector_count: string | number
     runtime_linked_connector_count: string | number
     active_endpoint_lease_count: string | number
@@ -157,27 +83,39 @@ export async function fetchBotStatusFromDb(client: Client): Promise<Map<string, 
   }>(QUERY)
   const map = new Map<string, BotStatusDbRow>()
   for (const row of result.rows) {
+    const provider=await resolveSeatProvider(client,{agentId:row.agent_id,inspect:options.inspect})
+    const endpoint=provider.ok ? await resolveRuntimeEndpoint(client,{agentId:row.agent_id,
+      runtimeInstanceId:provider.observation?.runtime_instance_id,inspect:options.inspect}) : null
+    const observed=provider.ok && endpoint?.ok ? provider.observation : null
+    const claims=parseCount(row.active_claim_count)
+    const connectors=row.connector_runtime_ids ?? []
+    const linked=connectors.filter(id=>id!==null).length
+    const covered=observed?connectors.filter(id=>id===observed.runtime_instance_id).length:0
+    const connectorCount=parseCount(row.active_connector_count)
+    const coverageState=connectorCount>linked?'missing_runtime':connectorCount>covered?'missing_lease':endpoint?.ok?'ok':'missing_runtime'
+
     map.set(row.agent_id, {
       agent_id: row.agent_id,
       agent_type: row.agent_type ?? null,
       profile_enabled: row.profile_enabled ?? null,
       disabled_at: row.disabled_at ? row.disabled_at.toISOString() : null,
-      runtime: row.runtime ?? null,
-      runtime_engine_preference: row.runtime_engine_preference ?? null,
-      status: row.status,
+      runtime: observed?.provider ?? null,
+      observed_runtime_provider: observed?.provider ?? null,
+      runtime_engine_preference: null,
+      status: observed ? (claims>0?'busy':'online') : 'unknown',
       typed_failed_count: parseCount(row.typed_failed_count),
-      last_seen_at: row.last_seen_at ? row.last_seen_at.toISOString() : null,
-      heartbeat_ok: Boolean(row.heartbeat_ok),
+      last_seen_at: observed?.observed_at ?? null,
+      heartbeat_ok: Boolean(observed),
       pending_count: parseCount(row.pending_count),
       oldest_pending_at: row.oldest_pending_at ? row.oldest_pending_at.toISOString() : null,
       active_claim_count: parseCount(row.active_claim_count),
-      health_state: row.health_state,
+      health_state: observed ? (claims>0?'busy_active':'healthy') : 'unknown',
       active_connector_count: parseCount(row.active_connector_count),
-      runtime_linked_connector_count: parseCount(row.runtime_linked_connector_count),
-      active_endpoint_lease_count: parseCount(row.active_endpoint_lease_count),
-      endpoint_lease_state: row.endpoint_lease_state,
-      endpoint_lease_expires_at: row.endpoint_lease_expires_at ? row.endpoint_lease_expires_at.toISOString() : null,
-      endpoint_lease_heartbeat_at: row.endpoint_lease_heartbeat_at ? row.endpoint_lease_heartbeat_at.toISOString() : null,
+      runtime_linked_connector_count: linked,
+      active_endpoint_lease_count: endpoint?.ok ? Math.max(connectorCount?0:1,covered) : 0,
+      endpoint_lease_state: coverageState,
+      endpoint_lease_expires_at: null,
+      endpoint_lease_heartbeat_at: null,
     })
   }
   return map

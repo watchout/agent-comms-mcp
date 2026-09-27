@@ -1,0 +1,102 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-current-resolver.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-TkdYde/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:64:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:95:11)
+(fail) runtime current resolver > codex-cto sole live holder remains current and stale same-kind diagnostics cannot mutate anchors [33.68ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-MFG9SM/test.db
+(pass) runtime current resolver > two live holders fail closed and revocation selects the sole remaining holder [21.74ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-gj0Xbu/test.db
+(pass) runtime current resolver > a legacy profile tuple cannot break two-holder ambiguity or block a sole relocated holder [20.71ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-I7dahf/test.db
+(pass) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [21.09ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-M2qW0v/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:64:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:240:11)
+(fail) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [18.91ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-xXprKE/test.db
+(pass) runtime current resolver > requested kind defines an independent ordinary ranking surface [19.64ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-IPcLgs/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:64:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:283:11)
+(fail) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [18.93ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-VCPawy/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:64:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:310:11)
+(fail) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [19.84ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-fAGX8K/test.db
+(pass) runtime current resolver > unknown group uses the frozen 30m/24h defaults [19.90ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-9SF90E/test.db
+(pass) runtime current resolver > policy rejects unsupported or unsafe values [16.17ms]
+
+ 6 pass
+ 4 fail
+ 25 expect() calls
+Ran 10 tests across 1 file. [227.00ms]

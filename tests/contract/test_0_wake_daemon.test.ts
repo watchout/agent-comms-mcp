@@ -1,3 +1,4 @@
+import {observedSqliteRuntimeFixture} from '../helpers/nonpersist-host-fixture'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
@@ -38,6 +39,7 @@ const DAEMON_TEST_TIMEOUT_MS = DAEMON_READY_TIMEOUT_MS + 40_000
 let tmpDir: string
 let dbPath: string
 let daemon: ChildProcess | null = null
+let currentHost:Awaited<ReturnType<typeof observedSqliteRuntimeFixture>>|undefined
 
 function tmuxHas(session: string): boolean {
   return spawnSync('tmux', ['has-session', '-t', session], {
@@ -98,6 +100,7 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     if (daemon && daemon.pid && !daemon.killed) {
       try { daemon.kill('SIGKILL') } catch {}
     }
+    await currentHost?.close()
     tmuxKill(SESSION)
     tmuxKill(`${SESSION}-status-disabled`)
     tmuxKill(`${SESSION}-system`)
@@ -147,9 +150,10 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
     const db = new Database(dbPath)
     const messageId = `msg-${randomUUID()}`
     db.prepare(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled)
-       VALUES (?, ?, 'dev', 'claude-code', 'online', ?, 1)`,
-    ).run(AGENT_ID, AGENT_ID, JSON.stringify({ tmux_session: SESSION }))
+      `INSERT INTO agents (agent_id, display_name, agent_type, metadata, profile_enabled)
+       VALUES (?, ?, 'dev', ?, 1)`,
+    ).run(AGENT_ID, AGENT_ID, '{}')
+    currentHost=await observedSqliteRuntimeFixture(dbPath,AGENT_ID,SESSION)
     db.exec(`INSERT INTO agent_messages (id, author_id, content, message_type, source) VALUES ('${messageId}', 'tester', 'hi', 'chat', 'agent-comms')`)
     db.exec(`INSERT INTO message_queue (agent_id, message_id, payload, status) VALUES ('${AGENT_ID}', '${messageId}', '{}', 'pending')`)
     db.close()
@@ -167,7 +171,7 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
       5000,
       100,
     )
-    expect(woke).toBe(true)
+    expect(woke,dStderr).toBe(true)
     const wakeLogPattern = new RegExp(`wake .* for ${AGENT_ID}/${messageId}`)
     const wakeLog = await waitFor(
       () => dStderr,
@@ -256,14 +260,14 @@ describe('test_0 wake_daemon (PR #0, spec v3 contract_test test_0, merge gate)',
       const messageId = `msg-${randomUUID()}`
       db.prepare(
         `INSERT INTO agents
-           (agent_id, display_name, agent_type, runtime, status, metadata, profile_enabled, disabled_at)
-         VALUES (?, ?, ?, 'claude-code', ?, ?, 1, ?)`,
+           (agent_id, display_name, agent_type, profile_enabled, metadata, disabled_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(
         profile.agentId,
         profile.agentId,
         profile.agentType,
-        profile.status,
-        JSON.stringify({ tmux_session: profile.session }),
+        profile.status==='disabled'?0:1,
+        '{}',
         profile.disabledAt,
       )
       db.exec(`INSERT INTO agent_messages (id, author_id, content, message_type, source) VALUES ('${messageId}', 'tester', 'blocked wake', 'chat', 'agent-comms')`)

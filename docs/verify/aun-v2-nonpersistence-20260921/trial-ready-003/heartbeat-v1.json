@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/runtime-heartbeat.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "6d90c96a8d1e0c2adf29abe0859bded11ee02061edbe85fdbc6579aeb49f5c6c",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "63380c345e7e37c2a3f8782b45a6b896c53859e53d820da05d0ec8b82257324a",
+  "started_at": "2026-09-21T09:40:43.863082+00:00",
+  "ended_at": "2026-09-21T09:40:51.823305+00:00",
+  "exit_code": 0,
+  "log_sha256": "3ea72b72c3cceb0438b02f8c1d29b9c4aee1a8fbdd12501e5fcb01f07a5392fb"
+}

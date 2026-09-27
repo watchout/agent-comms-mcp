@@ -14,7 +14,7 @@ function runSync(dir: string, runtime: string, agentId = 'agent-mem-dev'): { sta
     `source ${JSON.stringify(SCRIPT)}`,
     `sync_mcp_config "agent-mem-dev" ${JSON.stringify(dir)} ${JSON.stringify(agentId)} "39130" ${JSON.stringify(runtime)}`,
   ].join('\n')
-  const r = spawnSync('bash', ['-lc', script], { encoding: 'utf-8' })
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf-8' })
   return { status: r.status ?? -1, stderr: r.stderr ?? '' }
 }
 

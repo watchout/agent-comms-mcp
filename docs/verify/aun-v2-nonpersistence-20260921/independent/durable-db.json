@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_runtime_nonpersist_durable_fields.test.ts",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "c92f5868159f19fe2b3167d532e88858dde336a0fc6dc08ea4e7b74fd3de0e13",
+  "source_head": "0a262881c501b7b5767f9a861f269a2e41d643a1",
+  "working_diff_sha256": "f510bf627bd4349fe744992b9a80cf0608d002262b3f5375e0968e9d770a16e0",
+  "started_at": "2026-09-21T05:46:35.035206+00:00",
+  "ended_at": "2026-09-21T05:46:37.218993+00:00",
+  "exit_code": 1,
+  "log_sha256": "b19c74f7a37cebdaae399c41d58f7226684784c12caa2b3cd8cf1fba9503bf40"
+}

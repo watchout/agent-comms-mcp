@@ -6,7 +6,9 @@ test('DB endpoint rebind is one exact candidate and uses the protected restart g
   const desired = desiredFixture(2)
   const old = candidateFixture(desired, true)
   const rebound = buildAunConfigurationCandidate({
-    hostId: old.hostId, desired,
+    desired,
+    rollbackReleaseCommit: old.releaseCommit,
+    rollbackReleaseTree: old.releaseTree,
     externalRoot: {
       databaseLocatorRef: 'external-locator:db-v2', databaseCredentialRef: 'secret-ref:db-v2',
       releaseCommit: desired.releaseCommit, releaseTree: desired.releaseTree, controlRefs: desired.controlRefs,

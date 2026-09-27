@@ -1,3 +1,4 @@
+import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -140,6 +141,7 @@ export type SealedBootstrapRuntimeReceipt = {
 }
 
 export type RuntimeCurrentResolverInput = {
+  inspect?: HostRuntimeInspector
   agentId: string
   requestedRuntimeKind: string
   selectedBootstrapReceipt?: SealedBootstrapRuntimeReceipt | null
@@ -352,18 +354,36 @@ export async function resolveRuntimeMemoryReadyCurrent(
     profile_source: text(agent.profile_source),
     metadata,
   }
-  const runtimeRows = await rows<RuntimeRow>(
-    db,
-    `SELECT CAST(runtime_instance_id AS TEXT) AS runtime_instance_id, agent_id,
-            runtime_engine, runtime_kind, session_name, port, checkout_path, commit_sha,
-            started_at, last_seen_at, status, metadata
-       FROM agent_runtime_instances
-      WHERE agent_id = $1
-        AND runtime_kind = $2
-        AND status IN ('running', 'active')
-      ORDER BY last_seen_at DESC, started_at DESC, runtime_instance_id ASC`,
-    [input.agentId, requestedRuntimeKind],
-  )
+  const anchors=await rows<any>(db,`SELECT CAST(r.runtime_instance_id AS TEXT) AS runtime_instance_id,
+    r.agent_id,r.runtime_kind,r.metadata,l.holder_agent_id,l.holder_runtime_instance_id,l.fencing_token,
+    CASE WHEN l.status = 'active' AND l.expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
+    FROM agent_runtime_instances r LEFT JOIN control_plane_leases l
+      ON l.lease_scope_type = 'runtime_instance' AND l.lease_scope_id = CAST(r.runtime_instance_id AS TEXT)
+        AND l.lease_purpose = 'worker' AND l.status = 'active'
+    WHERE r.agent_id = $1 AND r.runtime_kind = $2`,[input.agentId,requestedRuntimeKind])
+  const inspected=(input.inspect ?? inspectHostRuntime)({agentId:input.agentId})
+  const runtimeRows:RuntimeRow[]=[]
+  if(inspected.reasonCode==='OBSERVED') for(const anchor of anchors) {
+    const metadata=object(anchor.metadata)
+    const id=requestedRuntimeKind==='bootstrap_bound_provider'?text(metadata.mcp_runtime_instance_id):String(anchor.runtime_instance_id)
+    const matches=inspected.observations.filter(o=>o.runtime_instance_id===id)
+    if(matches.length!==1) continue
+    const o=matches[0]
+    let authority=anchor
+    if(requestedRuntimeKind==='bootstrap_bound_provider') {
+      const holders=await rows<any>(db,`SELECT holder_agent_id,holder_runtime_instance_id,fencing_token,
+        CASE WHEN status = 'active' AND expires_at > clock_timestamp() THEN 1 ELSE 0 END AS authority_live
+        FROM control_plane_leases WHERE lease_scope_type = 'runtime_instance' AND lease_scope_id = $1
+          AND lease_purpose = 'worker' AND status = 'active'`,[id])
+      if(holders.length!==1) continue
+      authority=holders[0]
+    }
+    if(Number(authority.authority_live)!==1 || authority.holder_agent_id!==input.agentId
+      || String(authority.holder_runtime_instance_id)!==id || Number(authority.fencing_token)<1) continue
+    runtimeRows.push({...anchor,runtime_engine:o.provider,session_name:o.session_name,port:o.port,checkout_path:o.workspace,
+      commit_sha:text(metadata.source_commit),started_at:o.process_started_at,last_seen_at:o.observed_at,status:'active',
+      metadata:{...metadata,source:'fresh_host_observation',provider_observation:o}})
+  }
   const nowMs = now.getTime()
   const mismatchesByRuntime = new Map<string, RuntimeProfileMismatch[]>()
   const normalized = runtimeRows.map((row): RuntimeCurrentInstance => {
@@ -427,13 +447,13 @@ export async function resolveRuntimeMemoryReadyCurrent(
         })
       }
     } else {
-      if (instance.runtime_engine !== profile.runtime_kind) {
+      if (profile.runtime_kind !== null && instance.runtime_engine !== profile.runtime_kind) {
         mismatches.push({ field: 'runtime_engine', expected: profile.runtime_kind, observed: instance.runtime_engine })
       }
-      if (instance.session_name !== profile.session_name) {
+      if (profile.session_name !== null && instance.session_name !== profile.session_name) {
         mismatches.push({ field: 'session_name', expected: profile.session_name, observed: instance.session_name })
       }
-      if (instance.checkout_path !== profile.home_directory) {
+      if (profile.home_directory !== null && instance.checkout_path !== profile.home_directory) {
         mismatches.push({ field: 'checkout_path', expected: profile.home_directory, observed: instance.checkout_path })
       }
     }
@@ -475,19 +495,13 @@ export async function resolveRuntimeMemoryReadyCurrent(
         bootstrapSelection?.session_name ? null : 'sealed_receipt.session_name',
         bootstrapSelection?.checkout_path ? null : 'sealed_receipt.checkout_path',
       ].filter((value): value is string => value !== null)
-    : [
-        profile.runtime_kind ? null : 'runtime_kind',
-        profile.session_name ? null : 'session',
-        profile.home_directory ? null : 'home',
-      ].filter((value): value is string => value !== null)
+    : []
   const liveRows = normalized.filter(row => row.live)
   const exactLiveRows = liveRows.filter(row => row.profile_match)
   const currentCandidates = requestedRuntimeKind === 'bootstrap_bound_provider'
     ? exactLiveRows
-    : exactLiveRows.length > 0
-      ? exactLiveRows
-      : liveRows
-  const current = currentCandidates[0] ?? null
+    : liveRows
+  const current = currentCandidates.length === 1 ? currentCandidates[0] : null
   const candidateExclusions: RuntimeCandidateExclusion[] = requestedRuntimeKind === 'bootstrap_bound_provider'
     ? normalized
         .filter(row => !row.profile_match)
@@ -498,17 +512,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
           mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
           handling: 'FAIL_CLOSED' as const,
         }))
-    : exactLiveRows.length > 0
-      ? liveRows
-          .filter(row => !row.profile_match)
-          .map(row => ({
-            code: 'PROFILE_MISMATCH_DEPRIORITIZED' as const,
-            runtime_instance_id: row.runtime_instance_id,
-            live: true,
-            mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
-            handling: 'WARN_ONLY_RANK_BELOW_EXACT' as const,
-          }))
-      : []
+    : []
   const profileMismatchObservations: RuntimeProfileMismatchObservation[] = requestedRuntimeKind === 'bootstrap_bound_provider'
     ? []
     : liveRows
@@ -522,9 +526,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
             current: current?.runtime_instance_id === row.runtime_instance_id,
             mismatches: mismatchesByRuntime.get(row.runtime_instance_id) ?? [],
             registration_metadata_provenance: Object.keys(provenance).length > 0 ? provenance : null,
-            handling: exactLiveRows.length > 0
-              ? 'WARN_ONLY_RANK_BELOW_EXACT' as const
-              : 'WARN_ONLY_CURRENT_FALLBACK' as const,
+            handling: 'WARN_ONLY_CURRENT_FALLBACK' as const,
           }
         })
   const candidateAbsenceReason: RuntimeCandidateAbsenceReason | null = current
@@ -567,9 +569,7 @@ export async function resolveRuntimeMemoryReadyCurrent(
       live_profile_mismatches: profileMismatchObservations.length,
       current_candidate_count: currentCandidates.length,
       current_resolution_source: current
-        ? current.profile_match
-          ? 'exact_profile'
-          : 'live_profile_mismatch_fallback'
+        ? requestedRuntimeKind === 'bootstrap_bound_provider' ? 'sealed_receipt' : 'observed_runtime'
         : null,
       candidate_absence_reason: candidateAbsenceReason,
       candidate_exclusions_total: candidateExclusions.length,
@@ -585,19 +585,6 @@ export async function reapRuntimeMemoryReadyStaleRows(
   candidates: RuntimeStaleReapCandidate[],
   now = new Date(),
 ): Promise<Array<RuntimeStaleReapCandidate & { reaped: boolean }>> {
-  const results: Array<RuntimeStaleReapCandidate & { reaped: boolean }> = []
-  for (const candidate of candidates) {
-    const updated = await rows<{ runtime_instance_id: string }>(
-      db,
-      `UPDATE agent_runtime_instances
-          SET status = 'stopped', stopped_at = $4
-        WHERE CAST(runtime_instance_id AS TEXT) = $1
-          AND status = $2
-          AND last_seen_at = $3
-        RETURNING CAST(runtime_instance_id AS TEXT) AS runtime_instance_id`,
-      [candidate.runtime_instance_id, candidate.observed_status, candidate.observed_last_seen_at, now.toISOString()],
-    )
-    results.push({ ...candidate, reaped: updated.length === 1 })
-  }
-  return results
+  // Physical absence does not authorize changing legacy rows or clearing work.
+  return candidates.map(candidate=>({...candidate,reaped:false}))
 }

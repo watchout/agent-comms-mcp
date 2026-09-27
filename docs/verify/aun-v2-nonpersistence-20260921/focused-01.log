@@ -1,0 +1,27 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+62 |     const result=await heartbeatRuntimeInstance(db,{agentId:'seat',runtimeInstanceId
+         ^
+error: Expected "}" but found "const"
+    at /Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence.test.ts:62:5
+
+62 |     const result=await heartbeatRuntimeInstance(db,{agentId:'seat',runtimeInstanceId:id,pr
+               ^
+error: Expected ";" but found "result"
+    at /Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence.test.ts:62:11
+
+62 |     const result=await heartbeatRuntimeInstance(db,{agentId:'seat',runtimeInstanceId:id,processI
+                     ^
+error: Unexpected =
+    at /Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_observation_nonpersistence.test.ts:62:17
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [15.00ms]

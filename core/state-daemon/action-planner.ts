@@ -23,6 +23,7 @@ export interface PlannerQueueRow {
 
 export interface PlannerAgentRow {
   runtime: string | null
+  observed_runtime_provider?: string | null
   runtime_engine_preference?: string | null
   tmux_session: string | null
   status?: string | null
@@ -63,7 +64,7 @@ function isInactiveAgent(status: string | null | undefined): boolean {
 }
 
 function effectiveRuntime(agent: PlannerAgentRow): string | null {
-  return agent.runtime_engine_preference?.trim() || agent.runtime
+  return agent.observed_runtime_provider?.trim() || null
 }
 
 const TERMINAL_STATUSES = new Set([

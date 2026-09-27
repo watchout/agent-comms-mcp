@@ -254,13 +254,17 @@ describe('aun bootstrap B0-B8 state machine', () => {
     }
   }, 10_000)
 
-  test('auto runtime requires live identity and rejects provider conflict', () => {
+  test('auto runtime selects actual provider over stale preference and rejects real provider conflicts', () => {
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
     ]).reason).toBe('NO_GO_RUNTIME_UNDETECTED')
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
       { source: 'process_identity', runtime: 'claude', verified: true, evidence: 'process' },
+    ]).runtime).toBe('claude')
+    expect(selectBootstrapRuntime('auto', [
+      {source:'process_identity',runtime:'claude',verified:true,evidence:'live1'},
+      {source:'process_identity',runtime:'codex',verified:true,evidence:'live2'},
     ]).reason).toBe('NO_GO_RUNTIME_AMBIGUOUS')
     expect(selectBootstrapRuntime('auto', [
       { source: 'agent_profile', runtime: 'codex', verified: true, evidence: 'profile' },
@@ -495,6 +499,8 @@ describe('aun bootstrap B0-B8 state machine', () => {
   })
 
   test('B4 stage deadline after provider mutation uses fresh readback, journals, and rolls back before lock release', async () => {
+    const home=realpathSync(mkdtempSync(join(tmpdir(),'aun-stage-deadline-')))
+    try {
     const store = new MemoryBootstrapStateStore()
     const ports = passingPorts()
     let added = false
@@ -519,10 +525,11 @@ describe('aun bootstrap B0-B8 state machine', () => {
           ? { exitCode: 0, stdout: JSON.stringify({
               name: 'aun', enabled: true,
               transport: {
-                type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', process.cwd(), 'server.ts'],
+                type: 'stdio', command: '/bin/bun', args: ['run', '--cwd', process.cwd(), join(process.cwd(), 'server.ts')],
                 env: {
                   AGENT_ID: 'stage-deadline', AGENT_COM_EXPECTED_AGENT_ID: 'stage-deadline',
-                  AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db', AGENT_COM_DB: 'sqlite',
+                  AGENT_COM_WORKSPACE: process.cwd(), AGENT_COM_RUNTIME_SESSION: 'runtime:stage-deadline',
+                  AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db', AGENT_COM_DB: 'sqlite', AUN_WEBHOOK_PORT: '0',
                   AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
                 },
               },
@@ -551,8 +558,8 @@ describe('aun bootstrap B0-B8 state machine', () => {
     ports.ensureMcpRegistration = (stageContext) => adapter.applyMcpRegistration(stageContext)
     ports.rollbackMutation = (stageContext, mutation) => adapter.rollbackRuntimeRegistration(stageContext, mutation)
     const result = await bootstrap({
-      agentId: 'stage-deadline', runtime: 'codex', home: '/tmp/stage-deadline', repoRoot: process.cwd(),
-      env: { HOME: '/tmp/stage-deadline', AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db' },
+      agentId: 'stage-deadline', runtime: 'codex', home, repoRoot: process.cwd(),
+      env: { HOME: home, AGENT_COM_DB: 'sqlite', AGENT_COM_SQLITE_PATH: '/tmp/stage-deadline.db' },
     }, {
       stateStore: store,
       ports,
@@ -562,7 +569,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
     })
 
     expect(result.status).toBe('NO_GO')
-    expect(result.reason_codes).toContain('NO_GO_POST_MUTATION_READBACK')
+    expect(result.reason_codes,JSON.stringify(result)).toContain('NO_GO_POST_MUTATION_READBACK')
     expect(freshReadbackObserved).toBe(true)
     expect(added).toBe(false)
     const state = store.states.get('stage-deadline/bootstrap-stage-deadline-run')!
@@ -574,6 +581,7 @@ describe('aun bootstrap B0-B8 state machine', () => {
       Date.parse(String(mutation.rollback_payload?.rollback_completed_at)),
     )
     expect(Date.parse(state.lock_released_at!)).toBeGreaterThanOrEqual(Date.parse(state.lock_release_authorized_at!))
+    } finally {rmSync(home,{recursive:true,force:true})}
   })
 
   test('unresolved stage-deadline mutation is durably recovery-required before lock release', async () => {

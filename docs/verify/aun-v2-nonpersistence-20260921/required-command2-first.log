@@ -1,0 +1,469 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-memory-ready.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-rDoNKl/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:119:11)
+(fail) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [27.82ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-1BwIuZ/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:141:11)
+(fail) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [15.49ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-fIvLW6/test.db
+161 |       observed_at: '2026-06-01T00:00:03.000Z', source: 'process_ancestry', verified: true } as const
+162 |     await db.execute('UPDATE agent_runtime_instances SET metadata=$1 WHERE runtime_instance_id=$2',
+163 |       [JSON.stringify({provider_observation:observation}),runtimeInstanceId])
+164 |     const args = {agentId,project:'agent-comms-mcp',runtimeInstanceId,receipt,now:new Date('2026-06-01T00:00:03Z'),observeProvider:()=>observation}
+165 |     await expect(recordVerifiedNativeRuntimeMemoryReady(db as any, {...args, receipt:{...receipt,runtime_instance_id:'sealed-runtime'}})).rejects.toThrow('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
+166 |     await expect(recordVerifiedNativeRuntimeMemoryReady(db as any, {...args, observeProvider:()=>({...observation,provider_started_at:'2026-06-01T00:00:01.000Z'})})).rejects.toThrow('MEMORY_NATIVE_CURRENT_PROVIDER_MISMATCH')
+                                                                                                                                                                                    ^
+error: expect(received).toThrow(expected)
+
+Expected substring: "MEMORY_NATIVE_CURRENT_PROVIDER_MISMATCH"
+Received message: "MEMORY_NATIVE_CURRENT_RUNTIME_MISMATCH"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:166:175)
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [95.07ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-Xko1b5/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:195:11)
+(fail) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [16.67ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-z80zTd/test.db
+(pass) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [307.22ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-snolRL/test.db
+(pass) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [15.36ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-sJZrW5/test.db
+(pass) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [16.01ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-muhDxU/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:264:11)
+(fail) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [15.25ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-tOGUTP/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:299:11)
+(fail) runtime memory-ready evidence gate > gate follows the common freshest exact-profile resolver instead of evidence-bound precedence [16.49ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-SUkrZx/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:341:11)
+(fail) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [14.41ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-z3JQbb/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:370:11)
+(fail) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [15.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ccnqVS/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:441:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [14.88ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-UHDGWg/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:441:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [15.30ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ube2Q9/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:441:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [15.05ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-UNKRLz/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:467:11)
+(fail) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [15.62ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-nfw4Py/test.db
+480 |     await seedRuntime()
+481 |     expect((await evaluateRuntimeMemoryReadyGate(db as any, {
+482 |       agent_id: 'agent-com-dev',
+483 |       project: 'agent-comms-mcp',
+484 |       now: new Date('2026-06-01T00:00:03.000Z'),
+485 |     })).reason).toBe('missing_evidence')
+                      ^
+error: expect(received).toBe(expected)
+
+Expected: "missing_evidence"
+Received: "no_current_runtime_for_profile"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:485:17)
+(fail) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [90.55ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-1e0WGV/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:505:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [15.95ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-TtKH92/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:530:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [15.26ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-2KQXeP/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:552:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [15.58ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-hBqTrn/test.db
+(pass) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [87.41ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-W5gMdQ/test.db
+73 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+74 |     const p = this.prepare(sql, params)
+75 |     try {
+76 |       const statement = this.db.prepare(p.sql)
+77 |       try {
+78 |         return statement.all(...p.params) as T[]
+                              ^
+SQLiteError: NOT NULL constraint failed: runtime_memory_ready_evidence.session_name
+      errno: 1299,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_NOTNULL"
+
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:78:26)
+      at queryRows (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:270:27)
+      at recordRuntimeMemoryReadyEvidence (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:536:22)
+      at recordReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:65:9)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:621:11)
+(fail) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [15.16ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-KRJnZD/test.db
+(pass) runtime memory-ready evidence gate > Wasurezu bootstrap evidence is queue-independent metadata [13.22ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-ElPxd8/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run never creates a missing database or journal [14.09ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-N2v2RC/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [18.85ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-WkPMC1/test.db
+697 |     expect(readFileSync(cleanPath)[18]).toBe(1)
+698 |     const snapshot=()=>Object.fromEntries(readdirSync(tmp).sort().map(name=>[name,createHash('sha256').update(readFileSync(join(tmp,name))).digest('hex')]))
+699 |     const before=snapshot()
+700 |     const result=await memoryReadyBootstrap({agentId:'wasurezu',project:'agent-comms-mcp',dryRun:true,
+701 |       env:{AGENT_COM_DB:'sqlite',AGENT_COM_SQLITE_PATH:cleanPath,PATH:'/unavailable-native-tools'}})
+702 |     expect(result.code).toBe(0)
+                              ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:702:25)
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [92.66ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-dZh0Xb/test.db
+(pass) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [88.52ms]
+
+tests/seat-context-recovery.test.ts:
+(pass) seat context recovery > binds exact target last without modifying the configured transport [0.07ms]
+(pass) seat context recovery > prepares semantic context without issuing a consumption receipt [0.97ms]
+(pass) seat context recovery > requires exact host input acknowledgement and never transfers a prior runtime receipt [0.48ms]
+(pass) seat context recovery > rejects foreign seat before any host output [0.10ms]
+(pass) seat context recovery > rejects foreign project before any host output [0.02ms]
+(pass) seat context recovery > rejects foreign provider before any host output [0.02ms]
+(pass) seat context recovery > rejects project-substring recovery, missing next action and untrusted instruction promotion [0.05ms]
+(pass) seat context recovery > times out missing memory without ready or consumption [6.29ms]
+(pass) native context receipt lookup > maps stored native proof to exact fresh runtime without re-reading or writing context [0.62ms]
+(pass) native context receipt lookup > rejects unavailable, foreign, reused PID, session and attempt evidence [0.22ms]
+
+tests/aun-configuration-desired-state.test.ts:
+(pass) AUN configuration desired-state canonical contract > is byte deterministic and excludes mutable observation metadata [0.60ms]
+(pass) AUN configuration desired-state canonical contract > runtime-only provider, port and path changes leave the stable desired digest unchanged [0.12ms]
+(pass) AUN configuration desired-state canonical contract > rejects raw secret material while allowing secret references [0.06ms]
+(pass) AUN configuration desired-state canonical contract > normalizes a DB row and proves stored digest byte-for-byte [0.15ms]
+
+tests/contract/test_aun_configuration_restart_gate.test.ts:
+(pass) AUN configuration reconciler > applies one unprotected candidate and requires exact native readback before READY [1.69ms]
+(pass) AUN configuration reconciler > an equal second run performs zero mutations and still fresh-readbacks [0.17ms]
+(pass) AUN configuration reconciler > discards a stale candidate before any apply [0.16ms]
+(pass) AUN configuration reconciler > lease loss inside a successful adapter call rejects the effect before commit
+(pass) AUN configuration reconciler > lease loss inside a partial adapter call cannot commit or invoke stale rollback [0.57ms]
+(pass) AUN configuration reconciler > never closes an outbox event when the stale observed receipt is fence-rejected [0.19ms]
+(pass) AUN configuration reconciler > a failed candidate render stays undelivered and does not reject the sweep [0.30ms]
+(pass) AUN configuration reconciler > partial apply and rollback failure fail closed with no automatic retry [0.42ms]
+(pass) AUN configuration reconciler > coalesces concurrent same-key work into one apply [0.22ms]
+(pass) AUN configuration reconciler > heartbeats an in-flight reconciliation at the sealed 15-second target [0.32ms]
+(pass) restart-required reconciliation emits approval request and performs zero restart [0.18ms]
+(pass) revision drift during native readback creates no restart request [0.17ms]
+(pass) a durable exact CTO claim permits one fake restart and exact terminal readback [0.12ms]
+(pass) rejected, expired, superseded, or drifted durable restart claims perform zero effects [0.36ms]
+(pass) an ineligible exact maintenance-lease holder cannot claim or restart [0.26ms]
+(pass) lease loss after durable claim records failure and performs zero restart [0.17ms]
+(pass) terminal ACK loss cannot claim or restart the same request twice [0.11ms]
+
+tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:
+26 |     ?? DEFAULT_POSTGRES_TEST_DATABASE_URL
+27 |   let parsed: URL
+28 |   try {
+29 |     parsed = new URL(value)
+30 |   } catch {
+31 |     throw new Error('invalid PostgreSQL test database base URL')
+                   ^
+error: invalid PostgreSQL test database base URL
+      at configuredBaseUrl (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:31:15)
+      at derivePostgresTestDatabaseUrls (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:44:16)
+      at createPostgresTestDatabase (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:78:43)
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:28:20)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:86:97)
+(fail) stable seat desired document PostgreSQL compatibility > new enrollment accepts unset/zero diagnostics and SQL/TS stable digest parity
+26 |     ?? DEFAULT_POSTGRES_TEST_DATABASE_URL
+27 |   let parsed: URL
+28 |   try {
+29 |     parsed = new URL(value)
+30 |   } catch {
+31 |     throw new Error('invalid PostgreSQL test database base URL')
+                   ^
+error: invalid PostgreSQL test database base URL
+      at configuredBaseUrl (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:31:15)
+      at derivePostgresTestDatabaseUrls (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:44:16)
+      at createPostgresTestDatabase (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/postgres-test-database.ts:78:43)
+      at fixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:28:20)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:98:112)
+(fail) stable seat desired document PostgreSQL compatibility > populated legacy transition is once-only and preserves runtime, identity, queues and history
+
+20 tests failed:
+(fail) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [27.82ms]
+(fail) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [15.49ms]
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [95.07ms]
+(fail) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [16.67ms]
+(fail) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [15.25ms]
+(fail) runtime memory-ready evidence gate > gate follows the common freshest exact-profile resolver instead of evidence-bound precedence [16.49ms]
+(fail) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [14.41ms]
+(fail) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [15.50ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [14.88ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [15.30ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [15.05ms]
+(fail) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [15.62ms]
+(fail) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [90.55ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [15.95ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [15.26ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [15.58ms]
+(fail) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [15.16ms]
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [92.66ms]
+(fail) stable seat desired document PostgreSQL compatibility > new enrollment accepts unset/zero diagnostics and SQL/TS stable digest parity
+(fail) stable seat desired document PostgreSQL compatibility > populated legacy transition is once-only and preserves runtime, identity, queues and history
+
+ 39 pass
+ 20 fail
+ 157 expect() calls
+Ran 59 tests across 5 files. [1205.00ms]

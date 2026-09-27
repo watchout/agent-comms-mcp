@@ -1,0 +1,34 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: ALLOWED (env)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-q5dsBP/aun.db
+112 |     publishNativeFixtureReport(${JSON.stringify(report)},{endpoint,provider:observeNativeProcess(process.pid),connected:connected.pid,content});
+113 |   `)
+114 |   const child=Bun.spawn([fixtureProvider,host],{cwd:workspace,env:{PATH:process.env.PATH!,LANG:'C',TMPDIR:home,CODEX_HOME:home,CODEX_THREAD_ID:session,AGENT_COM_RUNTIME_INSTANCE_ID:runtimeId,AGENT_COM_WORKSPACE:workspace,AGENT_COM_RUNTIME_SESSION:session,...memoryEnv},stdout:'ignore',stderr:Bun.file(join(home,'native-host.err'))})
+115 |   nativeHosts.push(child)
+116 |   for(let i=0;!existsSync(report)&&i<200;i++) {if(child.exitCode!==null)throw new Error(readFileSync(join(home,'native-host.err'),'utf8'));await Bun.sleep(50)}
+117 |   if(!existsSync(report))throw new Error('native fixture startup timeout')
+                                         ^
+error: native fixture startup timeout
+      at nativeHostFixture (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/helpers/seat-native-runtime-fixture.ts:117:36)
+      at async <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/contract/test_runtime_nonpersist_native.test.ts:20:25)
+(fail) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [10286.43ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent [0.24ms]
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.16ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.49ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.17ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.75ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1105.04ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [807.89ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.19ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [1.83ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.39ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.09ms]
+
+ 11 pass
+ 1 fail
+ 50 expect() calls
+Ran 12 tests across 2 files. [12.28s]

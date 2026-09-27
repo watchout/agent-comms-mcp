@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { resolveSeatProvider } from '../core/seat-runtime-selection'
+import { claimUnboundedRuntimeQueue } from '../core/runtime-queue-claim'
+import { inspectHostRuntime } from '../core/host-runtime-observer'
 /**
  * agent-com CLI — Channel, agent, and status management + message I/O.
  *
@@ -20,6 +23,7 @@
  */
 
 import type { Client } from 'pg'
+import { tryBoundedClaim, admissionInstalled, admissionForAgent, admissionTransition, sealBoundedMessage, unboundedQueuePredicate, admissionBindingFromEnv } from '../core/queue-admission'
 import { truncateForDiscord } from '../core/truncate'
 import { createDbAdapter, type DbAdapter } from '../core/db'
 import { readFileSync, existsSync } from 'node:fs'
@@ -106,11 +110,9 @@ import {
   formatChannelRegistrationReconcileText,
 } from '../core/channel-registration-reconcile'
 import { getAgentDiscordUiId, getDiscordUiBindingForAgent } from '../core/ui-bindings'
+import { resolveRuntimeEndpoint } from '../core/runtime-endpoint'
 import {
-  deterministicWorkspaceId,
-  heartbeatRuntimeInstance,
   inferRuntimeSessionName,
-  inferWorkspaceName,
   parseRuntimePort,
 } from '../core/runtime-heartbeat'
 import {
@@ -1420,34 +1422,21 @@ async function agentRegister(args: string[]) {
   const { positional, flags } = parseArgs(args)
   const agentId = positional[0]
   if (!agentId) {
-    console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>]')
+    console.error('Usage: agent-com agent register <agent_id> [--display-name "Name"] [--type dev] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>]')
     process.exit(1)
   }
 
   const profile = buildBotProfileInput(agentId, flags, {
     displayName: flags['display-name'] ?? agentId,
     agentType: flags.type ?? 'dev',
-    runtime: flags.runtime ?? 'claude-code',
   })
 
   const db = await getDb()
   try {
     const row = await upsertBotProfile(db, profile, 'agent.register')
-    await auditLog(db, 'agent.register', 'cli', agentId, {
-      display_name: row.display_name,
-      agent_type: row.agent_type,
-      runtime: row.runtime,
-      home_directory: row.home_directory,
-      channel_port: row.channel_port,
-      tmux_session: botProfileForOutput(row).tmux_session,
-      runtime_engine_preference: row.runtime_engine_preference,
-      provider_token_source_ref: row.provider_token_source_ref ? '(set)' : null,
-      expected_provider_identity: parseJsonObject(row.expected_provider_identity),
-      profile_enabled: row.profile_enabled,
-      profile_revision: row.profile_revision,
-    })
+    await auditLog(db, 'agent.register', 'cli', agentId, logicalProfileAudit(row)!)
     await pgNotify(db, 'agent_events', { event: 'agent.register', agent_id: agentId })
-    console.log(`Agent '${agentId}' registered (${row.display_name}, ${row.agent_type}/${row.runtime}, profile_revision=${row.profile_revision})`)
+    console.log(`Agent '${agentId}' registered (${row.display_name}, ${row.agent_type}, profile_revision=${row.profile_revision})`)
   } finally {
     await db.end()
   }
@@ -1584,133 +1573,50 @@ function buildBotProfileInput(
   }
 }
 
-async function upsertBotProfile(db: Client, input: BotProfileInput, source: string): Promise<any> {
-  const expectedIdentityJson = input.expectedProviderIdentity === null
-    ? null
-    : JSON.stringify(input.expectedProviderIdentity ?? {})
-  const enabled = input.profileEnabled
-  const hasUiId = input.uiId !== undefined && input.uiId !== null
-  const hasUiHandle = input.uiHandle !== undefined
-  const hasDisplayName = input.displayName !== undefined
-  const hasAgentType = input.agentType !== undefined
-  const hasRuntime = input.runtime !== undefined
-  const hasHomeDirectory = input.homeDirectory !== undefined
-  const hasChannelPort = input.channelPort !== undefined
-  const hasTmuxSession = input.tmuxSession !== undefined
-  const hasRuntimeEnginePreference = input.runtimeEnginePreference !== undefined
-  const hasProviderTokenSourceRef = input.providerTokenSourceRef !== undefined
-  const hasExpectedProviderIdentity = input.expectedProviderIdentity !== undefined
-  const hasProfileEnabled = input.profileEnabled !== undefined && input.profileEnabled !== null
-  const existing = await db.query(
-    `SELECT metadata FROM agents WHERE agent_id = $1`,
-    [input.agentId],
-  ).catch(() => ({ rows: [] as any[] }))
-  const existingMetadata = parseJsonObject(existing.rows[0]?.metadata)
-  let metadataForWrite: string | null = null
-  if (hasTmuxSession) {
-    const metadata = { ...existingMetadata }
-    if (input.tmuxSession === null) delete metadata.tmux_session
-    else metadata.tmux_session = input.tmuxSession
-    metadataForWrite = JSON.stringify(metadata)
+function assertLogicalProfileInput(input: BotProfileInput): void {
+  if ([input.runtime, input.homeDirectory, input.channelPort, input.tmuxSession,
+    input.runtimeEnginePreference].some(value => value !== undefined)) {
+    throw new Error('PROFILE_PHYSICAL_OBSERVATION_FORBIDDEN')
   }
-  const defaultUiHandle = typeof existingMetadata.replaces === 'string' && existingMetadata.replaces.trim()
-    ? existingMetadata.replaces.trim()
-    : input.agentId
-  const implicitUiIdSql = isSqliteMode()
-    ? '(SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents)'
-    : "nextval('agent_ui_id_seq')"
+}
+
+function logicalProfileAudit(row: any): Record<string, unknown> | null {
+  if (!row) return null
+  return {agent_id: row.agent_id, display_name: row.display_name, agent_type: row.agent_type,
+    ui_id: row.ui_id, ui_handle: row.ui_handle, profile_enabled: row.profile_enabled,
+    profile_revision: row.profile_revision, provider_token_source_ref: row.provider_token_source_ref ? '(set)' : null,
+    expected_provider_identity: parseJsonObject(row.expected_provider_identity)}
+}
+
+async function upsertBotProfile(db: Client, input: BotProfileInput, source: string): Promise<any> {
+  assertLogicalProfileInput(input)
+  const replacementAlias = isSqliteMode() ? "json_extract(agents.metadata, '$.replaces')" : "agents.metadata->>'replaces'"
+  const nextUi = isSqliteMode() ? '(SELECT COALESCE(MAX(ui_id), 0) + 1 FROM agents)' : "nextval('agent_ui_id_seq')"
   const result = await db.query(
-    `INSERT INTO agents (
-       agent_id, org_id, display_name, agent_type, runtime, status, registered_at,
-       metadata, ui_id, ui_handle, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
-       expected_provider_identity, profile_enabled, profile_revision,
-       profile_source, profile_updated_at, disabled_at
-     )
-     VALUES (
-       $1, 'default',
-       CASE WHEN $11 THEN COALESCE($2, $1) ELSE $1 END,
-       CASE WHEN $12 THEN COALESCE($3, 'dev') ELSE 'dev' END,
-       CASE WHEN $13 THEN COALESCE($4, 'unknown') ELSE 'unknown' END,
-       CASE WHEN $18 AND $9 = false THEN 'disabled' ELSE 'offline' END, now(),
-       CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
-       CASE WHEN $24 THEN $23::bigint ELSE ${implicitUiIdSql} END,
-       CASE WHEN $26 THEN $25 ELSE $27 END,
-       CASE WHEN $22 THEN $21::int ELSE NULL END,
-       CASE WHEN $14 THEN $5 ELSE NULL END,
-       CASE WHEN $15 THEN $6 ELSE NULL END,
-       CASE WHEN $16 THEN $7 ELSE NULL END,
-       CASE WHEN $17 THEN COALESCE($8::jsonb, '{}'::jsonb) ELSE '{}'::jsonb END,
-       CASE WHEN $18 THEN COALESCE($9, true) ELSE true END,
-       1, $10, now(), CASE WHEN $18 AND $9 = false THEN now() ELSE NULL END
-     )
+    `INSERT INTO agents (agent_id,org_id,display_name,agent_type,ui_id,ui_handle,
+       provider_token_source_ref,expected_provider_identity,profile_enabled,
+       profile_revision,profile_source,profile_updated_at,disabled_at)
+     VALUES ($1,'default',COALESCE($2,$1),COALESCE($3,'dev'),COALESCE($4::bigint,${nextUi}),
+       COALESCE($5,$1),$6,COALESCE($7::jsonb,'{}'::jsonb),COALESCE($8,true),1,$9,now(),
+       CASE WHEN $8=false THEN now() ELSE NULL END)
      ON CONFLICT (agent_id) DO UPDATE SET
-       display_name = CASE WHEN $11 THEN COALESCE($2, agents.agent_id) ELSE agents.display_name END,
-       agent_type = CASE WHEN $12 THEN COALESCE($3, agents.agent_type) ELSE agents.agent_type END,
-       runtime = CASE WHEN $13 THEN COALESCE($4, agents.runtime) ELSE agents.runtime END,
-       metadata = CASE WHEN $20 THEN COALESCE($19::jsonb, '{}'::jsonb) ELSE agents.metadata END,
-       ui_id = CASE WHEN $24 THEN $23::bigint ELSE COALESCE(agents.ui_id, ${implicitUiIdSql}) END,
-       ui_handle = CASE WHEN $26 THEN $25 ELSE COALESCE(NULLIF(agents.ui_handle, ''), $27) END,
-       channel_port = CASE WHEN $22 THEN $21::int ELSE agents.channel_port END,
-       home_directory = CASE WHEN $14 THEN $5 ELSE agents.home_directory END,
-       runtime_engine_preference = CASE WHEN $15 THEN $6 ELSE agents.runtime_engine_preference END,
-       provider_token_source_ref = CASE WHEN $16 THEN $7 ELSE agents.provider_token_source_ref END,
-       expected_provider_identity = CASE WHEN $17 THEN COALESCE($8::jsonb, '{}'::jsonb) ELSE agents.expected_provider_identity END,
-       profile_enabled = CASE WHEN $18 THEN COALESCE($9, agents.profile_enabled) ELSE agents.profile_enabled END,
-       disabled_at = CASE
-         WHEN $18 AND $9 = false THEN COALESCE(agents.disabled_at, now())
-         WHEN $18 AND $9 = true THEN NULL
-         ELSE agents.disabled_at
-       END,
-       status = CASE
-         WHEN $18 AND $9 = false THEN 'disabled'
-         WHEN $18 AND $9 = true AND agents.status = 'disabled' THEN 'offline'
-         ELSE agents.status
-       END,
-       profile_revision = COALESCE(agents.profile_revision, 1) + 1,
-       profile_source = $10,
-       profile_updated_at = now()
-     RETURNING agent_id, display_name, agent_type, runtime, status,
-       metadata, ui_id, ui_handle, channel_port, home_directory, runtime_engine_preference, provider_token_source_ref,
-       expected_provider_identity, profile_enabled, profile_revision,
-       profile_source, profile_updated_at`,
-    [
-      input.agentId,
-      input.displayName,
-      input.agentType,
-      input.runtime,
-      input.homeDirectory,
-      input.runtimeEnginePreference,
-      input.providerTokenSourceRef,
-      expectedIdentityJson,
-      enabled,
-      source,
-      hasDisplayName,
-      hasAgentType,
-      hasRuntime,
-      hasHomeDirectory,
-      hasRuntimeEnginePreference,
-      hasProviderTokenSourceRef,
-      hasExpectedProviderIdentity,
-      hasProfileEnabled,
-      metadataForWrite,
-      hasTmuxSession,
-      input.channelPort,
-      hasChannelPort,
-      input.uiId,
-      hasUiId,
-      input.uiHandle,
-      hasUiHandle,
-      defaultUiHandle,
-    ],
+       display_name=CASE WHEN $10 THEN COALESCE($2,agents.agent_id) ELSE agents.display_name END,
+       agent_type=CASE WHEN $11 THEN COALESCE($3,agents.agent_type) ELSE agents.agent_type END,
+       ui_id=COALESCE($4::bigint,agents.ui_id,${nextUi}),
+       ui_handle=CASE WHEN $12 THEN $5 ELSE COALESCE(NULLIF(agents.ui_handle,''),NULLIF(${replacementAlias},''),$1) END,
+       provider_token_source_ref=CASE WHEN $13 THEN $6 ELSE agents.provider_token_source_ref END,
+       expected_provider_identity=CASE WHEN $14 THEN COALESCE($7::jsonb,'{}'::jsonb) ELSE agents.expected_provider_identity END,
+       profile_enabled=COALESCE($8,agents.profile_enabled),
+       disabled_at=CASE WHEN $8=false THEN COALESCE(agents.disabled_at,now()) WHEN $8=true THEN NULL ELSE agents.disabled_at END,
+       profile_revision=COALESCE(agents.profile_revision,1)+1,profile_source=$9,profile_updated_at=now()
+     RETURNING *`,
+    [input.agentId,input.displayName,input.agentType,input.uiId,input.uiHandle,input.providerTokenSourceRef,
+     input.expectedProviderIdentity == null ? null : JSON.stringify(input.expectedProviderIdentity),input.profileEnabled,source,
+     input.displayName!==undefined,input.agentType!==undefined,input.uiHandle!==undefined,
+     input.providerTokenSourceRef!==undefined,input.expectedProviderIdentity!==undefined],
   )
-  if (hasUiId) {
-    await db.query(
-      `SELECT setval(
-         'agent_ui_id_seq',
-         GREATEST((SELECT COALESCE(MAX(ui_id), 0) FROM agents), 1),
-         (SELECT COALESCE(MAX(ui_id), 0) FROM agents) > 0
-       )`,
-    ).catch(() => ({ rows: [] as any[] }))
+  if(input.uiId !== undefined && input.uiId !== null && !isSqliteMode()) {
+    await db.query(`SELECT setval('agent_ui_id_seq',GREATEST((SELECT COALESCE(MAX(ui_id),0) FROM agents),1),true)`)
   }
   return result.rows[0]
 }
@@ -1775,11 +1681,7 @@ function expectedProviderSubjectId(row: any): string | null {
 
 function buildProfileProjection(row: any): BotProfileProjection {
   const agentId = String(row.agent_id)
-  const orgId = String(row.org_id ?? 'default')
   const metadata = parseJsonObject(row.metadata)
-  const homeDirectory = typeof row.home_directory === 'string' && row.home_directory.trim()
-    ? row.home_directory.trim()
-    : null
   const uiId = Number(row.ui_id)
   const uiHandle = typeof row.ui_handle === 'string' && row.ui_handle.trim()
     ? row.ui_handle.trim()
@@ -1818,37 +1720,8 @@ function buildProfileProjection(row: any): BotProfileProjection {
       profile_revision: revision,
     })
   }
-  if (!homeDirectory) {
-    projection.blockers.push({ code: 'missing_home_directory' })
-  } else {
-    const workspaceId = deterministicWorkspaceId(orgId, homeDirectory)
-    projection.actions.push({
-      table: 'agent_workspaces',
-      action: 'upsert',
-      workspace_id: workspaceId,
-      org_id: orgId,
-      local_path: homeDirectory,
-      name: inferWorkspaceName(homeDirectory, agentId),
-      source: 'bot_profile_projector',
-      profile_revision: revision,
-    })
-    projection.actions.push({
-      table: 'agent_workspace_bindings',
-      action: 'upsert',
-      agent_id: agentId,
-      workspace_id: workspaceId,
-      binding_role: 'primary',
-      source: 'bot_profile_projector',
-      profile_revision: revision,
-    })
-    projection.actions.push({
-      table: 'agent_runtime_instances',
-      action: 'link_active_workspace',
-      agent_id: agentId,
-      workspace_id: workspaceId,
-      source: 'bot_profile_projector',
-      profile_revision: revision,
-    })
+  if (Number(row.logical_workspace_count) !== 1) {
+    projection.blockers.push({code: 'logical_workspace_binding_unavailable'})
   }
 
   const provider = expectedProvider(row)
@@ -1937,7 +1810,9 @@ async function selectProjectableProfiles(db: Client, agentId: string | null): Pr
       `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
               metadata, ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref,
               expected_provider_identity, profile_enabled, profile_revision,
-              profile_source, profile_updated_at
+              profile_source, profile_updated_at,
+              (SELECT count(*) FROM agent_workspace_bindings b JOIN agent_workspaces w ON w.workspace_id=b.workspace_id
+                WHERE b.agent_id=agents.agent_id AND b.active=true AND b.binding_role='primary') AS logical_workspace_count
          FROM agents
         WHERE agent_id = $1`,
       [agentId],
@@ -1948,7 +1823,9 @@ async function selectProjectableProfiles(db: Client, agentId: string | null): Pr
     `SELECT agent_id, org_id, display_name, agent_type, runtime, status,
             metadata, ui_id, ui_handle, home_directory, runtime_engine_preference, provider_token_source_ref,
             expected_provider_identity, profile_enabled, profile_revision,
-            profile_source, profile_updated_at
+            profile_source, profile_updated_at,
+              (SELECT count(*) FROM agent_workspace_bindings b JOIN agent_workspaces w ON w.workspace_id=b.workspace_id
+                WHERE b.agent_id=agents.agent_id AND b.active=true AND b.binding_role='primary') AS logical_workspace_count
        FROM agents
       WHERE agent_type <> 'human'
         AND COALESCE(profile_enabled, true) = true
@@ -1983,77 +1860,6 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
       ],
     )
   }
-  const workspaceAction = actionForTable(projection, 'agent_workspaces')
-  if (workspaceAction) {
-    const metadata = JSON.stringify({
-      source: 'bot_profile_projector',
-      agent_id: projection.agent_id,
-      profile_revision: projection.profile_revision,
-    })
-    const existing = await db.query(
-      `SELECT workspace_id
-         FROM agent_workspaces
-        WHERE org_id = $1
-          AND local_path = $2
-        LIMIT 1`,
-      [workspaceAction.org_id, workspaceAction.local_path],
-    )
-    if (existing.rows[0]?.workspace_id) {
-      await db.query(
-        `UPDATE agent_workspaces
-            SET name = $2,
-                workspace_type = 'local_path',
-                metadata = COALESCE($3::jsonb, '{}'::jsonb),
-                updated_at = now()
-          WHERE workspace_id = $1`,
-        [existing.rows[0].workspace_id, workspaceAction.name, metadata],
-      )
-      workspaceAction.workspace_id = existing.rows[0].workspace_id
-    } else {
-      await db.query(
-        `INSERT INTO agent_workspaces
-           (workspace_id, org_id, name, workspace_type, local_path, metadata, updated_at)
-         VALUES
-           ($1, $2, $3, 'local_path', $4, COALESCE($5::jsonb, '{}'::jsonb), now())`,
-        [
-          workspaceAction.workspace_id,
-          workspaceAction.org_id,
-          workspaceAction.name,
-          workspaceAction.local_path,
-          metadata,
-        ],
-      )
-    }
-  }
-
-  const bindingAction = actionForTable(projection, 'agent_workspace_bindings')
-  if (bindingAction) {
-    const workspaceId = workspaceAction?.workspace_id ?? bindingAction.workspace_id
-    await db.query(
-      `INSERT INTO agent_workspace_bindings
-         (agent_id, workspace_id, binding_role, active, updated_at)
-       VALUES
-         ($1, $2, $3, true, now())
-       ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET
-         active = true,
-         updated_at = now()`,
-      [projection.agent_id, workspaceId, bindingAction.binding_role],
-    )
-  }
-
-  const runtimeAction = actionForTable(projection, 'agent_runtime_instances')
-  if (runtimeAction) {
-    const workspaceId = workspaceAction?.workspace_id ?? runtimeAction.workspace_id
-    await db.query(
-      `UPDATE agent_runtime_instances
-          SET workspace_id = $2
-        WHERE agent_id = $1
-          AND status IN ('running', 'active')
-          AND workspace_id IS NULL`,
-      [projection.agent_id, workspaceId],
-    )
-  }
-
   const connectorAction = actionForTable(projection, 'connector_instances')
   let connectorInstanceId: string | null = null
   if (connectorAction) {
@@ -2061,7 +1867,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
       source: 'bot_profile_projector',
       agent_id: projection.agent_id,
       profile_revision: projection.profile_revision,
-      expected_provider_identity: expectedProviderIdentity(row),
+      expected_provider_subject_id: expectedProviderSubjectId(row),
       token_source_ref_set: Boolean(row.provider_token_source_ref),
     })
     const capabilities = JSON.stringify({ roles: ['profile_projection'], source: 'bot_profile_projector' })
@@ -2211,7 +2017,7 @@ async function applyProfileProjection(db: Client, row: any, projection: BotProfi
       source: 'bot_profile_projector',
       agent_id: projection.agent_id,
       profile_revision: projection.profile_revision,
-      expected_provider_identity: expectedProviderIdentity(row),
+      expected_provider_subject_id: expectedProviderSubjectId(row),
     })
     const existing = await db.query(
       `SELECT provider_identity_id, status
@@ -2391,10 +2197,11 @@ async function agentProfile(args: string[]) {
     if (action === 'set') {
       const agentId = positional[0] ?? flags['agent-id']
       if (!agentId) {
-        console.error('Usage: agent-com agent profile set <agent_id> [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider <provider>] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]')
+        console.error('Usage: agent-com agent profile set <agent_id> [--token-source-ref <ref>] [--expected-provider <provider>] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]')
         process.exit(2)
       }
       const input = buildBotProfileInput(agentId, flags)
+      assertLogicalProfileInput(input)
       const dryRun = parseRepairDryRun(flags)
       const before = await selectBotProfile(db, agentId)
       const preview = {
@@ -2420,8 +2227,8 @@ async function agentProfile(args: string[]) {
       }
       const row = await upsertBotProfile(db, input, 'agent.profile.set')
       await auditLog(db, 'agent.profile_set', 'cli', agentId, {
-        before: before ? botProfileForOutput(before) : null,
-        after: botProfileForOutput(row),
+        before: logicalProfileAudit(before),
+        after: logicalProfileAudit(row),
       })
       process.stdout.write(`${JSON.stringify({ ok: true, dry_run: false, profile: botProfileForOutput(row) }, null, 2)}\n`)
       return
@@ -2461,8 +2268,8 @@ async function agentProfile(args: string[]) {
       const includeDisabledProfiles = hasFlag(flags, 'include-disabled') && flagEnabled(flags['include-disabled'])
       const includeTestProfiles = hasFlag(flags, 'include-test') && flagEnabled(flags['include-test'])
       const rows = await db.query(
-        `SELECT agent_id, display_name, agent_type, runtime, status, metadata,
-                ui_id, ui_handle, home_directory, channel_port, runtime_engine_preference,
+        `SELECT agent_id, display_name, agent_type, metadata,
+                ui_id, ui_handle,
                 provider_token_source_ref, expected_provider_identity, profile_enabled, disabled_at
            FROM agents
           WHERE agent_type <> 'human'
@@ -2473,9 +2280,6 @@ async function agentProfile(args: string[]) {
         includeTestProfiles,
       }) === null)
       const blockers: Array<Record<string, unknown>> = []
-      const homeByPath = new Map<string, string[]>()
-      const portOwners = new Map<number, string[]>()
-      const sessionOwners = new Map<string, string[]>()
       const uiIdOwners = new Map<number, string[]>()
       const uiHandleOwners = new Map<string, { ui_handle: string; agents: string[] }>()
       const expectedAliases: Array<{ alias: string; canonical_agent_id: string }> = []
@@ -2507,38 +2311,6 @@ async function agentProfile(args: string[]) {
         if (replacedAlias && replacedAlias !== agentId) {
           expectedAliases.push({ alias: replacedAlias, canonical_agent_id: agentId })
         }
-        const home = typeof row.home_directory === 'string' ? row.home_directory : ''
-        if (!home) blockers.push({ agent_id: agentId, code: 'missing_home_directory' })
-        else {
-          const agents = homeByPath.get(home) ?? []
-          agents.push(agentId)
-          homeByPath.set(home, agents)
-        }
-        const port = Number(row.channel_port)
-        if (!Number.isInteger(port) || port <= 0) {
-          blockers.push({ agent_id: agentId, code: 'missing_channel_port' })
-        } else {
-          const agents = portOwners.get(port) ?? []
-          agents.push(agentId)
-          portOwners.set(port, agents)
-        }
-        const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
-          ? metadata.tmux_session.trim()
-          : ''
-        const supervisorType = typeof metadata.supervisor_type === 'string' && metadata.supervisor_type.trim()
-          ? metadata.supervisor_type.trim().toLowerCase()
-          : 'tmux'
-        if (supervisorType === 'tmux' && !tmuxSession) {
-          blockers.push({ agent_id: agentId, code: 'missing_tmux_session' })
-        } else if (tmuxSession) {
-          const agents = sessionOwners.get(tmuxSession) ?? []
-          agents.push(agentId)
-          sessionOwners.set(tmuxSession, agents)
-        }
-        const runtimeEngine = typeof row.runtime_engine_preference === 'string' && row.runtime_engine_preference.trim()
-          ? row.runtime_engine_preference.trim()
-          : ''
-        if (!runtimeEngine) blockers.push({ agent_id: agentId, code: 'missing_runtime_engine_preference' })
         const hasTokenSource = typeof row.provider_token_source_ref === 'string' && row.provider_token_source_ref.trim()
         const provider = expectedProvider(row)
         if (hasTokenSource && !provider) blockers.push({ agent_id: agentId, code: 'missing_expected_provider_identity' })
@@ -2546,15 +2318,6 @@ async function agentProfile(args: string[]) {
         if (typeof row.provider_token_source_ref === 'string' && looksLikeRawSecret(row.provider_token_source_ref)) {
           blockers.push({ agent_id: agentId, code: 'raw_secret_like_token_source_ref' })
         }
-      }
-      for (const [home_directory, agents] of homeByPath.entries()) {
-        if (agents.length > 1) blockers.push({ code: 'duplicate_home_directory', home_directory, agents })
-      }
-      for (const [channel_port, agents] of portOwners.entries()) {
-        if (agents.length > 1) blockers.push({ code: 'duplicate_channel_port', channel_port, agents })
-      }
-      for (const [tmux_session, agents] of sessionOwners.entries()) {
-        if (agents.length > 1) blockers.push({ code: 'duplicate_tmux_session', tmux_session, agents })
       }
       for (const [ui_id, agents] of uiIdOwners.entries()) {
         if (agents.length > 1) blockers.push({ code: 'duplicate_ui_id', ui_id, agents })
@@ -2601,10 +2364,8 @@ async function agentProfile(args: string[]) {
             tmuxOutput,
             processOutput,
             expectations: activeRows.map((row: any) => {
-              const metadata = parseJsonObject(row.metadata)
-              const tmuxSession = typeof metadata.tmux_session === 'string' && metadata.tmux_session.trim()
-                ? metadata.tmux_session.trim()
-                : null
+              const observed=inspectHostRuntime({agentId:String(row.agent_id)})
+              const tmuxSession=observed.reasonCode==='OBSERVED' && observed.observations.length===1 ? observed.observations[0].session_name : null
               return { agent_id: String(row.agent_id), tmux_session: tmuxSession }
             }),
           }))
@@ -2618,19 +2379,10 @@ async function agentProfile(args: string[]) {
       if (strict) {
         const activeAgentIds = new Set(activeRows.map((row: any) => String(row.agent_id)))
         const workspaceRows = await db.query(
-          `SELECT a.agent_id, a.home_directory, b.workspace_id
-             FROM agents a
-             LEFT JOIN agent_workspaces w
-               ON w.org_id = COALESCE(a.org_id, 'default')
-              AND w.local_path = a.home_directory
-             LEFT JOIN agent_workspace_bindings b
-               ON b.agent_id = a.agent_id
-              AND b.workspace_id = w.workspace_id
-              AND b.binding_role = 'primary'
-              AND b.active = true
-            WHERE a.agent_type <> 'human'
-              ${includeDisabledProfiles ? '' : 'AND COALESCE(a.profile_enabled, true) = true AND a.disabled_at IS NULL'}
-              AND a.home_directory IS NOT NULL`,
+          `SELECT a.agent_id,b.workspace_id FROM agents a
+             LEFT JOIN agent_workspace_bindings b ON b.agent_id=a.agent_id AND b.binding_role='primary' AND b.active=true
+             WHERE a.agent_type <> 'human'
+              ${includeDisabledProfiles ? '' : 'AND COALESCE(a.profile_enabled, true) = true AND a.disabled_at IS NULL'}`,
         )
         for (const row of workspaceRows.rows) {
           if (!activeAgentIds.has(String(row.agent_id))) continue
@@ -2638,24 +2390,16 @@ async function agentProfile(args: string[]) {
             blockers.push({
               agent_id: row.agent_id,
               code: 'missing_profile_projected_workspace_binding',
-              home_directory: row.home_directory,
+
             })
           }
         }
-        const runtimeRows = await db.query(
-          `SELECT runtime_instance_id, agent_id
-             FROM agent_runtime_instances
-            WHERE status IN ('running', 'active')
-              AND workspace_id IS NULL
-            ORDER BY agent_id, started_at DESC`,
-        ).catch(() => ({ rows: [] as any[] }))
-        for (const row of runtimeRows.rows) {
-          if (!activeAgentIds.has(String(row.agent_id))) continue
-          blockers.push({
-            agent_id: row.agent_id,
-            runtime_instance_id: row.runtime_instance_id,
-            code: 'runtime_missing_workspace_profile_linkage',
-          })
+        for (const agent of activeRows) {
+          const endpoint=await resolveRuntimeEndpoint(db,{agentId:String(agent.agent_id)})
+          if(endpoint.ok && endpoint.endpoint) {
+            const logical=await db.query('SELECT workspace_id FROM agent_runtime_instances WHERE runtime_instance_id=$1',[endpoint.endpoint.runtimeInstanceId])
+            if(!logical.rows[0]?.workspace_id)blockers.push({agent_id:agent.agent_id,runtime_instance_id:endpoint.endpoint.runtimeInstanceId,code:'runtime_missing_workspace_profile_linkage'})
+          }
         }
         const connectorRows = await db.query(
           `SELECT connector_instance_id, agent_id, provider, connector_uri, metadata
@@ -2690,7 +2434,10 @@ async function agentProfile(args: string[]) {
                ON cpl.lease_scope_type = 'runtime_instance'
               AND cpl.lease_scope_id = ci.runtime_instance_id::text
               AND cpl.status = 'active'
-              AND cpl.expires_at > now()
+              AND cpl.expires_at > clock_timestamp()
+              AND cpl.lease_purpose = 'worker'
+              AND cpl.holder_agent_id = ci.agent_id
+              AND cpl.holder_runtime_instance_id = ci.runtime_instance_id
             WHERE ci.status = 'active'
               AND a.agent_type <> 'human'
               ${includeDisabledProfiles ? '' : 'AND COALESCE(a.profile_enabled, true) = true AND a.disabled_at IS NULL'}
@@ -2716,6 +2463,10 @@ async function agentProfile(args: string[]) {
               runtime_instance_id: row.runtime_instance_id,
               code: 'active_connector_missing_endpoint_lease',
             })
+          } else {
+            const endpoint=await resolveRuntimeEndpoint(db,{agentId:String(row.agent_id),runtimeInstanceId:String(row.runtime_instance_id)})
+            if(!endpoint.ok)blockers.push({agent_id:row.agent_id,connector_instance_id:row.connector_instance_id,
+              runtime_instance_id:row.runtime_instance_id,code:'active_connector_runtime_unavailable',reason_code:endpoint.code})
           }
         }
       }
@@ -2858,6 +2609,8 @@ async function nextMessage() {
   const agentId = requireAgentId('next')
   const db = await getDb()
   try {
+    const bounded = await tryBoundedClaim(db, agentId, { dialect: isSqliteMode() ? 'sqlite' : 'postgres' })
+    if (bounded) { process.stdout.write(JSON.stringify(bounded) + '\n'); return }
     try {
       await assertMessageQueueStatusVocabularyCompatible(db, { operation: 'agent-com next' })
     } catch (err) {
@@ -2900,33 +2653,8 @@ async function nextMessage() {
         // sweeper flips it to IMPLICIT_ABANDON.
         const popped = pop.rows[0]
         const claimTtlSec = parseInt(process.env.AGENT_COMMS_CLAIM_TTL_SEC ?? '30', 10)
-        // claim_expires_at is computed in JS rather than via
-        // `now() + ($N || ' seconds')::interval` so this UPDATE works
-        // identically in PG and SQLite modes (the latter is exercised
-        // by the CLI test suite). Both backends accept an ISO-8601
-        // timestamp parameter.
-        const claimExpiresAt = new Date(Date.now() + claimTtlSec * 1000).toISOString()
-        await db.query(
-          `UPDATE message_queue
-              SET status = 'received',
-                  read_at = now(),
-                  claimed_by = $1,
-                  claimed_at = now(),
-                  claim_expires_at = $2
-            WHERE id = $3`,
-          [agentId, claimExpiresAt, popped.id],
-        )
-        // spec §4.1 step 4 — mark agent busy. Issue #278 cycle 1
-        // (auditor BLOCK 1): EXISTS-derive over the open-claim set so
-        // multi in-flight stays visible on agents.status.
-        await db.query(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [agentId],
-        )
+        await claimUnboundedRuntimeQueue(db,{agentId,queueId:popped.id,ttlSeconds:claimTtlSec,
+          runtimeInstanceId:process.env.AGENT_COM_RUNTIME_INSTANCE_ID})
         await db.query('COMMIT')
         row = popped
       }
@@ -3155,6 +2883,12 @@ async function sendMessage(args: string[]) {
       const explicitClose = !!queueIdRaw || !!messageIdRaw
       let claimRenewalEvidence: ClaimRenewalEvidence | null = null
       let queueWorkFinalizerCloseFence: QueueWorkFinalizerCloseFence | null = null
+      const boundedReply = !isSqliteMode() && await admissionInstalled(db, 'postgres') ? await admissionForAgent(db, agentId) : null
+      const boundedTask = boundedReply?.tasks.find(t => String(t.queue_id) === queueIdRaw)
+      if (boundedReply) {
+        if (!queueWorkFinalizer || !boundedTask) writeFailureJson('ADMISSION_REPLY_DENIED', 'bounded reply requires the reserved trusted host finalizer')
+        await admissionTransition(db, boundedReply, 'reply_lock', { ordinal: boundedTask!.ordinal, claim_fence: boundedTask!.claim_fence, result_digest: boundedTask!.result_digest })
+      }
 
       if (explicitClose) {
         let qres
@@ -3213,7 +2947,7 @@ async function sendMessage(args: string[]) {
           const runnerResult = queuePayload.runner_result && typeof queuePayload.runner_result === 'object'
             ? queuePayload.runner_result as Record<string, unknown>
             : {}
-          const expectedSource = 'state-daemon-queue-work-scheduler'
+          const expectedSource = boundedReply ? 'bounded-admission' : 'state-daemon-queue-work-scheduler'
           const mismatches = queueWorkClaimResultFenceMismatches({
             row: qrow,
             payload: queuePayload,
@@ -3782,7 +3516,10 @@ async function sendMessage(args: string[]) {
         // the only path now. #420 keeps this default path for backward
         // compatibility; ACK/progress callers opt out with --no-close.
         // ─────────────────────────────────────────────────────────────────
-        if (queueWorkFinalizerCloseFence) {
+        if (boundedReply && boundedTask) {
+          await admissionTransition(db, boundedReply, 'reply_commit', { ordinal: boundedTask.ordinal, claim_fence: boundedTask.claim_fence,
+            result_digest: boundedTask.result_digest, reply_id: id })
+        } else if (queueWorkFinalizerCloseFence) {
           // The row is already terminal-done and locked by this transaction.
           // Recheck the exact immutable claim/result identity at mutation;
           // lease expiry cannot reassign executable ownership from done, and
@@ -3833,20 +3570,9 @@ async function sendMessage(args: string[]) {
             [id, target.queue_id],
           )
         }
-        // spec §4.2 step 10-11 — flip the agent based on remaining open
-        // claims. Issue #278 cycle 1 (auditor BLOCK 1): with multi in-flight
-        // the send only closed ONE claim; if other claims are still 'received'
-        // the agent must remain busy. EXISTS-derive keeps observability
-        // (sender-feedback / heartbeat / bot_status) tracking the truth.
-        await db.query(
-          `UPDATE agents SET
-             status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-             status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-             status_updated_at = now()
-           WHERE agent_id = $1`,
-          [agentId],
-        )
+        // Other claims retain their own durable owner and expiry.
       }
+      await sealBoundedMessage(db, id, isSqliteMode() ? 'sqlite' : 'postgres')
       await auditLog(db, 'message.send', agentId, channelId, {
         message_id: id,
         reply_to: replyTo,
@@ -4208,6 +3934,7 @@ async function notifyMessage(args: string[]) {
         return
       }
 
+      await sealBoundedMessage(db, id, isSqliteMode() ? 'sqlite' : 'postgres')
       await db.query('COMMIT')
       txCommitted = true
 
@@ -4237,7 +3964,7 @@ async function notifyMessage(args: string[]) {
 
 /**
  * `agent-com fail` (spec §4.1, §11 failed_reason, v2.1.0) — mark a message_queue
- * row as `failed` with an explicit reason and release the agent to idle.
+ * row as `failed` with an explicit reason and release its durable claim.
  *
  * Called by run-bot.sh / LLM integration when the message can't be replied to:
  * LLM_FAILED (empty / non-zero exit), SEND_FAILED_AFTER_N_RETRIES, LOOP_DETECTED,
@@ -4321,17 +4048,6 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
       }
       const queueId = upd.rows[0].id
 
-      // Issue #278 cycle 1 (auditor BLOCK 1): EXISTS-derive busy/idle
-      // from the remaining open claims. fail/skip closes one claim
-      // only; if others are still 'received' the agent stays busy.
-      await db.query(
-        `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-           status_updated_at = now()
-         WHERE agent_id = $1`,
-        [agentId],
-      )
       await db.query('COMMIT')
 
       process.stdout.write(JSON.stringify({
@@ -4360,7 +4076,7 @@ async function failOrSkipMessage(kind: 'fail' | 'skip', args: string[]) {
  * rows whose `read_at` is older than RECLAIM_MIN_AGE (15 minutes), matching the
  * daemon's orphan-reclaim cutoff. It also clears agents.current_message_id so a
  * fresh `next` can pop from the queue cleanly. Both updates run in one
- * BEGIN/COMMIT so a crash mid-flight cannot leave the agent stuck in `busy`.
+ * BEGIN/COMMIT so claim release is atomic with the queue transition.
  *
  * Flags:
  *   --agent-id <id>  required (falls back to AGENT_ID env)
@@ -4385,6 +4101,7 @@ async function reclaimMessages(args: string[]) {
           WHERE agent_id = $1
             AND status = 'received'
             AND read_at < now() - INTERVAL '15 minutes'
+            AND ${unboundedQueuePredicate('agent_id', isSqliteMode() ? 'sqlite' : 'postgres')}
           RETURNING id`,
         [agentId],
       )
@@ -4393,14 +4110,6 @@ async function reclaimMessages(args: string[]) {
       // in-flight — after rolling expired 'received' rows back to 'pending',
       // the agent may still hold OTHER active claims that are not
       // orphaned. EXISTS-derive keeps the right state visible.
-      await db.query(
-        `UPDATE agents SET
-           status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'busy' ELSE 'idle' END,
-           status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'received') THEN 'メッセージ処理中' ELSE NULL END,
-           status_updated_at = now()
-         WHERE agent_id = $1`,
-        [agentId],
-      )
       await db.query('COMMIT')
 
       process.stdout.write(JSON.stringify({
@@ -4859,6 +4568,9 @@ async function stateDaemonCommand(subcommand: string | undefined, args: string[]
     const db = await getDb()
     try {
       const report = await buildQueueWorkActivationPlan(db.__adapter, {
+        admission: admissionBindingFromEnv({ ...process.env,
+          ...Object.fromEntries(['policy-id','config-digest','source-sha','cohort-digest','runtime-id']
+            .filter(k => flags[`admission-${k}`]).map(k => [`AUN_ADMISSION_${k.replaceAll('-','_').toUpperCase()}`,flags[`admission-${k}`]])) }),
         agentId,
         queueId: flags['queue-id'],
         commit,
@@ -5015,7 +4727,11 @@ async function repairQueue(subcommand: string | undefined, args: string[]) {
         console.error('Usage: agent-com queue requeue-failed (--agent <agent> | --id <queue_id[,queue_id...]>) [--execute|--dry-run]')
         process.exit(2)
       }
-      const report = await requeueFailedQueueRows(db as any, { agentId, queueIds, dryRun })
+      // This existing helper's fixed SELECT/UPDATE share exactly this WHERE.
+      // Add exclusion inside each SQL statement, not a racy pre-filter of IDs.
+      const guardedRepairDb = { query: (sql: string, params?: any[]) => db.query(
+        sql.replace("WHERE status = 'failed'", `WHERE ${unboundedQueuePredicate('agent_id', isSqliteMode() ? 'sqlite' : 'postgres')} AND status = 'failed'`), params) }
+      const report = await requeueFailedQueueRows(guardedRepairDb as any, { agentId, queueIds, dryRun })
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
       return
     }
@@ -5513,16 +5229,13 @@ async function status(args: string[]) {
         `SELECT count(*)::int AS n FROM message_queue WHERE agent_id = $1 AND status = 'pending'`,
         [agentId],
       )
-      const agent = await db.query(
-        `SELECT status, last_seen_at FROM agents WHERE agent_id = $1`,
-        [agentId],
-      )
+      const provider = await resolveSeatProvider(db,{agentId})
       // Issue #278 (A) segment 3d — agents.current_message_id is gone.
       // The "in-flight claim" view is now the most-recent active per-row
       // claim from message_queue.
       const claim = await db.query(
         `SELECT id::text AS id FROM message_queue
-            WHERE claimed_by = $1 AND status = 'received'
+            WHERE claimed_by = $1 AND status IN ('received','in_progress')
             ORDER BY claimed_at DESC NULLS LAST
             LIMIT 1`,
         [agentId],
@@ -5531,8 +5244,8 @@ async function status(args: string[]) {
         `SELECT wa.*,
                 mq.status AS queue_status,
                 mq.message_id AS message_id,
-                ari.status AS runtime_status,
-                ari.last_seen_at AS runtime_last_seen_at
+                NULL AS runtime_status,
+                NULL AS runtime_last_seen_at
            FROM worker_activity wa
            LEFT JOIN message_queue mq ON mq.id = wa.queue_id
            LEFT JOIN agent_runtime_instances ari ON ari.runtime_instance_id = wa.runtime_instance_id
@@ -5542,12 +5255,11 @@ async function status(args: string[]) {
           LIMIT 1`,
         [agentId],
       ).catch(() => ({ rows: [] as any[] }))
-      const row = agent.rows[0]
       const result = {
         agent_id: agentId,
         pending: pending.rows[0]?.n ?? 0,
-        status: row?.status ?? 'unknown',
-        last_seen_at: row?.last_seen_at ?? null,
+        status: provider.ok ? (claim.rows.length ? 'busy' : 'online') : 'unknown',
+        last_seen_at: provider.observation?.observed_at ?? null,
         current_message_id: claim.rows[0]?.id ?? null,
         worker_activity: workerActivity.rows[0] ? normalizeWorkerActivity(workerActivity.rows[0]) : null,
       }
@@ -5570,7 +5282,13 @@ async function status(args: string[]) {
       //              still receiving queue rows, etc.) follow the tables.
       // --format json → extended schema (additive over the brief shape).
       const chCount = await db.query('SELECT COUNT(*) as cnt FROM channels')
-      const agOnline = await db.query("SELECT COUNT(*) as cnt FROM agents WHERE status = 'online'")
+      const identities = await db.query('SELECT agent_id FROM agents')
+      const observations = new Map<string, NonNullable<Awaited<ReturnType<typeof resolveSeatProvider>>['observation']>>()
+      for(const row of identities.rows) {
+        const resolved=await resolveSeatProvider(db,{agentId:row.agent_id})
+        if(resolved.ok && resolved.observation)observations.set(row.agent_id,resolved.observation)
+      }
+      const agOnline = {rows:[{cnt:String(observations.size)}]}
       const agTotal = await db.query('SELECT COUNT(*) as cnt FROM agents')
       const msgRecent = await db.query("SELECT COUNT(*) as cnt FROM agent_messages WHERE created_at > now() - interval '1 hour'")
       const brief = hasFlag(flags, 'brief')
@@ -5594,51 +5312,31 @@ async function status(args: string[]) {
       const agentsRes = await db.query(
         `SELECT agent_id,
                 agent_type,
-                runtime,
-                status,
+                NULL AS runtime,
+                NULL AS status,
                 display_name,
-                home_directory,
-                last_seen_at,
+                NULL AS home_directory,
+                NULL AS last_seen_at,
                 metadata->>'discord_id' AS discord_id,
-                metadata->>'tmux_session' AS tmux_session,
+                NULL AS tmux_session,
                 metadata->>'discord_username' AS discord_username_cached,
                 metadata->>'retired' AS retired_raw
            FROM agents
           WHERE disabled_at IS NULL
-          ORDER BY (status = 'busy') DESC,
-                   (status = 'idle') DESC,
-                   agent_id`,
+          ORDER BY agent_id`,
       )
 
-      // Per-agent live runtime workspace lookup. Pulled from
-      // agent_runtime_instances so the value reflects the *actually
-      // running* checkout, not a stale metadata field. SQLite tests use
-      // bun:sqlite which has had this table since the NORM-020
-      // migration, but the column set is small so we tolerate an empty
-      // result silently.
-      const workspaceRes = await db.query(
-        `SELECT agent_id, checkout_path
-           FROM agent_runtime_instances
-          WHERE status = 'running' AND checkout_path IS NOT NULL`,
-      ).catch(() => ({ rows: [] as any[] }))
-      const workspaceByAgent = new Map<string, string>()
-      for (const r of workspaceRes.rows) {
-        // If two runtimes share an agent_id (shouldn't happen, but
-        // codex-aun lane is still normalising), prefer the first seen.
-        if (!workspaceByAgent.has(r.agent_id)) workspaceByAgent.set(r.agent_id, r.checkout_path)
+      const workspaceByAgent = new Map<string,string>()
+      for(const row of agentsRes.rows) {
+        const observed=observations.get(row.agent_id)
+        row.runtime=observed?.provider ?? null
+        row.status=observed ? 'online' : 'unknown'
+        row.last_seen_at=observed?.observed_at ?? null
+        row.tmux_session=observed?.session_name ?? null
+        row.home_directory=null // The old launch directory has no current authority.
+        if(observed?.workspace)workspaceByAgent.set(row.agent_id,observed.workspace)
       }
 
-      // Per CEO 2026-05-24 directive (msg `7d778234`): the live Discord
-      // API resolution path is removed. codex-aun lane (NORM-020) owns
-      // the per-bot connector/runtime identity work that will persist
-      // discord_username into the agents row at heartbeat time. The
-      // status CLI conforms to that spec once it lands. Until then,
-      // fall through to metadata.discord_username (read-only consumer)
-      // → display_name → placeholder.
-
-      // 起動ディレクトリ (launch directory) is the bot profile SSOT
-      // (`agents.home_directory`). It is distinct from runtime workspace
-      // (= what the process is actually executing inside).
       const queueRes = await db.query(
         `SELECT agent_id,
                 status,
@@ -5688,9 +5386,11 @@ async function status(args: string[]) {
         if (a.agent_type === 'human' && q && (q.pending + q.received + q.in_progress) > 0) {
           drifts.push(`human agent '${a.agent_id}' has ${q.pending + q.received + q.in_progress} queued rows — PR #533 fix should have prevented this; check fleet runtime build`)
         }
-        if (a.runtime === 'TUI' && (!a.tmux_session || a.tmux_session === '')) {
-          drifts.push(`agent '${a.agent_id}' runtime=TUI but metadata.tmux_session is missing`)
+        if(a.agent_type !== 'human' && !observations.has(a.agent_id)) {
+          drifts.push(`agent '${a.agent_id}' current runtime authority unavailable`)
         }
+        if(observations.has(a.agent_id) && q && q.received+q.in_progress>0)a.status='busy'
+
       }
 
       if (format === 'json') {
@@ -5740,10 +5440,7 @@ async function status(args: string[]) {
         'launch_dir'.padEnd(36) +
         'last_seen',
       )
-      // `launch_dir` is the bot profile home directory, distinct from
-      // the runtime workspace (= what the process is actually executing
-      // inside). Both are exposed in --format json under `launch_dir`
-      // and `workspace` respectively so dashboards can compare them.
+      // Preserve the launch_dir output key as NULL; workspace is current observation.
       const HOME = process.env.HOME ?? ''
       const shrinkHome = (p: string) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p)
       for (const a of agentsRes.rows) {
@@ -5782,69 +5479,27 @@ async function status(args: string[]) {
   }
 }
 
-/**
- * `agent-com heartbeat [--agent-id <id>]` — update agents.last_seen_at + disconnected→idle (v1.0.2 §4.5 / §6.5).
- */
+/** Observe the active holder. Only the owning server renews its acquired lease. */
 async function heartbeat(args: string[]) {
   const agentId = resolveAgentId(args, 'heartbeat')
   const { flags } = parseArgs(args)
-  const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID ?? null
-  const checkoutEvidence = collectGitCheckoutEvidence(process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd())
-  const discordToken = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || ''
-  const discordTokenFingerprint = discordToken.trim()
-    ? createHash('sha256').update(discordToken.trim()).digest('hex')
-    : null
+  const runtimeInstanceId = flags['runtime-instance-id'] ?? process.env.AGENT_COM_RUNTIME_INSTANCE_ID
   const db = await getDb()
   try {
-    // ARC codex audit (PR#139): spec requires disconnected→idle recovery on heartbeat.
-    await db.query(
-      `UPDATE agents SET last_seen_at = now(),
-       status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-    const runtime = runtimeInstanceId
-      ? await heartbeatRuntimeInstance(db as any, {
-          runtimeInstanceId,
-          agentId,
-          runtimeEngine: flags['runtime-engine'] ?? process.env.AGENT_COM_RUNTIME_ENGINE ?? process.env.AGENT_COM_RUNTIME ?? 'unknown',
-          runtimeKind: flags['runtime-kind'] ?? process.env.AGENT_COM_RUNTIME_KIND ?? 'local_process',
-          sessionName: flags['session-name'] ?? inferRuntimeSessionName(),
-          processId: process.env.AGENT_COM_RUNTIME_PROCESS_ID ? Number.parseInt(process.env.AGENT_COM_RUNTIME_PROCESS_ID, 10) : null,
-          port: parseRuntimePort(),
-          checkoutPath: process.env.AGENT_COM_CHECKOUT_PATH ?? process.cwd(),
-          commitSha: process.env.AGENT_COM_COMMIT_SHA ?? null,
-          endpointUri: process.env.AGENT_COM_ENDPOINT_URI ?? null,
-          connectorProvider: discordTokenFingerprint ? 'discord' : null,
-          connectorUri: discordTokenFingerprint ? `discord://agents/${agentId}` : null,
-          connectorKind: discordTokenFingerprint ? 'chat_adapter' : null,
-          connectorTransport: discordTokenFingerprint ? 'discord_gateway' : null,
-          metadata: { source: 'agent-com heartbeat', ...gitCheckoutMetadata(checkoutEvidence) },
-          connectorMetadata: discordTokenFingerprint
-            ? {
-                token_fingerprint: discordTokenFingerprint,
-                token_source: process.env.DISCORD_TOKEN ? 'DISCORD_TOKEN' : 'DISCORD_BOT_TOKEN',
-              }
-            : undefined,
-        })
-      : null
+    const result=await resolveRuntimeEndpoint(db,{agentId,runtimeInstanceId})
+    if(!result.ok || !result.endpoint) throw new Error(result.code)
     process.stdout.write(JSON.stringify({
-      ok: true,
-      agent_id: agentId,
-      last_seen_at: new Date().toISOString(),
-      runtime_instance_id: runtime?.runtime_instance_id ?? null,
-      runtime_workspace_id: runtime?.workspace_id ?? null,
-      runtime_connector_rows_upserted: runtime?.connector_rows_upserted ?? 0,
-      runtime_connector_rows_updated: runtime?.connector_rows_updated ?? 0,
-    }) + '\n')
-  } finally {
-    await db.end()
-  }
+      ok:true,agent_id:agentId,observed_at:result.endpoint.lastSeenAt,
+      runtime_instance_id:result.endpoint.runtimeInstanceId,
+      endpoint_lease_id:result.endpoint.leaseId,
+      endpoint_lease_fencing_token:result.endpoint.fencingToken,
+    })+'\n')
+  } finally { await db.end() }
 }
 
 /**
  * `agent-com daemon` — long-running polling driver for MCP-unsupported envs
- * (v1.0.2 §6.5). Runs heartbeat + poll loop, prints pending messages to
+ * (v1.0.2 §6.5). Observes holder authority and polls pending messages to
  * stdout when they arrive. Designed for tmux sessions where the operator
  * reads stdout and manually calls `next`.
  *
@@ -5859,21 +5514,10 @@ async function daemon(args: string[]) {
   console.error(`[daemon] Started for ${agentId}, poll=${pollInterval}ms, heartbeat=${heartbeatInterval}ms`)
   console.error(`[daemon] Press Ctrl+C to stop`)
 
-  // Heartbeat timer
+  // A polling CLI does not own the server's lease and cannot renew it.
   setInterval(async () => {
-    const db = await getDb()
-    try {
-      await db.query(
-        `UPDATE agents SET last_seen_at = now(),
-         status = CASE WHEN status = 'disconnected' THEN 'idle' ELSE status END
-         WHERE agent_id = $1`,
-        [agentId],
-      )
-    } catch (err) {
-      console.error(`[daemon] heartbeat error: ${err}`)
-    } finally {
-      await db.end()
-    }
+    try { await heartbeat(['--agent-id',agentId]) }
+    catch (err) { console.error(`[daemon] holder observation error: ${err}`) }
   }, heartbeatInterval)
 
   // Poll timer
@@ -6510,9 +6154,9 @@ Commands:
   channel policy bootstrap [--execute|--dry-run] [--extra-allowlist <a,b>] [--overwrite]
   channel policy sync-connectors [--channel <id|name>] [--provider discord] [--execute|--dry-run]
   channel policy set <channel_id> [--primary <agent|none>] [--adapter-owner <agent|none>] [--allowlist <a,b|none>] [--execute|--dry-run]
-  agent register <agent_id> [--display-name "Name"] [--type dev] [--runtime claude-code] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>]
+  agent register <agent_id> [--display-name "Name"] [--type dev] [--token-source-ref <ref>]
   agent profile get <agent_id>
-  agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--home-directory <path>] [--channel-port <port>] [--tmux-session <name>] [--runtime-engine <engine>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
+  agent profile set <agent_id> [--display-name "Name"] [--type dev] [--runtime <runtime>] [--token-source-ref <ref>] [--expected-provider discord] [--expected-provider-subject <id>] [--enabled true|false] [--execute|--dry-run]
   agent profile project <agent_id>|--all [--execute|--dry-run]
   agent profile doctor [--strict] [--live-tmux] [--include-disabled] [--include-test]
   fleet-runtime queue-observation [--format json]          — atomic PostgreSQL queue/profile/runtime observation v2

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  buildFullChannelSmokeReport,
+  buildFullChannelSmokeReport as realBuildFullChannelSmokeReport,
   formatFullChannelSmokeText,
   FULL_CHANNEL_SMOKE_FAILURE_CLASSES,
   type FullChannelSmokeOptions,
@@ -12,6 +12,9 @@ import {
  * starts from a single healthy channel scenario and overrides one dimension to
  * exercise a specific #581/NORM-050 failure class or the exclusion / execute paths.
  */
+
+import {unitRuntimeObservation,unitRuntimeAuthority} from './helpers/logical-runtime-unit-fixture'
+const buildFullChannelSmokeReport=(db:any,options:FullChannelSmokeOptions={})=>realBuildFullChannelSmokeReport(db,{...options,inspect:db.inspect})
 
 type Scenario = {
   agents?: any[]
@@ -107,6 +110,12 @@ function makeDb(s: Scenario) {
   const route = (sql: string, params?: any[]): any[] => {
     // --- buildAgentEvidence ---
     if (sql.includes('COALESCE(profile_enabled, true) AS profile_enabled')) return s.agents ?? []
+    if(sql.includes('FROM agent_runtime_instances r')) {
+      const agent=params?.[0],live=(s.runtimes??[]).some(r=>r.agent_id===agent && !r.stopped_at && ['active','idle','online','running'].includes(r.status))
+      const lease=(s.leases??[]).some(l=>l.holder_agent_id===agent && l.lease_purpose==='worker')
+      const endpoint=(s.endpoints??[]).some(e=>e.agent_id===agent)
+      return live && lease && (sql.includes('LEFT JOIN')||endpoint)?[unitRuntimeAuthority(agent)]:[]
+    }
     if (sql.includes('FROM agent_runtime_instances')) return s.runtimes ?? []
     if (sql.includes('FROM worker_activity')) return s.workers ?? []
     if (sql.includes('FROM control_plane_leases')) return s.leases ?? []
@@ -167,6 +176,8 @@ function makeDb(s: Scenario) {
     return []
   }
   return {
+    inspect:(input:any)=>{const live=(s.runtimes??[]).filter(r=>r.agent_id===input.agentId && !r.stopped_at && ['active','idle','online','running'].includes(r.status))
+      return {reasonCode:live.length?'OBSERVED':'NO_LIVE_RUNTIME',observations:live.map(()=>unitRuntimeObservation(input.agentId))}},
     async query(sql: string, params?: any[]) {
       return route(sql, params)
     },

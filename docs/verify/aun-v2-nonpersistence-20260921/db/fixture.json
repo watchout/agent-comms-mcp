@@ -1,0 +1,23 @@
+{
+  "task_started_at": "2026-09-21T13:43:29.894646+09:00",
+  "deadline": "2026-09-21T14:58:29.894646+09:00",
+  "fixture_root": "/private/tmp/aun-np-db-n_mu4fk1",
+  "test_env": {
+    "PATH": "/Users/yuji/.bun/bin:/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:/usr/bin:/bin",
+    "LANG": "C",
+    "TMPDIR": "/private/tmp/aun-np-db-n_mu4fk1",
+    "AUN_NP_FIXTURE_ROOT": "/private/tmp/aun-np-db-n_mu4fk1",
+    "AGENT_COM_TEST_DATABASE_URL": "postgresql://fixture@/postgres?host=%2Fprivate%2Ftmp%2Faun-np-db-n_mu4fk1%2Fsocket",
+    "DATABASE_URL": "postgresql://fixture@/postgres?host=%2Fprivate%2Ftmp%2Faun-np-db-n_mu4fk1%2Fsocket",
+    "AGENT_COM_DB": "postgres",
+    "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED": "1"
+  },
+  "identity": {
+    "database": "postgres",
+    "role": "fixture",
+    "version": "17.9 (Homebrew)",
+    "socket": "/private/tmp/aun-np-db-n_mu4fk1/socket",
+    "listen": ""
+  },
+  "setup_finished_at": "2026-09-21T13:54:48.921997+09:00"
+}

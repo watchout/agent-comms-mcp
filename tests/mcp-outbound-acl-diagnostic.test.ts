@@ -18,10 +18,10 @@ async function withAclDb<T>(fn: (db: SqliteAdapter) => Promise<T>): Promise<T> {
     migrateSqlite(dbPath)
     const seed = new Database(dbPath)
     seed.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, status)
+      INSERT INTO agents (agent_id, display_name, agent_type)
       VALUES
-        ('sender-a', 'sender-a', 'dev', 'idle'),
-        ('target-b', 'target-b', 'dev', 'idle')
+        ('sender-a', 'sender-a', 'dev'),
+        ('target-b', 'target-b', 'dev')
     `)
     seed.exec(`INSERT INTO channels (id, name, members) VALUES ('acl-ch', 'acl-ch', '["target-b"]')`)
     seed.exec(`

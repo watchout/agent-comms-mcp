@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/contract/test_aun_configuration_runtime_diagnostics.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "1878c78387cd4c2acabea42376d1898e6cfe1d80b029e01d04ac7487948454ca",
+  "source_head": "23b6f055ecc8f0971e7eed2f5546188a5a5f2fef",
+  "working_diff_sha256": "13529b8df2b456ee9ce478cee9ed30a6ccae57f7740578190e18bfd30ed54597",
+  "started_at": "2026-09-21T08:06:57.288306+00:00",
+  "ended_at": "2026-09-21T08:06:57.796361+00:00",
+  "exit_code": 0,
+  "log_sha256": "ee9e8f71f8e090b1b5836a28e422f1232b891e91d03225597613ad7622c3a8cd"
+}

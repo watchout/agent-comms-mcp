@@ -1,0 +1,67 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-2ZOoiS/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [3682.32ms]
+
+tests/contract/test_runtime_nonpersist_authority.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_07a2c995ef7248968709032fe4784061","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP02/04 real UUID acquisition, fenced renewal, and reused valid UUID with surviving lease [2459.02ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_bc6c04540ea545f2aa9f15559deb89c7","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP03 lease-write failure rolls back the new logical anchor; only the owned socket remains [1346.77ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_558b5a8954f3469db85b82cdb04b81e0","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 fence replacement during observation and holder change after SQL both deny endpoint resolution [1592.23ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_f3ce9a704098494396ddd96fa70f8035","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04 SQL-time expiry advances during a transaction and delayed renewal has no effect [1777.94ms]
+
+tests/contract/test_runtime_observation_nonpersistence.test.ts:
+(pass) NP implementation: observation and durable boundaries > NP05: a tempting same-seat history never supplies cold intent
+(pass) NP implementation: observation and durable boundaries > NP01/07: copied native/physical fields are excluded by positive serializers [0.66ms]
+(pass) NP implementation: observation and durable boundaries > NP04/08: endpoint requires current exact authority, ignores tempting DB physical fields [0.29ms]
+(pass) NP implementation: observation and durable boundaries > NP05/08: DB-down cannot become a cold launch; authoritative empty set plus no live process can use explicit intent [0.28ms]
+(pass) NP implementation: observation and durable boundaries > NP01: actual heartbeat SQL and parameters contain only anchor and authority data [0.19ms]
+(pass) NP implementation: observation and durable boundaries > NP04/06: genuine OS listener and a fresh independent reader use no DB snapshot [1042.17ms]
+(pass) NP implementation: observation and durable boundaries > NP04: OS-visible unbound UUID cannot be discovered [789.37ms]
+(pass) NP implementation: observation and durable boundaries > NP08: one deadline covers all candidates; no fresh per-candidate budget [0.04ms]
+(pass) NP changed-input effect and authority regressions > NP03: held port is inaccessible before commit and after authority loss [1.90ms]
+(pass) NP changed-input effect and authority regressions > NP03: unknown commit closes only this held socket [1.33ms]
+(pass) NP changed-input effect and authority regressions > NP02: bypass authority constraints survive projection exactly [0.04ms]
+
+tests/contract/test_runtime_nonpersist_cleanup.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_ba5ba3776b3c41bea0fdd492c31c876f","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: null value in column "payload" of relation "message_queue" violates not-null constraint
+     length: 437,
+   severity: "ERROR",
+     detail: "Failing row contains (1, np-220c6105-dfd1-4333-a131-5e0895816dcd, 4085e98a-f18b-4383-967c-64cdb3b66947, null, in_progress, 0, 2026-09-21 14:39:54.198292+09, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null).",
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: undefined,
+     schema: "public",
+      table: "message_queue",
+   dataType: undefined,
+ constraint: undefined,
+       file: "execMain.c",
+    routine: "ExecConstraints",
+       code: "23502"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) NP04/08 cleanup denies unknown work, changed PID start, active lease and DB failure before any kill [1021.48ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_27d5ffc1ec9b432788a4164868dc3629","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP04/08 cleanup plan binds process start; expired holder stops exactly once without physical persistence [1506.35ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_dd615d9c66934526925d2abe60600b3c","db":"aun_independent","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-vfe9q16y/socket","listen":""}
+(pass) NP08 orphan kill-only and observation timeout never authorize an unbound process [896.45ms]
+
+ 18 pass
+ 1 fail
+ 105 expect() calls
+Ran 19 tests across 4 files. [16.20s]

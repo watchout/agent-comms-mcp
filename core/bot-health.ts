@@ -14,6 +14,7 @@
 export interface BotHealthEntry {
   session?: string | null
   port?: number | null
+  processId?: number | null
   supervisorType?: string | null
 }
 
@@ -41,18 +42,19 @@ function normalizedSupervisorType(entry: BotHealthEntry): string {
 export function checkBotHealth(entry: BotHealthEntry, deps: BotHealthDeps): BotHealthResult {
   const supervisorType = normalizedSupervisorType(entry)
   if (supervisorType !== 'tmux') {
+    const holder = entry.port && entry.processId && deps.getPids(entry.port).includes(String(entry.processId))
     return {
-      status: 'healthy',
-      details: `supervisor_type=${supervisorType}; tmux diagnostics skipped`,
+      status: holder ? 'healthy' : 'initializing',
+      details: `supervisor_type=${supervisorType}; tmux diagnostics skipped; ${holder ? 'runtime holder present' : 'runtime endpoint unavailable'}`,
     }
   }
   if (!entry.session) return { status: 'misconfigured', details: 'missing tmux session in bot profile' }
-  if (!entry.port || entry.port <= 0) return { status: 'misconfigured', details: 'missing channel_port in bot profile' }
 
   // Check 1: tmux session present.
   if (!deps.hasSession(entry.session)) {
     return { status: 'dead', details: 'tmux session not found' }
   }
+  if (!entry.port || entry.port <= 0 || !entry.processId) return {status:'initializing',details:'runtime endpoint unavailable'}
 
   const output = deps.capture(entry.session, 30)
 
@@ -75,9 +77,10 @@ export function checkBotHealth(entry: BotHealthEntry, deps: BotHealthDeps): BotH
       details: `session exists, port ${entry.port} free (bun not yet listening)`,
     }
   }
+  if (!pids.includes(String(entry.processId))) return {status:'misconfigured',details:'runtime endpoint holder mismatch'}
 
   const portInfo = `port ${entry.port} in use (PID: ${pids.join(',')})`
-  const pidIsBunServer = pids.some(pid => {
+  const pidIsBunServer = [String(entry.processId)].some(pid => {
     try {
       return /bun.*server\.ts/.test(deps.psCommand(pid))
     } catch {

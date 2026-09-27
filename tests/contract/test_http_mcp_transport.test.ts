@@ -1,3 +1,11 @@
+import {spawnObservedServer,closeObservedServers} from '../helpers/observed-server-fixture'
+import {realpathSync,mkdtempSync,rmSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+import {PgAdapter} from '../../core/db/pg-adapter'
+import {createReadyNativeRuntimeWithDb,stopNativeFixtures} from '../helpers/seat-native-runtime-fixture'
+const nativeHomes:string[]=[]
+let nativePath=process.env.PATH!
 /**
  * ADR-029R — Streamable HTTP MCP transport contract (PR 4 productionized).
  *
@@ -32,22 +40,19 @@ let serverProc: ChildProcess | null = null
 let pg: PgClient
 
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
-  return spawn('bun', ['run', 'server.ts'], {
-    cwd: `${import.meta.dir}/../..`,
-    env: {
+  return spawnObservedServer(realpathSync(`${import.meta.dir}/../..`), {
       ...process.env,
+      PATH:nativePath,
       AGENT_ID: `${PREFIX}-stdio`,
       AGENT_COM_EXPECTED_AGENT_ID: `${PREFIX}-stdio`,
       AGENT_COMMS_PORT: String(port),
       WEBHOOK_PORT: String(port + 1000),
       AGENT_COM_PG_NOTIFY: 'false',
       AGENT_COMMS_TTL_SWEEP_DISABLED: '1',
-      AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '1',
+      AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '0',
       DATABASE_URL,
       DISCORD_BOT_TOKEN: '',
       ...extraEnv,
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
   })
 }
 
@@ -103,25 +108,36 @@ beforeAll(async () => {
   await pg.connect()
   for (const id of [BOT_A, BOT_B]) {
     await pg.query(
-      `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
-       VALUES ($1, 'default', $1, 'dev', 'TUI', 'idle', now(), now())
-       ON CONFLICT (agent_id) DO UPDATE SET status='idle', last_seen_at=now()`,
+      `INSERT INTO agents (agent_id, org_id, display_name, agent_type, registered_at)
+       VALUES ($1, 'default', $1, 'dev', now())
+       ON CONFLICT (agent_id) DO NOTHING`,
       [id],
     )
     await seedBearerKey(pg, id, TOKENS[id])
   }
 
+  const db=new PgAdapter(DATABASE_URL)
+  try {for(const agent of [BOT_A,BOT_B]) {
+    const home=realpathSync(mkdtempSync(join(tmpdir(),'http-seat-native-')));nativeHomes.push(home)
+    const fixture=await createReadyNativeRuntimeWithDb(db,home,agent,randomUUID())
+    nativePath=fixture.cliPath+':'+process.env.PATH
+  }} finally {await db.close()}
   serverProc = bootServerWith({ AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1' }, HTTP_PORT)
   await waitHealth(HTTP_PORT)
 }, 30000)
 
 afterAll(async () => {
-  serverProc?.kill('SIGTERM')
+  await closeObservedServers()
+  await stopNativeFixtures()
+  for(const home of nativeHomes)rmSync(home,{recursive:true,force:true})
   if (pg) {
     await pg.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agent_messages WHERE author_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agent_identity_keys WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM audit_log WHERE agent_id LIKE $1`, [`${PREFIX}%`])
+    await pg.query(`DELETE FROM runtime_memory_ready_evidence WHERE agent_id LIKE $1`, [`${PREFIX}%`])
+    await pg.query(`DELETE FROM control_plane_leases WHERE holder_agent_id LIKE $1`, [`${PREFIX}%`])
+    await pg.query(`DELETE FROM agent_runtime_instances WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agents WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.end()
   }

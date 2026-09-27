@@ -1,5 +1,10 @@
-import { existsSync, statSync } from 'node:fs'
-import { basename, isAbsolute } from 'node:path'
+import { readCurrentNativeProof } from './runtime-native-proof'
+import { inspectHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
+import { durableMemoryMetadata } from './runtime-durable-data'
+import { createHash } from 'node:crypto'
+import { observeSeatProvider } from './seat-runtime-selection'
+import { resolveRuntimeEndpoint } from './runtime-endpoint'
+import { validateSeatContextReceipt, seatContextDigest, type SeatContextReceipt } from './seat-context-recovery'
 import {
   loadRuntimeMemoryReadyPolicy,
   resolveRuntimeMemoryReadyCurrent,
@@ -93,6 +98,8 @@ export interface RuntimeMemoryReadyGateResult {
     | 'bypass_scope_mismatch'
     | 'bypass_expired'
     | 'read_error'
+    | 'context_consumption_missing'
+    | 'endpoint_unavailable'
   agent_id: string
   project: string
   checked_at: string
@@ -108,6 +115,7 @@ export interface RuntimeMemoryReadyGateResult {
 
 export type RuntimeMemoryReadyProjectResolutionSource =
   | 'agent_metadata_override'
+  | 'verified_current_runtime_receipt'
   | 'active_primary_workspace'
   | 'canonical_workspace'
 
@@ -127,6 +135,8 @@ export class RuntimeMemoryReadyProjectResolutionError extends Error {
       | 'WORKSPACE_NOT_ABSOLUTE'
       | 'WORKSPACE_NOT_FOUND'
       | 'WORKSPACE_NOT_DIRECTORY'
+      | 'PROJECT_MISSING'
+      | 'PROJECT_AMBIGUOUS'
       | 'PROJECT_INVALID',
     message: string,
     readonly details: Record<string, unknown> = {},
@@ -144,58 +154,16 @@ interface RuntimeMemoryReadyProjectAgentRow {
   metadata: unknown
 }
 
-interface RuntimeMemoryReadyWorkspaceRow {
-  local_path: string | null
-}
-
 function enabledProfile(value: unknown): boolean {
   return value === true || value === 1 || value === '1'
 }
 
-function projectFromWorkspace(agentId: string, workspacePath: string): string {
-  if (!isAbsolute(workspacePath)) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_NOT_ABSOLUTE',
-      `memory-ready workspace must be absolute for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
-  if (!existsSync(workspacePath)) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_NOT_FOUND',
-      `memory-ready workspace does not exist for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
-  if (!statSync(workspacePath).isDirectory()) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_NOT_DIRECTORY',
-      `memory-ready workspace is not a directory for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
-  const project = basename(workspacePath).trim()
-  if (!project || project === '.' || project === '/') {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'PROJECT_INVALID',
-      `memory-ready project cannot be derived for ${agentId}`,
-      { workspace_path: workspacePath },
-    )
-  }
-  return project
-}
-
-/**
- * Resolve the target agent's memory partition from DB-owned identity state.
- *
- * An explicit per-agent metadata override wins. Otherwise exactly one active
- * primary workspace is authoritative. The agent profile's `home_directory`
- * is the schema-stable canonical-workspace fallback. No daemon-repository or
- * latest-evidence fallback exists.
- */
+/** The logical namespace is explicit seat metadata or independently verified
+ * current native input. A host-local path never creates a memory project. */
 export async function resolveRuntimeMemoryReadyProject(
   db: RuntimeMemoryReadyDb,
   agentId: string,
+  options: { now?: Date; inspect?: HostRuntimeInspector; readNativeProof?: typeof readCurrentNativeProof } = {},
 ): Promise<RuntimeMemoryReadyProjectResolution> {
   const agents = await queryRows<RuntimeMemoryReadyProjectAgentRow>(
     db,
@@ -215,6 +183,10 @@ export async function resolveRuntimeMemoryReadyProject(
 
   const metadata = parseObject(agent.metadata)
   const explicitProject = normalizeText(metadata.memory_project)
+  if (Object.prototype.hasOwnProperty.call(metadata, 'memory_project')
+    && (!explicitProject || typeof metadata.memory_project !== 'string' || /[:\r\n\0]/.test(explicitProject))) {
+    throw new RuntimeMemoryReadyProjectResolutionError('PROJECT_INVALID', `memory-ready logical project is invalid for ${agentId}`)
+  }
   if (explicitProject) {
     return {
       agent_id: agentId,
@@ -224,53 +196,30 @@ export async function resolveRuntimeMemoryReadyProject(
     }
   }
 
-  const primaryRows = await queryRows<RuntimeMemoryReadyWorkspaceRow>(
-    db,
-    `SELECT w.local_path
-       FROM agent_workspace_bindings b
-       JOIN agent_workspaces w ON w.workspace_id = b.workspace_id
-      WHERE b.agent_id = $1
-        AND b.active = true
-        AND b.binding_role = 'primary'
-      ORDER BY b.workspace_id`,
-    [agentId],
-  )
-  if (primaryRows.length > 1) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_AMBIGUOUS',
-      `memory-ready project has multiple active primary workspaces for ${agentId}`,
-      { workspace_count: primaryRows.length },
-    )
-  }
-  const primaryPath = normalizeText(primaryRows[0]?.local_path)
-  if (primaryRows.length === 1 && !primaryPath) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_MISSING',
-      `memory-ready primary workspace path is missing for ${agentId}`,
-    )
-  }
-  if (primaryPath) {
-    return {
-      agent_id: agentId,
-      project: projectFromWorkspace(agentId, primaryPath),
-      workspace_path: primaryPath,
-      source: 'active_primary_workspace',
+  const now = options.now ?? new Date()
+  const current = await resolveRuntimeMemoryReadyCurrent(db, {agentId,requestedRuntimeKind:'local_process',now,inspect:options.inspect})
+  const runtime = current.current_runtime
+  const projects = new Set<string>()
+  if (current.ok && runtime) {
+    const rows = await queryRows<{project:string}>(db,
+      `SELECT DISTINCT project FROM runtime_memory_ready_evidence
+        WHERE agent_id=$1 AND runtime_instance_id=$2 LIMIT 33`, [agentId,runtime.runtime_instance_id])
+    if (rows.length > 32) throw new RuntimeMemoryReadyProjectResolutionError('PROJECT_AMBIGUOUS', `memory-ready logical project selection is unbounded for ${agentId}`)
+    for (const row of rows) {
+      const project = normalizeText(row.project)
+      if (!project || /[:\r\n\0]/.test(project)) continue
+      const gate = await evaluateRuntimeMemoryReadyGate(db,{agent_id:agentId,project,now,requested_runtime_kind:'local_process',inspect:options.inspect,readNativeProof:options.readNativeProof})
+      if (!gate.ok || gate.runtime_instance_id !== runtime.runtime_instance_id) continue
+      // The gate has freshly re-read the original native receipt for this project.
+      projects.add(project)
     }
   }
+  if (projects.size !== 1) throw new RuntimeMemoryReadyProjectResolutionError(
+    projects.size > 1 ? 'PROJECT_AMBIGUOUS' : 'PROJECT_MISSING',
+    `memory-ready requires one explicit or verified logical project for ${agentId}`,
+    {verified_project_count:projects.size})
+  return {agent_id:agentId,project:[...projects][0],workspace_path:runtime!.checkout_path,source:'verified_current_runtime_receipt'}
 
-  const canonicalWorkspace = normalizeText(agent.home_directory)
-  if (!canonicalWorkspace) {
-    throw new RuntimeMemoryReadyProjectResolutionError(
-      'WORKSPACE_MISSING',
-      `memory-ready project has no active primary or canonical workspace for ${agentId}`,
-    )
-  }
-  return {
-    agent_id: agentId,
-    project: projectFromWorkspace(agentId, canonicalWorkspace),
-    workspace_path: canonicalWorkspace,
-    source: 'canonical_workspace',
-  }
 }
 
 interface AgentProfileRow {
@@ -522,12 +471,12 @@ CREATE TABLE IF NOT EXISTS runtime_memory_ready_evidence (
   runtime_instance_id TEXT NOT NULL,
   profile_revision INTEGER,
   profile_source TEXT,
-  session_name TEXT NOT NULL,
-  port INTEGER NOT NULL,
+  session_name TEXT,
+  port INTEGER,
   expected_agent_id TEXT NOT NULL,
   checkout_path TEXT,
   checkout_commit_sha TEXT,
-  recovery_command TEXT NOT NULL,
+  recovery_command TEXT,
   result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
   failure_reason TEXT,
   completed_at TIMESTAMPTZ NOT NULL,
@@ -554,12 +503,12 @@ CREATE TABLE IF NOT EXISTS runtime_memory_ready_evidence (
   runtime_instance_id TEXT NOT NULL,
   profile_revision INTEGER,
   profile_source TEXT,
-  session_name TEXT NOT NULL,
-  port INTEGER NOT NULL,
+  session_name TEXT,
+  port INTEGER,
   expected_agent_id TEXT NOT NULL,
   checkout_path TEXT,
   checkout_commit_sha TEXT,
-  recovery_command TEXT NOT NULL,
+  recovery_command TEXT,
   result_status TEXT NOT NULL CHECK (result_status IN ('ready', 'failed', 'bypassed')),
   failure_reason TEXT,
   completed_at TEXT NOT NULL,
@@ -581,7 +530,16 @@ export async function recordRuntimeMemoryReadyEvidence(
   db: RuntimeMemoryReadyDb,
   input: RuntimeMemoryReadyEvidenceInput,
 ): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
-  const metadata = JSON.stringify(input.metadata ?? {})
+  // Machine-generated identifiers/reason codes cannot carry an observation or
+  // arbitrary exception text under an otherwise permitted column name.
+  for(const [key,value] of Object.entries({source:input.source,failure_reason:input.failure_reason,evidence_log_id:input.evidence_log_id})) {
+    if(value!=null && (typeof value!=='string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value))) throw new Error(`MEMORY_DURABLE_FIELD_INVALID:${key}`)
+  }
+  if(input.checkout_commit_sha!=null && !/^[0-9a-f]{40}$/.test(input.checkout_commit_sha))throw new Error('MEMORY_DURABLE_FIELD_INVALID:checkout_commit_sha')
+  const projected=durableMemoryMetadata(input.metadata)
+  const proof=projected.seat_context_proof as Record<string,string>|undefined
+  if(proof && (proof.agent_id!==input.agent_id || proof.project!==input.project || proof.runtime_instance_id!==input.runtime_instance_id))throw new Error('MEMORY_LOGICAL_PROOF_BINDING_MISMATCH')
+  const metadata=JSON.stringify(projected)
   const completedAt = normalizeDateIso(input.completed_at) ?? input.completed_at
   const validUntil = normalizeDateIso(input.valid_until) ?? input.valid_until
   const rows = await queryRows<{ id: string | number }>(
@@ -603,16 +561,16 @@ export async function recordRuntimeMemoryReadyEvidence(
       input.runtime_instance_id,
       input.profile_revision ?? null,
       input.profile_source ?? null,
-      input.session_name,
-      input.port,
+      null,
+      null,
       input.expected_agent_id,
-      input.checkout_path ?? null,
+      null,
       input.checkout_commit_sha ?? null,
-      input.recovery_command,
+      null,
       input.result_status,
       input.failure_reason ?? null,
       completedAt,
-      input.evidence_path ?? null,
+      null,
       input.evidence_log_id ?? null,
       validUntil,
       input.source,
@@ -634,7 +592,7 @@ export async function recordRuntimeMemoryReadyEvidence(
         result_status: input.result_status,
         source: input.source,
         evidence_id: evidenceId,
-        evidence_path: input.evidence_path ?? null,
+        
         evidence_log_id: input.evidence_log_id ?? null,
       }),
     ],
@@ -656,6 +614,8 @@ export async function evaluateRuntimeMemoryReadyGate(
     policy?: RuntimeMemoryReadyPolicy
     requested_runtime_kind?: string
     selected_bootstrap_receipt?: SealedBootstrapRuntimeReceipt | null
+    inspect?: HostRuntimeInspector
+    readNativeProof?: typeof readCurrentNativeProof
   },
 ): Promise<RuntimeMemoryReadyGateResult> {
   const now = input.now ?? new Date()
@@ -692,29 +652,8 @@ export async function evaluateRuntimeMemoryReadyGate(
   }
   if (!agent) return fail(base, 'agent_missing')
 
-  const agentMetadata = parseObject(agent.metadata)
-  const expectedPort = normalizeNumber(agent.channel_port)
-  if (expectedPort !== null) {
-    const occupants = await queryRows<RuntimeRow>(
-      db,
-      `SELECT runtime_instance_id, agent_id, session_name, port, checkout_path, commit_sha, started_at, last_seen_at, status
-         FROM agent_runtime_instances
-        WHERE port = $1
-          AND status IN ('running', 'active')
-          AND agent_id <> $2
-        ORDER BY COALESCE(last_seen_at, started_at) DESC, started_at DESC
-        LIMIT 1`,
-      [expectedPort, input.agent_id],
-    ).catch(() => [])
-    const occupant = occupants[0]
-    if (occupant) {
-      return fail(base, 'port_identity_mismatch', {
-        expected_port: expectedPort,
-        occupant_agent_id: occupant.agent_id,
-        occupant_runtime_instance_id: occupant.runtime_instance_id,
-      })
-    }
-  }
+  // Profile ports are legacy projection. Endpoint ownership is evaluated for
+  // the selected runtime, never by looking for another seat at a profile port.
 
   const policy = input.policy ?? loadRuntimeMemoryReadyPolicy()
   let currentResolution
@@ -723,6 +662,7 @@ export async function evaluateRuntimeMemoryReadyGate(
       agentId: input.agent_id,
       requestedRuntimeKind: input.requested_runtime_kind?.trim() || 'local_process',
       selectedBootstrapReceipt: input.selected_bootstrap_receipt,
+      inspect: input.inspect,
       now,
       policy,
     })
@@ -758,9 +698,14 @@ export async function evaluateRuntimeMemoryReadyGate(
          FROM runtime_memory_ready_evidence
         WHERE agent_id = $1
           AND project = $2
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_runtime_instances evidence_runtime
+             WHERE CAST(evidence_runtime.runtime_instance_id AS TEXT) = runtime_memory_ready_evidence.runtime_instance_id
+               AND evidence_runtime.runtime_kind <> $3
+          )
         ORDER BY completed_at DESC, id DESC
         LIMIT 1`,
-      [input.agent_id, input.project],
+      [input.agent_id, input.project, selectedRuntime.runtime_kind],
     )
   } catch (err) {
     const msg = (err as Error).message ?? String(err)
@@ -818,35 +763,9 @@ export async function evaluateRuntimeMemoryReadyGate(
     })
   }
 
-  const expectedSession = normalizeText(agentMetadata.tmux_session)
-  if (expectedSession && currentRuntime.session_name !== expectedSession) {
-    return fail(withEvidence, 'session_mismatch', {
-      profile_session_name: expectedSession,
-      runtime_session_name: currentRuntime.session_name,
-    })
-  }
-  if (expectedPort !== null && currentRuntime.port !== expectedPort) {
-    return fail(withEvidence, 'port_mismatch', {
-      profile_port: expectedPort,
-      runtime_port: currentRuntime.port,
-    })
-  }
-  const expectedCheckoutPath = normalizeText(agent.home_directory)
-  if (expectedCheckoutPath && currentRuntime.checkout_path !== expectedCheckoutPath) {
-    return fail(withEvidence, 'checkout_path_mismatch', {
-      profile_checkout_path: expectedCheckoutPath,
-      runtime_checkout_path: currentRuntime.checkout_path,
-    })
-  }
-  const currentRegistrationMismatch = currentResolution.profile_mismatch_observations.find(
-    observation => observation.current && observation.runtime_instance_id === currentRuntime.runtime_instance_id,
-  ) ?? null
-  if (currentRegistrationMismatch) {
-    return fail(withEvidence, 'registration_profile_mismatch', {
-      repair_signal: 'RUNTIME_REGISTRATION_PROFILE_CORRECTION_REQUIRED',
-      registration_profile_mismatch: currentRegistrationMismatch,
-    })
-  }
+  // Current observed identity and its recovery receipt are compared below.
+  // Historical profile session/path/port differences do not rewrite or reject
+  // an otherwise verified replacement of this same seat.
   if (evidence.runtime_instance_id !== currentRuntime.runtime_instance_id) {
     return fail(withEvidence, 'runtime_instance_mismatch', { evidence_runtime_instance_id: evidence.runtime_instance_id })
   }
@@ -856,20 +775,7 @@ export async function evaluateRuntimeMemoryReadyGate(
       expected_agent_id: expectedAgentId,
     })
   }
-  const evidenceSession = normalizeText(evidence.session_name)
-  if (currentRuntime.session_name && evidenceSession !== currentRuntime.session_name) {
-    return fail(withEvidence, 'session_mismatch', {
-      evidence_session_name: evidenceSession,
-      runtime_session_name: currentRuntime.session_name,
-    })
-  }
-  const evidencePort = normalizeNumber(evidence.port)
-  if (currentRuntime.port !== null && evidencePort !== currentRuntime.port) {
-    return fail(withEvidence, 'port_mismatch', {
-      evidence_port: evidencePort,
-      runtime_port: currentRuntime.port,
-    })
-  }
+  // Legacy stored session/port/path observations are history, never admission inputs.
   const evidenceRevision = normalizeNumber(evidence.profile_revision)
   if (currentRuntime.profile_revision !== null && evidenceRevision !== null && evidenceRevision !== currentRuntime.profile_revision) {
     return fail(withEvidence, 'profile_revision_mismatch', {
@@ -882,13 +788,6 @@ export async function evaluateRuntimeMemoryReadyGate(
     return fail(withEvidence, 'profile_source_mismatch', {
       evidence_profile_source: evidenceProfileSource,
       runtime_profile_source: currentRuntime.profile_source,
-    })
-  }
-  const evidenceCheckoutPath = normalizeText(evidence.checkout_path)
-  if (currentRuntime.checkout_path && evidenceCheckoutPath && evidenceCheckoutPath !== currentRuntime.checkout_path) {
-    return fail(withEvidence, 'checkout_path_mismatch', {
-      evidence_checkout_path: evidenceCheckoutPath,
-      runtime_checkout_path: currentRuntime.checkout_path,
     })
   }
   const evidenceCommit = normalizeText(evidence.checkout_commit_sha)
@@ -911,6 +810,79 @@ export async function evaluateRuntimeMemoryReadyGate(
     if (bypassFailure) return bypassFailure
   }
 
+  if (evidence.result_status !== 'bypassed') {
+    const observation = parseObject(selectedRuntime.metadata).provider_observation
+    let receipt: SeatContextReceipt
+    try {
+      receipt=await (input.readNativeProof ?? readCurrentNativeProof)({agentId:expectedAgentId,project:input.project,
+        runtimeInstanceId:currentRuntime.runtime_instance_id,observation})
+    } catch {return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_NATIVE_ORIGINAL_READ_REQUIRED'})}
+    const proof=parseObject(parseObject(evidence.metadata).seat_context_proof)
+    if(proof.agent_id!==expectedAgentId || proof.project!==input.project || proof.runtime_instance_id!==currentRuntime.runtime_instance_id
+      || proof.pack_id!==receipt.pack_id || proof.work_digest!==receipt.work_digest
+      || proof.invocation_digest!==receipt.invocation_digest) return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_LOGICAL_PROOF_MISMATCH'})
+    if (!validateSeatContextReceipt(receipt, {
+      agentId: expectedAgentId, project: input.project,
+      runtimeInstanceId: currentRuntime.runtime_instance_id,
+    })) return fail(withEvidence, 'context_consumption_missing', { code: 'MEMORY_CONTEXT_RECOVERY_REQUIRED' })
+    const nativeDelivery = (receipt as SeatContextReceipt).native_delivery
+    if (nativeDelivery) {
+      if(nativeDelivery.agent_id!==expectedAgentId || nativeDelivery.project!==input.project
+        || nativeDelivery.target_runtime!==receipt.target_runtime || nativeDelivery.pack_ref!==receipt.pack_id
+        || nativeDelivery.input_sha256!==receipt.invocation_digest || nativeDelivery.work_sha256!==receipt.work_digest
+        || seatContextDigest(nativeDelivery)!==receipt.response_digest) {
+        return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_NATIVE_CONTEXT_IDENTITY_MISMATCH'})
+      }
+      const metadata = parseObject(selectedRuntime.metadata)
+      const observation = parseObject(metadata.provider_observation)
+      const observedRuntimeId = selectedRuntime.runtime_kind === 'bootstrap_bound_provider'
+        ? metadata.mcp_runtime_instance_id : currentRuntime.runtime_instance_id
+      if (observation.verified !== true || observation.source !== 'process_ancestry'
+        || observation.agent_id !== expectedAgentId || observation.runtime_instance_id !== observedRuntimeId
+        || observation.provider_pid !== nativeDelivery.provider_pid || observation.provider !== nativeDelivery.target_runtime
+        || observation.provider_started_at !== nativeDelivery.provider_started_at
+        || (observation.host_session_id && observation.host_session_id !== nativeDelivery.host_session_id)
+        || typeof observation.workspace !== 'string'
+        || createHash('sha256').update(observation.workspace).digest('hex') !== nativeDelivery.workspace_sha256) {
+        return fail(withEvidence, 'context_consumption_missing', { code: 'MEMORY_NATIVE_CONTEXT_PROVENANCE_MISMATCH' })
+      }
+    }
+    const consumedAt = dateMs((receipt as SeatContextReceipt).completed_at)
+    if (consumedAt === null || (startedMs !== null && consumedAt < startedMs) || consumedAt > now.getTime()) {
+      return fail(withEvidence, 'stale_runtime_restore', { code: 'MEMORY_CONTEXT_RECEIPT_TIME_MISMATCH' })
+    }
+  }
+
+  // A sealed provider receipt and the MCP listener are different runtime kinds.
+  // Local runtime gates bind the exact instance; provider receipts additionally
+  // require their sealed MCP instance binding to match the observed endpoint.
+  try {
+    const endpointRuntimeId = (input.requested_runtime_kind ?? 'local_process') === 'local_process'
+      ? currentRuntime.runtime_instance_id
+      : normalizeText(selectedRuntime.metadata.mcp_runtime_instance_id)
+    if (!endpointRuntimeId) return fail(withEvidence, 'endpoint_unavailable', { code: 'MCP_RUNTIME_BINDING_MISSING' })
+    const endpoint = await resolveRuntimeEndpoint(db, {
+      agentId: input.agent_id, runtimeInstanceId: endpointRuntimeId, now, inspect:input.inspect,
+    })
+    if (!endpoint.ok || !endpoint.endpoint || endpoint.endpoint.port !== currentRuntime.port
+      || endpoint.endpoint.processId !== parseObject(selectedRuntime.metadata).provider_observation?.process_id
+      || endpoint.endpoint.checkoutPath !== currentRuntime.checkout_path
+      || endpoint.endpoint.processStartedAt !== parseObject(selectedRuntime.metadata).provider_observation?.process_started_at) {
+      return fail(withEvidence, 'endpoint_unavailable', { code: endpoint.code })
+    }
+  } catch { return fail(withEvidence, 'endpoint_unavailable', { code: 'RUNTIME_ENDPOINT_READ_FAILED' }) }
+
+  // Native transport and OS reads can outlast evidence validity. Re-read the
+  // same logical proof at database wall time immediately before admission.
+  try {
+    const final=await queryRows<EvidenceRow>(db,`SELECT id,result_status,metadata,completed_at,valid_until
+      FROM runtime_memory_ready_evidence WHERE id=$1 AND agent_id=$2 AND project=$3
+        AND runtime_instance_id=$4 AND valid_until > clock_timestamp()`,
+      [evidence.id,input.agent_id,input.project,currentRuntime.runtime_instance_id])
+    if(final.length!==1)return fail(withEvidence,'expired')
+    if(final[0].result_status!==evidence.result_status || dateMs(final[0].completed_at)!==completedMs
+      || seatContextDigest(parseObject(final[0].metadata))!==seatContextDigest(parseObject(evidence.metadata)))return fail(withEvidence,'context_consumption_missing',{code:'MEMORY_LOGICAL_PROOF_CHANGED'})
+  } catch {return fail(withEvidence,'read_error',{code:'MEMORY_FINAL_AUTHORITY_UNAVAILABLE'})}
   return pass(
     withEvidence,
     evidence.result_status === 'bypassed' ? 'bypassed' : 'ready',
@@ -933,10 +905,12 @@ export function buildWasurezuBootstrapEvidence(input: {
   evidence_path?: string | null
   evidence_log_id?: string | null
   recovery_command?: string | null
+  recovery_receipt?: SeatContextReceipt | null
 }): RuntimeMemoryReadyEvidenceInput {
   const completedAt = input.completed_at ?? new Date()
   const completedMs = dateMs(completedAt) ?? Date.now()
   const validForSeconds = input.valid_for_seconds ?? 1800
+  const consumed = validateSeatContextReceipt(input.recovery_receipt, { agentId: input.agent_id, project: input.project, runtimeInstanceId: input.runtime_instance_id })
   return {
     agent_id: input.agent_id,
     project: input.project,
@@ -949,8 +923,8 @@ export function buildWasurezuBootstrapEvidence(input: {
     checkout_path: input.checkout_path ?? null,
     checkout_commit_sha: input.checkout_commit_sha ?? null,
     recovery_command: input.recovery_command ?? 'mcp__wasurezu__recover_context',
-    result_status: 'ready',
-    failure_reason: null,
+    result_status: consumed ? 'ready' : 'failed',
+    failure_reason: consumed ? null : 'MEMORY_CONTEXT_RECOVERY_REQUIRED',
     completed_at: completedAt,
     evidence_path: input.evidence_path ?? null,
     evidence_log_id: input.evidence_log_id ?? null,
@@ -959,9 +933,58 @@ export function buildWasurezuBootstrapEvidence(input: {
       ? 'wasurezu_boot_recovery'
       : 'agent_memory_boot_recovery',
     metadata: {
+      seat_context_receipt: consumed ? input.recovery_receipt : null,
       bootstrap_without_aun_queue: true,
       live_discord_send: false,
       launchagent_mutation: false,
     },
   }
+}
+
+
+/** Record ordinary readiness only from independently validated current native
+ * input. A sealed bootstrap receipt cannot be relabelled to this MCP UUID. */
+export async function recordVerifiedNativeRuntimeMemoryReady(db: RuntimeMemoryReadyDb, input: {
+  agentId: string; project: string; runtimeInstanceId: string; receipt: SeatContextReceipt
+  now?: Date; validForSeconds?: number; observeProvider?: typeof observeSeatProvider; inspect?: HostRuntimeInspector; readNativeProof?: typeof readCurrentNativeProof
+}): Promise<{ evidence_id: string | number | null; evidence_log_id: string | null }> {
+  const now = input.now ?? new Date()
+  if (!validateSeatContextReceipt(input.receipt, input)) throw new Error('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
+  const native = input.receipt.native_delivery
+  if (!native || native.agent_id !== input.agentId || native.project !== input.project
+    || native.target_runtime !== input.receipt.target_runtime || native.input_sha256 !== input.receipt.invocation_digest
+    || native.work_sha256 !== input.receipt.work_digest || seatContextDigest(native) !== input.receipt.response_digest) {
+    throw new Error('MEMORY_NATIVE_RUNTIME_RECEIPT_MISMATCH')
+  }
+  const resolution = await resolveRuntimeMemoryReadyCurrent(db, {
+    agentId: input.agentId, requestedRuntimeKind: 'local_process', now, inspect:input.inspect,
+  })
+  const runtime = resolution.current_runtime
+  if (!resolution.ok || !runtime || runtime.runtime_instance_id !== input.runtimeInstanceId
+    || runtime.runtime_kind !== 'local_process' || !runtime.session_name || !runtime.checkout_path) {
+    throw new Error('MEMORY_NATIVE_CURRENT_RUNTIME_MISMATCH')
+  }
+  const endpoint = await resolveRuntimeEndpoint(db, {agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,now,inspect:input.inspect})
+  if (!endpoint.ok || !endpoint.endpoint || !endpoint.endpoint.processId) throw new Error(`MEMORY_NATIVE_ENDPOINT_UNAVAILABLE:${endpoint.code}`)
+  const observed = (input.observeProvider ?? observeSeatProvider)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+    processId:endpoint.endpoint.processId,sessionName:runtime.session_name,workspace:runtime.checkout_path,now})
+  const saved = parseObject(parseObject(runtime.metadata).provider_observation)
+  if (!observed || observed.verified !== true || observed.provider !== native.target_runtime
+    || observed.provider_pid !== native.provider_pid || observed.provider_started_at !== native.provider_started_at
+    || (observed.host_session_id && observed.host_session_id !== native.host_session_id)
+    || createHash('sha256').update(observed.workspace).digest('hex') !== native.workspace_sha256
+    || saved.verified !== true || saved.runtime_instance_id !== input.runtimeInstanceId || saved.agent_id !== input.agentId
+    || saved.process_id !== endpoint.endpoint.processId || saved.provider_pid !== observed.provider_pid
+    || saved.provider_started_at !== observed.provider_started_at || saved.provider !== observed.provider
+    || saved.workspace !== observed.workspace) throw new Error('MEMORY_NATIVE_CURRENT_PROVIDER_MISMATCH')
+  const recorded = await recordRuntimeMemoryReadyEvidence(db, buildWasurezuBootstrapEvidence({
+    agent_id: input.agentId, project: input.project, runtime_instance_id: input.runtimeInstanceId,
+    profile_revision: resolution.profile?.profile_revision ?? null, profile_source: resolution.profile?.profile_source ?? null,
+    session_name: runtime.session_name, port: endpoint.endpoint.port, checkout_path: runtime.checkout_path,
+    checkout_commit_sha: runtime.commit_sha, completed_at: input.receipt.completed_at,
+    valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
+  }))
+  const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
+  if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}:${String(gate.details?.code ?? 'NO_DETAIL')}`)
+  return recorded
 }

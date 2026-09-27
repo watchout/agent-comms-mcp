@@ -1,3 +1,6 @@
+import {resolveSeatProvider} from './seat-runtime-selection'
+import {resolveRuntimeEndpoint} from './runtime-endpoint'
+import {inspectHostRuntime,type HostRuntimeInspector} from './host-runtime-observer'
 import { createHash, randomUUID } from 'node:crypto'
 import type { DbAdapter } from './db'
 import { buildChannelRegistrationReconcileReport } from './channel-registration-reconcile'
@@ -180,6 +183,7 @@ export interface FullChannelSmokeReport {
 }
 
 export interface FullChannelSmokeOptions {
+  inspect?:HostRuntimeInspector
   provider?: string
   windowHours?: number
   externalChannelId?: string | null
@@ -305,7 +309,7 @@ interface AgentEvidence {
   human: boolean
 }
 
-async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvidence>> {
+async function buildAgentEvidence(db: DbAdapter,inspect?:HostRuntimeInspector): Promise<Map<string, AgentEvidence>> {
   const map = new Map<string, AgentEvidence>()
   const agents = await queryOptional<any>(
     db,
@@ -321,8 +325,7 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
     const disabled =
       row.profile_enabled === false ||
       row.profile_enabled === 0 ||
-      row.disabled_at != null ||
-      String(row.status ?? '') === 'disabled'
+      row.disabled_at != null
     const test =
       isTestAgentId(agentId) ||
       String(row.agent_type ?? '') === 'test' ||
@@ -359,14 +362,13 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
     return entry
   }
 
-  const runtimes = await queryOptional<any>(
-    db,
-    `SELECT agent_id, status, stopped_at FROM agent_runtime_instances`,
-  )
-  for (const row of runtimes) {
-    if (!row.stopped_at && LIVE_RUNTIME_STATUSES.has(String(row.status ?? ''))) {
-      ensure(String(row.agent_id)).live_runtime = true
-    }
+  for(const [agentId,entry] of map) {
+    const provider=await resolveSeatProvider(db,{agentId,inspect})
+    const host=(inspect??inspectHostRuntime)({agentId})
+    entry.live_runtime=host.reasonCode==='OBSERVED' && host.observations.length===1
+    const endpoint=provider.ok?await resolveRuntimeEndpoint(db,{agentId,runtimeInstanceId:provider.observation?.runtime_instance_id,inspect}):null
+    entry.active_lease=endpoint?.ok===true
+    entry.active_endpoint=endpoint?.ok===true
   }
 
   const workers = await queryOptional<any>(
@@ -374,25 +376,6 @@ async function buildAgentEvidence(db: DbAdapter): Promise<Map<string, AgentEvide
     `SELECT agent_id FROM worker_activity WHERE status IN ('running','idle','active')`,
   )
   for (const row of workers) ensure(String(row.agent_id)).worker_activity = true
-
-  const leases = await queryOptional<any>(
-    db,
-    `SELECT holder_agent_id, lease_purpose
-       FROM control_plane_leases
-      WHERE status = 'active'
-        AND expires_at > $1`,
-    [new Date().toISOString()],
-  )
-  for (const row of leases) {
-    const agentId = asString(row.holder_agent_id)
-    if (agentId && ACTIVE_LEASE_PURPOSES.has(String(row.lease_purpose ?? ''))) ensure(agentId).active_lease = true
-  }
-
-  const endpoints = await queryOptional<any>(
-    db,
-    `SELECT agent_id FROM agent_endpoints WHERE status = 'active' AND disabled_at IS NULL`,
-  )
-  for (const row of endpoints) ensure(String(row.agent_id)).active_endpoint = true
 
   return map
 }
@@ -1033,7 +1016,7 @@ export async function buildFullChannelSmokeReport(
   const sqlDialect = options.sqlDialect ?? defaultSqlDialect()
   const cutoff = new Date(nowMs() - windowHours * 60 * 60 * 1000).toISOString()
 
-  const agentEvidence = await buildAgentEvidence(db)
+  const agentEvidence = await buildAgentEvidence(db,options.inspect)
   const channelsWithDeliveryOwner = await buildChannelsWithDeliveryOwner(db, provider)
   const targets = await queryTargetChannels(db, provider, externalChannelId)
 

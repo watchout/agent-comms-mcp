@@ -1,0 +1,13 @@
+{
+  "reason": "run1 fixture URL syntax: WHATWG requires a hostname with username. Explicit host query remains owned Unix socket, not TCP. Initial identity evidence is retained.",
+  "env": {
+    "PATH": "/Users/yuji/.bun/bin:/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:/usr/bin:/bin",
+    "LANG": "C",
+    "TMPDIR": "/private/tmp/aun-np-db-n_mu4fk1",
+    "AUN_NP_FIXTURE_ROOT": "/private/tmp/aun-np-db-n_mu4fk1",
+    "AGENT_COM_TEST_DATABASE_URL": "postgresql://fixture@localhost/postgres?host=%2Fprivate%2Ftmp%2Faun-np-db-n_mu4fk1%2Fsocket",
+    "DATABASE_URL": "postgresql://fixture@localhost/postgres?host=%2Fprivate%2Ftmp%2Faun-np-db-n_mu4fk1%2Fsocket",
+    "AGENT_COM_DB": "postgres",
+    "AGENT_COMMS_DESTRUCTIVE_MIGRATIONS_ALLOWED": "1"
+  }
+}

@@ -1,3 +1,5 @@
+import { durableRuntimeMetadata } from './runtime-durable-data'
+import { inspectHostRuntime, sameHostRuntime, type HostRuntimeInspector } from './host-runtime-observer'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -65,6 +67,7 @@ export type RuntimeHeartbeatResult = {
   connector_rows_updated: number
   connector_rows_upserted: number
   endpoint_lease_id: string | null
+  endpoint_lease_fencing_token: number
   endpoint_lease_expires_at: string | Date | null
   endpoint_lease_heartbeat_at: string | Date | null
   memory_ready_identity: RuntimeMemoryReadyIdentityReconcileResult | null
@@ -72,6 +75,9 @@ export type RuntimeHeartbeatResult = {
 }
 
 export type RuntimeHeartbeatOptions = {
+  /** Logical authority receipt retained only by the process that acquired it. */
+  lease?: { leaseId: string; fencingToken: number }
+  inspect?: HostRuntimeInspector
   reconcileMemoryReadyIdentity?: typeof reconcileRuntimeMemoryReadyIdentity
 }
 
@@ -89,6 +95,7 @@ type RuntimeConnectorHeartbeatResult = {
 }
 
 type EndpointLeaseHeartbeatResult = {
+  fencingToken: number
   leaseId: string
   expiresAt: string | Date | null
   heartbeatAt: string | Date | null
@@ -217,7 +224,11 @@ function resolveRuntimeRegistrationMetadata(
     typeof profile?.metadata.tmux_session === 'string' ? profile.metadata.tmux_session : null,
   )
   const registeredCheckout = normalizeCheckoutPath(profile?.home_directory)
-  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process'
+  const observed = input.metadata?.provider_observation as Record<string, unknown> | undefined
+  const verifiedLocation = observed?.verified === true && observed.agent_id === input.agentId
+    && observed.runtime_instance_id === input.runtimeInstanceId && observed.workspace === ambientCheckout
+    && observed.session_name === ambientSession
+  const preferRegistered = (normalizedText(input.runtimeKind) ?? 'local_process') === 'local_process' && !verifiedLocation
   const sessionName = registrationField(registeredSession, ambientSession, preferRegistered)
   const checkoutPath = registrationField(registeredCheckout, ambientCheckout, preferRegistered)
   return {
@@ -233,145 +244,20 @@ function resolveRuntimeRegistrationMetadata(
   }
 }
 
-async function ensureWorkspaceBinding(
-  db: RuntimeHeartbeatDb,
-  input: RuntimeHeartbeatInput,
-  profileInput?: AgentWorkspaceProfile | null,
-  observedCheckoutPath?: string | null,
-): Promise<string | null> {
-  const checkoutPath = normalizeCheckoutPath(input.checkoutPath)
-  const explicitWorkspaceId = input.workspaceId?.trim() || null
-  const profile = profileInput === undefined
-    ? await selectAgentWorkspaceProfile(db, input.agentId)
-    : profileInput
-  const profileHomeDirectory = normalizeCheckoutPath(profile?.home_directory)
-  const workspacePath = profileHomeDirectory ?? checkoutPath
-  if (!workspacePath && !explicitWorkspaceId) return null
-
-  const orgId = input.orgId?.trim() || 'default'
-  const effectiveOrgId = profile?.org_id?.trim() || orgId
-  const workspaceId = explicitWorkspaceId ?? deterministicWorkspaceId(effectiveOrgId, workspacePath!)
-  const workspaceName = input.workspaceName?.trim() || inferWorkspaceName(workspacePath, input.agentId)
-  const bindingRole = input.workspaceBindingRole?.trim() || 'primary'
-
-  if (workspacePath) {
-    const workspaceMetadata = JSON.stringify({
-      source: 'runtime_heartbeat',
-      agent_id: input.agentId,
-      workspace_path_source: profileHomeDirectory ? 'agent_profile.home_directory' : 'runtime.checkout_path',
-      profile_revision: profile?.profile_revision ?? null,
-      profile_source: profile?.profile_source ?? null,
-      runtime_checkout_path: observedCheckoutPath === undefined
-        ? checkoutPath
-        : normalizeCheckoutPath(observedCheckoutPath),
-    })
-    const workspace = await db.query<{ workspace_id: string }>(
-      `INSERT INTO agent_workspaces
-         (workspace_id, org_id, name, workspace_type, local_path, metadata, updated_at)
-       VALUES
-         ($1, $2, $3, 'local_path', $4, COALESCE($5::jsonb, '{}'::jsonb), now())
-       ON CONFLICT (org_id, local_path) WHERE local_path IS NOT NULL DO UPDATE SET
-         name = EXCLUDED.name,
-         workspace_type = EXCLUDED.workspace_type,
-         updated_at = now(),
-         metadata = COALESCE(agent_workspaces.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
-       RETURNING workspace_id`,
-      [workspaceId, effectiveOrgId, workspaceName, workspacePath, workspaceMetadata],
-    )
-    const resolvedWorkspaceId = String(workspace.rows[0]?.workspace_id ?? workspaceId)
-    await db.query(
-      `INSERT INTO agent_workspace_bindings
-         (agent_id, workspace_id, binding_role, active, updated_at)
-       VALUES
-         ($1, $2, $3, true, now())
-       ON CONFLICT (agent_id, workspace_id, binding_role) DO UPDATE SET
-         active = true,
-         updated_at = now()`,
-      [input.agentId, resolvedWorkspaceId, bindingRole],
-    )
-    return resolvedWorkspaceId
-  }
-
-  return workspaceId
-}
-
-async function ensureRuntimeConnector(
-  db: RuntimeHeartbeatDb,
-  input: RuntimeHeartbeatInput,
-): Promise<RuntimeConnectorHeartbeatResult> {
-  const provider = input.connectorProvider?.trim()
-  const connectorUri = input.connectorUri?.trim()
-  if (!provider || !connectorUri) return { rowCount: 0, connectorInstanceId: null }
-
-  const capabilities = JSON.stringify({ roles: ['runtime'], source: 'runtime_heartbeat' })
-  const metadata = JSON.stringify({
-    source: 'runtime_heartbeat',
-    ...(input.connectorMetadata ?? {}),
-  })
-  const result = await db.query(
-    `INSERT INTO connector_instances
-       (agent_id, runtime_instance_id, provider, connector_kind, transport, connector_uri,
-        status, trust_status, capabilities, metadata, last_seen_at, updated_at)
-     VALUES
-       ($1, $2, $3, $4, $5, $6,
-        'active', 'local', COALESCE($7::jsonb, '{}'::jsonb), COALESCE($8::jsonb, '{}'::jsonb), now(), now())
-     ON CONFLICT (provider, connector_uri) WHERE connector_uri IS NOT NULL DO UPDATE SET
-       agent_id = EXCLUDED.agent_id,
-       runtime_instance_id = EXCLUDED.runtime_instance_id,
-       connector_kind = EXCLUDED.connector_kind,
-       transport = EXCLUDED.transport,
-       status = CASE
-         WHEN connector_instances.status = 'disabled' THEN connector_instances.status
-         ELSE 'active'
-       END,
-       trust_status = CASE
-         WHEN connector_instances.trust_status IN ('revoked', 'disabled') THEN connector_instances.trust_status
-         ELSE EXCLUDED.trust_status
-       END,
-       capabilities = COALESCE(connector_instances.capabilities, '{}'::jsonb) || COALESCE(EXCLUDED.capabilities, '{}'::jsonb),
-       metadata = COALESCE(connector_instances.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
-       last_seen_at = now(),
-       updated_at = now()
-     RETURNING connector_instance_id`,
-    [
-      input.agentId,
-      input.runtimeInstanceId,
-      provider,
-      input.connectorKind?.trim() || 'chat_adapter',
-      input.connectorTransport?.trim() || `${provider}_gateway`,
-      connectorUri,
-      capabilities,
-      metadata,
-    ],
-  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
-  return {
-    rowCount: result.rowCount ?? result.rows.length,
-    connectorInstanceId: result.rows[0]?.connector_instance_id ? String(result.rows[0].connector_instance_id) : null,
-  }
-}
-
 async function heartbeatRuntimeEndpointLease(
   db: RuntimeHeartbeatDb,
   input: RuntimeHeartbeatInput,
   holderConnectorInstanceId: string | null,
+  expectedLease?: RuntimeHeartbeatOptions['lease'],
 ): Promise<EndpointLeaseHeartbeatResult | null> {
   const ttlMs = runtimeEndpointLeaseTtlMs()
-  const now = new Date()
-  const heartbeatAt = dbTimestamp(now)
-  const expiresAt = dbTimestamp(new Date(now.getTime() + ttlMs))
-  const metadata = JSON.stringify({
-    source: 'runtime_heartbeat',
-    endpoint_uri: input.endpointUri ?? null,
-    endpoint_kind: endpointKind(input.endpointUri),
-    port: input.port ?? null,
-    process_id: input.processId ?? null,
-    session_name: input.sessionName ?? null,
-    checkout_path: input.checkoutPath ?? null,
-    commit_sha: input.commitSha ?? null,
-  })
+  const clock = await db.query('SELECT clock_timestamp() AS database_now')
+  const now = new Date(clock.rows[0]?.database_now)
+  if (!Number.isFinite(now.getTime())) throw new Error('RUNTIME_AUTHORITY_CLOCK_UNAVAILABLE')
+  const metadata = JSON.stringify(durableRuntimeMetadata())
 
   const current = await db.query(
-    `SELECT lease_id, fencing_token, expires_at
+    `SELECT lease_id, fencing_token, expires_at, acquired_at, holder_agent_id, holder_runtime_instance_id, metadata
        FROM control_plane_leases
       WHERE lease_scope_type = 'runtime_instance'
         AND lease_scope_id = $1
@@ -380,8 +266,20 @@ async function heartbeatRuntimeEndpointLease(
       ORDER BY fencing_token DESC
       LIMIT 1`,
     [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE],
-  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
+  )
   const active = current.rows[0]
+  if (expectedLease) {
+    if (!active || String(active.lease_id) !== expectedLease.leaseId
+      || Number(active.fencing_token) !== expectedLease.fencingToken) throw new Error('RUNTIME_ENDPOINT_FENCE_CHANGED')
+  } else if (active) throw new Error('RUNTIME_UUID_ALREADY_REGISTERED')
+
+  const heartbeatAt = dbTimestamp(now)
+  const expiresAt = dbTimestamp(new Date(now.getTime() + ttlMs))
+  if (active && ((active.holder_agent_id && active.holder_agent_id !== input.agentId)
+    || (active.holder_runtime_instance_id && String(active.holder_runtime_instance_id) !== input.runtimeInstanceId))) {
+    throw new Error('RUNTIME_ENDPOINT_HOLDER_MISMATCH')
+  }
+
 
   if (active && (parseDateMs(active.expires_at) ?? 0) > now.getTime()) {
     const updated = await db.query(
@@ -394,8 +292,11 @@ async function heartbeatRuntimeEndpointLease(
               metadata = COALESCE($8::jsonb, '{}'::jsonb)
         WHERE lease_id = $1
           AND fencing_token = $2
+          AND holder_agent_id = $3
+          AND holder_runtime_instance_id = $4
           AND status = 'active'
-          AND expires_at > $6
+          AND expires_at > clock_timestamp()
+          AND $7 > clock_timestamp()
         RETURNING lease_id, heartbeat_at, expires_at`,
       [
         active.lease_id,
@@ -410,7 +311,7 @@ async function heartbeatRuntimeEndpointLease(
     )
     const row = updated.rows[0]
     return row
-      ? { leaseId: String(row.lease_id), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
+      ? { leaseId: String(row.lease_id), fencingToken: Number(active.fencing_token), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
       : null
   }
 
@@ -423,9 +324,10 @@ async function heartbeatRuntimeEndpointLease(
           AND lease_scope_id = $1
           AND lease_purpose = $2
           AND status = 'active'
-          AND expires_at <= $3`,
+          AND expires_at <= clock_timestamp()`,
       [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE, heartbeatAt],
     )
+    throw new Error('RUNTIME_ENDPOINT_LEASE_EXPIRED')
   }
 
   const token = await db.query(
@@ -435,8 +337,9 @@ async function heartbeatRuntimeEndpointLease(
         AND lease_scope_id = $1
         AND lease_purpose = $2`,
     [input.runtimeInstanceId, RUNTIME_ENDPOINT_LEASE_PURPOSE],
-  ).catch(() => ({ rows: [] as any[], rowCount: 0 }))
+  )
   const fencingToken = Number(token.rows[0]?.max_token ?? 0) + 1
+  if (fencingToken > 1) throw new Error('RUNTIME_ENDPOINT_LEASE_REVOKED')
   const inserted = await db.query(
     `INSERT INTO control_plane_leases (
        lease_scope_type, lease_scope_id, lease_purpose,
@@ -462,7 +365,7 @@ async function heartbeatRuntimeEndpointLease(
   )
   const row = inserted.rows[0]
   return row
-    ? { leaseId: String(row.lease_id), expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
+    ? { leaseId: String(row.lease_id), fencingToken, expiresAt: row.expires_at ?? null, heartbeatAt: row.heartbeat_at ?? null }
     : null
 }
 
@@ -533,90 +436,65 @@ export async function heartbeatRuntimeInstance(
   input: RuntimeHeartbeatInput,
   options: RuntimeHeartbeatOptions = {},
 ): Promise<RuntimeHeartbeatResult> {
-  const profile = await selectAgentWorkspaceProfile(db, input.agentId)
-  const registration = resolveRuntimeRegistrationMetadata(input, profile)
-  const effectiveInput: RuntimeHeartbeatInput = {
-    ...input,
-    sessionName: registration.sessionName,
-    checkoutPath: registration.checkoutPath,
-    metadata: {
-      ...(input.metadata ?? {}),
-      registration_metadata_provenance: registration.provenance,
-    },
+  const inspected=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,
+    logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  const held=inspected.observations
+  if(inspected.reasonCode!=='OBSERVED' || held.length!==1 || held[0].process_id!==input.processId
+    || held[0].port!==input.port || held[0].endpoint_uri!==input.endpointUri) throw new Error('RUNTIME_CURRENT_HOLDER_UNVERIFIED')
+  const profile = await selectAgentWorkspaceProfile(db,input.agentId)
+  if(!profile) throw new Error('RUNTIME_SEAT_IDENTITY_MISSING')
+  const registration=resolveRuntimeRegistrationMetadata({...input,metadata:{provider_observation:held[0]}},profile)
+  const effectiveInput=input
+  // Existing logical workspace membership is read, never created from this host's path.
+  const binding=await db.query(`SELECT workspace_id FROM agent_workspace_bindings
+    WHERE agent_id = $1 AND active = true AND binding_role = 'primary'`,[input.agentId])
+  if(binding.rows.length>1) throw new Error('RUNTIME_WORKSPACE_BINDING_AMBIGUOUS')
+  const workspaceId=binding.rows[0]?.workspace_id ?? input.workspaceId ?? null
+  const confirm=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(confirm.reasonCode!=='OBSERVED' || confirm.observations.length!==1 || !sameHostRuntime(held[0],confirm.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
+  await db.query('BEGIN')
+  let endpointLease: EndpointLeaseHeartbeatResult | null = null
+  try {
+    const runtime=options.lease
+      ? await db.query(`SELECT runtime_instance_id,agent_id FROM agent_runtime_instances
+          WHERE runtime_instance_id=$1 AND agent_id=$2 AND runtime_kind=$3`,
+          [input.runtimeInstanceId,input.agentId,input.runtimeKind ?? 'local_process'])
+      : await db.query(`INSERT INTO agent_runtime_instances
+          (runtime_instance_id,agent_id,workspace_id,runtime_kind,runtime_engine,status,started_at,metadata)
+          VALUES ($1,$2,$3,$4,NULL,NULL,NULL,$5::jsonb)
+          ON CONFLICT (runtime_instance_id) DO NOTHING
+          RETURNING runtime_instance_id,agent_id`,
+          [input.runtimeInstanceId,input.agentId,workspaceId,input.runtimeKind ?? 'local_process',JSON.stringify(durableRuntimeMetadata(input.metadata))])
+    if(runtime.rows.length!==1) throw new Error(options.lease ? 'RUNTIME_INSTANCE_HOLDER_MISMATCH' : 'RUNTIME_UUID_ALREADY_REGISTERED')
+
+  const preLease=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(preLease.reasonCode!=='OBSERVED' || preLease.observations.length!==1 || !sameHostRuntime(held[0],preLease.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
+  endpointLease = await heartbeatRuntimeEndpointLease(db,effectiveInput,null,options.lease)
+  if(!endpointLease) throw new Error('RUNTIME_ENDPOINT_LEASE_UNCONFIRMED')
+  const preCommit=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(preCommit.reasonCode!=='OBSERVED' || preCommit.observations.length!==1 || !sameHostRuntime(held[0],preCommit.observations[0])) throw new Error('RUNTIME_CURRENT_HOLDER_CHANGED')
+  await db.query('COMMIT')
+  } catch (error) {
+    await db.query('ROLLBACK').catch(()=>{})
+    throw error
   }
-  const workspaceId = await ensureWorkspaceBinding(db, effectiveInput, profile, input.checkoutPath)
-  const metadata = JSON.stringify(effectiveInput.metadata ?? {})
-  const runtime = await db.query(
-    `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, workspace_id, runtime_engine, runtime_kind,
-        host_id, session_name, process_id, port, checkout_path, commit_sha,
-        endpoint_uri, status, started_at, stopped_at, last_seen_at, metadata)
-     VALUES
-       ($1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10, $11,
-        $12, 'running', now(), NULL, now(), COALESCE($13::jsonb, '{}'::jsonb))
-     ON CONFLICT (runtime_instance_id) DO UPDATE SET
-       agent_id = EXCLUDED.agent_id,
-       workspace_id = EXCLUDED.workspace_id,
-       runtime_engine = EXCLUDED.runtime_engine,
-       runtime_kind = EXCLUDED.runtime_kind,
-       host_id = EXCLUDED.host_id,
-       session_name = EXCLUDED.session_name,
-       process_id = EXCLUDED.process_id,
-       port = EXCLUDED.port,
-       checkout_path = EXCLUDED.checkout_path,
-       commit_sha = EXCLUDED.commit_sha,
-       endpoint_uri = EXCLUDED.endpoint_uri,
-       status = 'running',
-       stopped_at = NULL,
-       last_seen_at = now(),
-       metadata = COALESCE(agent_runtime_instances.metadata, '{}'::jsonb) || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
-     RETURNING runtime_instance_id, agent_id, status, last_seen_at`,
-    [
-      effectiveInput.runtimeInstanceId,
-      effectiveInput.agentId,
-      workspaceId,
-      effectiveInput.runtimeEngine ?? 'unknown',
-      effectiveInput.runtimeKind ?? 'local_process',
-      effectiveInput.hostId ?? hostname(),
-      effectiveInput.sessionName ?? null,
-      effectiveInput.processId ?? null,
-      effectiveInput.port ?? null,
-      effectiveInput.checkoutPath ?? null,
-      effectiveInput.commitSha ?? null,
-      effectiveInput.endpointUri ?? null,
-      metadata,
-    ],
-  )
 
-  const requestedRuntimeKind = effectiveInput.runtimeKind?.trim() || 'local_process'
-  const reconcileMemoryReadyIdentity = options.reconcileMemoryReadyIdentity ?? reconcileRuntimeMemoryReadyIdentity
-  const memoryReadyIdentity = requestedRuntimeKind === 'local_process'
-    ? await reconcileMemoryReadyIdentity(db, {
-        agentId: effectiveInput.agentId,
-        observedRuntimeInstanceId: effectiveInput.runtimeInstanceId,
-        requestedRuntimeKind,
-      })
-    : null
-
-  const connectorRowsUpserted = await ensureRuntimeConnector(db, effectiveInput)
-  const holderConnectorInstanceId = connectorRowsUpserted.connectorInstanceId
-  const endpointLease = await heartbeatRuntimeEndpointLease(db, effectiveInput, holderConnectorInstanceId)
-
-  const row = runtime.rows[0]
+  const after=(options.inspect ?? inspectHostRuntime)({agentId:input.agentId,runtimeInstanceId:input.runtimeInstanceId,logicalWorkspace:input.checkoutPath ?? undefined,expectedHost:input.hostId ?? undefined})
+  if(after.reasonCode!=='OBSERVED' || after.observations.length!==1 || !sameHostRuntime(held[0],after.observations[0])) throw new Error('RUNTIME_POST_COMMIT_HOLDER_CHANGED')
   return {
     ok: true,
-    runtime_instance_id: String(row?.runtime_instance_id ?? effectiveInput.runtimeInstanceId),
-    agent_id: String(row?.agent_id ?? effectiveInput.agentId),
+    runtime_instance_id: input.runtimeInstanceId,
+    agent_id: input.agentId,
     workspace_id: workspaceId,
-    status: String(row?.status ?? 'running'),
-    last_seen_at: row?.last_seen_at ?? null,
+    status: 'observed',
+    last_seen_at: held[0].observed_at,
     connector_rows_updated: 0,
-    connector_rows_upserted: connectorRowsUpserted.rowCount,
+    connector_rows_upserted: 0,
     endpoint_lease_id: endpointLease?.leaseId ?? null,
+    endpoint_lease_fencing_token: endpointLease!.fencingToken,
     endpoint_lease_expires_at: endpointLease?.expiresAt ?? null,
     endpoint_lease_heartbeat_at: endpointLease?.heartbeatAt ?? null,
-    memory_ready_identity: memoryReadyIdentity,
+    memory_ready_identity: null,
     registration_metadata_provenance: registration.provenance,
   }
 }

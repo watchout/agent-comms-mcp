@@ -13,4 +13,4 @@ if (!existsSync(envPath)) {
 }
 
 // Bun auto-loads .env from cwd
-await import('../server')
+await import('../entrypoints/runtime')

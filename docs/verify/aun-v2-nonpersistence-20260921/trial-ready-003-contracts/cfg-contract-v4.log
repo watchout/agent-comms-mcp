@@ -1,0 +1,25 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_configuration_contract.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_19b6520b75c140e7987aac167bf0dfff","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-1","hostname_in_candidate":0,"host_columns":0,"forbidden_host_denied":1}
+(pass) AC-CFG-1 fresh hostname stays outside candidate, logical scopes and durable records; supplied host is rejected [1376.83ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_eba7c0bb16f74d079c498e83fef63851","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-2","applies":1,"fresh_readbacks":2,"delivered":1,"observation_table_accesses":0,"stale_completions":0}
+(pass) AC-CFG-2 ordinary reconcile delivers existing outbox with logical audit and no observation sink; stale fence cannot deliver [1367.58ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_fcda986d148f47dab2f5d5c652c1bbcc","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-4","logical_insert":1,"authenticated_claim":1,"ownerless_denied":1,"rollback_mismatch_denied":1,"duplicate_execution_denied":1,"expired_denied":1,"physical_denied":4,"restarts":0}
+(pass) AC-CFG-4 logical restart insert and authenticated one-shot execution pass; physical fields, ownerless and expired execution fail [204.21ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_28570836915f46a4b62e84ddf5d3dd8d","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"AC-CFG-5","submitted":2,"durable_requests":1,"foreign_holder_denied":1,"wrong_fence_denied":1,"idempotent_migration":1}
+(pass) AC-CFG-5 duplicate logical restart requests converge; a stale holder cannot create another request [197.70ms]
+{"case":"fixture-identity","kind":"postgres","name":"np_ef7014d3617c4b7da3339307696e9987","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"restart-migration","kind":"postgres","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 postgres preserves existing request history, rejects duplicate migration and physical rewrites [197.97ms]
+{"case":"restart-migration","kind":"sqlite","history_preserved":1,"duplicate_migration_denied":1,"physical_rewrite_denied":1}
+(pass) D-CFG-1 sqlite preserves existing request history, rejects duplicate migration and physical rewrites [3.08ms]
+
+ 6 pass
+ 0 fail
+ 45 expect() calls
+Ran 6 tests across 1 file. [3.37s]

@@ -1,3 +1,5 @@
+import {unitRuntimeObservation} from '../helpers/logical-runtime-unit-fixture'
+import type {HostRuntimeInspector,HostRuntimeObservation} from '../../core/host-runtime-observer'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
@@ -31,6 +33,8 @@ const SCRATCH_BASE_URL = process.env.AGENT_COM_TEST_DATABASE_URL
 const SOURCE_COMMIT = 'a'.repeat(40)
 let scratch: PostgresTestDatabase
 let db: Client
+const observedSeats=new Map<string,HostRuntimeObservation>()
+const inspect:HostRuntimeInspector=input=>({reasonCode:observedSeats.has(input.agentId)?'OBSERVED':'NO_LIVE_RUNTIME',observations:observedSeats.has(input.agentId)?[observedSeats.get(input.agentId)!]:[]})
 
 function scratchDatabaseName(): string {
   return `n1_slo_test_${process.pid}_${randomUUID().replaceAll('-', '').slice(0, 10)}`
@@ -46,9 +50,9 @@ async function seedSeat(input: {
   const runtimeId = randomUUID()
   const leaseId = randomUUID()
   await db.query(
-    `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-     VALUES ($1, $1, 'bot', 'codex', $2)`,
-    [input.agentId, input.agentStatus ?? 'idle'],
+    `INSERT INTO agents (agent_id, display_name, agent_type)
+     VALUES ($1, $1, 'bot')`,
+    [input.agentId],
   )
   const membership = await db.query(
     `UPDATE channels
@@ -59,9 +63,9 @@ async function seedSeat(input: {
   if (membership.rowCount !== 1) throw new Error('test probe channel is missing')
   await db.query(
     `INSERT INTO agent_runtime_instances
-       (runtime_instance_id, agent_id, runtime_engine, runtime_kind, endpoint_uri, status, last_seen_at)
-     VALUES ($1, $2, 'codex', 'local_process', $3, 'running', now())`,
-    [runtimeId, input.agentId, `http://127.0.0.1/${input.agentId}`],
+       (runtime_instance_id, agent_id, runtime_kind)
+     VALUES ($1, $2, 'local_process')`,
+    [runtimeId, input.agentId],
   )
   await db.query(
     `INSERT INTO control_plane_leases
@@ -77,6 +81,8 @@ async function seedSeat(input: {
       input.expiresAt ?? '2099-01-01T00:00:00.000Z',
     ],
   )
+  if(!['offline','disabled','online'].includes(input.agentStatus ?? 'idle'))observedSeats.set(input.agentId,unitRuntimeObservation(input.agentId,{runtime_instance_id:runtimeId,process_started_at:'2026-01-01T00:00:00Z'}))
+  if(input.agentStatus==='disabled')await db.query('UPDATE agents SET profile_enabled=false WHERE agent_id=$1',[input.agentId])
   return { runtimeId, leaseId }
 }
 
@@ -117,6 +123,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
+  observedSeats.clear()
   await db.query(`TRUNCATE TABLE
     outbound_queue, message_queue, agent_messages, control_plane_leases,
     agent_runtime_instances, agents, channels RESTART IDENTITY CASCADE`)
@@ -153,7 +160,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
   test('production-equivalent schema stores every probe on the exact canonical internal channel', async () => {
     await seedSeat({ agentId: 'channel-bound-seat' })
 
-    const report = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
+    const report = await runN1Measurement(db, {inspect, sourceCommit: SOURCE_COMMIT })
     const stored = (await db.query(
       `SELECT am.channel_id, c.id AS canonical_channel_id,
               am.author_id = ANY(c.members) AS author_is_member
@@ -178,13 +185,13 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
       [N1_PROBE_CHANNEL_ID],
     )
 
-    await expect(runN1Measurement(db, { sourceCommit: SOURCE_COMMIT }))
+    await expect(runN1Measurement(db, {inspect, sourceCommit: SOURCE_COMMIT }))
       .rejects.toThrow('N1_PROBE_CHANNEL_BINDING_NOT_READY')
     expect(Number((await db.query(`SELECT count(*) FROM agent_messages`)).rows[0]!.count)).toBe(0)
     expect(Number((await db.query(`SELECT count(*) FROM message_queue`)).rows[0]!.count)).toBe(0)
   })
 
-  test('canonical active-seat query includes idle/busy with a valid runtime endpoint worker lease and excludes other statuses', async () => {
+  test('canonical active-seat query requires current observation, enabled identity and the exact worker lease', async () => {
     const idle = await seedSeat({ agentId: 'idle-seat' })
     const busy = await seedSeat({ agentId: 'busy-seat', agentStatus: 'busy' })
     await seedSeat({ agentId: 'online-seat', agentStatus: 'online' })
@@ -194,7 +201,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
     await seedSeat({ agentId: 'released-seat', leaseStatus: 'released' })
     await seedSeat({ agentId: 'presence-only-seat', purpose: 'presence' })
 
-    const seats = await listCanonicalActiveSeats(db, new Date('2026-08-20T00:00:00.000Z'))
+    const seats = await listCanonicalActiveSeats(db, new Date('2026-08-20T00:00:00.000Z'),inspect)
 
     expect(seats).toEqual([
       {
@@ -216,7 +223,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
     await seedSeat({ agentId: 'probe-seat' })
     const businessMessageId = await seedBusinessMessage('probe-seat')
 
-    const report = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
+    const report = await runN1Measurement(db, {inspect, sourceCommit: SOURCE_COMMIT })
 
     expect(report.verdict).toBe('PASS')
     expect(report.active_seat_query_version).toBe(N1_ACTIVE_SEAT_QUERY_VERSION)
@@ -259,7 +266,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
 
   test('an unclaimed probe records typed RETRY_EXHAUSTED and cleanup leaves zero nonterminal residue', async () => {
     await seedSeat({ agentId: 'silent-claim-seat' })
-    const report = await runN1Measurement(db, {
+    const report = await runN1Measurement(db, {inspect,
       sourceCommit: SOURCE_COMMIT,
       observationWindowMs: 25,
       pollIntervalMs: 5,
@@ -292,7 +299,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
 
   test('a claimed but unclosed probe records close-stage RETRY_EXHAUSTED and is terminally cleaned', async () => {
     await seedSeat({ agentId: 'silent-close-seat' })
-    const report = await runN1Measurement(db, {
+    const report = await runN1Measurement(db, {inspect,
       sourceCommit: SOURCE_COMMIT,
       observationWindowMs: 25,
       pollIntervalMs: 5,
@@ -310,7 +317,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
 
   test('machine publisher is pinned to issue #602, verifies returned body, and never calls a Discord/provider endpoint', async () => {
     await seedSeat({ agentId: 'publisher-seat' })
-    const report = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT, runId: randomUUID() })
+    const report = await runN1Measurement(db, {inspect, sourceCommit: SOURCE_COMMIT, runId: randomUUID() })
     const body = renderN1ReportComment(report)
     const calls: Array<{ url: string; method: string; body: string | null }> = []
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -376,7 +383,7 @@ describe('N1 communication SLO harness (isolated PostgreSQL scratch DB)', () => 
   })
 
   test('zero eligible seats produces an explicit NO_DATA report with zero effects', async () => {
-    const report: N1MeasurementReport = await runN1Measurement(db, { sourceCommit: SOURCE_COMMIT })
+    const report: N1MeasurementReport = await runN1Measurement(db, {inspect, sourceCommit: SOURCE_COMMIT })
     expect(report.verdict).toBe('NO_DATA')
     expect(report.summary.active_seat_count).toBe(0)
     expect(report.effects).toMatchObject({

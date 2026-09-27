@@ -1,0 +1,26 @@
+{
+  "run": 5,
+  "changed_input": "PG CASE expression parentheses; rollback must fail at division-by-zero injection not syntax; failed setup closes only its dedicated database",
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T14:02:54.893319+09:00",
+  "finished_at": "2026-09-21T14:02:56.443089+09:00",
+  "duration_seconds": 1.55,
+  "exit_code": 0,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "source_files_sha256": {
+    "db/migrate.ts": "0659c029ae23f6d740bf899b325521728d9c3d67901e13f277511837146ee9de",
+    "db/migrate-sqlite.ts": "c88460ffa7e9c2b11de46710f7eb7297fd2ed50755923724d9088ac966cd1f10",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql": "c37404f84fc8a48cdf8211a86cd10f36da3be1bede419fd4436118b24040aa64",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts": "069d988ffda1986a5600cebd081d857a6ba9fb3e8fda211acdf32818615cacb7",
+    "tests/helpers/runtime-observation-nonpersistence-db-fixture.ts": "91d211e7dca459644a23b54da4f2fdc76903c36bc072be030ede45bb13957bd9"
+  },
+  "stdout_sha256": "98c85299c5bef0a001d1a509e0ab6dc2ff826b657e72d58726c3ce4d92a605f2",
+  "stderr_sha256": "ad1dd00030fe1ca6cad0a4f37d27fc66d9a593bc68b1c418d49b78521d3ca4c9"
+}

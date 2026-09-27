@@ -79,6 +79,11 @@ export type RuntimeMemoryReadyIdentityOptions = {
   refreshSeat?: typeof refreshRuntimeMemoryReadySeat
 }
 
+export type RuntimeMemoryReadyFleetIdentityOptions = RuntimeMemoryReadyIdentityOptions & {
+  /** Narrow the eligible fleet before any per-seat effects; null/omitted keeps the fleet. */
+  agentAllowlist?: readonly string[] | null
+}
+
 async function queryRows<T>(db: RuntimeMemoryReadyDb, sql: string, params?: any[]): Promise<T[]> {
   const result = await db.query<T>(sql, params)
   return Array.isArray(result) ? result : result.rows
@@ -138,7 +143,7 @@ async function recordIdentityAudit(
     `INSERT INTO audit_log (event_type, agent_id, target, detail, org_id)
      VALUES ('runtime.memory_ready_identity', $1, $2, COALESCE($3::jsonb, '{}'::jsonb), 'default')
      RETURNING id`,
-    [input.agentId, input.target, JSON.stringify({ code: input.code, ...input.details })],
+    [input.agentId, input.target, JSON.stringify({ code: input.code })],
   ).catch(() => [])
   return inserted.length === 1
 }
@@ -367,17 +372,23 @@ export async function reconcileRuntimeMemoryReadyIdentity(
 
 export async function reconcileRuntimeMemoryReadyFleetIdentity(
   db: RuntimeMemoryReadyDb,
-  options: RuntimeMemoryReadyIdentityOptions = {},
+  options: RuntimeMemoryReadyFleetIdentityOptions = {},
 ): Promise<RuntimeMemoryReadyIdentityReconcileResult[]> {
+  const allowlist = options.agentAllowlist
+  if (allowlist?.length === 0) return []
+  const agentScope = allowlist == null
+    ? ''
+    : `AND agent_id IN (${allowlist.map((_, index) => `$${index + 1}`).join(', ')})`
   const seats = await queryRows<FleetSeatRow>(
     db,
     `SELECT agent_id
        FROM agents
-      WHERE status IN ('idle', 'busy')
-        AND COALESCE(profile_enabled, true) = true
+      WHERE COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
         AND COALESCE(agent_type, 'dev') <> 'human'
+        ${agentScope}
       ORDER BY agent_id`,
+    allowlist == null ? undefined : [...allowlist],
   )
   const results: RuntimeMemoryReadyIdentityReconcileResult[] = []
   for (const seat of seats) {
@@ -399,8 +410,7 @@ export async function queryRuntimeMemoryReadyIdentityMonitor(
     db,
     `SELECT agent_id
        FROM agents
-      WHERE status IN ('idle', 'busy')
-        AND COALESCE(profile_enabled, true) = true
+      WHERE COALESCE(profile_enabled, true) = true
         AND disabled_at IS NULL
       ORDER BY agent_id`,
   )

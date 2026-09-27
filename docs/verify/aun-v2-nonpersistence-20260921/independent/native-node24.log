@@ -1,0 +1,25 @@
+bun test v1.3.11 (af24e281)
+
+tests/seat-context-recovery.test.ts:
+(pass) seat context recovery > binds exact target last without modifying the configured transport [0.21ms]
+(pass) seat context recovery > prepares semantic context without issuing a consumption receipt [1.30ms]
+(pass) seat context recovery > requires exact host input acknowledgement and never transfers a prior runtime receipt [0.64ms]
+(pass) seat context recovery > rejects foreign seat before any host output [0.44ms]
+(pass) seat context recovery > rejects foreign project before any host output [0.07ms]
+(pass) seat context recovery > rejects foreign provider before any host output [0.02ms]
+(pass) seat context recovery > rejects project-substring recovery, missing next action and untrusted instruction promotion [0.09ms]
+(pass) seat context recovery > times out missing memory without ready or consumption [6.34ms]
+(pass) native context receipt lookup > maps stored native proof to exact fresh runtime without re-reading or writing context [0.47ms]
+(pass) native context receipt lookup > rejects unavailable, foreign, reused PID, session and attempt evidence [0.15ms]
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-z7swjt/aun.db
+(pass) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [4866.55ms]
+(pass) NP07 real native absent original cannot produce a receipt [530.14ms]
+(pass) NP07 real native pending original cannot produce a receipt [763.20ms]
+
+ 13 pass
+ 0 fail
+ 76 expect() calls
+Ran 13 tests across 2 files. [6.24s]

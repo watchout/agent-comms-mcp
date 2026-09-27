@@ -1,8 +1,21 @@
 # AUN configuration reconciliation
 
-Mutable agent configuration is owned by PostgreSQL. Provider MCP entries,
-LaunchAgent plists, launchd state, and runtime registrations are generated
-projections or observations; they must never update the desired row.
+Stable logical agent configuration is owned by PostgreSQL. Under the adopted
+[non-persistence contract](../spec/seat-runtime-continuity.md), actual provider,
+PID/start, port, workspace/home, liveness and encoded observation copies are
+request-local. Provider MCP entries, LaunchAgent plists and runtime registrations
+must not feed these physical values back into desired or observed DB records.
+
+The previous host-scoped reconciler implementation below is historical where it
+stores physical snapshots. Its `AUN_HOST_ID || hostname()` is not an established
+logical deployment ID. The host/fence binding must not silently be replaced by a
+hash, agent ID or fabricated target. Until a supported logical target binding is
+specified and implemented, current configuration persistence/restart admission is
+an explicit incomplete slice; retain existing history and reject new physical
+writes. This is not a claim that configuration convergence or compatible rollback
+has passed. Source state and tests are recorded in
+`docs/verify/aun-v2-nonpersistence-20260921/`.
+
 
 ## Authority boundary
 
@@ -15,7 +28,7 @@ bootstrap or authorize them itself:
 - secret references. Raw secret values are forbidden from desired documents,
   candidates, logs, and evidence digests.
 
-Everything else in the mutable operational profile is represented by the
+Historical pre-cutover behavior: the mutable operational profile was represented by the
 governed `agents` columns and their `desired_revision`/`desired_digest`.
 Provider CLI readback is scoped to `canonical_home`; agents sharing one host do
 not share a provider-home projection. A profile does not receive a desired
@@ -29,7 +42,7 @@ an enrolled profile cannot erase its revision or bypass the outbox.
 
 ## Reconciliation
 
-`state-daemon` owns a host-scoped `configuration-reconciler:<host_id>` lease:
+The legacy `state-daemon` implementation uses a host-scoped `configuration-reconciler:<host_id>` lease:
 
 - lease TTL: 45 seconds;
 - heartbeat target: 15 seconds;

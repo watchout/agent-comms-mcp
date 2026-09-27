@@ -185,7 +185,7 @@ describe('queue repair helpers', () => {
     })).rejects.toThrow('QUEUE_REPAIR_INCLUDE_ACTIVE_REQUIRES_QUEUE_ID')
   })
 
-  test('close obsolete can terminalize one explicit active row and refresh the agent', async () => {
+  test('close obsolete terminalizes only the selected claim without persisting agent liveness', async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = []
     const db = {
       async query(sql: string, params?: unknown[]) {
@@ -216,13 +216,13 @@ describe('queue repair helpers', () => {
     const mutation = calls.find((call) => call.sql.includes('WITH before AS'))
     expect(mutation?.sql).toContain("status IN ('pending', 'received', 'in_progress')")
     expect(mutation?.sql).toContain('claimed_by = NULL')
-    expect(mutation?.sql).toContain('refreshed_agents AS')
-    expect(mutation?.sql).toContain("WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'")
-    expect(mutation?.sql).toContain("WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'")
-    expect(mutation?.sql).toContain('ELSE a.status')
-    expect(mutation?.sql).toContain("WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'message processing'")
-    expect(mutation?.sql).toContain("WHEN NOT aas.has_active_claims AND a.status IN ('busy', 'idle') THEN NULL")
-    expect(mutation?.sql).not.toContain("WHEN aas.has_active_claims THEN 'busy'")
+    expect(mutation?.sql).toContain('UPDATE message_queue mq')
+    expect(mutation?.sql).toContain('claimed_at = NULL')
+    expect(mutation?.sql).toContain('claim_expires_at = NULL')
+    expect(mutation?.sql).toContain('WHERE mq.id = b.id')
+    expect(mutation?.sql).toContain("status = 'skipped'")
+    expect(mutation?.sql).toContain('done_at = now()')
+    expect(mutation?.sql).not.toContain("UPDATE agents")
     expect(mutation?.params).toEqual(['codex-audit', '73958', 'OBSOLETE:ceo presence broadcast'])
     const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
     expect(String(audit?.params?.[3])).toContain('"include_active":true')
@@ -246,7 +246,7 @@ describe('queue repair helpers', () => {
     expect(calls[0].sql).toContain('claim_expires_at < now()')
   })
 
-  test('reclaim expired refreshes every affected agent from the mutation CTE', async () => {
+  test('reclaim expired releases each expired claim without persisting agent liveness', async () => {
     const calls: Array<{ sql: string; params?: unknown[] }> = []
     const db = {
       async query(sql: string, params?: unknown[]) {
@@ -267,13 +267,13 @@ describe('queue repair helpers', () => {
 
     expect(report).toMatchObject({ action: 'reclaim_expired', dry_run: false })
     const mutation = calls.find((call) => call.sql.includes('WITH before AS'))?.sql ?? ''
-    expect(mutation).toContain('refreshed_agents AS')
+    expect(mutation).toContain('UPDATE message_queue mq')
     expect(mutation).toContain('b.status AS before_status')
-    expect(mutation).toContain('SELECT DISTINCT agent_id FROM reclaimed')
-    expect(mutation).toContain("WHEN aas.has_active_claims AND a.status IN ('busy', 'idle') THEN 'busy'")
-    expect(mutation).toContain("WHEN NOT aas.has_active_claims AND a.status = 'busy' THEN 'idle'")
-    expect(mutation).toContain('ELSE a.status')
-    expect(mutation).not.toContain("WHEN aas.has_active_claims THEN 'busy'")
+    expect(mutation).toContain("status = 'pending'")
+    expect(mutation).toContain('claimed_at = NULL')
+    expect(mutation).toContain('claim_expires_at = NULL')
+    expect(mutation).toContain('WHERE mq.id = b.id')
+    expect(mutation).not.toContain("UPDATE agents")
     expect(mutation).not.toContain('id = ANY')
     const audit = calls.find((call) => call.sql.includes('INSERT INTO audit_log'))
     expect(String(audit?.params?.[3])).toContain('"before_statuses":{"received":1}')

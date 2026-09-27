@@ -29,6 +29,7 @@
  */
 import { afterEach, beforeEach, describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { join } from 'node:path'
 import {
   consumeOneOutboundRow,
@@ -713,15 +714,12 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   })
 
   test('consumeOneOutboundRow selects discord_message_id in RETURNING', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    expect(fnIdx).toBeGreaterThan(-1)
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 4000)
+    const fnBody = actualConsumerDeclaration()
     expect(fnBody).toMatch(/RETURNING[^;]*discord_message_id/)
   })
 
   test('consumer short-circuits to sent when row already has discord_message_id', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    const fnBody = actualConsumerDeclaration()
     // Guard: the discord_message_id-presence check exists and routes to
     // status='sent' without re-calling sendAdapterMessage.
     expect(fnBody).toMatch(/if\s*\(\s*row\.discord_message_id\s*\)/)
@@ -729,14 +727,12 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   })
 
   test('consumer passes nonce "out-<row.id>" to sendAdapterMessage', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    const fnBody = actualConsumerDeclaration()
     expect(fnBody).toMatch(/sendAdapterMessage\(\{[\s\S]*?nonce:\s*`out-\$\{row\.id\}`/)
   })
 
   test('consumer persists discord_message_id on mark-sent', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 12000)
+    const fnBody = actualConsumerDeclaration()
     expect(fnBody).toMatch(
       /UPDATE outbound_queue SET status = 'sent'[^`]*discord_message_id\s*=\s*\$1/,
     )
@@ -764,8 +760,7 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
   })
 
   test('consumer catch-block calls isDuplicateNonceError and flips deliveryError to null', () => {
-    const fnIdx = SERVER_SRC.indexOf('async function consumeOneOutboundRow')
-    const fnBody = SERVER_SRC.slice(fnIdx, fnIdx + 8000)
+    const fnBody = actualConsumerDeclaration()
     expect(fnBody).toMatch(/isDuplicateNonceError\(err,\s*deliveryError\)/)
     expect(fnBody).toMatch(/duplicateNonceIdempotent\s*=\s*true/)
     expect(fnBody).toMatch(/deliveryError\s*=\s*null/)
@@ -784,4 +779,20 @@ describe('T5 — outbound idempotency (PR-A B)', () => {
     expect(fnBody).toMatch(/OUTBOUND_ORPHAN_TIMEOUT_SEC\s*\?\?\s*'600'/)
     expect(fnBody).toMatch(/\|\|\s*600/)
   })
+})
+
+function consumerDeclaration(source: string): string {
+  const parsed = ts.createSourceFile('outbound-consumer.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const declarations = parsed.statements.filter((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'consumeOneOutboundRow')
+  if (declarations.length !== 1 || !declarations[0].body?.statements.length) throw Error('EXACT_CONSUMER_DECLARATION_REQUIRED')
+  return source.slice(declarations[0].getStart(parsed), declarations[0].end)
+}
+const actualConsumerDeclaration = () => consumerDeclaration(readFileSync(join(REPO_ROOT, 'adapters/outbound-consumer.ts'), 'utf8'))
+test('consumer source boundaries exclude neighbours and survive padding', () => {
+  const body = 'async function consumeOneOutboundRow() { return 1; }'
+  expect(consumerDeclaration('/*' + 'x'.repeat(12000) + '*/' + body)).toBe(body)
+  expect(consumerDeclaration(body.replace('return', '/*' + 'x'.repeat(12000) + '*/ return'))).toContain('return 1')
+  expect(() => consumerDeclaration('function neighbour() { return 1 }')).toThrow('EXACT_CONSUMER_DECLARATION_REQUIRED')
+  expect(() => consumerDeclaration(body + body)).toThrow('EXACT_CONSUMER_DECLARATION_REQUIRED')
+  expect(consumerDeclaration(body + 'function neighbour(){ const x = "RETURNING discord_message_id" }')).not.toMatch(/RETURNING[^;]*discord_message_id/)
 })

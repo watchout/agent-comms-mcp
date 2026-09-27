@@ -34,6 +34,7 @@ class FakeAunRuntimeDb implements QueueWorkDb {
   async query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }> {
     this.calls.push({ sql, params })
     const compact = sql.replace(/\s+/g, ' ').trim()
+    if (compact === "SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed") return { rows: [{ installed: false }] as T[], rowCount: 1 }
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(compact)) {
       return { rows: [], rowCount: 0 }
     }
@@ -779,4 +780,10 @@ describe('runAunRuntimeV2', () => {
     expect(JSON.parse(db.rows[0].payload).runner_result).toBeUndefined()
     expect(JSON.parse(db.rows[0].payload).runner_error).toBeUndefined()
   })
+})
+
+test('fixture capability response is exact and unknown SQL still rejects', async () => {
+  const db = new FakeAunRuntimeDb([])
+  expect(await db.query("SELECT to_regprocedure('public.aun_admission_agent_status(text)') IS NOT NULL AS installed")).toEqual({rows:[{installed:false}],rowCount:1})
+  await expect(db.query('SELECT unsupported_fixture_function()')).rejects.toThrow()
 })

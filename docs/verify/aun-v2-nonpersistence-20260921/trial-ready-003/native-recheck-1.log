@@ -1,0 +1,31 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts: (run #1)
+{"case":"fixture-identity","kind":"postgres","name":"np_62ddfb134eb94e62bc3cce49ff6496c0","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4275.60ms]
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts: (run #2)
+{"case":"fixture-identity","kind":"postgres","name":"np_162203ed98a340318a71504dcaf4644b","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [3991.28ms]
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts: (run #3)
+{"case":"fixture-identity","kind":"postgres","name":"np_3047add5c9fd4835baaea4c3594151cb","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4021.71ms]
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts: (run #4)
+{"case":"fixture-identity","kind":"postgres","name":"np_715aeb1a4e9f43af9d1b9d291ad025da","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4172.61ms]
+
+tests/contract/test_runtime_nonpersist_scheduler_native.test.ts: (run #5)
+{"case":"fixture-identity","kind":"postgres","name":"np_4ee951a1d7184fefb3919e0cfd17974d","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"native-scheduler-admission","native_reads":2,"dispatched":1,"denied":3,"provider_invocations":0,"observer_calls":18}
+(pass) NP07/08 normal daemon pending path re-reads real native original on private PostgreSQL; missing original/observer/lease dispatch zero [4022.81ms]
+
+ 5 pass
+ 0 fail
+ 80 expect() calls
+Ran 5 tests across 1 file. [20.58s]

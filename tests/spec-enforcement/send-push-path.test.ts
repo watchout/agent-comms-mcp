@@ -112,10 +112,8 @@ describe('T4 — MCP next tool exists in server.ts (spec §4.1)', () => {
     // sole record of the in-flight pointer; the agents UPDATE only
     // flips status='busy'.
     expect(body).not.toMatch(/UPDATE agents SET current_message_id/)
-    expect(body).toMatch(/claimed_by\s*=\s*\$1/)
-    expect(body).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+    expect(body).toContain('claimUnboundedRuntimeQueue')
+    expect(body).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
   })
 })
 

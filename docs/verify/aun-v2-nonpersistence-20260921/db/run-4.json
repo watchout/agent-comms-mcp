@@ -1,0 +1,26 @@
+{
+  "run": 4,
+  "changed_input": "typed hash/UUID/code checks, lossless bypass array/nested target, old nested physical deletion rejection, SQLite fresh EventLog guard, config trigger/history fixtures",
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T14:02:03.896369+09:00",
+  "finished_at": "2026-09-21T14:02:05.349112+09:00",
+  "duration_seconds": 1.453,
+  "exit_code": 1,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "source_files_sha256": {
+    "db/migrate.ts": "0659c029ae23f6d740bf899b325521728d9c3d67901e13f277511837146ee9de",
+    "db/migrate-sqlite.ts": "c88460ffa7e9c2b11de46710f7eb7297fd2ed50755923724d9088ac966cd1f10",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql": "8e90995c6b6edb13b0464841e2742ce1b571b3983c6d6d69bc56bf57af2c181c",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts": "4ae9b256b73db606b3d85b33fa4f3ac4e2a0c0decb5ce2398255821c03a3e5d0",
+    "tests/helpers/runtime-observation-nonpersistence-db-fixture.ts": "17ffeca3d31a5f4e6b9e0c7bc46aa0a33bff38a5ccd9f4aa63a64497ab946106"
+  },
+  "stdout_sha256": "2be8bb883d24739252e5a1ff273ada25ada4b5bb64295e093bba70ad216c109e",
+  "stderr_sha256": "506b40448f275bec50fd445e7720b147cf59f8aa3c8aa52a3d5a6ae3ec69673d"
+}

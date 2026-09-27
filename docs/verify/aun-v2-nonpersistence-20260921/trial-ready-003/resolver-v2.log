@@ -1,0 +1,62 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-current-resolver.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-JdspAu/test.db
+120 |         current: true,
+121 |         handling: 'WARN_ONLY_CURRENT_FALLBACK',
+122 |         registration_metadata_provenance: null,
+123 |       }),
+124 |     ]))
+125 |     expect(resolution.reap_candidates.map(row => [row.runtime_instance_id, row.reason])).toEqual([
+                                                                                               ^
+error: expect(received).toEqual(expected)
+
+  [
+    [
+      "stale-profile-match",
+      "absolute",
+    ],
++   [
++     "4b3e8c4e-41c9-4430-808c-c473443f6459",
++     "superseded",
++   ],
+  ]
+
+- Expected  - 0
++ Received  + 4
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/runtime-current-resolver.test.ts:125:90)
+(fail) runtime current resolver > codex-cto sole live holder remains current and stale same-kind diagnostics cannot mutate anchors [34.18ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-in2HKI/test.db
+(pass) runtime current resolver > two live holders fail closed and revocation selects the sole remaining holder [20.74ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-UHjMwP/test.db
+(pass) runtime current resolver > a legacy profile tuple cannot break two-holder ambiguity or block a sole relocated holder [20.24ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-j8LkuT/test.db
+(pass) runtime current resolver > distinguishes no rows and stale rows while a sole live mismatch remains resolvable [19.52ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-n7c9N9/test.db
+(pass) runtime current resolver > ordinary current resolution excludes a fresher bootstrap-bound receipt [20.42ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-ntdewE/test.db
+(pass) runtime current resolver > requested kind defines an independent ordinary ranking surface [19.65ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-Ah32HC/test.db
+(pass) runtime current resolver > bootstrap-bound current resolves only the sealed selected receipt exact binding [19.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-C0QOB8/test.db
+(pass) runtime current resolver > bootstrap-bound current fails closed without an exact sealed receipt row [19.96ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-iLsuGD/test.db
+(pass) runtime current resolver > unknown group uses the frozen 30m/24h defaults [19.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/runtime-current-resolver-YZtpPL/test.db
+(pass) runtime current resolver > policy rejects unsupported or unsafe values [16.63ms]
+
+ 9 pass
+ 1 fail
+ 40 expect() calls
+Ran 10 tests across 1 file. [226.00ms]

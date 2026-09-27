@@ -1,0 +1,201 @@
+{
+  "instruction_id": "AUN-V2-NONPERSIST-DB-SPLIT-20260921",
+  "control_handoff_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755459642",
+    "sha256": "a8fe020709c5ffca697476455dc436f0cba0797649952e2d996fca912c0fef86"
+  },
+  "owner_source_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5755364993",
+    "sha256": "8414bb149e2a8b9aee4fb62b87f11d6109d5bc9bf9beb67019e282e21bcc1791"
+  },
+  "actor": "codex-cto/e3_independent_review",
+  "function": "implementation_executor",
+  "task_started_at": "2026-09-21T13:43:29.894646+09:00",
+  "deadline": "2026-09-21T14:58:29.894646+09:00",
+  "tests_finished_at": "2026-09-21T14:07:49.425813+09:00",
+  "fixture_stop": {
+    "argv": [
+      "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+      "-D",
+      "/private/tmp/aun-np-db-n_mu4fk1/pgdata",
+      "-m",
+      "smart",
+      "-w",
+      "-t",
+      "20",
+      "stop"
+    ],
+    "started_at": "2026-09-21T14:06:34.603686+09:00",
+    "finished_at": "2026-09-21T14:06:34.713712+09:00",
+    "exit_code": 0,
+    "postmaster_pid_file_exists": false,
+    "stdout_sha256": "ca19178a35ab4153b75b494963b66ce8243e1b94c173107c87b44d09db23652d",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "branch": "codex/aun-v2-nonpersist-db-20260921",
+  "source_files_sha256": {
+    "db/migrate.ts": "0659c029ae23f6d740bf899b325521728d9c3d67901e13f277511837146ee9de",
+    "db/migrate-sqlite.ts": "797c5f2d4b2bb322ed0ac27d2d19e4da89463b615db07d6d49891cb1fab6fb04",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.up.sql": "9e3d347e9e7a4a1aa858bd2f6f40a963bc65d6e9e56a059247f1291e436f5c0f",
+    "db/migrations/2026-09-21-runtime-observation-nonpersistence.down.sql": "507331e2c275b4ba85305741d03773450c637a751a02217922f7d10fc3a97139",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts": "537c0fccbd01c1cb180fc18f6edb0792ea44e6b2a352539642cff37e14736805",
+    "tests/helpers/runtime-observation-nonpersistence-db-fixture.ts": "06d28f9f5ad32ac9b8b98cdc55ad95c76cb2b667b623521068c4a83e296aac29"
+  },
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "bun": "1.3.11 (af24e281)",
+    "postgres": "17.9 (Homebrew)",
+    "other_pg_versions": "NOT_RUN",
+    "connection": "owned Unix socket only; listen_addresses empty; fixture role"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 1,
+      "pass": 0,
+      "fail": 9,
+      "skip": 0,
+      "changed_input": "initial fixture",
+      "started_at": "2026-09-21T13:55:06.994034+09:00",
+      "finished_at": "2026-09-21T13:55:07.036224+09:00",
+      "stdout_sha256": "72af121bdc4cbb1d32d4d3454fb83f73b6700b1a1e939b5ec41ab8d6819f89b2",
+      "stderr_sha256": "d6c8024f59025c02b1bdb4ccc1399ee84b5701424544020a0f95179d70394cff"
+    },
+    {
+      "run": 2,
+      "exit_code": 1,
+      "pass": 7,
+      "fail": 2,
+      "skip": 0,
+      "changed_input": "fixture URL parser correction; explicit owned Unix socket unchanged",
+      "started_at": "2026-09-21T13:55:35.991338+09:00",
+      "finished_at": "2026-09-21T13:55:37.271277+09:00",
+      "stdout_sha256": "7bdcbaab114760297da309534831afc79ffd0d334b5de54dd512e08fd7c9d6b5",
+      "stderr_sha256": "37d00755f6972c525f9f500ca343f69bff148f3d93305128b81bf27f7038ce65"
+    },
+    {
+      "run": 3,
+      "exit_code": 0,
+      "pass": 9,
+      "fail": 0,
+      "skip": 0,
+      "changed_input": "SQLite json_tree fullkey quotes underscores; generate exact canonical paths without broad quote normalization",
+      "started_at": "2026-09-21T13:56:28.441032+09:00",
+      "finished_at": "2026-09-21T13:56:29.741182+09:00",
+      "stdout_sha256": "b6bd064f2182724c42cb8bb97a455f1fd5bf194845497bb1f7ab858945f8cf9c",
+      "stderr_sha256": "eca663355bbc313114efaed51902176f24b18a530a293841a1f2c5bd89ee6a35"
+    },
+    {
+      "run": 4,
+      "exit_code": 1,
+      "pass": 5,
+      "fail": 5,
+      "skip": 0,
+      "changed_input": "typed hash/UUID/code checks, lossless bypass array/nested target, old nested physical deletion rejection, SQLite fresh EventLog guard, config trigger/history fixtures",
+      "started_at": "2026-09-21T14:02:03.896369+09:00",
+      "finished_at": "2026-09-21T14:02:05.349112+09:00",
+      "stdout_sha256": "2be8bb883d24739252e5a1ff273ada25ada4b5bb64295e093bba70ad216c109e",
+      "stderr_sha256": "506b40448f275bec50fd445e7720b147cf59f8aa3c8aa52a3d5a6ae3ec69673d"
+    },
+    {
+      "run": 5,
+      "exit_code": 0,
+      "pass": 10,
+      "fail": 0,
+      "skip": 0,
+      "changed_input": "PG CASE expression parentheses; rollback must fail at division-by-zero injection not syntax; failed setup closes only its dedicated database",
+      "started_at": "2026-09-21T14:02:54.893319+09:00",
+      "finished_at": "2026-09-21T14:02:56.443089+09:00",
+      "stdout_sha256": "98c85299c5bef0a001d1a509e0ab6dc2ff826b657e72d58726c3ce4d92a605f2",
+      "stderr_sha256": "ad1dd00030fe1ca6cad0a4f37d27fc66d9a593bc68b1c418d49b78521d3ca4c9"
+    },
+    {
+      "run": 6,
+      "exit_code": 0,
+      "pass": 10,
+      "fail": 0,
+      "skip": 0,
+      "changed_input": "SQLite UUID requires exactly32hex+4hyphens; retained explicit zero-port compatibility per adopted stable-seat spec (positive actual ports still rejected)",
+      "started_at": "2026-09-21T14:04:45.515639+09:00",
+      "finished_at": "2026-09-21T14:04:47.023822+09:00",
+      "stdout_sha256": "e14c59f6ff2500a9a6d575634024831131e339078b55dd141f3135b21fa8c97d",
+      "stderr_sha256": "b707963e8ece73f4f615ae5b1f1757965608cd552bf0e8863b467b6e24b14ed7"
+    },
+    {
+      "run": 7,
+      "exit_code": 0,
+      "pass": 10,
+      "fail": 0,
+      "skip": 0,
+      "changed_input": "Direct SQLite entrypoint moved after guard const initialization; fresh SQLite test now calls migrate-sqlite.ts directly to exercise that entrypoint. Reused owned private cluster for this changed-input check.",
+      "started_at": "2026-09-21T14:07:47.786240+09:00",
+      "finished_at": "2026-09-21T14:07:49.425813+09:00",
+      "stdout_sha256": "648636de320206596241e3124dae6624963793b4c8eeef6fdf50deecfd29cde3",
+      "stderr_sha256": "45da0ac9e99c41315ed57111046e7db50afde78509ae3cb08aecf91739200df7"
+    }
+  ],
+  "final_test_result": "10 PASS / 0 FAIL / 0 SKIP / 105 assertions",
+  "np_mapping": {
+    "NP01": "SCOPED_DB_GUARDS_TESTED: 15 negative cases per backend + strict event/typed alias/fresh guard tests. General logical metadata is not a universal arbitrary-alias detector; producer integration remains.",
+    "NP02": "SCOPED_LEGACY_ROWS_AND_SIX_RUNTIME_FKS_PRESERVED: claim/fence/expiry/history byte/JSON readbacks equal. Core old-claim replay/finalization behavior not tested here.",
+    "NP09": "PG desired trigger physical updates/nested projection refused without revision/digest/outbox change; stable policy advances exactly once. Core observer-only update path awaits integration.",
+    "NP10": "PG17_AND_SQLITE_FIXTURE_PASS: legacy and fresh schema, all seeded old rows, implicit SQLite rowids/sequences implementation, FK graph, reapply and injected-failure rollback. Not live cutover.",
+    "NP11": "INCOMPATIBLE_DOWN_REJECTED: PG down retains guard/history. Actual compatible-build runtime restoration is not performed.",
+    "NP12": "NOT_RUN: no shared DB or runtime application/real task acceptance"
+  },
+  "remaining": [
+    "Core ensure DDL, serializers, bootstrap and call-site result propagation require integration and existing impacted tests; this DB commit is not full NP acceptance.",
+    "General agents/workspace/connector metadata and non-endpoint logical leases retain free logical fields and reject known physical keys recursively. Arbitrary renamed/encoded snapshots in their free scalar fields are not independently proven absent by this DB fixture; typed producer inventory and independent review remain.",
+    "Configuration observed/restart history is preserved; new INSERT is rejected pending the host-scope contract. Existing physical-derived digest fields cannot be refreshed. No new logical host identity is invented.",
+    "If a separately versioned optional table is installed after cutover, rerun this migration before writers. Fresh EventLog is created before guard install; configuration tables are optional because their writer is explicitly unavailable in this slice.",
+    "Existing tests that seed old physical records after current migrate must use a pinned legacy fixture; do not weaken the guard to accept legacy seed writers.",
+    "PG17 only; no claim of PG16/full CI/runtime acceptance."
+  ],
+  "effects": {
+    "live_DB": 0,
+    "runtime": 0,
+    "auth": 0,
+    "queue": 0,
+    "merge": 0,
+    "manual_CI": 0,
+    "PR": 0,
+    "additional_agents": 0,
+    "product_test_runs": 7,
+    "new_private_pg_cluster": 1,
+    "private_pg_cluster_stopped": 2,
+    "private_pg_cluster_start_count": 2
+  },
+  "next_action": {
+    "owner_agent": "codex-cto/execution_guide_review; independent checker codex-cto/aun_kusabi_current",
+    "required_function": "implementation_executor then evidence_audit_gate",
+    "action": "Read fixed DB commit and integrate into the existing core branch; align ensure DDL/typed serializers and execute existing affected tests. Independent checker reviews the fixed source/evidence without accepting maker claims as audit.",
+    "handoff_method": "one #940 return plus direct actor/root message",
+    "input_refs": [
+      "5755459642",
+      "5755364993",
+      "fixed final commit and this result.json",
+      "run-7.json/source_files_sha256"
+    ],
+    "scope": "existing owner-adopted D1-D4 and parent/core handoff; no live application/new authority",
+    "deliverable": "integrated compatible source plus exact NP evidence or concrete remaining IDs",
+    "completion_evidence": "source hashes, test raw stdout/stderr, six FKs and legacy snapshot equality, independent result",
+    "blocking": false
+  },
+  "fixture_final_stop": {
+    "argv": [
+      "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+      "-D",
+      "/private/tmp/aun-np-db-n_mu4fk1/pgdata",
+      "-m",
+      "smart",
+      "-w",
+      "-t",
+      "20",
+      "stop"
+    ],
+    "exit_code": 0,
+    "finished_at": "2026-09-21T14:07:49.553988+09:00",
+    "postmaster_pid_file_exists": false
+  }
+}

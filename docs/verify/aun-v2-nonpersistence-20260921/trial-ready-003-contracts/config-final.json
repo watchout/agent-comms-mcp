@@ -1,0 +1,25 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/aun-configuration-candidate.test.ts",
+    "tests/aun-configuration-reconciler.test.ts",
+    "tests/contract/test_aun_configuration_concurrent_revision.test.ts",
+    "tests/contract/test_aun_configuration_db_outage.test.ts",
+    "tests/contract/test_aun_configuration_endpoint_rebind.test.ts",
+    "tests/contract/test_aun_configuration_notification_loss.test.ts",
+    "tests/contract/test_aun_configuration_projection_readback.test.ts",
+    "tests/contract/test_aun_configuration_restart_gate.test.ts",
+    "tests/migrations/aun-configuration-reconciliation.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "9804212b79858df9153376f5b77c39aa6392a53422e37980570642229a013ad8",
+  "source_head": "4a69acd4351f99738389882a58644800a682d176",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "started_at": "2026-09-21T12:08:49.828351+00:00",
+  "ended_at": "2026-09-21T12:08:50.400951+00:00",
+  "exit_code": 0,
+  "log_sha256": "27002bc1ab17debcbde2a7406b52d62a52c1849a57f9f73663628c0dcb9a8f55"
+}

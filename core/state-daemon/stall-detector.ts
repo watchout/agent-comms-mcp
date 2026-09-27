@@ -47,6 +47,7 @@ export interface DetectorQueueRow {
 export interface DetectorAgentRow {
   readonly agent_id: string
   readonly runtime: string | null
+  readonly observed_runtime_provider?: string | null
   readonly runtime_engine_preference?: string | null
   readonly status: string | null
   readonly tmux_session: string | null
@@ -249,7 +250,7 @@ async function l1_received_stuck(ctx: BotContext): Promise<StallVerdict | null> 
 const CODEX_RUNNER_RUNTIMES = new Set(['codex', 'codex-runner', 'CODEX', 'CODEX_RUNNER'])
 
 function effectiveRuntime(agent: DetectorAgentRow): string | null {
-  return agent.runtime_engine_preference?.trim() || agent.runtime
+  return agent.observed_runtime_provider?.trim() || null
 }
 
 function isCodexRunnerRuntime(runtime: string | null): boolean {

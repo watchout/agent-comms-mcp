@@ -16,6 +16,8 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { migrateSqlite } from '../../db/migrate-sqlite'
+import { unitRuntimeObservation } from '../helpers/logical-runtime-unit-fixture'
 import { SqliteAdapter } from '../../core/db/sqlite-adapter'
 import { toLegacy } from '../../core/db/adapter'
 import { notifySenderOfDeliveryStatus, type SenderFeedbackDb } from '../../core/sender-feedback'
@@ -164,39 +166,31 @@ describe('Behavioral FAIL B2 — MCP send per-row claim guard (Issue #278 segmen
   })
 })
 
-describe('Behavioral FAIL B1 — next derives agents.status from open-claim EXISTS (Issue #278 cycle 1)', () => {
+describe('Behavioral FAIL B1 — next keeps claim state on message_queue (Issue #278 cycle 1)', () => {
   // Cycle 1 (auditor BLOCK 1): the multi in-flight contract requires
   // agents.status to track the *set* of open claims, not just the most
   // recent transition. Both next and send/fail/skip/reclaim now write
   // the same EXISTS-derive shape.
-  test('server.ts next uses CASE WHEN EXISTS open-claim derivation', () => {
-    expect(SERVER_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+  test('server.ts next does not write derived status', () => {
+    expect(SERVER_SRC).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
   })
-  test('cli nextMessage uses CASE WHEN EXISTS open-claim derivation', () => {
-    expect(CLI_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+  test('cli nextMessage does not write derived status', () => {
+    expect(CLI_SRC).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
   })
 })
 
-describe('Behavioral FAIL B4 — send uses the same EXISTS-derive at close-time (Issue #278 cycle 1)', () => {
-  test('server.ts send uses CASE WHEN EXISTS open-claim derivation', () => {
+describe('Behavioral FAIL B4 — send closes claims without storing derived liveness (Issue #278 cycle 1)', () => {
+  test('server.ts send does not write derived status', () => {
     const sendIdx = SERVER_SRC.indexOf("if (name === 'send')")
     const quoteIdx = SERVER_SRC.indexOf("if (name === 'quote')", sendIdx)
     const handler = SERVER_SRC.slice(sendIdx, quoteIdx === -1 ? SERVER_SRC.length : quoteIdx)
-    expect(handler).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+    expect(handler).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
     // Negative pins.
     expect(handler).not.toMatch(/UPDATE agents SET current_message_id = NULL/)
     expect(handler).not.toMatch(/UPDATE agents SET status = 'idle', status_detail = NULL, status_updated_at = now\(\) WHERE agent_id = \$1/)
   })
-  test('cli sendMessage uses CASE WHEN EXISTS open-claim derivation', () => {
-    expect(CLI_SRC).toMatch(
-      /status = CASE WHEN EXISTS\(SELECT 1 FROM message_queue WHERE claimed_by = \$1 AND status = 'received'\) THEN 'busy' ELSE 'idle' END/,
-    )
+  test('cli sendMessage does not write derived status', () => {
+    expect(CLI_SRC).not.toMatch(/UPDATE agents SET status|status = CASE WHEN EXISTS/)
     expect(CLI_SRC).not.toMatch(/UPDATE agents SET current_message_id = NULL, status = 'idle'/)
   })
 })
@@ -283,29 +277,15 @@ describe('notifySenderOfDeliveryStatus — behavior', () => {
 
   beforeEach(async () => {
     dbPath = `/tmp/sender-feedback-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.db`
+    migrateSqlite(dbPath)
     db = new SqliteAdapter(dbPath)
     legacy = toLegacy(db) as SenderFeedbackDb
-    await db.execute(`
-      CREATE TABLE agents (
-        agent_id TEXT PRIMARY KEY,
-        status TEXT NOT NULL DEFAULT 'idle'
-      )
-    `)
-    await db.execute(`
-      CREATE TABLE message_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        agent_id TEXT NOT NULL,
-        message_id TEXT,
-        payload TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      )
-    `)
-    // Minimal seed: sender (idle) + targets in every relevant status.
-    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('sender-a', 'idle')`)
-    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('target-idle', 'idle')`)
-    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('target-busy', 'busy')`)
-    await db.execute(`INSERT INTO agents (agent_id, status) VALUES ('target-off', 'disconnected')`)
+    for (const id of ['sender-a','target-idle','target-busy','target-off']) {
+      await db.execute("INSERT INTO agents(agent_id,display_name,agent_type) VALUES($1,$1,'dev')",[id])
+    }
+    await db.execute(`INSERT INTO message_queue(agent_id,payload,status,claimed_by,claim_expires_at)
+      VALUES('target-busy','{}','in_progress','target-busy',$1)`,[new Date(Date.now()+60_000).toISOString()])
+
   })
 
   afterEach(async () => {
@@ -324,8 +304,10 @@ describe('notifySenderOfDeliveryStatus — behavior', () => {
   test('idle target → no feedback row (fast path)', async () => {
     const res = await notifySenderOfDeliveryStatus(legacy, {
       senderId: 'sender-a', targetId: 'target-idle', messageId: 'msg-1',
+      inspect:()=>({observations:[unitRuntimeObservation('target-idle')],reasonCode:'OBSERVED'}),
     })
     expect(res.emitted).toBe(null)
+    expect(res.reason).toBe('target-idle')
     expect(await feedbackRows('sender-a')).toHaveLength(0)
   })
 
@@ -391,9 +373,9 @@ describe('notifySenderOfDeliveryStatus — behavior', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Part C — SQL shape integration (SQLite) for B1 / B4 UPDATE bundles
 // ─────────────────────────────────────────────────────────────────────────────
-// Pin that the atomic "current_message_id + status" UPDATE statements used in
-// server.ts and cli/index.ts are dialect-safe: they run on SQLite without
-// rewrite. PG is covered by the same literal strings executed in production.
+// Historical pre-cutover SQL syntax compatibility only. Current server/CLI
+// behavior is pinned above and cannot write derived status under the NP guard.
+// This minimal historical schema does not represent the current migrated DB.
 
 describe('B1 / B4 — atomic agents UPDATE is SQL-standard', () => {
   let db: SqliteAdapter

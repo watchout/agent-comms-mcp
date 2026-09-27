@@ -1,0 +1,6 @@
+{
+  "root": "/private/tmp/aun-independent-pg-vfe9q16y",
+  "scope": "owned synthetic PostgreSQL17, Unix socket only",
+  "identity_readback": "postgres|fixture|17.9 (Homebrew)|/private/tmp/aun-independent-pg-vfe9q16y/socket|\n",
+  "native_source": "e49abc24838227776dc01be111aeb035ec7c9aad"
+}

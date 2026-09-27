@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { observedSqliteRuntimeFixture } from '../helpers/nonpersist-host-fixture'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -13,6 +14,7 @@ const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 const TEST_AGENT = 'targeted-dev'
 const OTHER_AGENT = 'other-targeted-dev'
 
+let holder: Awaited<ReturnType<typeof observedSqliteRuntimeFixture>> | undefined
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
@@ -100,7 +102,7 @@ function rowPayload(queueId: number): Record<string, unknown> {
   })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-targeted-receive-'))
   dbPath = join(tmpDir, 'test.db')
   env = {
@@ -117,17 +119,20 @@ beforeEach(() => {
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   withDb((db) => {
     db.exec(`
-      INSERT INTO agents (agent_id, display_name, agent_type, status)
-        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev', 'idle'),
-               ('${OTHER_AGENT}', '${OTHER_AGENT}', 'dev', 'idle'),
-               ('codex-cto', 'codex-cto', 'cto', 'idle');
+      INSERT INTO agents (agent_id, display_name, agent_type)
+        VALUES ('${TEST_AGENT}', '${TEST_AGENT}', 'dev'),
+               ('${OTHER_AGENT}', '${OTHER_AGENT}', 'dev'),
+               ('codex-cto', 'codex-cto', 'cto');
       INSERT INTO channels (id, name, members)
         VALUES ('targeted-ch', 'targeted-ch', '["${TEST_AGENT}","${OTHER_AGENT}","codex-cto"]');
     `)
   })
+  holder = await observedSqliteRuntimeFixture(dbPath,TEST_AGENT)
+  env.AGENT_COM_RUNTIME_INSTANCE_ID = holder.runtimeId
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await holder?.close(); holder = undefined
   rmSync(tmpDir, { recursive: true, force: true })
 })
 

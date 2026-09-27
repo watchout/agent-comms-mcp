@@ -1,0 +1,141 @@
+{
+  "head": "66c973aa4ee6bf823f783b58baae39962e6024e4",
+  "run": 35670508795,
+  "raw_counts": {
+    "pass": 3308,
+    "fail": 4,
+    "skip": 59,
+    "tests": 3371,
+    "bun_assertions": 18309,
+    "junit_assertions": 18308
+  },
+  "failures": [
+    {
+      "suite": {
+        "name": "aun bootstrap clean-host journal",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "43",
+        "tests": "18",
+        "assertions": "379",
+        "failures": "3",
+        "skipped": "0",
+        "time": "176.588",
+        "hostname": "runnervmlun5p"
+      },
+      "case": {
+        "name": "B5-INCREMENTAL-BINDING-001 preserves every release, agent, digest, expiry and transport rejection",
+        "classname": "aun bootstrap clean-host journal",
+        "time": "30.174351",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "349",
+        "assertions": "16"
+      },
+      "failures": [
+        {
+          "type": "TimeoutError",
+          "message": "test timed out",
+          "text": null
+        }
+      ],
+      "category": "aggregate scenarios exceeded 30-second case budget",
+      "correction_paths": [
+        "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+      ]
+    },
+    {
+      "suite": {
+        "name": "aun bootstrap clean-host journal",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "43",
+        "tests": "18",
+        "assertions": "379",
+        "failures": "3",
+        "skipped": "0",
+        "time": "176.588",
+        "hostname": "runnervmlun5p"
+      },
+      "case": {
+        "name": "live Codex account-root observation survives stale, absent and symlinked profile metadata",
+        "classname": "aun bootstrap clean-host journal",
+        "time": "0.434027",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "660",
+        "assertions": "1"
+      },
+      "failures": [
+        {
+          "type": "error",
+          "message": "terminating connection due to administrator command",
+          "text": "error: terminating connection due to administrator command\n      at parseErrorMessage (node_modules/pg-protocol/dist/parser.js:305:26)\n      at handlePacket (node_modules/pg-protocol/dist/parser.js:143:27)\n      at parse (node_modules/pg-protocol/dist/parser.js:37:38)\n      at emit (node:events:100:22)\n      at addChunk (internal:streams/readable:267:47)\n      at readableAddChunkPushByteMode (internal:streams/readable:245:18)\n      at data (node:net:633:72)\n"
+        }
+      ],
+      "category": "DB connection terminated immediately after preceding timeout; cascading-cleanup hypothesis checked by full-file rerun",
+      "correction_paths": [
+        "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+      ]
+    },
+    {
+      "suite": {
+        "name": "aun bootstrap clean-host journal",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "43",
+        "tests": "18",
+        "assertions": "379",
+        "failures": "3",
+        "skipped": "0",
+        "time": "176.588",
+        "hostname": "runnervmlun5p"
+      },
+      "case": {
+        "name": "ordinary native memory CLI establishes local readiness and receive without shared bootstrap effects",
+        "classname": "aun bootstrap clean-host journal",
+        "time": "30.098613",
+        "file": "tests/contract/test_aun_bootstrap_clean_host.test.ts",
+        "line": "814",
+        "assertions": "84"
+      },
+      "failures": [
+        {
+          "type": "TimeoutError",
+          "message": "test timed out",
+          "text": null
+        }
+      ],
+      "category": "aggregate scenarios exceeded 30-second case budget",
+      "correction_paths": [
+        "tests/contract/test_aun_bootstrap_clean_host.test.ts"
+      ]
+    },
+    {
+      "suite": {
+        "name": "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+        "file": "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+        "tests": "3",
+        "assertions": "14",
+        "failures": "1",
+        "skipped": "0",
+        "time": "2.656930974",
+        "hostname": "runnervmlun5p"
+      },
+      "case": {
+        "name": "AC-S0-2 expire, changed fence and actual replacement deny S0 dispatch with no history fallback",
+        "classname": "",
+        "time": "0.524962",
+        "file": "tests/contract/test_runtime_nonpersist_s0_contract.test.ts",
+        "line": "46",
+        "assertions": "1"
+      },
+      "failures": [
+        {
+          "type": "AssertionError",
+          "message": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n",
+          "text": "AssertionError: expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n\n      at tests/contract/test_runtime_nonpersist_s0_contract.test.ts:51:35\n"
+        }
+      ],
+      "category": "plain native fixture granted authority inside coarse start interval",
+      "correction_paths": [
+        "tests/contract/test_runtime_nonpersist_s0_contract.test.ts"
+      ]
+    }
+  ]
+}

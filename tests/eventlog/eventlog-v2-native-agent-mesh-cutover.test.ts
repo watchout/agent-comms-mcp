@@ -1,3 +1,5 @@
+import { unitRuntimeAuthority, unitRuntimeId, unitRuntimeObservation } from '../helpers/logical-runtime-unit-fixture'
+import { execFileSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -60,10 +62,13 @@ beforeEach(async () => {
     agent_id TEXT PRIMARY KEY, profile_revision INTEGER, runtime_engine_preference TEXT,
     metadata TEXT, profile_enabled INTEGER, disabled_at TEXT, agent_type TEXT
   )`)
+  await db.execute(`CREATE TABLE control_plane_leases(lease_id TEXT, lease_scope_type TEXT, lease_scope_id TEXT,
+    lease_purpose TEXT, holder_agent_id TEXT, holder_runtime_instance_id TEXT, fencing_token INTEGER,
+    status TEXT, acquired_at TEXT, expires_at TEXT, metadata TEXT)`)
   await db.execute(`CREATE TABLE agent_runtime_instances (
     runtime_instance_id TEXT PRIMARY KEY, agent_id TEXT, runtime_engine TEXT,
     checkout_path TEXT, commit_sha TEXT, status TEXT, stopped_at TEXT,
-    last_seen_at TEXT, started_at TEXT
+    last_seen_at TEXT, started_at TEXT, host_id TEXT, process_id INTEGER, session_name TEXT, runtime_kind TEXT, metadata TEXT
   )`)
 })
 
@@ -144,19 +149,57 @@ describe('V2-native S0 cutover and zero-effect fences', () => {
         `INSERT INTO agents VALUES ($1, 1, 'deterministic-s0', $2, 1, NULL, $3)`,
         [agentId, JSON.stringify({ profile_class: profileClass, ...classificationEvidence }), agentType],
       )
-      await db.execute(
-        `INSERT INTO agent_runtime_instances VALUES ($1, $2, 'deterministic-s0', $3, $4, 'ready', NULL, $5, $5)`,
-        [`runtime-${agentId}`, agentId, `/fixture/${agentId}`, agentId === 'alpha' ? '4'.repeat(40) : '5'.repeat(40), now],
-      )
+      const commit=agentId==='alpha'?'4'.repeat(40):'5'.repeat(40)
+      await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,commit_sha,metadata) VALUES($1,$2,$3,$4)`,
+        [`runtime-${agentId}`,agentId,commit,JSON.stringify({source_commit:commit,source_tree:'6'.repeat(40)})])
+      await db.execute(`INSERT INTO control_plane_leases VALUES($1,'runtime_instance',$2,'maintenance',$3,$2,1,'active',$4,'2099-01-01T00:00:00Z',$5)`,
+        [`lease-${agentId}`,`runtime-${agentId}`,agentId,now,JSON.stringify({native_runtime_kind:'deterministic-s0'})])
     }
-    expect(await readV2NativeFrozenEnabledSet(db, { nowMs: Date.now() })).toEqual(agents)
+    const options={nativeInspect:(input:any)=>({reasonCode:'OBSERVED' as const,observations:[{
+      ...unitRuntimeObservation(input.agentId,{workspace:`/fixture/${input.agentId}`}),
+      schema_version:'seat-native-runtime-observation/v1' as const,source:'process_socket' as const,
+      runtime_instance_id:`runtime-${input.agentId}`,
+    }]})}
+    expect(await readV2NativeFrozenEnabledSet(db,options)).toEqual(agents)
+    await db.execute("UPDATE agents SET runtime_engine_preference = 'claude-code'")
+    expect(await readV2NativeFrozenEnabledSet(db,options)).toEqual(agents)
+    await db.execute(`INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,commit_sha,metadata) VALUES('runtime-beta-duplicate','beta',$1,$2)`,
+      ['5'.repeat(40),JSON.stringify({source_commit:'5'.repeat(40),source_tree:'6'.repeat(40)})])
+    await db.execute(`INSERT INTO control_plane_leases VALUES('lease-beta-duplicate','runtime_instance','runtime-beta-duplicate','maintenance','beta','runtime-beta-duplicate',1,'active',$1,'2099-01-01T00:00:00Z',$2)`,
+      [now,JSON.stringify({native_runtime_kind:'deterministic-s0'})])
+    await expect(readV2NativeFrozenEnabledSet(db,options)).rejects.toThrow('NATIVE_AUTHORITY_AMBIGUOUS')
+  })
 
-    await db.execute(
-      `INSERT INTO agent_runtime_instances VALUES ('runtime-beta-duplicate', 'beta', 'deterministic-s0', '/fixture/beta', $1, 'ready', NULL, $2, $2)`,
-      ['5'.repeat(40), now],
-    )
-    await expect(readV2NativeFrozenEnabledSet(db, { nowMs: Date.now() }))
-      .rejects.toThrow('beta has 2 selected live runtimes')
+  test('LLM selector uses fresh provider and checkout with NULL physical anchors, never historical preference', async () => {
+    const metadata = JSON.stringify({profile_class:'production',
+      profile_class_source_ref:'https://github.com/watchout/agent-comms-mcp/issues/602#issuecomment-5186249673',
+      profile_class_source_sha256:'a'.repeat(64), profile_class_plan_sha256:'b'.repeat(64)})
+    for (const agent of agents) {
+      await db.execute("INSERT INTO agents VALUES($1,1,'claude-code',$2,1,NULL,'bot')",[agent.agent_id,metadata])
+      await db.execute("INSERT INTO agent_runtime_instances(runtime_instance_id,agent_id,runtime_kind,metadata) VALUES($1,$2,'local_process','{}')",[unitRuntimeId(agent.agent_id),agent.agent_id])
+      const authority=unitRuntimeAuthority(agent.agent_id)
+      await db.execute("INSERT INTO control_plane_leases VALUES($1,'runtime_instance',$2,'worker',$3,$2,1,'active',$4,'2099-01-01T00:00:00Z','{}')",
+        [authority.lease_id,authority.runtime_instance_id,agent.agent_id,authority.acquired_at])
+    }
+    const workspace=join(import.meta.dir,'../..')
+    const commit=execFileSync('git',['-C',workspace,'rev-parse','HEAD'],{encoding:'utf8'}).trim()
+    let mode:'valid'|'missing'|'foreign-instance'|'foreign-agent'='valid'
+    const options={inspect: (input:any) => ({reasonCode:mode==='missing'?'NO_LIVE_RUNTIME':'OBSERVED',observations:mode==='missing'?[]:[
+      unitRuntimeObservation(input.agentId,{workspace,
+        ...(mode==='foreign-instance'?{runtime_instance_id:unitRuntimeId('foreign')}:{ }),
+        ...(mode==='foreign-agent'?{agent_id:'foreign-seat'}:{ })})]})}
+    const result=await readV2NativeFrozenEnabledSet(db,options)
+    expect(result.map(row=>row.runtime_engine)).toEqual(['codex','codex'])
+    expect(result.map(row=>row.runtime_instance_id)).toEqual(agents.map(agent=>unitRuntimeId(agent.agent_id)))
+    expect(result.map(row=>row.runtime_checkout_sha)).toEqual([commit,commit])
+    expect(result.map(row=>row.runtime_checkout_root)).toEqual([workspace,workspace])
+    for (const denied of ['missing','foreign-instance','foreign-agent'] as const) {
+      mode=denied
+      await expect(readV2NativeFrozenEnabledSet(db,options)).rejects.toThrow('V2_NATIVE_FROZEN_SET_BLOCKED')
+    }
+    expect((await db.query<any>('SELECT runtime_engine,checkout_path,status,last_seen_at FROM agent_runtime_instances')))
+      .toEqual([{runtime_engine:null,checkout_path:null,status:null,last_seen_at:null},{runtime_engine:null,checkout_path:null,status:null,last_seen_at:null}])
+    expect((await db.query<any>('SELECT runtime_engine_preference FROM agents')).map(row=>row.runtime_engine_preference)).toEqual(['claude-code','claude-code'])
   })
 
   test('provider or V1 escape literals fail before the first event', async () => {

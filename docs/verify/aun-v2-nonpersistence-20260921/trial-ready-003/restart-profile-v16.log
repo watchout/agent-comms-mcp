@@ -1,0 +1,47 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_9c8f7fc9674b4a0d988d3899322ff492","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+{"case":"actual-server-lifecycle","starts":2,"stops":2,"restarts":1,"recovered_claims":1,"provider_invocations":0,"external_sends":0,"stderr":["agent-comms: bridge listening on http://127.0.0.1:50201\nagent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\nagent-comms: queue ttl sweeper started (interval=300000ms, ttl=24h)\nagent-comms: agent 'boot-52f6d5eb-3be5-4745-b2da-e98daa60c216' registered with logical identity\nagent-comms: startup self-reclaim complete (0 rows for boot-52f6d5eb-3be5-4745-b2da-e98daa60c216)\nagent-comms: self-reclaim sweeper started for boot-52f6d5eb-3be5-4745-b2da-e98daa60c216 (interval=60000ms)\nagent-comms: claim ttl sweeper started (interval=300000ms, selfAgentIds=[boot-52f6d5eb-3be5-4745-b2da-e98daa60c216])\nagent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\nagent-comms: PollingDriver started (poll=3000ms, heartbeat=30000ms)\n","agent-comms: bridge listening on http://127.0.0.1:50217\nagent-comms: pg_notify listener skipped (AGENT_COM_PG_NOTIFY=false, polling-only mode)\nagent-comms: queue ttl sweeper started (interval=300000ms, ttl=24h)\nagent-comms: agent 'boot-52f6d5eb-3be5-4745-b2da-e98daa60c216' registered with logical identity\nagent-comms: startup self-reclaim — 1 orphaned claims rolled back to 'pending' for boot-52f6d5eb-3be5-4745-b2da-e98daa60c216\nagent-comms: startup self-reclaim complete (1 rows for boot-52f6d5eb-3be5-4745-b2da-e98daa60c216)\nagent-comms: self-reclaim sweeper started for boot-52f6d5eb-3be5-4745-b2da-e98daa60c216 (interval=60000ms)\nagent-comms: claim ttl sweeper started (interval=300000ms, selfAgentIds=[boot-52f6d5eb-3be5-4745-b2da-e98daa60c216])\nagent-comms: DISCORD_BOT_TOKEN not set, Discord adapter disabled\nagent-comms: PollingDriver started (poll=3000ms, heartbeat=30000ms)\n"]}
+(pass) NP04 actual managed server starts, releases while it owns the socket, and restarts with a new incarnation without physical DB writes [4010.50ms]
+
+tests/contract/test_runtime_nonpersist_profile.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_5f379bef872c4a7e95e651e0a994dacd","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 postgres ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [764.67ms]
+15 |           AGENT_COM_SQLITE_PATH:join(process.env.AUN_NP_FIXTURE_ROOT!,f.name+'.sqlite')},stdout:'pipe',stderr:'pipe'})
+16 |       const [code,stdout,stderr]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()])
+17 |       return {code,stdout,stderr}
+18 |     }
+19 |     const registered=await run(['agent','register','fresh-profile','--display-name','Fresh profile'])
+20 |     expect(registered.code,registered.stderr+registered.stdout).toBe(0)
+                                                                     ^
+error: 73 |   }
+74 | 
+75 |   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+76 |     const p = this.prepare(sql, params)
+77 |     try {
+78 |       const statement = this.db.prepare(p.sql)
+                                     ^
+SQLiteError: near "(": syntax error
+      errno: 1,
+ byteOffset: 905,
+
+      at prepare (bun:sqlite:345:37)
+      at query (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/core/db/sqlite-adapter.ts:78:33)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:215:34)
+      at upsertBotProfile (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:1593:27)
+      at agentRegister (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/cli/index.ts:1435:23)
+
+Bun v1.3.11 (macOS arm64)
+
+
+Expected: 0
+Received: 1
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_profile.test.ts:20:65)
+(fail) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [200.86ms]
+
+ 2 pass
+ 1 fail
+ 37 expect() calls
+Ran 3 tests across 2 files. [5.08s]

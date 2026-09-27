@@ -1,0 +1,16 @@
+{
+  "control_source_ref": {
+    "url": "https://github.com/watchout/agent-comms-mcp/pull/968#issuecomment-5773161834",
+    "sha256": "d96e08ae362935bd5478466578297de5d071961dbc15d44247042bcb9c88eaf8"
+  },
+  "baseline_head": "aa91e435c5ad858185e27950f9f083e6349d2f69",
+  "files": {
+    "full-file.xml": "cfde40fb0745f3a6bb62d93ed5068a149b57213671655a0df717d9718b949f4b",
+    "preservation.json": "1ed0d8cb69a1b971b56e6d7574dd976992b016a772223e4ea368624351938193",
+    "targeted.log": "7d9229bcef19f64559eb68c499fd19c86a6c15c797564d9de80a09c8b1a44546",
+    "full-file.json": "3952d7d41bf340d515f82f9daab509649acb38879816a873d017c0827806d08c",
+    "targeted.xml": "cc92339b568424d1f14980c73cd9a7d8b19b3081e948075082eb3ab0a24cbab1",
+    "denominators.json": "fa9b2f267cca46ca5d363f1a6914730a32820815781e3c8872d507c13d75d029",
+    "full-file.log": "4c6ce8f35a6302785776bc4c4a62593f9cc8491a3fdc4a5beabc5865361a9047"
+  }
+}

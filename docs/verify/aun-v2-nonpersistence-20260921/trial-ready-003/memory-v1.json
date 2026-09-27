@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/runtime-memory-ready.test.ts",
+    "tests/runtime-current-resolver.test.ts"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "6d24139bdfe7ea19e861c02b4806d415399a33ebb15035ad1dbb942ac0066071",
+  "source_head": "4be7a6d3c49507a8fbe1ca4e5b2ec4b6dee08775",
+  "working_diff_sha256": "6505916b688493bf3ad5e74e23e9e92255f9bf1763d9229b6586bdeba7c60129",
+  "started_at": "2026-09-21T09:45:36.203316+00:00",
+  "ended_at": "2026-09-21T09:45:37.165652+00:00",
+  "exit_code": 1,
+  "log_sha256": "e725e3226a42f6500e7f34c14a4b87c65593f36439270315d633f14321e71691"
+}

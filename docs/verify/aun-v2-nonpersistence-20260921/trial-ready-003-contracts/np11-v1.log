@@ -1,0 +1,23 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_a4aef7ee4a544d74a581165288117a7f","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+30 |       : nativeRun(command,args,options)
+31 |     const ports=bootstrapInternal.createDefaultPorts({run,env,home:dir,repoRoot})
+32 |     const context={runId:`bootstrap-${randomUUID()}`,agentId:agent,requestedRuntime:'codex',resolvedRuntime:'codex',repoRoot,workspaceRoot:dir,
+33 |       repoHead,env,dryRun:false,priorState:{mutations:[],terminal_status:null}} as unknown as BootstrapStageContext
+34 |     const b3=await ports.ensureAgentProfile(context)
+35 |     expect(b3.ok,JSON.stringify(b3)).toBe(true)
+                                          ^
+error: {"ok":false,"reasonCodes":["NO_GO_PROFILE_CONFLICT"],"evidenceRefs":["profile-post-command-readback:84f6fa09facfe98a3f547c114022b09ea2820e3af32b3c74c737f316562c8d98"],"readbackDigest":"4173fe75856a510810fb673d510128063b913ff8946df7a3ab4b26dde9676dfa"}
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-trial-ready-20260921/tests/contract/test_runtime_nonpersist_server_lifecycle.test.ts:35:38)
+(fail) NP11/AC-CFG-3 compatible B3 profile → managed start → fresh READY/idempotent READY → restart and claim recovery with no physical writes [592.04ms]
+
+ 0 pass
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [701.00ms]

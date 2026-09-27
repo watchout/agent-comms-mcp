@@ -24,7 +24,7 @@ import {
   FakeTmux,
   PgDBClient,
 } from './contract/state-daemon/fakes'
-import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow } from './contract/state-daemon/seed'
+import { cleanAll, makeAgentId, openClient, seedAgent, seedQueueRow, enableNativeRuntimeFixtures } from './contract/state-daemon/seed'
 
 class PgClientAdapter implements DbAdapter {
   constructor(private readonly client: Client) {}
@@ -67,15 +67,13 @@ class FakeSmokeDb implements DbAdapter {
   constructor(agentId = '__queue_wake_smoke__') {
     this.agents.set(agentId, {
       agent_id: agentId,
-      runtime: 'TUI',
-      status: 'idle',
-      metadata: JSON.stringify({ tmux_session: `${agentId}-tmux` }),
+      agent_type: 'bot', profile_enabled: true, disabled_at: null,
       last_wake_attempt_at: null,
     })
   }
 
   async query<T = any>(sql: string, params?: any[]): Promise<T[]> {
-    if (sql.includes('FROM agents') && sql.includes('WHERE agent_id = $1') && sql.includes('runtime')) {
+    if (sql.includes('FROM agents') && sql.includes('WHERE agent_id = $1') && sql.includes('profile_enabled')) {
       const row = this.agents.get(params?.[0])
       return (row ? [row] : []) as T[]
     }
@@ -196,7 +194,8 @@ function botStatusRow(overrides: Partial<BotStatusDbRow> = {}): BotStatusDbRow {
     agent_type: 'dev',
     profile_enabled: true,
     disabled_at: null,
-    runtime: 'codex',
+    runtime: null,
+    observed_runtime_provider: 'codex',
     runtime_engine_preference: null,
     status: 'idle',
     last_seen_at: '2026-06-02T00:00:00.000Z',
@@ -566,6 +565,7 @@ describe('queue wake smoke integration evidence', () => {
 
   beforeAll(async () => {
     pg = await openClient()
+    enableNativeRuntimeFixtures(pg, new Date().toISOString())
   })
 
   afterAll(async () => {
@@ -675,7 +675,7 @@ describe('queue wake smoke integration evidence', () => {
       // active_claim_count / queue_wake_state / latest_wake_progress_at were
       // removed with the wake-state classifier (NORM-022 endpoint lease read
       // model); pending visibility is the remaining DB-truth contract here.
-      expect(row.health_state).toBe('healthy')
+      expect(row.health_state).toBe('unknown')
     } finally {
       await daemon.stop()
     }
@@ -685,7 +685,7 @@ describe('queue wake smoke integration evidence', () => {
     const agent = makeAgentId('busy-growth')
     const now = new Date()
     await seedAgent(pg, {
-      agent_id: agent,
+      agent_id: agent, observed_provider: 'codex',
       runtime: 'TUI',
       status: 'busy',
       last_seen_at: now,

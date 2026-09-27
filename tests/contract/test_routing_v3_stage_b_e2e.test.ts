@@ -143,22 +143,15 @@ dbDescribe('Issue #278 Stage B — SQL-level integration', () => {
   async function statusOf(agentId: string): Promise<{ status: string; status_detail: string | null }> {
     // Bootstrap the agent row if absent so the UPDATE below has a target.
     await client.query(
-      `INSERT INTO agents (agent_id, display_name, agent_type, runtime, status)
-       VALUES ($1, $1, 'dev', 'mcp', 'idle') ON CONFLICT DO NOTHING`,
+      `INSERT INTO agents (agent_id, display_name, agent_type)
+       VALUES ($1, $1, 'dev') ON CONFLICT DO NOTHING`,
       [agentId],
     )
-    await client.query(
-      `UPDATE agents SET
-         status = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'busy' ELSE 'idle' END,
-         status_detail = CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by = $1 AND status = 'read') THEN 'メッセージ処理中' ELSE NULL END,
-         status_updated_at = now()
-       WHERE agent_id = $1`,
-      [agentId],
-    )
-    const r = await client.query<{ status: string; status_detail: string | null }>(
-      `SELECT status, status_detail FROM agents WHERE agent_id = $1`,
-      [agentId],
-    )
+    // v2 derives legacy claim-display state without writing a physical status.
+    const r = await client.query<{status:string;status_detail:string|null}>(
+      `SELECT CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by=$1 AND status='read') THEN 'busy' ELSE 'idle' END AS status,
+       CASE WHEN EXISTS(SELECT 1 FROM message_queue WHERE claimed_by=$1 AND status='read') THEN 'メッセージ処理中' ELSE NULL END AS status_detail`, [agentId])
+    expect((await client.query('SELECT status,status_detail FROM agents WHERE agent_id=$1',[agentId])).rows[0]).toEqual({status:null,status_detail:null})
     return r.rows[0]
   }
 

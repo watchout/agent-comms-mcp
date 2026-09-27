@@ -1,0 +1,588 @@
+bun test v1.3.11 (af24e281)
+
+tests/runtime-memory-ready.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-xlMvhu/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:118:11)
+(fail) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [26.90ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-vsboxb/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:133:11)
+(fail) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [19.64ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-5mpTkG/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:149:11)
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [19.35ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-AAQyrf/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:192:11)
+(fail) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [18.29ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-IPF8YL/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:225:13)
+(fail) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [18.08ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-IvlhUY/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:240:11)
+(fail) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [18.45ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-I1S8tB/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:254:11)
+(fail) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [18.32ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-UK1tUa/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:263:11)
+(fail) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [17.80ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-5Fxx4m/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:279:11)
+(fail) runtime memory-ready evidence gate > gate follows the common freshest exact-profile resolver instead of evidence-bound precedence [17.46ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-VQrlwC/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:340:11)
+(fail) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [17.32ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-DhZCkO/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:369:11)
+(fail) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [18.61ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-C5Aup1/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:433:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [17.48ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-yv1G4r/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:433:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [18.20ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-77SVBz/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:433:13)
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [17.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-N3cYyM/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:460:11)
+(fail) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [16.76ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-b9KsFv/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:480:11)
+(fail) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [17.46ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-clZLHi/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:504:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [16.95ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-0d8QdE/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:529:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [18.68ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-zLxMyK/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:551:11)
+(fail) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [19.21ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-430eeH/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #runNoArgs (bun:sqlite:138:25)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:578:14)
+(fail) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [18.50ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-LcMPGj/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:601:11)
+(fail) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [18.60ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-9JjW7O/test.db
+(pass) runtime memory-ready evidence gate > Wasurezu bootstrap evidence is queue-independent metadata [18.65ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-RW9vG5/test.db
+(pass) runtime memory-ready evidence gate > SQLite dry-run never creates a missing database or journal [18.43ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-XSTPZC/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:668:11)
+(fail) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [17.59ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-34fmfd/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:693:11)
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [17.55ms]
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/memory-ready-UM1iou/test.db
+ 97 |   async execute(sql: string, params?: any[]): Promise<{ rowCount: number }> {
+ 98 |     const p = this.prepare(sql, params)
+ 99 |     try {
+100 |       const statement = this.db.prepare(p.sql)
+101 |       try {
+102 |         const result = statement.run(...p.params)
+                                       ^
+SQLiteError: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN
+      errno: 1811,
+ byteOffset: -1,
+       code: "SQLITE_CONSTRAINT_TRIGGER"
+
+      at #run (bun:sqlite:185:20)
+      at execute (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/db/sqlite-adapter.ts:102:34)
+      at seedRuntime (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:49:12)
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/tests/runtime-memory-ready.test.ts:713:11)
+(fail) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [18.07ms]
+
+tests/seat-context-recovery.test.ts:
+(pass) seat context recovery > binds exact target last without modifying the configured transport [0.11ms]
+(pass) seat context recovery > prepares semantic context without issuing a consumption receipt [0.82ms]
+(pass) seat context recovery > requires exact host input acknowledgement and never transfers a prior runtime receipt [0.48ms]
+(pass) seat context recovery > rejects foreign seat before any host output [0.08ms]
+(pass) seat context recovery > rejects foreign project before any host output [0.03ms]
+(pass) seat context recovery > rejects foreign provider before any host output [0.01ms]
+(pass) seat context recovery > rejects project-substring recovery, missing next action and untrusted instruction promotion [0.06ms]
+(pass) seat context recovery > times out missing memory without ready or consumption [6.31ms]
+(pass) native context receipt lookup > maps stored native proof to exact fresh runtime without re-reading or writing context [0.53ms]
+(pass) native context receipt lookup > rejects unavailable, foreign, reused PID, session and attempt evidence [0.16ms]
+
+tests/aun-configuration-desired-state.test.ts:
+(pass) AUN configuration desired-state canonical contract > is byte deterministic and excludes mutable observation metadata [0.39ms]
+(pass) AUN configuration desired-state canonical contract > runtime-only provider, port and path changes leave the stable desired digest unchanged [0.10ms]
+(pass) AUN configuration desired-state canonical contract > rejects raw secret material while allowing secret references [0.09ms]
+(pass) AUN configuration desired-state canonical contract > normalizes a DB row and proves stored digest byte-for-byte [0.18ms]
+
+tests/contract/test_aun_configuration_restart_gate.test.ts:
+(pass) AUN configuration reconciler > applies one unprotected candidate and requires exact native readback before READY [1.19ms]
+(pass) AUN configuration reconciler > an equal second run performs zero mutations and still fresh-readbacks [0.15ms]
+(pass) AUN configuration reconciler > discards a stale candidate before any apply [0.18ms]
+(pass) AUN configuration reconciler > lease loss inside a successful adapter call rejects the effect before commit [0.17ms]
+(pass) AUN configuration reconciler > lease loss inside a partial adapter call cannot commit or invoke stale rollback [0.28ms]
+(pass) AUN configuration reconciler > never closes an outbox event when the stale observed receipt is fence-rejected [0.18ms]
+(pass) AUN configuration reconciler > a failed candidate render stays undelivered and does not reject the sweep [0.42ms]
+(pass) AUN configuration reconciler > partial apply and rollback failure fail closed with no automatic retry [0.37ms]
+(pass) AUN configuration reconciler > coalesces concurrent same-key work into one apply [0.23ms]
+(pass) AUN configuration reconciler > heartbeats an in-flight reconciliation at the sealed 15-second target [0.27ms]
+(pass) restart-required reconciliation emits approval request and performs zero restart [0.17ms]
+(pass) revision drift during native readback creates no restart request [0.19ms]
+(pass) a durable exact CTO claim permits one fake restart and exact terminal readback [0.40ms]
+(pass) rejected, expired, superseded, or drifted durable restart claims perform zero effects [0.20ms]
+(pass) an ineligible exact maintenance-lease holder cannot claim or restart [0.09ms]
+(pass) lease loss after durable claim records failure and performs zero restart [0.16ms]
+(pass) terminal ACK loss cannot claim or restart the same request twice [0.17ms]
+
+tests/contract/test_aun_configuration_runtime_diagnostics.test.ts:
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.runtime
+     length: 192,
+   severity: "ERROR",
+     detail: undefined,
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: "PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE",
+     schema: undefined,
+      table: undefined,
+   dataType: undefined,
+ constraint: undefined,
+       file: "pl_exec.c",
+    routine: "exec_stmt_raise",
+       code: "P0001"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) stable seat desired document PostgreSQL compatibility > new enrollment accepts unset/zero diagnostics and SQL/TS stable digest parity [251.84ms]
+626 |         result = new this._Promise((resolve, reject) => {
+627 |           query.callback = (err, res) => (err ? reject(err) : resolve(res))
+628 |         }).catch((err) => {
+629 |           // replace the stack trace that leads to `TCP.onStreamRead` with one that leads back to the
+630 |           // application that created the query
+631 |           Error.captureStackTrace(err)
+                      ^
+error: AUN_RUNTIME_OBSERVATION_PERSISTENCE_FORBIDDEN:agents.runtime
+     length: 192,
+   severity: "ERROR",
+     detail: undefined,
+       hint: undefined,
+   position: undefined,
+ internalPosition: undefined,
+ internalQuery: undefined,
+      where: "PL/pgSQL function aun_guard_runtime_nonpersistence() line 8 at RAISE",
+     schema: undefined,
+      table: undefined,
+   dataType: undefined,
+ constraint: undefined,
+       file: "pl_exec.c",
+    routine: "exec_stmt_raise",
+       code: "P0001"
+
+      at <anonymous> (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/node_modules/pg/lib/client.js:631:17)
+(fail) stable seat desired document PostgreSQL compatibility > populated legacy transition is once-only and preserves runtime, identity, queues and history [193.01ms]
+
+26 tests failed:
+(fail) runtime memory-ready evidence gate > requires consumed context for this runtime and a live endpoint lease [26.90ms]
+(fail) runtime memory-ready evidence gate > native input evidence remains bound to the observed provider process and start [19.64ms]
+(fail) runtime memory-ready evidence gate > ordinary native readiness independently binds the actual MCP UUID and ignores only known other-kind evidence [19.35ms]
+(fail) runtime memory-ready evidence gate > explicit logical project resolution admits only current exact-runtime evidence [18.29ms]
+(fail) runtime memory-ready evidence gate > missing logical project never derives a namespace from relative, absent, canonical or multiple workspace paths [18.08ms]
+(fail) runtime memory-ready evidence gate > explicit per-agent memory project override is deterministic without a workspace fallback [18.45ms]
+(fail) runtime memory-ready evidence gate > logical project remains stable across host-local path replacement without rewriting the project [18.32ms]
+(fail) runtime memory-ready evidence gate > valid current-runtime-bound evidence passes [17.80ms]
+(fail) runtime memory-ready evidence gate > gate follows the common freshest exact-profile resolver instead of evidence-bound precedence [17.46ms]
+(fail) runtime memory-ready evidence gate > latest exact-project evidence never falls back when its runtime is inactive [17.32ms]
+(fail) runtime memory-ready evidence gate > equal evidence timestamps select the highest id without runtime fallback [18.61ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed session replacement without profile edits [17.48ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed port replacement without profile edits [18.20ms]
+(fail) runtime memory-ready evidence gate > current receipt and lease permit observed checkout replacement without profile edits [17.50ms]
+(fail) runtime memory-ready evidence gate > legacy provider preference mismatch does not override current recovery and lease [16.76ms]
+(fail) runtime memory-ready evidence gate > missing, stale, and mismatched evidence fail closed [17.46ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence without audited metadata fails closed [16.95ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence passes only with bounded audited metadata [18.68ms]
+(fail) runtime memory-ready evidence gate > bypassed evidence with mismatched queue scope fails closed [19.21ms]
+(fail) runtime memory-ready evidence gate > wrong identity on occupied expected port fails readiness [18.50ms]
+(fail) runtime memory-ready evidence gate > newer same-agent B5 runtime cannot shadow an older wrong-agent port occupant [18.60ms]
+(fail) runtime memory-ready evidence gate > SQLite dry-run refuses WAL before touching existing database or shared-memory bytes [17.59ms]
+(fail) runtime memory-ready evidence gate > SQLite dry-run reads a clean rollback-journal database without file or journal changes [17.55ms]
+(fail) runtime memory-ready evidence gate > transport-free bootstrap cannot claim context consumption [18.07ms]
+(fail) stable seat desired document PostgreSQL compatibility > new enrollment accepts unset/zero diagnostics and SQL/TS stable digest parity [251.84ms]
+(fail) stable seat desired document PostgreSQL compatibility > populated legacy transition is once-only and preserves runtime, identity, queues and history [193.01ms]
+
+ 33 pass
+ 26 fail
+ 130 expect() calls
+Ran 59 tests across 5 files. [1031.00ms]

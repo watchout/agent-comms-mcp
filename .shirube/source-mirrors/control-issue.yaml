@@ -1,23 +1,104 @@
+---
 schema_version: shirube-source-mirror/v1
-source_type: github_issue
-source_ref: watchout/agent-comms-mcp#802
+source_type: github_issue_comment
+source_ref: watchout/agent-comms-mcp#940
 source_repo: watchout/agent-comms-mcp
-issue_number: 802
-source_url: https://github.com/watchout/agent-comms-mcp/issues/802
+issue_number: 940
+source_url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
 target_repo: watchout/agent-comms-mcp
 product: AgentCommsMcp
 framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
-fetched_at: 2026-06-25T02:00:01Z
-sha256: 10cfe97d8a720a66e6f0bdfc60b91a87674584f886c54b18a8de5412c6538c65
+fetched_at: '2026-09-17T12:08:25.888274+00:00'
+sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
 mirror_is_truth: false
-generated_by: codex-agent-comms
+generated_by: codex-cto/recovery_path_author
 source_authority:
   type: github_issue_or_comment
   remains_authority: true
   mirror_role: machine_readable_snapshot
 extracted_fields:
+  owner_goal_verbatim: 全体の開発高速チームの構築を成立させる
+  source_status: authenticated_published_owner_graph_direction
+  scope: Bounded design and implementation only, never live authority
+  cell_graph_amendment:
+    control_source: watchout/agent-comms-mcp#940
+    cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+    cell_goal: Supply tested AUN common admission/retry controls and existing Shirube
+      acceptance inputs needed to make unchanged USE01..09 reachable.
+    risk_class: R4
+    phases:
+    - id: D
+      function: control_artifact_author
+      deliverable: one narrow DesignPack/v2 delta + exact implementation supply
+      allowed_now: true
+    - id: DG
+      function: evidence_audit_gate
+      deliverable: independent exact design gate
+      allowed_now: true
+    - id: I
+      function: implementation_executor
+      deliverable: exact scoped code/docs/tests candidate
+      condition: DG PASS and explicit implementation handoff
+    - id: IG
+      function: evidence_audit_gate
+      deliverable: independent code/test acceptance and exact-head application proposal
+      condition: candidate supplied
+    - id: LIVE
+      function: runtime_recovery_executor
+      deliverable: applied real use under all9 frozen predicates
+      allowed_now: false
+      condition: later exact-head merge/application authority and operational admission
+    generation_disposition: Owner has ruled on the gen2 scope escalation by approving
+      narrow capability correction. Author/gate limit2 applies to this new correction
+      design. Prior operational gen2 remains NO-GO; no unchanged gen3 resubmission.
+    no_new_root_goal: true
+  design_admission_ref:
+    url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+    sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+  current_scope_amendments:
+  - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+    sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+  - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+    sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
+  - url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+    sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4
+  owner_exact_head_decision: PENDING_NOT_REQUESTED
+historical_adoption_snapshot:
+  schema_version: shirube-source-mirror/v1
+  source_type: github_issue
+  source_ref: watchout/agent-comms-mcp#802
+  source_repo: watchout/agent-comms-mcp
+  issue_number: 802
+  source_url: https://github.com/watchout/agent-comms-mcp/issues/802
   target_repo: watchout/agent-comms-mcp
   product: AgentCommsMcp
-  owner_confirmation: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
-  owner_confirmation_raw_body_sha256: 4384a62af0cc035cfff30d01c8f09aff658d4e90152bbc5b7b915830bb03dc8a
-  control_source_status: snapshot
+  framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
+  fetched_at: 2026-06-25 02:00:01 UTC
+  sha256: 10cfe97d8a720a66e6f0bdfc60b91a87674584f886c54b18a8de5412c6538c65
+  mirror_is_truth: false
+  generated_by: codex-agent-comms
+  source_authority:
+    type: github_issue_or_comment
+    remains_authority: true
+    mirror_role: machine_readable_snapshot
+  extracted_fields:
+    target_repo: watchout/agent-comms-mcp
+    product: AgentCommsMcp
+    owner_confirmation: https://github.com/watchout/agent-comms-mcp/pull/805#issuecomment-4776374018
+    owner_confirmation_raw_body_sha256: 4384a62af0cc035cfff30d01c8f09aff658d4e90152bbc5b7b915830bb03dc8a
+    control_source_status: snapshot
+authenticated_refs:
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5576498516
+  sha256: a3d16ddcb8fd872cade9f971f337ede6f3cf85a23fec621492be916438978ff1
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600533790
+  sha256: f82e3a215f0341cc0e012609dd761a4bfdc7bfd67673d026f6fd9a872f9d035d
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5600600067
+  sha256: a73638ab595370177bca7f08b7898dc2c11dbcaa3a0172d31481dc45093c76bf
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5609700544
+  sha256: 59952776f1cfb5093040cb9318641f54721ef4f0f416ee278d1e426e980aef02
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713693956
+  sha256: eb8bd44526c94bdb7c8158ed23d48d087ce0e41d3907dc92131031cc715beed8
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713769510
+  sha256: 7ff80f50c1d9958c951f6312bc11a6896a699448f20af0656ed9ea12fba715be
+- url: https://github.com/watchout/agent-comms-mcp/issues/940#issuecomment-5713927431
+  sha256: 2a46980a2a0781eb7e5adc5a159389d33c7ce928aa9e1e527bf620932e2f0af4

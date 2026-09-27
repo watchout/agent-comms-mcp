@@ -1,0 +1,16 @@
+{
+  "argv": [
+    "/opt/homebrew/opt/postgresql@17/bin/pg_ctl",
+    "-D",
+    "/private/tmp/aun-np-db-n_mu4fk1/pgdata",
+    "-m",
+    "smart",
+    "-w",
+    "-t",
+    "20",
+    "stop"
+  ],
+  "exit_code": 0,
+  "finished_at": "2026-09-21T14:07:49.553988+09:00",
+  "postmaster_pid_file_exists": false
+}

@@ -1,0 +1,20 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_native.test.ts:
+[migrate] destructive migrations: BLOCKED (default, dev-bot safe)
+SQLite migration complete: /private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-N7ZUks/aun.db
+NATIVE_TIME_DIAGNOSTIC {"originalCompleted":"2026-09-21T05:25:06.852Z","now":"2026-09-21T05:25:07.790Z","gate":{"gate":"memory_ready","agent_id":"np-native-7dabbc0d-4f81-42ee-8508-e73fd2cbd435","project":"np-native-project","checked_at":"2026-09-21T05:25:07.448Z","runtime_instance_id":"527a15d8-a530-42b6-a421-b3f8daa292ae","evidence_id":1,"evidence_path":null,"evidence_log_id":null,"source":"agent_memory_boot_recovery","valid_until":"2026-09-21T05:55:06.852Z","current_runtime":{"agent_id":"np-native-7dabbc0d-4f81-42ee-8508-e73fd2cbd435","runtime_instance_id":"527a15d8-a530-42b6-a421-b3f8daa292ae","profile_revision":1,"profile_source":"legacy","session_name":"np-session-e885a65e-7a7f-48f8-99d7-b2545b9a1be6","port":62110,"checkout_path":"/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-N7ZUks","commit_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","started_at":"2026-09-21T05:25:05.000Z","status":"active"},"details":{"policy":{"schema_version":"runtime-memory-ready-policy/v1","path":"/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/config/runtime-memory-ready-policy.json","sha256":"1ca1aeb676b28c62824ecd416516ca99869cf6ede910de7400e2d8eb7839a79b"},"resolver_code":"RESOLVED","missing_profile_fields":[],"bootstrap_receipt_bound":false,"active_runtime_rows":1,"live_runtime_rows":1,"live_profile_matches":0,"live_profile_mismatches":1,"current_candidate_count":1,"current_resolution_source":"observed_runtime","candidate_absence_reason":null,"candidate_exclusions_total":0,"live_candidate_exclusions":[],"profile_mismatch_observations":[{"code":"REGISTRATION_PROFILE_MISMATCH","runtime_instance_id":"527a15d8-a530-42b6-a421-b3f8daa292ae","live":true,"current":true,"mismatches":[{"field":"runtime_engine","expected":null,"observed":"codex"},{"field":"session_name","expected":null,"observed":"np-session-e885a65e-7a7f-48f8-99d7-b2545b9a1be6"},{"field":"checkout_path","expected":null,"observed":"/private/var/folders/h5/mpl2kfxj2qxbx4984qvywgd80000gn/T/aun-np-native-N7ZUks"}],"registration_metadata_provenance":null,"handling":"WARN_ONLY_CURRENT_FALLBACK"}],"profile_mismatch_handling":"WARN_ONLY_NO_QUARANTINE","code":"MEMORY_CONTEXT_RECEIPT_TIME_MISMATCH"},"ok":false,"reason":"stale_runtime_restore"}}
+957 |     session_name: runtime.session_name, port: endpoint.endpoint.port, checkout_path: runtime.checkout_path,
+958 |     checkout_commit_sha: runtime.commit_sha, completed_at: input.receipt.completed_at,
+959 |     valid_for_seconds: input.validForSeconds, recovery_command: 'mcp:tools/call:native_context_delivery', recovery_receipt: input.receipt,
+960 |   }))
+961 |   const gate = await evaluateRuntimeMemoryReadyGate(db, {agent_id:input.agentId,project:input.project,now,requested_runtime_kind:'local_process',inspect:input.inspect,readNativeProof:input.readNativeProof})
+962 |   if (!gate.ok) throw new Error(`MEMORY_NATIVE_ORDINARY_GATE_FAILED:${gate.reason}`)
+                                ^
+error: MEMORY_NATIVE_ORDINARY_GATE_FAILED:stale_runtime_restore
+      at recordVerifiedNativeRuntimeMemoryReady (/Users/yuji/Developer/.worktrees/agent-comms-aun-v2-nonpersist-design-20260921/core/runtime-memory-ready.ts:962:27)
+(fail) NP07 actual native pipe original is re-read; AUN persists logical proof only and stale/copied proof never admits [2399.67ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [2.48s]

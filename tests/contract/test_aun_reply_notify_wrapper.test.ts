@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { observedSqliteRuntimeFixture } from '../helpers/nonpersist-host-fixture'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -12,6 +13,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const AUN = join(REPO_ROOT, 'bin', 'aun.ts')
 const MIGRATE = join(REPO_ROOT, 'db', 'migrate.ts')
 
+let holder: Awaited<ReturnType<typeof observedSqliteRuntimeFixture>> | undefined
 let tmpDir: string
 let dbPath: string
 let env: Record<string, string>
@@ -55,7 +57,7 @@ function seedPending(content = 'review request'): { messageId: string; queueId: 
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), 'aun-reply-notify-'))
   dbPath = join(tmpDir, 'test.db')
   env = {
@@ -68,18 +70,21 @@ beforeEach(() => {
   const migrated = spawnSync('bun', [MIGRATE], { cwd: REPO_ROOT, env, encoding: 'utf-8' })
   if (migrated.status !== 0) throw new Error(`migrate failed: ${migrated.stderr}`)
   dbExec(`
-    INSERT INTO agents (agent_id, display_name, agent_type, status)
-      VALUES ('probe-dev', 'probe-dev', 'dev', 'idle');
-    INSERT INTO agents (agent_id, display_name, agent_type, status)
-      VALUES ('codex-cto', 'codex-cto', 'cto', 'idle');
+    INSERT INTO agents (agent_id, display_name, agent_type)
+      VALUES ('probe-dev', 'probe-dev', 'dev');
+    INSERT INTO agents (agent_id, display_name, agent_type)
+      VALUES ('codex-cto', 'codex-cto', 'cto');
     INSERT INTO channels (id, name, members)
       VALUES ('probe-ch', 'probe-ch', '["probe-dev","codex-cto"]');
     INSERT INTO channel_routing_policy (channel_id, outbound_allowlist, policy_source)
       VALUES ('probe-ch', '["probe-dev","codex-cto"]', 'aun-reply-notify-test');
   `)
+  holder = await observedSqliteRuntimeFixture(dbPath,'probe-dev')
+  env.AGENT_COM_RUNTIME_INSTANCE_ID = holder.runtimeId
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await holder?.close(); holder = undefined
   rmSync(tmpDir, { recursive: true, force: true })
 })
 

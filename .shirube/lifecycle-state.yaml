@@ -1,19 +1,33 @@
+---
 schema_version: shirube-lifecycle-state/rapid-lite/v1
 mode: rapid-lite
 profile: hotel-lite
 repo: watchout/agent-comms-mcp
-current_phase: HANDOFF_READY
+current_phase: GATE_REVIEW_REQUIRED
 framework_ref: watchout/ai-dev-framework@1337b0d1c7c38480d90b186fd72b5c1ea5d21b2b
-adoption_report_ref: null
-repo_spec_ref: .shirube/repo-spec.yaml
-handoff_ref: .shirube/control-handoffs/CH-001.yaml
-gate_contract_report_ref: null
-design_rule_report_ref: null
-enforcement_policy_report_ref: null
-control_state_completeness_report_ref: null
-owner_decision_ref: null
-post_merge_ref: null
+adoption_report_ref:
+repo_spec_ref: ".shirube/repo-spec.yaml"
+handoff_ref: ".shirube/control-handoffs/CH-AUN-940-NARROW-USE-CORRECTION-20260917.yaml"
+gate_contract_report_ref:
+design_rule_report_ref:
+enforcement_policy_report_ref:
+control_state_completeness_report_ref:
+owner_decision_ref:
+post_merge_ref:
 last_allowed_phase: HANDOFF_READY
-updated_at: 2026-06-25T02:00:01Z
-updated_by: codex-agent-comms
+updated_at: '2026-09-17T12:08:25.888274+00:00'
+updated_by: codex-cto/recovery_path_author
 owner_must_not_merge_until_exact_head_decision: true
+historical_adoption_phase:
+  current_phase: HANDOFF_READY
+  updated_at: 2026-06-25 02:00:01 UTC
+  handoff_ref: ".shirube/control-handoffs/CH-001.yaml"
+  scope: 'Historical #802 only'
+observed_gate_state: BLOCKED_PENDING_CURRENT_AUDIT
+phase_meaning: Current candidate/control inputs require review; no assertion that
+  readiness predicates passed. Trusted report must evaluate adoption, RPS, handoff,
+  design and protected review obligations.
+current_control_source: watchout/agent-comms-mcp#940
+cell_id: CELL-AUN-940-NARROW-USE-CORRECTION-20260908-001
+source_candidate_status: PENDING_NEW_HEAD
+owner_ready: false

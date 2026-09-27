@@ -1,0 +1,18 @@
+{
+  "run": 1,
+  "argv": [
+    "/Users/yuji/.bun/bin/bun",
+    "test",
+    "tests/contract/test_runtime_observation_nonpersistence_db.test.ts",
+    "--timeout",
+    "30000"
+  ],
+  "started_at": "2026-09-21T13:55:06.994034+09:00",
+  "finished_at": "2026-09-21T13:55:07.036224+09:00",
+  "duration_seconds": 0.042,
+  "exit_code": 1,
+  "source_base": "174c04e7db86b5fbc89c4bce08dbe48583c5ffac",
+  "working_diff_sha256": "28ce228c9bb4019c32d71e7e0856912854582c8f53b94271e888e9c2e6c26095",
+  "stdout_sha256": "72af121bdc4cbb1d32d4d3454fb83f73b6700b1a1e939b5ec41ab8d6819f89b2",
+  "stderr_sha256": "d6c8024f59025c02b1bdb4ccc1399ee84b5701424544020a0f95179d70394cff"
+}

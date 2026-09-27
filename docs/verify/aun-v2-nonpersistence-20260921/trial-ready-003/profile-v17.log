@@ -1,0 +1,11 @@
+bun test v1.3.11 (af24e281)
+
+tests/contract/test_runtime_nonpersist_profile.test.ts:
+{"case":"fixture-identity","kind":"postgres","name":"np_15578ea9aca348b7ac8aa90064822874","db":"aun_trial_ready","actor":"fixture","version":"17.9 (Homebrew)","socket":"/private/tmp/aun-independent-pg-7i5o4k48/socket","listen":""}
+(pass) NP03 postgres ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [716.61ms]
+(pass) NP03 sqlite ordinary enrollment and stable updates preserve legacy observations; projection uses logical membership [619.32ms]
+
+ 2 pass
+ 0 fail
+ 30 expect() calls
+Ran 2 tests across 1 file. [1357.00ms]

@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/Users/yuji/.bun/bin/bun",
+    "--no-env-file",
+    "test",
+    "tests/runtime-inventory.test.ts",
+    "--test-name-pattern",
+    "ordinary all-agent manifest"
+  ],
+  "node_version": "v24.20.0",
+  "node_exit_code": 0,
+  "source_manifest_sha256": "3b951e993f5f38f21ff7f3d3e2ab5f6fa742e5a4014a8c8f3444cfc13ea12c72",
+  "source_head": "ef42f44abcfdec35888aee8da4ea37afea14c64f",
+  "working_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "started_at": "2026-09-21T08:08:28.352921+00:00",
+  "ended_at": "2026-09-21T08:08:28.385003+00:00",
+  "exit_code": 0,
+  "log_sha256": "a1b10d8ff0b4799af1e66cf487cad20812d370ee79a5f775a99f8911ad141897"
+}

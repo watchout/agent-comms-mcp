@@ -15,6 +15,7 @@
  * was removed when the project went OSS / LLM-agnostic.
  */
 
+import { Readable } from 'node:stream'
 import {
   Client,
   GatewayIntentBits,
@@ -23,6 +24,8 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ActionRowBuilder,
+  REST,
+  Routes,
   type Message,
   type TextChannel,
   type ThreadChannel,
@@ -44,6 +47,61 @@ import {
   type DiscordProviderAckV1,
   type DiscordProviderRequestV1,
 } from '../core/eventlog/transport-contract'
+import { AdmissionError, admissionSha256, boundedRequestBytes, boundedRetryAfter, boundedWireCalls,
+  consumeBoundedPostPermit, type BoundedDiscordRequest, type BoundedPostPermit, type BoundedProviderOutcome } from '../core/queue-admission'
+
+/** Uses the locked real SDK. Only the fixture replaces its final network function. */
+export async function postBoundedDiscordRequest(request: BoundedDiscordRequest, permit: BoundedPostPermit,
+  credential: string, makeRequest?: NonNullable<ConstructorParameters<typeof REST>[0]>['makeRequest']): Promise<BoundedProviderOutcome> {
+  boundedRequestBytes(request)
+  let observed: { status: number; header: string | null; body: any; raw: string } | null = null
+  const rest = new REST({ retries: 0, rejectOnRateLimit: () => true, timeout: 10000,
+    hashSweepInterval: 0, handlerSweepInterval: 0 })
+  const wire = makeRequest ?? rest.options.makeRequest
+  rest.options.makeRequest = async (url, init) => {
+    if (init.body !== JSON.stringify(request.body)) throw new AdmissionError('ADMISSION_WIRE_REQUEST_CHANGED')
+    consumeBoundedPostPermit(permit, request, String(url), String(init.method))
+    const original = await wire(url, init)
+    // The pinned Node SDK strategy returns an Undici ResponseLike (no clone).
+    // Adapt its untouched stream once, then tee via Response.clone; the SDK
+    // receives the other branch with identical status, headers and body bytes.
+    const response = original instanceof Response ? original : new Response(
+      Readable.toWeb(original.body as Readable) as ReadableStream,
+      { status: original.status, statusText: original.statusText, headers: original.headers as Headers })
+    const raw = await response.clone().text()
+    let body: any = null
+    try { body = JSON.parse(raw) } catch { /* A malformed success is not an ACK. */ }
+    observed = { status: response.status, header: response.headers.get('Retry-After'), body, raw }
+    return response
+  }
+  try {
+    if (!credential) throw new AdmissionError('ADMISSION_PROVIDER_CREDENTIAL_MISSING')
+    rest.setToken(credential)
+    await rest.post(Routes.channelMessages(request.channel_id), { body: request.body })
+  } catch (error) {
+    // Do not serialize SDK errors: they may contain request content or credentials.
+    if (error instanceof AdmissionError) return { kind: 'NEEDS_ATTENTION', reason: error.code, wire_calls: boundedWireCalls(permit) }
+    if (!observed) return { kind: 'RETRYABLE', reason: 'NETWORK_OR_RESPONSE_LOSS', wire_calls: boundedWireCalls(permit), retry_after_ms: 0, global: false }
+  } finally { rest.clearHashSweeper(); rest.clearHandlerSweeper() }
+  const response = observed as { status: number; header: string | null; body: any; raw: string } | null
+  const wire_calls = boundedWireCalls(permit)
+  if (!response) return { kind: 'NEEDS_ATTENTION', reason: 'PROVIDER_RECEIPT_MISSING', wire_calls }
+  if (response.status === 429) {
+    const wait = boundedRetryAfter(response.header, response.body?.retry_after)
+    return wait === null ? { kind: 'NEEDS_ATTENTION', reason: 'RATE_LIMIT_WAIT_INVALID', wire_calls }
+      : { kind: 'RETRYABLE', reason: 'RATE_LIMIT', wire_calls, retry_after_ms: wait, global: response.body?.global === true }
+  }
+  if (response.status >= 500) return { kind: 'RETRYABLE', reason: 'PROVIDER_5XX', wire_calls, retry_after_ms: boundedRetryAfter(response.header, null) ?? 0, global: false }
+  const body = response.body
+  if (response.status < 200 || response.status >= 300) return { kind: 'NEEDS_ATTENTION', reason: `PROVIDER_HTTP_${response.status}`, wire_calls }
+  if (!body || typeof body.id !== 'string' || !/^[1-9][0-9]{0,19}$/.test(body.id)
+    || body.channel_id !== request.channel_id || body.author?.id !== request.author_id
+    || typeof body.nonce !== 'string' || body.nonce !== request.delivery_id || body.content !== request.body.content) {
+    return { kind: 'NEEDS_ATTENTION', reason: 'PROVIDER_ACK_MISMATCH', wire_calls }
+  }
+  return { kind: 'ACK', wire_calls, ack: { message_id: body.id, channel_id: body.channel_id,
+    author_id: body.author.id, nonce: request.delivery_id, response_sha256: admissionSha256(response.raw) } }
+}
 
 // --- Permission operators (DM / button gate for MCP permission prompts) ---
 //
@@ -174,6 +232,33 @@ export class DiscordAdapter implements UIAdapter, Adapter, StrictDiscordProvider
 
   isConnected(): boolean {
     return this.client !== null && this.client.isReady()
+  }
+
+  /** Resolve once before the first reservation; never use legacy auto-reply/fallback. */
+  async prepareBoundedRequest(row: { id: string | number; channel_external_id: string; content: string;
+    attachments?: unknown; reply_to_discord_id?: string | null }): Promise<BoundedDiscordRequest> {
+    if (!this.client?.isReady() || !this.client.user?.id) throw new AdmissionError('ADMISSION_PROVIDER_NOT_READY')
+    if (row.attachments && (!Array.isArray(row.attachments) || row.attachments.length)) throw new AdmissionError('ADMISSION_ATTACHMENTS_UNSUPPORTED')
+    const channel = await this.client.channels.fetch(row.channel_external_id)
+    if (!channel || !('send' in channel) || channel.id !== row.channel_external_id) throw new AdmissionError('ADMISSION_DESTINATION_UNRESOLVED')
+    let content=row.content
+    for(const mention of new Set(content.match(/@([\w][\w-]*)/g)??[])){
+      if(!this.dbQuery)throw new AdmissionError('ADMISSION_MENTIONS_UNRESOLVED')
+      const externalId=await getAgentDiscordUiId({query:this.dbQuery},mention.slice(1))
+      if(!externalId)throw new AdmissionError('ADMISSION_MENTIONS_UNRESOLVED')
+      content=content.replaceAll(mention,`<@${externalId}>`)
+    }
+    const request: BoundedDiscordRequest = { delivery_id: `out-${row.id}`, channel_id: channel.id,
+      author_id: this.client.user.id, body: { content,
+        nonce: `out-${row.id}`, enforce_nonce: true, allowed_mentions: { parse: ['users','roles'], replied_user: false },
+        ...(row.reply_to_discord_id ? { message_reference: { message_id: row.reply_to_discord_id, channel_id: channel.id, fail_if_not_exists: false as const } } : {}) } }
+    boundedRequestBytes(request)
+    return request
+  }
+
+  async sendBoundedRequest(request: BoundedDiscordRequest, permit: BoundedPostPermit): Promise<BoundedProviderOutcome> {
+    if (!this.client?.isReady() || this.client.user?.id !== request.author_id || !this.client.token) throw new AdmissionError('ADMISSION_PROVIDER_IDENTITY_MISMATCH')
+    return postBoundedDiscordRequest(request, permit, this.client.token)
   }
 
   /** Convert core @agent_id mentions to Discord <@discord_id> via agent_ui_bindings first. */
