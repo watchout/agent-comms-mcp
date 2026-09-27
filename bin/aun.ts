@@ -320,6 +320,32 @@ export function run(argv: string[] = process.argv): number {
 
 export async function runAsync(argv: string[] = process.argv): Promise<number> {
   const { subcommand, flags, extras } = parseArgs(argv)
+  if (subcommand === 'v2') {
+    let client: import('@modelcontextprotocol/sdk/client/index.js').Client | undefined
+    try {
+      if (!['send', 'status'].includes(extras[0]) || typeof flags.input !== 'string') throw new Error('REJECTED_INPUT')
+      let input: Record<string, unknown>
+      try { input = JSON.parse(flags.input); if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error() } catch { throw new Error('REJECTED_INPUT') }
+      const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+      const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
+      const token = process.env.AUN_V2_BEARER_TOKEN
+      if (!token) throw new Error('IDENTITY_CREDENTIAL_REQUIRED')
+      if (!process.env.AUN_V2_MCP_URL) throw new Error('UNOBSERVABLE')
+      client = new Client({ name: 'aun-v2-window', version: '0.1' })
+      const transport = new StreamableHTTPClientTransport(new URL(process.env.AUN_V2_MCP_URL), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) },
+      })
+      await client.connect(transport)
+      const result = await client.callTool({ name: `aun.v2.${extras[0]}`, arguments: input })
+      const text = (result.content as Array<{ type: string; text?: string }>).filter(c => c.type === 'text').map(c => c.text).join('')
+      process.stdout.write(text + '\n')
+      return result.isError ? 1 : 0
+    } catch (error) {
+      const code = String(error).match(/IDENTITY_CREDENTIAL_REQUIRED|IDENTITY_NOT_BOUND|IDENTITY_MISMATCH|REJECTED_INPUT/)?.[0] ?? 'UNOBSERVABLE'
+      process.stdout.write(JSON.stringify({ observed: false, code }) + '\n')
+      return 1
+    } finally { await client?.close() }
+  }
   if (
     !((subcommand === 'receive' || subcommand === 'next') && typeof flags['queue-id'] === 'string') &&
     subcommand !== 'diagnose-receive' &&

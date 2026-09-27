@@ -16,6 +16,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Client as PgClient } from 'pg'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { PgAdapter } from '../../core/db/pg-adapter'
+import { ensureEventLogSchema, frozenEnabledSetSha256, runtimeSnapshotSha256 } from '../../core/eventlog'
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgresql://localhost/agent_comms'
 const HTTP_PORT = 39000 + Math.floor(Math.random() * 700)
@@ -30,6 +35,10 @@ const TOKENS: Record<string, string> = {
 
 let serverProc: ChildProcess | null = null
 let pg: PgClient
+const windowDir = mkdtempSync(join(tmpdir(), 'window-http-'))
+const windowAgents = [BOT_A, BOT_B].sort().map(agent_id => ({ agent_id, profile_revision: '1', runtime_engine: 'fixture', runtime_instance_id: agent_id, runtime_checkout_root: '/fixture', runtime_checkout_sha: 'a'.repeat(40) }))
+const windowScope = { schema_version: 'aun-v2-native-mesh-scope/v1', run_id: PREFIX, stage_id: 'S0_IMPLEMENTATION', repository: 'watchout/agent-comms-mcp', exact_implementation_head: 'b'.repeat(40), database_identity: 'isolated-http', frozen_enabled_set: windowAgents, frozen_enabled_set_sha256: frozenEnabledSetSha256(windowAgents), runtime_snapshot_sha256: runtimeSnapshotSha256(windowAgents), provider_dispatch: 'disabled', V1_mode: 'observe_only_no_traversal', deadline_ms: Date.now() + 600000 }
+writeFileSync(join(windowDir, 'scope.json'), JSON.stringify(windowScope))
 
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
   return spawn('bun', ['run', 'server.ts'], {
@@ -45,6 +54,8 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
       AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '1',
       DATABASE_URL,
       DISCORD_BOT_TOKEN: '',
+      AUN_V2_SCOPE_FILE: join(windowDir, 'scope.json'), AUN_V2_EXPECTED_HEAD: windowScope.exact_implementation_head,
+      AUN_V2_DATABASE_IDENTITY: windowScope.database_identity, AUN_V2_RUNTIME_SNAPSHOT_SHA256: windowScope.runtime_snapshot_sha256,
       ...extraEnv,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -101,6 +112,7 @@ async function seedBearerKey(client: PgClient, agentId: string, token: string): 
 beforeAll(async () => {
   pg = new PgClient({ connectionString: DATABASE_URL })
   await pg.connect()
+  const windowDb = new PgAdapter(DATABASE_URL); await ensureEventLogSchema(windowDb); await windowDb.close()
   for (const id of [BOT_A, BOT_B]) {
     await pg.query(
       `INSERT INTO agents (agent_id, org_id, display_name, agent_type, runtime, status, last_seen_at, registered_at)
@@ -117,6 +129,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   serverProc?.kill('SIGTERM')
+  rmSync(windowDir, { recursive: true, force: true })
   if (pg) {
     await pg.query(`DELETE FROM message_queue WHERE agent_id LIKE $1`, [`${PREFIX}%`])
     await pg.query(`DELETE FROM agent_messages WHERE author_id LIKE $1`, [`${PREFIX}%`])
@@ -166,6 +179,7 @@ describe('identity binding mode (default) — credential IS the identity', () =>
       body: initBody(),
     })
     expect(unknown.status).toBe(401)
+    expect((await unknown.json()).code).toBe('IDENTITY_NOT_BOUND')
   })
 
   test('bot_id claim mismatching the bound credential → 403 fail-closed; matching claim → ok', async () => {
@@ -215,6 +229,7 @@ describe('identity binding mode (default) — credential IS the identity', () =>
       body: initBody(),
     })
     expect(res.status).toBe(401)
+    expect((await res.json()).code).toBe('IDENTITY_NOT_BOUND')
   })
 })
 
@@ -512,4 +527,45 @@ describe('established-session credential re-validation (ARC review 4489519640)',
     const afterDelete = await sessionRequest(sid, { Authorization: `Bearer ${TOKENS[BOT_B]}` })
     expect(afterDelete.status).toBe(404)
   })
+})
+
+// V2-WINDOW-001: exercise the public bound transport against the isolated CI database.
+describe('V2 public window over HTTP MCP', () => {
+  test('send/status, CLI, native refs, cross-seat scope, revoked/unbound effect count', async () => {
+    const { client: a } = await connectClient(BOT_A), args = { to: BOT_B, conversation_id: null, idempotency_key: PREFIX, content: 'window input', refs: { principal_ref: 'p', pack_digest: 'd', approval_ref: 'a', onza_run_id: PREFIX } }
+    try {
+      expect((await a.listTools()).tools.map(t => t.name)).toContain('aun.v2.send')
+      const call = async (name: string, input: any) => JSON.parse(textOf(await a.callTool({ name, arguments: input })))
+      const sent = await call('aun.v2.send', args); expect(sent.state).toBe('queued')
+      expect(await Promise.all([call('aun.v2.send', args), call('aun.v2.send', args)])).toEqual([sent, sent])
+      expect((await call('aun.v2.send', { ...args, content: 'collision' })).code).toBe('CONFLICT')
+      const read = await call('aun.v2.status', { conversation_id: sent.conversation_id })
+      expect(read.links[0]).toMatchObject({ ...args.refs, linked_event_id: sent.event_id }); expect(read.states[0].state).toBe('queued')
+      const { client: b } = await connectClient(BOT_B)
+      try { expect(JSON.parse(textOf(await b.callTool({ name: 'aun.v2.status', arguments: { conversation_id: sent.conversation_id } }))).code).toBe('REJECTED_SCOPE') } finally { await b.close() }
+      const proc = Bun.spawn([process.execPath, '--no-env-file', 'bin/aun.ts', 'v2', 'status', '--input', JSON.stringify({ conversation_id: sent.conversation_id })], { env: { PATH: process.env.PATH!, HOME: windowDir, AUN_V2_MCP_URL: `http://127.0.0.1:${HTTP_PORT}/mcp`, AUN_V2_BEARER_TOKEN: TOKENS[BOT_A] }, stdout: 'pipe', stderr: 'pipe' })
+      const output = await new Response(proc.stdout).text(); expect(await proc.exited).toBe(0); expect(JSON.parse(output).links).toEqual(read.links)
+      for (const [payload, token, expected] of [['{', TOKENS[BOT_A], 'REJECTED_INPUT'], ['{}', '', 'IDENTITY_CREDENTIAL_REQUIRED'], ['{}', 'not-bound', 'IDENTITY_NOT_BOUND']]) {
+        const denied = Bun.spawn([process.execPath, '--no-env-file', 'bin/aun.ts', 'v2', 'status', '--input', payload], { env: { PATH: process.env.PATH!, HOME: windowDir, AUN_V2_MCP_URL: `http://127.0.0.1:${HTTP_PORT}/mcp`, AUN_V2_BEARER_TOKEN: token }, stdout: 'pipe', stderr: 'pipe' })
+        const failure = JSON.parse(await new Response(denied.stdout).text()); expect(await denied.exited).toBe(1); expect(failure.code).toBe(expected)
+      }
+      const before = Number((await pg.query('SELECT COUNT(*) AS n FROM event_log')).rows[0].n)
+      for (const token of ['not-bound', TOKENS[BOT_A]]) {
+        if (token === TOKENS[BOT_A]) await pg.query("UPDATE agent_identity_keys SET status='revoked', revoked_at=now() WHERE fingerprint=$1", [createHash('sha256').update(token).digest('hex')])
+        const res = await fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' }, body: initBody() })
+        expect(res.status).toBe(401); expect((await res.json()).code).toBe('IDENTITY_NOT_BOUND')
+      }
+      expect(Number((await pg.query('SELECT COUNT(*) AS n FROM event_log')).rows[0].n)).toBe(before)
+    } finally { await pg.query("UPDATE agent_identity_keys SET status='active', revoked_at=NULL WHERE fingerprint=$1", [createHash('sha256').update(TOKENS[BOT_A]).digest('hex')]); await a.close() }
+  }, 30000)
+  test('bound identity outside the configured scope is rejected before append', async () => {
+    const withoutA = { ...windowScope, frozen_enabled_set: windowAgents.filter(x => x.agent_id !== BOT_A).concat({ ...windowAgents[0], agent_id: 'zz-outside' }).sort((a,b) => a.agent_id.localeCompare(b.agent_id)) }
+    withoutA.frozen_enabled_set_sha256 = frozenEnabledSetSha256(withoutA.frozen_enabled_set); withoutA.runtime_snapshot_sha256 = runtimeSnapshotSha256(withoutA.frozen_enabled_set)
+    // Keep the fence valid while testing membership: use a temporary server with this scope and matching snapshot.
+    writeFileSync(join(windowDir, 'other.json'), JSON.stringify(withoutA))
+    const port = HTTP_PORT + 2000, child = bootServerWith({ AGENT_COMMS_EXPERIMENTAL_HTTP_MCP: '1', AUN_V2_SCOPE_FILE: join(windowDir, 'other.json'), AUN_V2_RUNTIME_SNAPSHOT_SHA256: withoutA.runtime_snapshot_sha256 }, port)
+    try { await waitHealth(port); const { client } = await connectClient(BOT_A, port)
+      try { const r = await client.callTool({ name: 'aun.v2.status', arguments: { conversation_id: 'absent' } }); expect(r.isError).toBe(true); expect(JSON.parse(textOf(r)).code).toBe('REJECTED_IDENTITY') } finally { await client.close() }
+    } finally { child.kill('SIGTERM') }
+  }, 30000)
 })

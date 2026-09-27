@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { v2Send, v2Status, v2WindowFailure, V2WindowError } from './core/eventlog/window'
 /**
  * Agent Communications MCP Plugin
  *
@@ -1974,13 +1975,21 @@ setInboundReceiverDeps({
 })
 
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
-function registerTools(server: Server, agentId: string) {
+function registerTools(server: Server, agentId: string, v2Bound = false) {
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   // Issue #118 PR-B ②: inject current agent_id list into description via cache
   const knownAgents = await refreshAgentCache()
   const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
   return { tools: [
+    ...(v2Bound ? ['send', 'status'].map(action => ({
+      name: `aun.v2.${action}`, description: `V2 ${action}: durable native messages and conversation evidence`,
+      inputSchema: { type: 'object' as const, additionalProperties: false,
+        properties: action === 'send' ? { to: { type: 'string' }, conversation_id: { type: ['string', 'null'] },
+          idempotency_key: { type: 'string' }, content: { type: 'string' }, refs: { type: 'object' } } : { conversation_id: { type: 'string' } },
+        required: action === 'send' ? ['to', 'conversation_id', 'idempotency_key', 'content', 'refs'] : ['conversation_id'],
+      },
+    })) : []),
     {
       // Issue #130 Phase 4: MCP next tool (message-queue-spec §4.1).
       // Pops the oldest pending message_queue row for the calling agent.
@@ -2211,6 +2220,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
+  if (name === 'aun.v2.send' || name === 'aun.v2.status') {
+    try {
+      if (!v2Bound) throw new V2WindowError('REJECTED_IDENTITY')
+      const scope = JSON.parse(readFileSync(process.env.AUN_V2_SCOPE_FILE ?? '', 'utf8'))
+      const context = { agentId, scope, nowMs: Date.now(), fence: { stage_id: 'S0_IMPLEMENTATION' as const,
+        exact_implementation_head: process.env.AUN_V2_EXPECTED_HEAD ?? '', database_identity: process.env.AUN_V2_DATABASE_IDENTITY ?? '',
+        runtime_snapshot_sha256: process.env.AUN_V2_RUNTIME_SNAPSHOT_SHA256 ?? '' } }
+      const windowDb = createDbAdapter() // Each request owns its transaction connection.
+      try {
+        const result = await (name === 'aun.v2.send' ? v2Send : v2Status)(windowDb, context, args)
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+      } finally { await windowDb.close() }
+    } catch (error) { return { isError: true, content: [{ type: 'text', text: JSON.stringify(v2WindowFailure(error)) }] } }
+  }
 
   // ============================================================
   // Issue #130 Phase 4: MCP next tool (§4.1)
@@ -4245,9 +4268,9 @@ interface BotContext {
 // Active bot contexts (multi-bot SSE)
 const botContexts = new Map<string, BotContext>()
 
-function createBotServer(botId: string): BotContext {
+function createBotServer(botId: string, v2Bound = false): BotContext {
   const server = createMcpServer()
-  registerTools(server, botId)
+  registerTools(server, botId, v2Bound)
   const ctx: BotContext = {
     botId,
     server,
@@ -4983,7 +5006,7 @@ async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, u
           return
         }
         const resolvedBotId = botId
-        const ctx = createBotServer(resolvedBotId)
+        const ctx = createBotServer(resolvedBotId, HTTP_MCP_IDENTITY_MODE === 'binding')
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
