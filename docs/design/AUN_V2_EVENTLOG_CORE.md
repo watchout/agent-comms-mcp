@@ -27,6 +27,14 @@ fencing and restart tests remain the acceptance evidence; no replacement
 simulation or compatibility entry point is introduced. The shared
 `aun runtime-v2` CLI and its queue-work implementation remain frozen.
 
+The third slice removes the unused reply-fanout request/plan builders,
+`EventLog.appendFanoutAtomic`, and `fanoutParentAggregate`, together with
+their dedicated atomic-fanout test. The demonstrated per-turn reply path
+does not call these APIs. Keep child-provenance decoding/digests and the
+`reply.fanout_planned` vocabulary entry for existing log compatibility;
+this slice does not erase stored events or relax delivery validation.
+The separate native ingress routing and internal handoff paths are unchanged.
+
 ## What this is
 
 A NEW core, decoupled from V1's mutable-status machine. State is never

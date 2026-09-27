@@ -14,7 +14,6 @@ import {
   ClaimLostError,
   EVENT_TYPES,
   EventIdCanonicalMaterialCollisionError,
-  FanoutCollisionError,
   ProtectedAuthorityAppendForbiddenError,
   ReconciliationTransitionCollisionError,
   ReopenNotAuthorizedError,
@@ -25,8 +24,6 @@ import {
 } from './types'
 import {
   canonicalJson,
-  decodeFanoutPlan,
-  decodeFanoutRequest,
   decodeReconciliationObservation,
   decodeReconciliationResolvedPayload,
   decodeReplyDeliveredPayload,
@@ -34,18 +31,12 @@ import {
   decodeReconciliationRequest,
   decodeReplyDeliveryUnknownPayload,
   isProtectedAuthorityEventType,
-  buildFanoutProvenance,
   reconciliationOutcomeEventId,
   reconciliationOutcomeKey,
   reconciliationObservationEventId,
   sha256Utf8,
-  validateDeliveryUnit,
   type DeliveryUnknownReconciliationObservationV1,
   type DeliveryUnknownReconciliationRequestV1,
-  type DeliveryUnitV1,
-  type FanoutPlanV1,
-  type FanoutRequestV1,
-  type LoadedConnectorRegistrationV1,
   type ReplyDeliveryReconciliationResolvedPayloadV1,
   type ReplyDeliveryUnknownPayloadV1,
   type ReplyDeliveredPayloadV1,
@@ -197,35 +188,6 @@ export interface CommitReconciliationTerminalCASResultV1 {
   provider_invocations: 0
 }
 
-export type FanoutAtomicCommitPoint =
-  | { point: 'before_transaction' }
-  | { point: 'before_plan_append' }
-  | { point: 'after_plan_append' }
-  | { point: 'before_child_append'; child_index: number }
-  | { point: 'after_child_append'; child_index: number }
-  | { point: 'before_commit' }
-  | { point: 'after_commit_before_return' }
-
-export interface FanoutAtomicChildInputV1 {
-  delivery_unit: DeliveryUnitV1
-  loaded_registration: LoadedConnectorRegistrationV1
-}
-
-export interface AppendFanoutAtomicInputV1 {
-  request: FanoutRequestV1
-  plan: FanoutPlanV1
-  children: FanoutAtomicChildInputV1[]
-  /** Deterministic rollback fixture only; never routing or provider authority. */
-  on_commit_point?: (point: FanoutAtomicCommitPoint) => void | Promise<void>
-}
-
-export interface AppendFanoutAtomicResultV1 {
-  status: 'inserted' | 'byte_identical_existing'
-  plan_event: StoredEvent
-  child_events: StoredEvent[]
-  provider_invocations: 0
-}
-
 export class EventLog {
   constructor(private db: DbAdapter) {}
 
@@ -294,139 +256,6 @@ export class EventLog {
       }
       return results
     })
-  }
-
-  /**
-   * FanoutAtomicAppendPort: persist the immutable plan and every child in one
-   * transaction. A partial pre-existing set is corruption, never a prefix to
-   * complete. This method owns no provider port and invokes no external effect.
-   */
-  async appendFanoutAtomic(input: AppendFanoutAtomicInputV1): Promise<AppendFanoutAtomicResultV1> {
-    const request = decodeFanoutRequest(input.request)
-    const plan = decodeFanoutPlan(input.plan)
-    const planEventId = `fanout-planned:${request.fanout_id}`
-    if (
-      plan.fanout_id !== request.fanout_id ||
-      plan.fanout_digest !== request.fanout_digest ||
-      plan.parent_reply_id !== request.parent_reply_id ||
-      plan.authority_snapshot_digest !== request.authority_snapshot_digest ||
-      plan.resolver_version !== request.resolver_version ||
-      plan.children.length !== request.recipient_seat_ids.length ||
-      plan.children.length !== input.children.length
-    ) throw new FanoutCollisionError('fanout request, plan, or child cardinality differs')
-
-    const expectedProvenance = buildFanoutProvenance(planEventId, request)
-    const events: AppendEvent[] = [{
-      eventId: planEventId,
-      eventType: 'reply.fanout_planned',
-      seatId: request.sender_seat_id,
-      conversationId: request.conversation_id,
-      causationId: request.causation_id,
-      correlationId: request.correlation_id,
-      turnId: request.turn_id,
-      replyId: request.parent_reply_id,
-      payload: plan as unknown as Record<string, unknown>,
-    }]
-
-    for (let index = 0; index < plan.children.length; index += 1) {
-      const planned = plan.children[index]!
-      const child = input.children[index]!
-      const unit = child.delivery_unit
-      if (planned.recipient_seat_id !== request.recipient_seat_ids[index]) throw new FanoutCollisionError('fanout plan recipient order differs from normalized request')
-      validateDeliveryUnit(unit, child.loaded_registration)
-      if (
-        unit.recipient_seat_id !== planned.recipient_seat_id ||
-        unit.reply_id !== planned.child_reply_id ||
-        unit.delivery_id !== planned.delivery_id ||
-        unit.destination_ref !== planned.destination_ref ||
-        unit.resolved_binding_snapshot_digest !== planned.resolved_binding_snapshot_digest ||
-        unit.resolved_delivery_decision.resolved_delivery_decision_digest !== planned.resolved_delivery_decision_digest ||
-        unit.sender_seat_id !== request.sender_seat_id ||
-        unit.conversation_id !== request.conversation_id ||
-        unit.turn_id !== request.turn_id ||
-        unit.correlation_id !== request.correlation_id ||
-        unit.causation_id !== request.causation_id ||
-        canonicalJson(unit.content) !== canonicalJson(request.content) ||
-        unit.fanout_child_provenance === null ||
-        canonicalJson(unit.fanout_child_provenance) !== canonicalJson(expectedProvenance) ||
-        planned.fanout_child_provenance_digest !== expectedProvenance.provenance_digest
-      ) throw new FanoutCollisionError(`fanout child ${index} differs from persisted-plan authority`)
-      events.push({
-        eventId: `fanout-child-enqueued:${planned.child_reply_id}`,
-        eventType: 'reply.enqueued',
-        seatId: request.sender_seat_id,
-        conversationId: request.conversation_id,
-        causationId: planEventId,
-        correlationId: request.correlation_id,
-        turnId: request.turn_id,
-        replyId: planned.child_reply_id,
-        payload: unit as unknown as Record<string, unknown>,
-      })
-    }
-
-    await input.on_commit_point?.({ point: 'before_transaction' })
-    const result = await serializedTransaction(this.db, async tx => {
-      const existing = await Promise.all(events.map(event => tx.queryOne<StoredEvent>(
-        'SELECT * FROM event_log WHERE event_id = $1',
-        [event.eventId],
-      )))
-      const existingCount = existing.filter(Boolean).length
-      if (existingCount > 0 && existingCount < events.length) {
-        throw new FanoutCollisionError(`fanout atomic set has ${existingCount}/${events.length} durable members`)
-      }
-      if (existingCount === events.length) {
-        try {
-          events.forEach((event, index) => assertByteIdenticalEvent(event, existing[index]!))
-        } catch (error) {
-          throw new FanoutCollisionError(String(error))
-        }
-        return {
-          status: 'byte_identical_existing' as const,
-          plan_event: existing[0]!,
-          child_events: existing.slice(1) as StoredEvent[],
-          provider_invocations: 0 as const,
-        }
-      }
-
-      await input.on_commit_point?.({ point: 'before_plan_append' })
-      let inserted = false
-      try {
-        inserted = (await this.append(events[0]!, tx)).inserted
-      } catch (error) {
-        if (error instanceof EventIdCanonicalMaterialCollisionError) throw new FanoutCollisionError(error.message)
-        throw error
-      }
-      await input.on_commit_point?.({ point: 'after_plan_append' })
-      for (let index = 1; index < events.length; index += 1) {
-        await input.on_commit_point?.({ point: 'before_child_append', child_index: index - 1 })
-        try {
-          inserted = (await this.append(events[index]!, tx)).inserted || inserted
-        } catch (error) {
-          if (error instanceof EventIdCanonicalMaterialCollisionError || error instanceof ClaimLostError) throw new FanoutCollisionError(String(error))
-          throw error
-        }
-        await input.on_commit_point?.({ point: 'after_child_append', child_index: index - 1 })
-      }
-      const readback = await Promise.all(events.map(event => tx.queryOne<StoredEvent>(
-        'SELECT * FROM event_log WHERE event_id = $1',
-        [event.eventId],
-      )))
-      if (readback.some(event => !event)) throw new FanoutCollisionError('fanout atomic readback is incomplete')
-      try {
-        events.forEach((event, index) => assertByteIdenticalEvent(event, readback[index]!))
-      } catch (error) {
-        throw new FanoutCollisionError(String(error))
-      }
-      await input.on_commit_point?.({ point: 'before_commit' })
-      return {
-        status: inserted ? 'inserted' as const : 'byte_identical_existing' as const,
-        plan_event: readback[0]!,
-        child_events: readback.slice(1) as StoredEvent[],
-        provider_invocations: 0 as const,
-      }
-    })
-    await input.on_commit_point?.({ point: 'after_commit_before_return' })
-    return result
   }
 
   private async requireEvent(

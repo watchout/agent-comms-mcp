@@ -2048,82 +2048,7 @@ export function decodeAttestationConsumption(value: unknown): ZeroExternalEffect
   for (const field of ['attestation_digest', 'evidence_digest', 'producer_registration_digest', 'reconciliation_outcome_key'] as const) assertSha(consumption[field], field)
   return consumption
 }
-
-export interface FanoutRequestV1 {
-  schema_version: 'aun-fanout-request/v1'
-  fanout_id: string
-  sender_seat_id: string
-  conversation_id: string
-  turn_id: string
-  parent_reply_id: string
-  correlation_id: string | null
-  causation_id: string | null
-  recipient_seat_ids: string[]
-  content: { media_type: 'text/plain'; text: string }
-  authority_snapshot_digest: Sha256
-  resolver_version: string
-  fanout_digest: Sha256
-}
-
-export interface FanoutPlanChildV1 {
-  recipient_seat_id: string
-  child_reply_id: string
-  delivery_id: string
-  destination_ref: Sha256
-  resolved_binding_snapshot_digest: Sha256
-  resolved_delivery_decision_digest: Sha256
-  fanout_child_provenance_digest: Sha256
-}
-
-export interface FanoutPlanV1 {
-  schema_version: 'aun-fanout-plan/v1'
-  fanout_id: string
-  fanout_digest: Sha256
-  parent_reply_id: string
-  authority_snapshot_digest: Sha256
-  resolver_version: string
-  children: FanoutPlanChildV1[]
-}
-
-const FANOUT_REQUEST_FIELDS = ['schema_version', 'fanout_id', 'sender_seat_id', 'conversation_id', 'turn_id', 'parent_reply_id', 'correlation_id', 'causation_id', 'recipient_seat_ids', 'content', 'authority_snapshot_digest', 'resolver_version', 'fanout_digest'] as const
-const FANOUT_PLAN_FIELDS = ['schema_version', 'fanout_id', 'fanout_digest', 'parent_reply_id', 'authority_snapshot_digest', 'resolver_version', 'children'] as const
-const FANOUT_PLAN_CHILD_FIELDS = ['recipient_seat_id', 'child_reply_id', 'delivery_id', 'destination_ref', 'resolved_binding_snapshot_digest', 'resolved_delivery_decision_digest', 'fanout_child_provenance_digest'] as const
 const FANOUT_PROVENANCE_FIELDS = ['schema_version', 'fanout_planned_event_id', 'fanout_id', 'fanout_digest', 'parent_reply_id', 'provenance_digest'] as const
-
-export function fanoutDigest(value: Omit<FanoutRequestV1, 'fanout_digest'> | FanoutRequestV1): Sha256 {
-  return digestCanonical(CONTRACT_DOMAINS.fanoutRequest, withoutField(value as unknown as Record<string, unknown>, 'fanout_digest'))
-}
-
-/**
- * FanoutExpanderPort input boundary: normalize the set-like recipient list
- * before identity is derived. Duplicate, empty, or malformed inputs remain
- * cardinality failures; only ordering differences normalize to one identity.
- */
-export function buildFanoutRequest(
-  value: Omit<FanoutRequestV1, 'fanout_digest'>,
-): FanoutRequestV1 {
-  const recipientSeatIds = sortedUnique(value.recipient_seat_ids, 'recipient_seat_ids')
-  const material = { ...value, recipient_seat_ids: recipientSeatIds }
-  const request = { ...material, fanout_digest: fanoutDigest(material) }
-  return decodeFanoutRequest(request)
-}
-
-export function decodeFanoutRequest(value: unknown): FanoutRequestV1 {
-  assertExactKeys(value, FANOUT_REQUEST_FIELDS, 'FanoutRequestV1')
-  const request = value as unknown as FanoutRequestV1
-  if (request.schema_version !== 'aun-fanout-request/v1') throw new ContractValidationError('FANOUT_COLLISION', 'wrong fanout request schema')
-  for (const field of ['fanout_id', 'sender_seat_id', 'conversation_id', 'turn_id', 'parent_reply_id', 'resolver_version'] as const) assertString(request[field], field)
-  assertNullableString(request.correlation_id, 'correlation_id')
-  assertNullableString(request.causation_id, 'causation_id')
-  assertAlreadySortedUnique(request.recipient_seat_ids, 'recipient_seat_ids')
-  if (request.recipient_seat_ids.length === 0) throw new ContractValidationError('FANOUT_COLLISION', 'fanout recipient set is empty')
-  assertExactKeys(request.content, ['media_type', 'text'], 'fanout content')
-  if (request.content.media_type !== 'text/plain') throw new ContractValidationError('FANOUT_COLLISION', 'unsupported fanout content type')
-  assertString(request.content.text, 'content.text')
-  for (const field of ['authority_snapshot_digest', 'fanout_digest'] as const) assertSha(request[field], field)
-  if (fanoutDigest(request) !== request.fanout_digest) throw new ContractValidationError('FANOUT_COLLISION', 'fanout digest differs')
-  return request
-}
 
 export function decodeFanoutProvenance(value: unknown): FanoutChildProvenanceV1 {
   assertExactKeys(value, FANOUT_PROVENANCE_FIELDS, 'FanoutChildProvenanceV1')
@@ -2135,49 +2060,8 @@ export function decodeFanoutProvenance(value: unknown): FanoutChildProvenanceV1 
   return provenance
 }
 
-export function decodeFanoutPlan(value: unknown): FanoutPlanV1 {
-  assertExactKeys(value, FANOUT_PLAN_FIELDS, 'FanoutPlanV1')
-  const plan = value as unknown as FanoutPlanV1
-  if (plan.schema_version !== 'aun-fanout-plan/v1') throw new ContractValidationError('FANOUT_COLLISION', 'wrong fanout plan schema')
-  for (const field of ['fanout_id', 'parent_reply_id', 'resolver_version'] as const) assertString(plan[field], field)
-  for (const field of ['fanout_digest', 'authority_snapshot_digest'] as const) assertSha(plan[field], field)
-  if (!Array.isArray(plan.children) || plan.children.length === 0) throw new ContractValidationError('FANOUT_COLLISION', 'fanout plan children are missing')
-  const recipients: string[] = []
-  for (const child of plan.children) {
-    assertExactKeys(child, FANOUT_PLAN_CHILD_FIELDS, 'FanoutPlanChildV1')
-    for (const field of ['recipient_seat_id', 'child_reply_id', 'delivery_id'] as const) assertString(child[field], field)
-    for (const field of ['destination_ref', 'resolved_binding_snapshot_digest', 'resolved_delivery_decision_digest', 'fanout_child_provenance_digest'] as const) assertSha(child[field], field)
-    const expected = fanoutChildIds(plan.fanout_id, plan.fanout_digest, child.recipient_seat_id)
-    if (child.child_reply_id !== expected.child_reply_id || child.delivery_id !== expected.delivery_id) throw new ContractValidationError('FANOUT_COLLISION', 'fanout child identity differs')
-    recipients.push(child.recipient_seat_id)
-  }
-  const canonicalRecipients = sortedUnique(recipients, 'fanout plan recipients')
-  if (canonicalRecipients.some((recipient, index) => recipient !== recipients[index])) throw new ContractValidationError('FANOUT_COLLISION', 'fanout plan children must be sorted')
-  return plan
-}
-
-export function fanoutChildHash(fanoutId: string, digest: Sha256, recipientSeatId: string): Sha256 {
-  return sha256Utf8(CONTRACT_DOMAINS.fanoutChild + fanoutId + '\n' + digest + '\n' + recipientSeatId)
-}
-
-export function fanoutChildIds(fanoutId: string, digest: Sha256, recipientSeatId: string): { child_reply_id: string; delivery_id: string } {
-  const hash = fanoutChildHash(fanoutId, digest, recipientSeatId)
-  return { child_reply_id: `reply:fanout:${hash}`, delivery_id: `delivery:fanout:${hash}` }
-}
-
 export function fanoutProvenanceDigest(value: Omit<FanoutChildProvenanceV1, 'provenance_digest'> | FanoutChildProvenanceV1): Sha256 {
   return digestCanonical(CONTRACT_DOMAINS.fanoutProvenance, withoutField(value as unknown as Record<string, unknown>, 'provenance_digest'))
-}
-
-export function buildFanoutProvenance(fanoutPlannedEventId: string, request: FanoutRequestV1): FanoutChildProvenanceV1 {
-  const material = {
-    schema_version: 'aun-fanout-child-provenance/v1' as const,
-    fanout_planned_event_id: fanoutPlannedEventId,
-    fanout_id: request.fanout_id,
-    fanout_digest: request.fanout_digest,
-    parent_reply_id: request.parent_reply_id,
-  }
-  return { ...material, provenance_digest: fanoutProvenanceDigest(material) }
 }
 
 export function reconciliationObservationEventId(deliveryUnknownEventId: string, observationDigest: Sha256): string {
