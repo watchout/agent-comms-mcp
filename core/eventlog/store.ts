@@ -1,6 +1,6 @@
 // EventLogCore/v1 generic store — the caller-visible write path into event_log.
-// Protected authority rows are owned only by the lexical registered-loader
-// composition root and are rejected at this surface.
+// Legacy authority rows remain forbidden at this surface after removal of
+// the dormant registered-loader composition root.
 //
 // Writes are INSERTs only. event_id conflicts are idempotent only when the
 // complete canonical conflict material is byte-identical. Conflicts on the claim arbiters (uq_el_turn_claim /

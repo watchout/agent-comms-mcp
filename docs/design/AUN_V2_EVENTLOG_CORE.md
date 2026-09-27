@@ -35,6 +35,22 @@ does not call these APIs. Keep child-provenance decoding/digests and the
 this slice does not erase stored events or relax delivery validation.
 The separate native ingress routing and internal handoff paths are unchanged.
 
+The fourth slice removes the dormant registered-loader composition root,
+its fixed connector catalog and data-only registry re-export module. Only
+its dedicated tests called the loader; the worker/reply path does not.
+Remove those lifecycle/reopen-cursor tests and their unused error classes,
+but retain authority receipt codec vectors and malformed-receipt rejection.
+Generic EventLog authority append rejection and historical event vocabulary
+remain unchanged; this does not grant a replacement authority writer.
+Delivery-unknown entries remain excluded from ordinary retry; this slice
+removes the dormant zero-effect reopen writer, not unknown detection.
+Keep `delivery.ts`, `internal-handoff.ts`, and `transport-contract.ts`:
+provider receipt validation, atomic handoff and shared receipt codecs are
+still needed. Keep the internal round-trip, UNKNOWN/no-blind-resend,
+stale-claim fencing and transactional internal-handoff acceptance tests
+required by #970 condition 6 (comment 5853928824). Existing `reply.delivered`
+writers in delivery, outbox and reconciliation remain unchanged.
+
 ## What this is
 
 A NEW core, decoupled from V1's mutable-status machine. State is never
