@@ -274,16 +274,6 @@ export class ReconciliationTransitionCollisionError extends Error {
   readonly code = 'RECONCILIATION_TRANSITION_COLLISION' as const
 }
 
-/** A fan-out event or child set disagrees with its deterministic plan. */
-export class FanoutCollisionError extends Error {
-  readonly code = 'FANOUT_COLLISION' as const
-}
-
-/** Terminal evidence cannot be joined to the persisted fan-out child. */
-export class FanoutParentLinkMismatchError extends Error {
-  readonly code = 'FANOUT_PARENT_LINK_MISMATCH' as const
-}
-
 /** A provider nonce was already reserved for different canonical material. */
 export class ProviderNonceCollisionError extends Error {
   readonly code = 'PROVIDER_NONCE_COLLISION' as const

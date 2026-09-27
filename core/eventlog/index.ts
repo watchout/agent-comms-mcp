@@ -11,8 +11,6 @@ export {
   storedEventConflictMaterial,
   assertByteIdenticalEvent,
   type AppendEventConflictMaterialV1,
-  type AppendFanoutAtomicInputV1,
-  type AppendFanoutAtomicResultV1,
   type CommitReconciliationTerminalCASInputV1,
   type CommitReconciliationTerminalCASResultV1,
 } from './store'
@@ -29,7 +27,6 @@ export {
   pendingDeliveries,
   deliveryTruthView,
   rebuildDeliveryTruthView,
-  fanoutParentAggregate,
   threadView,
 } from './views'
 export {
