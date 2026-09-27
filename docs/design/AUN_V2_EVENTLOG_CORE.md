@@ -20,6 +20,13 @@ uses the worker for one seat under its separate cutover authorization.
 This is the first deletion slice; #970's total line/event budgets, remaining
 deletions, database-copy transcript and independent acceptance remain open.
 
+The second slice removes `core/aun-runtime-v2-synthetic-claim.ts` and its
+dedicated test. That standalone in-memory baton simulation has no production
+caller and never appends to the event log. The normal event-log claim,
+fencing and restart tests remain the acceptance evidence; no replacement
+simulation or compatibility entry point is introduced. The shared
+`aun runtime-v2` CLI and its queue-work implementation remain frozen.
+
 ## What this is
 
 A NEW core, decoupled from V1's mutable-status machine. State is never
