@@ -51,6 +51,15 @@ stale-claim fencing and transactional internal-handoff acceptance tests
 required by #970 condition 6 (comment 5853928824). Existing `reply.delivered`
 writers in delivery, outbox and reconciliation remain unchanged.
 
+The fifth slice removes the unused registered-reopen scan-cursor types,
+decoder and event builder left after the fourth slice. No production or test
+caller remains. Keep the historical `authority.reopen_scan_cursor_advanced`
+event name and generic append rejection; existing log rows are not removed.
+Authority admission receipts, delivery/reconciliation codecs, UNKNOWN
+no-blind-resend, stale-claim fencing and atomic internal handoff are unchanged.
+The retained `transport-contract.ts` still supplies the typed Discord and
+internal delivery contracts; this is not removal of a `reply.delivered` writer.
+
 ## What this is
 
 A NEW core, decoupled from V1's mutable-status machine. State is never
