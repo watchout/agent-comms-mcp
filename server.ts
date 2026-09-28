@@ -1975,14 +1975,15 @@ setInboundReceiverDeps({
 })
 
 // --- Tool Registration (extracted for Per-Bot Server Factory) ---
-function registerTools(server: Server, agentId: string, v2Bound = false) {
+const v2BoundServers = new WeakSet<Server>() // Only credential-bound HTTP initialization admits a server.
+function registerTools(server: Server, agentId: string) {
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   // Issue #118 PR-B ②: inject current agent_id list into description via cache
   const knownAgents = await refreshAgentCache()
   const agentListStr = knownAgents.length > 0 ? ` Known agents: [${knownAgents.join(', ')}].` : ''
   return { tools: [
-    ...(v2Bound ? ['send', 'status'].map(action => ({
+    ...(v2BoundServers.has(server) ? ['send', 'status'].map(action => ({
       name: `aun.v2.${action}`, description: `V2 ${action}: durable native messages and conversation evidence`,
       inputSchema: { type: 'object' as const, additionalProperties: false,
         properties: action === 'send' ? { to: { type: 'string' }, conversation_id: { type: ['string', 'null'] },
@@ -2222,7 +2223,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let { name, arguments: args } = request.params
   if (name === 'aun.v2.send' || name === 'aun.v2.status') {
     try {
-      if (!v2Bound) throw new V2WindowError('REJECTED_IDENTITY')
+      if (!v2BoundServers.has(server)) throw new V2WindowError('REJECTED_IDENTITY')
       const scope = JSON.parse(readFileSync(process.env.AUN_V2_SCOPE_FILE ?? '', 'utf8'))
       const context = { agentId, scope, nowMs: Date.now(), fence: { stage_id: 'S0_IMPLEMENTATION' as const,
         exact_implementation_head: process.env.AUN_V2_EXPECTED_HEAD ?? '', database_identity: process.env.AUN_V2_DATABASE_IDENTITY ?? '',
@@ -4268,9 +4269,9 @@ interface BotContext {
 // Active bot contexts (multi-bot SSE)
 const botContexts = new Map<string, BotContext>()
 
-function createBotServer(botId: string, v2Bound = false): BotContext {
+function createBotServer(botId: string): BotContext {
   const server = createMcpServer()
-  registerTools(server, botId, v2Bound)
+  registerTools(server, botId)
   const ctx: BotContext = {
     botId,
     server,
@@ -5006,7 +5007,8 @@ async function handleHttpMcpRequest(req: IncomingMessage, res: ServerResponse, u
           return
         }
         const resolvedBotId = botId
-        const ctx = createBotServer(resolvedBotId, HTTP_MCP_IDENTITY_MODE === 'binding')
+        const ctx = createBotServer(resolvedBotId)
+        if (HTTP_MCP_IDENTITY_MODE === 'binding') v2BoundServers.add(ctx.server)
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {

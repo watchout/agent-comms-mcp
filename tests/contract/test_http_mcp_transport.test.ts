@@ -15,6 +15,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { Client as PgClient } from 'pg'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -440,6 +442,47 @@ describe('spike-bot-id mode requires explicit opt-in (dev/test only)', () => {
     })
     expect(res.status).toBe(400)
   })
+  test('spike factory retains V1 tools and refuses both V2 tools', async () => {
+    const client = new McpClient({ name: 'spike-window', version: '1' })
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp?bot_id=${BOT_B}`), { requestInit: { headers: { Authorization: `Bearer ${SHARED}` } } })
+    try { await client.connect(transport); await expectV1Only(client) } finally { await client.close() }
+  })
+})
+
+async function expectV1Only(client: McpClient): Promise<void> {
+  const names = (await client.listTools()).tools.map(t => t.name)
+  for (const name of ['next', 'processing', 'done', 'send', 'notify', 'bot_status']) expect(names).toContain(name)
+  for (const name of ['aun.v2.send', 'aun.v2.status']) {
+    expect(names).not.toContain(name)
+    const result = await client.callTool({ name, arguments: { conversation_id: 'absent' } })
+    expect(result.isError).toBe(true); expect(JSON.parse(textOf(result)).code).toBe('REJECTED_IDENTITY')
+  }
+}
+
+test('SSE factory and global stdio server retain V1 tools and refuse V2 even with a bound HTTP server', async () => {
+  const { client: bound } = await connectClient(BOT_A)
+  const sse = new McpClient({ name: 'sse-window', version: '1' }), stdio = new McpClient({ name: 'stdio-window', version: '1' })
+  try {
+    expect((await bound.listTools()).tools.map(t => t.name)).toContain('aun.v2.status')
+    await sse.connect(new SSEClientTransport(new URL(`http://127.0.0.1:${HTTP_PORT}/sse?bot_id=${BOT_A}`))); await expectV1Only(sse)
+    await stdio.connect(new StdioClientTransport({ command: process.execPath, args: ['--no-env-file', 'server.ts'], stderr: 'ignore', env: {
+      PATH: process.env.PATH!, HOME: windowDir, DATABASE_URL, AGENT_ID: `${PREFIX}-stdio-probe`, AGENT_COM_EXPECTED_AGENT_ID: `${PREFIX}-stdio-probe`,
+      AGENT_COMMS_PORT: String(HTTP_PORT + 8), WEBHOOK_PORT: String(HTTP_PORT + 1008), DISCORD_BOT_TOKEN: '',
+      AGENT_COM_PG_NOTIFY: 'false', AGENT_COMMS_TTL_SWEEP_DISABLED: '1', AGENT_COM_RUNTIME_HEARTBEAT_DISABLED: '1',
+    } })); await expectV1Only(stdio)
+  } finally { await sse.close(); await stdio.close(); await bound.close() }
+})
+
+test('v6 identity uses active status and valid_until; revoked_at alone is only a record', async () => {
+  const fingerprint = createHash('sha256').update(TOKENS[BOT_A]).digest('hex')
+  try {
+    await pg.query("UPDATE agent_identity_keys SET status='active', revoked_at=now(), valid_until=now()+interval '1 hour' WHERE fingerprint=$1", [fingerprint])
+    const { client } = await connectClient(BOT_A)
+    try { expect(JSON.parse(textOf(await client.callTool({ name: 'aun.v2.status', arguments: { conversation_id: 'absent-v6' } }))).observed).toBe(true) } finally { await client.close() }
+    await pg.query("UPDATE agent_identity_keys SET valid_until=now()-interval '1 hour' WHERE fingerprint=$1", [fingerprint])
+    const response = await fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${TOKENS[BOT_A]}` }, body: initBody() })
+    expect(response.status).toBe(401); expect((await response.json()).code).toBe('IDENTITY_NOT_BOUND')
+  } finally { await pg.query("UPDATE agent_identity_keys SET status='active', revoked_at=NULL, valid_until=NULL WHERE fingerprint=$1", [fingerprint]) }
 })
 
 describe('established-session credential re-validation (ARC review 4489519640)', () => {
@@ -537,6 +580,8 @@ describe('V2 public window over HTTP MCP', () => {
       expect((await a.listTools()).tools.map(t => t.name)).toContain('aun.v2.send')
       const call = async (name: string, input: any) => JSON.parse(textOf(await a.callTool({ name, arguments: input })))
       const sent = await call('aun.v2.send', args); expect(sent.state).toBe('queued')
+      expect((await call('aun.v2.send', { ...args, agent_id: BOT_B })).code).toBe('REJECTED_INPUT')
+      expect((await call('aun.v2.status', { conversation_id: sent.conversation_id, agent_id: BOT_B })).code).toBe('REJECTED_INPUT')
       expect(await Promise.all([call('aun.v2.send', args), call('aun.v2.send', args)])).toEqual([sent, sent])
       expect((await call('aun.v2.send', { ...args, content: 'collision' })).code).toBe('CONFLICT')
       const read = await call('aun.v2.status', { conversation_id: sent.conversation_id })

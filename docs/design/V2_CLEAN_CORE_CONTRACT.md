@@ -225,12 +225,12 @@ aun v2 recover-plan --conversation-id <id> --json
 
 V1 compatibility commands may exist, but the clean core contract should not be named after V1 queue-work states.
 
-### V2-WINDOW-001 (Issue #975, boundary diff v5)
+### V2-WINDOW-001 (Issue #975, boundary diff v6)
 
 The bound HTTP MCP tools `aun.v2.send` / `aun.v2.status` and `aun v2 send|status --input <JSON>` are the initial remote window. CLI uses `AUN_V2_MCP_URL` and `AUN_V2_BEARER_TOKEN`; it never opens the database. Only binding-mode HTTP sessions expose these tools. Inputs reject `agent_id` and extra fields.
 `send` accepts `{to, conversation_id, idempotency_key, content, refs:{principal_ref, pack_digest, approval_ref, onza_run_id}}`; all refs must be nonempty strings. A null conversation uses a deterministic caller/key identity; an explicit conversation must already belong to the caller. Native content and `conversation.linked` refs append in one transaction. Same key/different material conflicts; a new run uses a new key/link. `status` accepts `{conversation_id}` and returns observed/max_seq/states/links/claims/unprojected_replies. States retain event IDs, separate turn/delivery claims, detail and receipt mode. Unknown delivery has `failure_code:null`; unavailable records are never invented. Expired/released/terminal claims are not current. Strict delivered payload means provider_verified; the old transport UUID means placed/notify_accepted.
 The server reads `AUN_V2_SCOPE_FILE` and independently supplied `AUN_V2_EXPECTED_HEAD`, `AUN_V2_DATABASE_IDENTITY`, `AUN_V2_RUNTIME_SNAPSHOT_SHA256` as the execution fence; these are configuration inputs, not measured deployment evidence. Initialize the dedicated event-log schema before use. Scope must admit the bound caller and destination and remain within its deadline. Scope/identity are not taken from refs.
-Tool errors: CONFLICT, REJECTED_INPUT, REJECTED_IDENTITY, REJECTED_ROUTE, REJECTED_SCOPE, UNOBSERVABLE (observed=false). Existing HTTP authentication errors remain unchanged; unbound, revoked and DB-unavailable credentials are indistinguishable at transport level. CLI has a 15-second network budget and exits nonzero on errors.
+Tool errors: CONFLICT, REJECTED_INPUT, REJECTED_IDENTITY, REJECTED_ROUTE, REJECTED_SCOPE, UNOBSERVABLE (observed=false). Existing HTTP authentication errors remain unchanged; identity keys are admitted by `status=active` and `valid_until`, while `revoked_at` is a record only; unbound, revoked and DB-unavailable credentials are indistinguishable at transport level. CLI has a 15-second network budget and exits nonzero on errors.
 Tag `aun-v2-window/v0.1` is applied to the merge commit by suite-lead after owner exact-head approval. This PR neither tags nor activates a worker. Post-tag compatibility permits additive fields only.
 
 ## 12. Required validators
