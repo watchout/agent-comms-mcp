@@ -41,7 +41,7 @@ class LoopbackTransport implements OutboxTransport {
   private byNonce = new Map<string, string>()
   constructor(
     private db: SqliteAdapter,
-    private route: (delivery: OutboxDelivery) => { toSeat: string } | null,
+    private route: (delivery: OutboxDelivery) => { fromSeat: string; toSeat: string } | null,
   ) {}
   async send(delivery: OutboxDelivery) {
     const existing = this.byNonce.get(delivery.nonce)
@@ -55,7 +55,7 @@ class LoopbackTransport implements OutboxTransport {
         messageId: `${delivery.replyId}#delivered`,
         seatId: target.toSeat,
         conversationId: delivery.channelExternalId ?? 'loop',
-        payload: { content: delivery.content, author_id: 'peer', channel_id: delivery.channelExternalId },
+        payload: { content: delivery.content, author_id: target.fromSeat, from: target.fromSeat, to: target.toSeat, channel_id: delivery.channelExternalId },
       })
     }
     return { transportMessageId: id }
@@ -75,7 +75,7 @@ describe('bot↔bot round-trip with zero Discord', () => {
       async runTurn({ turn }) {
         return {
           outcome: 'replied',
-          replies: [{ content: `pong`, channelExternalId: 'chan-ab' }],
+          replies: [{ content: `pong`, channelExternalId: 'chan-ab', payload: { from: 'bot-b', to: 'bot-a' } }],
         }
       },
     }
@@ -84,20 +84,21 @@ describe('bot↔bot round-trip with zero Discord', () => {
       async runTurn() {
         pongs++
         if (pongs >= ROUNDS) return { outcome: 'no_reply' }
-        return { outcome: 'replied', replies: [{ content: 'ping', channelExternalId: 'chan-ab' }] }
+        return { outcome: 'replied', replies: [{ content: 'ping', channelExternalId: 'chan-ab', payload: { from: 'bot-a', to: 'bot-b' } }] }
       },
     }
-    // replies from B route to A's inbox; replies from A route to B's
-    const transport = new LoopbackTransport(db, d =>
-      d.replyId.includes(':turn:bot-b:') || d.replyId.startsWith('reply:turn:bot-b')
-        ? { toSeat: 'bot-a' }
-        : { toSeat: 'bot-b' },
-    )
+    // Dispatcher payload comes from reply.enqueued; IDs are opaque, not routes.
+    const transport = new LoopbackTransport(db, ({ payload: { from, to } }) => {
+      if ((from === 'bot-a' && to === 'bot-b') || (from === 'bot-b' && to === 'bot-a')) {
+        return { fromSeat: from, toSeat: to }
+      }
+      throw new Error(`invalid recorded route: ${from} -> ${to}`)
+    })
 
     // kick off: A pings B
     await receiveMessage(db, {
       messageId: 'kick', seatId: 'bot-b', conversationId: 'chan-ab',
-      payload: { content: 'ping', author_id: 'bot-a', channel_id: 'chan-ab' },
+      payload: { content: 'ping', author_id: 'bot-a', from: 'bot-a', to: 'bot-b', channel_id: 'chan-ab' },
     })
 
     const roundTimes: number[] = []
@@ -132,12 +133,30 @@ describe('bot↔bot round-trip with zero Discord', () => {
     expect(transport.sends.length).toBe(enqueued[0].n) // zero double sends
     expect(pongs).toBe(ROUNDS)
 
+    // Read committed facts through an independent read-only connection.
+    const observed = new SqliteAdapter(join(dir, 'b2b.db'), { readonly: true })
+    const seatCounts = await observed.query<{ seat_id: string; received: number; completed: number }>(
+      `SELECT seat_id,
+         SUM(CASE WHEN event_type = 'message.received' THEN 1 ELSE 0 END) AS received,
+         SUM(CASE WHEN event_type = 'turn.completed' THEN 1 ELSE 0 END) AS completed
+       FROM event_log WHERE event_type IN ('message.received', 'turn.completed')
+       GROUP BY seat_id ORDER BY seat_id`,
+    ).finally(() => observed.close())
+    const turns = seatCounts.reduce((n, seat) => n + seat.completed, 0)
+    console.log(`[b2b-seats] ${JSON.stringify(seatCounts)} samples=${roundTimes.length}`)
+    expect(seatCounts).toEqual([
+      { seat_id: 'bot-a', received: ROUNDS, completed: ROUNDS },
+      { seat_id: 'bot-b', received: ROUNDS, completed: ROUNDS },
+    ])
+    expect(roundTimes.length).toBe(ROUNDS)
+
     const rtP95 = p95(roundTimes)
+    console.log(`[b2b-measured] ${JSON.stringify({ p95_ms: rtP95, samples: roundTimes.length, turns, seats: seatCounts })}`)
     const perLeg = totalMs / (ROUNDS * 2) // one leg = one bot processing + delivery
     console.log(
       `[b2b] ${ROUNDS} full rounds in ${totalMs.toFixed(0)}ms — ` +
       `round p95=${rtP95.toFixed(1)}ms, per-leg avg=${perLeg.toFixed(1)}ms, ` +
-      `turns=${ROUNDS * 2} deliveries=${delivered[0].n}`,
+      `turns=${turns} deliveries=${delivered[0].n}`,
     )
     // fail-closed budgets (generous vs observed; catch structural regressions)
     expect(rtP95).toBeLessThan(100)
