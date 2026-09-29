@@ -53,6 +53,16 @@ test('link conflict cannot leave a received event; DB failures are unobservable'
   expect((await v2Status(db, c, { conversation_id: 'absent' })).states).toEqual([])
   expect(await code(v2Status({ ...db, query: async () => { throw Error('offline') } } as any, c, { conversation_id: 'absent' }))).toBe('UNOBSERVABLE')
 })
+test('UNKNOWN detail survives JSON serialization with nulls for absent values and preserves zero', async () => {
+  const sent = await v2Send(db, c, input()), log = new EventLog(db)
+  for (const [id, payload] of [['missing', {}], ['zero', { attempt_ordinal: 0 }]] as const) {
+    await log.append({ eventId: id, eventType: 'reply.delivery_unknown', conversationId: sent.conversation_id, replyId: id, payload })
+  }
+  const result = JSON.parse(JSON.stringify(await v2Status(db, c, { conversation_id: sent.conversation_id })))
+  const absent = { reconciliation_mode: null, attempt_ordinal: null, invocation_started_event_id: null, provider_request_digest: null, failure_code: null, terminal: false }
+  expect(result.states.find((s: any) => s.event_id === 'missing').detail).toEqual(absent)
+  expect(result.states.find((s: any) => s.event_id === 'zero').detail).toEqual({ ...absent, attempt_ordinal: 0 })
+})
 test('eight states preserve details, strict/legacy receipt modes and only current unexpired claims', async () => {
   const sent = await v2Send(db, c, input()), log = new EventLog(db)
   const put = async (id: string, eventType: AppendEvent['eventType'], payload = {}, turnId = id, replyId: string | null = null, claimEpoch = 0, causationId: string | null = null) => log.append({ eventId: id, eventType, payload, conversationId: sent.conversation_id, turnId, replyId, claimEpoch, causationId })

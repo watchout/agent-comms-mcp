@@ -99,8 +99,8 @@ export async function v2Status(db: DbAdapter, c: V2WindowContext, value: unknown
       if (terminal) terminalReplies.add(reply)
     }
     if (t === 'reply.delivery_unknown') {
-      state = 'unknown'; detail = { reconciliation_mode: p.reconciliation_mode, attempt_ordinal: p.attempt_ordinal,
-        invocation_started_event_id: p.invocation_started_event_id, provider_request_digest: p.provider_request_digest, failure_code: null }
+      state = 'unknown'; detail = { reconciliation_mode: p.reconciliation_mode ?? null, attempt_ordinal: p.attempt_ordinal ?? null,
+        invocation_started_event_id: p.invocation_started_event_id ?? null, provider_request_digest: p.provider_request_digest ?? null, failure_code: null }
     }
     if (t === 'reply.delivered') {
       try { decodeReplyDeliveredPayload(p); state = 'delivered'; receiptMode = 'provider_verified' }
