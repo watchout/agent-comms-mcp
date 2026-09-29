@@ -52,4 +52,4 @@ The five large-file entries existed at adoption; #970 tracks V2 reduction and #9
 
 Production entries are server, CLI, bin, entrypoints, DB, hooks and scripts. Tests, benchmarks and demo are excluded from this first profile and remain follow-up scope in the switch plan. `bun` is a runtime builtin dependency. Core must not depend on adapters, bin, CLI or server; cycles are forbidden.
 
-No baseline files or baseline caps are introduced here. Required checks, enforce_by and version_hold require their separate owner path. AB-01/02/03/04/05/06/07/08/10/11/12/13/18/23/24 are observed; AB-14 enforcement/rollback is pending, not passed.
+No baseline files or baseline caps are introduced here. Required checks, enforce_by and version_hold require their separate owner path. AB-01/02/03/04/05/06/07/08/10/11/12/13/18/23/24 are in scope; each run records which checks executed. Skipped checks are unobserved. AB-14 enforcement/rollback is pending, not passed.
