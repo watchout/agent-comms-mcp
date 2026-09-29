@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -91,8 +92,8 @@ describe('K3 dedicated dispatcher liveness', () => {
     expect(outbox.status).toBe('completed')
     expect((outbox.value as { cycles: number }).cycles).toBe(100)
     expect(cycleLatency).toHaveLength(100)
-    expect(percentile95(cycleLatency)).toBeLessThanOrEqual(100)
-    expect(performance.now() - overallStart).toBeLessThan(200)
+    expectWithinBudget(percentile95(cycleLatency), 100, 'outbox-dispatcher.p95', { inclusive: true })
+    expectWithinBudget(performance.now() - overallStart, 200, 'outbox-dispatcher.overall')
     expect(new Set([seatDb.id, dispatcherDb.id, reconcilerDb.id]).size).toBe(3)
   })
 

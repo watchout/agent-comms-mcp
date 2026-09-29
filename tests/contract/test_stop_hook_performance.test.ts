@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs'
@@ -152,6 +153,6 @@ describe('test_stop_hook_performance — 10 MB transcript → p95 < 100 ms', () 
     // the measured timings so a PR reviewer can see the distribution.
     // eslint-disable-next-line no-console
     console.log(`[perf] durations ms: min=${durations[0].toFixed(1)} p50=${durations[Math.floor(N/2)].toFixed(1)} p95=${p95.toFixed(1)} max=${durations[durations.length-1].toFixed(1)}`)
-    expect(p95).toBeLessThan(100)
+    expectWithinBudget(p95, 100, 'stop-hook.p95')
   })
 })

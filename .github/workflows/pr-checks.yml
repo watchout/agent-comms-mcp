@@ -141,6 +141,52 @@ jobs:
           path: route.json
           retention-days: 7
 
+  timing:
+    name: timing (informative, not required)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agent_comms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/agent_comms_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run migrations
+        run: bun run db/migrate.ts
+
+      - name: Measure timing budgets
+        run: >-
+          AUN_TIMING_ASSERTS=1 bun test --timeout 30000
+          tests/eventlog/eventlog-bot-to-bot-roundtrip.test.ts
+          tests/eventlog/eventlog-p95.test.ts
+          tests/contract/test_stop_hook_performance.test.ts
+          tests/aun-k3/dedicated-outbox-dispatcher.test.ts
+          tests/aun-k3/replay-starvation.test.ts
+          tests/aun-k2/seat-supervisor-fault-containment.test.ts
+          tests/aun-k2/database-reconnect.test.ts
+
   # ── Auto-merge (owner exact-head + explicit method gated) ────────────────
   # route:fast-merge + all Layer 0 checks pass is not sufficient.
   # The PR must be non-draft, carry owner exact-head current-overlay labels,
