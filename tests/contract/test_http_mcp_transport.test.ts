@@ -42,8 +42,19 @@ const windowAgents = [BOT_A, BOT_B].sort().map(agent_id => ({ agent_id, profile_
 const windowScope = { schema_version: 'aun-v2-native-mesh-scope/v1', run_id: PREFIX, stage_id: 'S0_IMPLEMENTATION', repository: 'watchout/agent-comms-mcp', exact_implementation_head: 'b'.repeat(40), database_identity: 'isolated-http', frozen_enabled_set: windowAgents, frozen_enabled_set_sha256: frozenEnabledSetSha256(windowAgents), runtime_snapshot_sha256: runtimeSnapshotSha256(windowAgents), provider_dispatch: 'disabled', V1_mode: 'observe_only_no_traversal', deadline_ms: Date.now() + 600000 }
 writeFileSync(join(windowDir, 'scope.json'), JSON.stringify(windowScope))
 
+const readiness = new Map<number, { child: ChildProcess; spawnedAt: number; portFree: string; stderr: string }>()
+
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
-  return spawn('bun', ['run', 'server.ts'], {
+  let portFree = 'true'
+  try {
+    // Synchronous one-shot probe preserves the harness's spawn/caller ordering.
+    Bun.listen({ hostname: '::', port, socket: { data() {} } }).stop(true)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    portFree = code === 'EADDRINUSE' ? 'false(EADDRINUSE)' : `unknown(${String(error)})`
+  }
+  const spawnedAt = Date.now()
+  const child = spawn('bun', ['run', 'server.ts'], {
     cwd: `${import.meta.dir}/../..`,
     env: {
       ...process.env,
@@ -62,6 +73,14 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
+  const diagnostic = { child, spawnedAt, portFree, stderr: '' }
+  readiness.set(port, diagnostic)
+  child.stderr!.setEncoding('utf8')
+  child.stderr!.on('data', (chunk: string) => {
+    // Keep 40 complete lines plus the possibly incomplete final line.
+    diagnostic.stderr = (diagnostic.stderr + chunk).split('\n').slice(-41).join('\n')
+  })
+  return child
 }
 
 async function waitHealth(port: number): Promise<void> {
@@ -69,11 +88,18 @@ async function waitHealth(port: number): Promise<void> {
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/health`)
-      if (res.ok) return
+      if (res.ok) {
+        console.log(`[readiness] port=${port} ready_ms=${Date.now() - readiness.get(port)!.spawnedAt}`)
+        return
+      }
     } catch {}
     await new Promise((r) => setTimeout(r, 250))
   }
-  throw new Error('server /health never became ready')
+  const diagnostic = readiness.get(port)!
+  const stderrTail = diagnostic.stderr.replace(/\n$/, '').split('\n').slice(-40).join('\n')
+  throw new Error(`server /health never became ready: port=${port} elapsed_ms=${Date.now() - diagnostic.spawnedAt}`
+    + ` port_free_before_spawn=${diagnostic.portFree} exit_code=${diagnostic.child.exitCode}`
+    + ` signal=${diagnostic.child.signalCode}\nstderr_tail_40:\n${stderrTail}`)
 }
 
 function initBody(): string {
