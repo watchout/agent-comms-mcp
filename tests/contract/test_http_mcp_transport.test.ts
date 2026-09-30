@@ -12,6 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createReadiness } from '../helpers/readiness'
 import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -42,8 +43,10 @@ const windowAgents = [BOT_A, BOT_B].sort().map(agent_id => ({ agent_id, profile_
 const windowScope = { schema_version: 'aun-v2-native-mesh-scope/v1', run_id: PREFIX, stage_id: 'S0_IMPLEMENTATION', repository: 'watchout/agent-comms-mcp', exact_implementation_head: 'b'.repeat(40), database_identity: 'isolated-http', frozen_enabled_set: windowAgents, frozen_enabled_set_sha256: frozenEnabledSetSha256(windowAgents), runtime_snapshot_sha256: runtimeSnapshotSha256(windowAgents), provider_dispatch: 'disabled', V1_mode: 'observe_only_no_traversal', deadline_ms: Date.now() + 600000 }
 writeFileSync(join(windowDir, 'scope.json'), JSON.stringify(windowScope))
 
+const readiness = createReadiness('test_http_mcp_transport.test.ts')
+
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
-  return spawn('bun', ['run', 'server.ts'], {
+  return readiness.boot(port, () => spawn('bun', ['run', 'server.ts'], {
     cwd: `${import.meta.dir}/../..`,
     env: {
       ...process.env,
@@ -61,19 +64,11 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
       ...extraEnv,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-  })
+  }))
 }
 
 async function waitHealth(port: number): Promise<void> {
-  const deadline = Date.now() + 15000
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`)
-      if (res.ok) return
-    } catch {}
-    await new Promise((r) => setTimeout(r, 250))
-  }
-  throw new Error('server /health never became ready')
+  return readiness.wait(port, 15000, 250)
 }
 
 function initBody(): string {
@@ -396,15 +391,7 @@ describe('spike-bot-id mode requires explicit opt-in (dev/test only)', () => {
       AUTH_TOKEN: SHARED,
       AUTH_SKIP_LOCALHOST: 'false',
     }, PORT)
-    const deadline = Date.now() + 15000
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/health`, { headers: { Authorization: `Bearer ${SHARED}` } })
-        if (res.ok) return
-      } catch {}
-      await new Promise((r) => setTimeout(r, 250))
-    }
-    throw new Error('spike-mode server never became ready')
+    await readiness.wait(PORT, 15000, 250, { headers: { Authorization: `Bearer ${SHARED}` } })
   }, 30000)
 
   afterAll(() => {
