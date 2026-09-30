@@ -42,7 +42,8 @@ const windowAgents = [BOT_A, BOT_B].sort().map(agent_id => ({ agent_id, profile_
 const windowScope = { schema_version: 'aun-v2-native-mesh-scope/v1', run_id: PREFIX, stage_id: 'S0_IMPLEMENTATION', repository: 'watchout/agent-comms-mcp', exact_implementation_head: 'b'.repeat(40), database_identity: 'isolated-http', frozen_enabled_set: windowAgents, frozen_enabled_set_sha256: frozenEnabledSetSha256(windowAgents), runtime_snapshot_sha256: runtimeSnapshotSha256(windowAgents), provider_dispatch: 'disabled', V1_mode: 'observe_only_no_traversal', deadline_ms: Date.now() + 600000 }
 writeFileSync(join(windowDir, 'scope.json'), JSON.stringify(windowScope))
 
-const readiness = new Map<number, { child: ChildProcess; spawnedAt: number; portFree: string; stderr: string }>()
+const STDERR_MAX_CHARS = 8192 // UTF-16 code units; never retain half a surrogate pair.
+const readiness = new Map<number, { child: ChildProcess; spawnedAt: number; portFree: string; stderr: string; truncated: boolean }>()
 
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
   let portFree = 'true'
@@ -73,12 +74,15 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
-  const diagnostic = { child, spawnedAt, portFree, stderr: '' }
+  const diagnostic = { child, spawnedAt, portFree, stderr: '', truncated: false }
   readiness.set(port, diagnostic)
   child.stderr!.setEncoding('utf8')
   child.stderr!.on('data', (chunk: string) => {
-    // Keep 40 complete lines plus the possibly incomplete final line.
-    diagnostic.stderr = (diagnostic.stderr + chunk).split('\n').slice(-41).join('\n')
+    const combined = diagnostic.stderr + chunk
+    diagnostic.truncated ||= combined.length > STDERR_MAX_CHARS
+    const bounded = combined.slice(-STDERR_MAX_CHARS).replace(/^[\uDC00-\uDFFF]/, '')
+    // Bound size before splitting; keep 40 complete lines plus a partial line.
+    diagnostic.stderr = bounded.split('\n').slice(-41).join('\n')
   })
   return child
 }
@@ -97,9 +101,10 @@ async function waitHealth(port: number): Promise<void> {
   }
   const diagnostic = readiness.get(port)!
   const stderrTail = diagnostic.stderr.replace(/\n$/, '').split('\n').slice(-40).join('\n')
+  const truncation = diagnostic.truncated ? `[stderr truncated; capture limit=${STDERR_MAX_CHARS} UTF-16 code units]\n` : ''
   throw new Error(`server /health never became ready: port=${port} elapsed_ms=${Date.now() - diagnostic.spawnedAt}`
     + ` port_free_before_spawn=${diagnostic.portFree} exit_code=${diagnostic.child.exitCode}`
-    + ` signal=${diagnostic.child.signalCode}\nstderr_tail_40:\n${stderrTail}`)
+    + ` signal=${diagnostic.child.signalCode}\n${truncation}stderr_tail_40:\n${stderrTail}`)
 }
 
 function initBody(): string {
