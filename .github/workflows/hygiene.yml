@@ -1,0 +1,15 @@
+name: hygiene
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  hygiene:
+    uses: watchout/shirube/.github/workflows/hygiene.yml@40733f6a5779e0d45a6cb64a0f76fc6528e94867 # v0.1.3
+    with:
+      profile: .shirube/hygiene-profile.md
+      targets: "core adapters bin cli db entrypoints hooks scripts server.ts"
+      node-version: "22"
+      package-manager: bun

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "server.ts!",
+    "bin/**!",
+    "cli/index.ts!",
+    "entrypoints/**!",
+    "db/*.ts!",
+    "hooks/**!",
+    "scripts/**!"
+  ],
+  "project": [
+    "core/**!",
+    "adapters/**!",
+    "bin/**!",
+    "cli/**!",
+    "db/**!",
+    "entrypoints/**!",
+    "hooks/**!",
+    "scripts/**!",
+    "server.ts!"
+  ],
+  "ignoreDependencies": [
+    "bun"
+  ]
+}
