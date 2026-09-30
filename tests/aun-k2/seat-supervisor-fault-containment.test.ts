@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 import { describe, expect, test } from 'bun:test'
 import type { DbAdapter } from '../../core/db/adapter'
 import { runSeatSupervisorCycle } from '../../core/eventlog/seat-supervisor'
@@ -130,7 +131,7 @@ describe('K2 seat supervisor fault containment', () => {
     if (guarded.kind !== 'report') throw new Error('supervisor stalled beyond the independent finite guard')
     const alphaReport = guarded.report.units.find(unit => unit.unit_id === 'seat:alpha')!
     const betaReport = guarded.report.units.find(unit => unit.unit_id === 'seat:beta')!
-    expect(performance.now() - started).toBeLessThan(250)
+    expectWithinBudget(performance.now() - started, 250, 'seat-supervisor.containment')
     expect(alphaReport).toMatchObject({
       status: 'unhealthy_exit', stop_code: 'UNIT_TIMEOUT', closed_adapters: 1,
     })
@@ -203,8 +204,8 @@ describe('K2 seat supervisor fault containment', () => {
     expect(outbox.status).toBe('completed')
     expect((beta.value as { completed: number }).completed).toBe(100)
     expect((outbox.value as { completed: number }).completed).toBe(100)
-    expect((beta.value as { last_at_ms: number }).last_at_ms).toBeLessThanOrEqual(100)
-    expect((outbox.value as { last_at_ms: number }).last_at_ms).toBeLessThanOrEqual(100)
+    expectWithinBudget((beta.value as { last_at_ms: number }).last_at_ms, 100, 'seat-supervisor.beta', { inclusive: true })
+    expectWithinBudget((outbox.value as { last_at_ms: number }).last_at_ms, 100, 'seat-supervisor.outbox', { inclusive: true })
     expect(instances.get('seat:alpha')![0].mutations).toHaveLength(0)
     expect(instances.get('seat:beta')![0].mutations.every(mutation => mutation.owner === 'beta')).toBeTrue()
     expect(instances.get('outbox:v2')![0].mutations.every(mutation => mutation.owner === 'outbox')).toBeTrue()

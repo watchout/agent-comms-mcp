@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 // V2 bot↔bot round-trip fixture — the owner's isolation question made
 // executable: can two seats exchange messages FAST with ZERO Discord?
 //
@@ -140,8 +141,8 @@ describe('bot↔bot round-trip with zero Discord', () => {
       `turns=${ROUNDS * 2} deliveries=${delivered[0].n}`,
     )
     // fail-closed budgets (generous vs observed; catch structural regressions)
-    expect(rtP95).toBeLessThan(100)
-    expect(totalMs).toBeLessThan(15_000)
+    expectWithinBudget(rtP95, 100, 'roundtrip.p95')
+    expectWithinBudget(totalMs, 15_000, 'roundtrip.total')
 
     await db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -187,7 +188,7 @@ describe('bot↔bot round-trip with zero Discord', () => {
       `[b2b-burst] enqueue ${N} in ${enqueueMs.toFixed(0)}ms (${(enqueueMs / N).toFixed(2)}ms/msg), ` +
       `process+deliver all in ${drainMs.toFixed(0)}ms (${(drainMs / N).toFixed(2)}ms/msg)`,
     )
-    expect(drainMs).toBeLessThan(20_000)
+    expectWithinBudget(drainMs, 20_000, 'roundtrip.drain')
 
     await db.close()
     rmSync(dir, { recursive: true, force: true })

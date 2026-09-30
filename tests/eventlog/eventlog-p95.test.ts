@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 // EventLogCore/v1 — performance budget fixture (fail-closed on regression).
 //
 // The owner's 高速/効率 requirement made testable: p95 budgets are hard
@@ -89,10 +90,10 @@ describe('performance budgets', () => {
     )
 
     // fail-closed budgets
-    expect(enqueueP95).toBeLessThan(ENQUEUE_P95_BUDGET_MS)
-    expect(claimP95).toBeLessThan(CLAIM_P95_BUDGET_MS)
-    expect(viewMs).toBeLessThan(QUEUE_VIEW_BUDGET_MS)
-    expect(cycleMs).toBeLessThan(FULL_CYCLE_BUDGET_MS)
+    expectWithinBudget(enqueueP95, ENQUEUE_P95_BUDGET_MS, 'eventlog.enqueue.p95')
+    expectWithinBudget(claimP95, CLAIM_P95_BUDGET_MS, 'eventlog.claim.p95')
+    expectWithinBudget(viewMs, QUEUE_VIEW_BUDGET_MS, 'eventlog.queue-view')
+    expectWithinBudget(cycleMs, FULL_CYCLE_BUDGET_MS, 'eventlog.full-cycle')
 
     await db.close()
     rmSync(dir, { recursive: true, force: true })

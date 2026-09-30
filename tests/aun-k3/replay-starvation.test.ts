@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -59,7 +60,7 @@ describe('K3 replay and pending selection', () => {
       const elapsed = performance.now() - started
       expect(view.map(row => row.reply_id)).toContain(fixture.unit.reply_id)
       expect(view.find(row => row.reply_id === fixture.unit.reply_id)?.state).toBe('pending')
-      expect(elapsed).toBeLessThan(2000)
+      expectWithinBudget(elapsed, 2000, 'replay.sqlite')
       expect(canonicalJson(await rebuildDeliveryTruthView(db))).toBe(canonicalJson(view))
     } finally {
       await db.close()
@@ -82,7 +83,7 @@ describe.if(pgEnabled())('K3 PostgreSQL replay and pending selection', () => {
       const started = performance.now()
       const view = await deliveryTruthView(pg.db)
       expect(view.find(row => row.reply_id === fixture.unit.reply_id)?.state).toBe('pending')
-      expect(performance.now() - started).toBeLessThan(2000)
+      expectWithinBudget(performance.now() - started, 2000, 'replay.postgres')
       expect(canonicalJson(await rebuildDeliveryTruthView(pg.db))).toBe(canonicalJson(view))
     } finally { await pg.cleanup() }
   }, 20_000)

@@ -1,3 +1,4 @@
+import { expectWithinBudget } from '../helpers/timing'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -145,7 +146,7 @@ describe.if(fixtureEnabled())('K2 database reconnect and poll backstop', () => {
       expect(adapters).toHaveLength(2)
       expect(adapters[0].closed).toBeTrue()
       expect(adapters[0].id).not.toBe(adapters[1].id)
-      expect(elapsedSeconds).toBeLessThanOrEqual(30)
+      expectWithinBudget(elapsedSeconds, 30, 'database.reconnect', { inclusive: true, unit: 's' })
       expect(modelCalls).toBe(1)
       expect((report.value as { claimed: number; completed: number })).toMatchObject({ claimed: 1, completed: 1 })
       expect(Number((await fixture.bootstrap.queryOne<{ n: string }>(
@@ -184,7 +185,7 @@ describe.if(fixtureEnabled())('K2 database reconnect and poll backstop', () => {
       const pollBackstopMs = performance.now() - started
       expect(notifyConsumed).toBeFalse()
       expect(result).toMatchObject({ claimed: 1, completed: 1 })
-      expect(pollBackstopMs).toBeLessThanOrEqual(2_000)
+      expectWithinBudget(pollBackstopMs, 2_000, 'database.poll-backstop', { inclusive: true })
       const claim = await fixture.bootstrap.queryOne<{ turn_id: string }>(
         `SELECT turn_id FROM event_log WHERE event_type='turn.claimed' AND seat_id='beta' ORDER BY seq DESC LIMIT 1`,
       )
