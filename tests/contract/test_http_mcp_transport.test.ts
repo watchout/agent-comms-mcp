@@ -12,6 +12,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createReadiness } from '../helpers/readiness'
 import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -42,20 +43,10 @@ const windowAgents = [BOT_A, BOT_B].sort().map(agent_id => ({ agent_id, profile_
 const windowScope = { schema_version: 'aun-v2-native-mesh-scope/v1', run_id: PREFIX, stage_id: 'S0_IMPLEMENTATION', repository: 'watchout/agent-comms-mcp', exact_implementation_head: 'b'.repeat(40), database_identity: 'isolated-http', frozen_enabled_set: windowAgents, frozen_enabled_set_sha256: frozenEnabledSetSha256(windowAgents), runtime_snapshot_sha256: runtimeSnapshotSha256(windowAgents), provider_dispatch: 'disabled', V1_mode: 'observe_only_no_traversal', deadline_ms: Date.now() + 600000 }
 writeFileSync(join(windowDir, 'scope.json'), JSON.stringify(windowScope))
 
-const STDERR_MAX_CHARS = 8192 // UTF-16 code units; never retain half a surrogate pair.
-const readiness = new Map<number, { child: ChildProcess; spawnedAt: number; portFree: string; stderr: string; truncated: boolean }>()
+const readiness = createReadiness('test_http_mcp_transport.test.ts')
 
 function bootServerWith(extraEnv: Record<string, string>, port: number): ChildProcess {
-  let portFree = 'true'
-  try {
-    // Synchronous one-shot probe preserves the harness's spawn/caller ordering.
-    Bun.listen({ hostname: '::', port, socket: { data() {} } }).stop(true)
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code
-    portFree = code === 'EADDRINUSE' ? 'false(EADDRINUSE)' : `unknown(${String(error)})`
-  }
-  const spawnedAt = Date.now()
-  const child = spawn('bun', ['run', 'server.ts'], {
+  return readiness.boot(port, () => spawn('bun', ['run', 'server.ts'], {
     cwd: `${import.meta.dir}/../..`,
     env: {
       ...process.env,
@@ -73,38 +64,11 @@ function bootServerWith(extraEnv: Record<string, string>, port: number): ChildPr
       ...extraEnv,
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-  })
-  const diagnostic = { child, spawnedAt, portFree, stderr: '', truncated: false }
-  readiness.set(port, diagnostic)
-  child.stderr!.setEncoding('utf8')
-  child.stderr!.on('data', (chunk: string) => {
-    const combined = diagnostic.stderr + chunk
-    diagnostic.truncated ||= combined.length > STDERR_MAX_CHARS
-    const bounded = combined.slice(-STDERR_MAX_CHARS).replace(/^[\uDC00-\uDFFF]/, '')
-    // Bound size before splitting; keep 40 complete lines plus a partial line.
-    diagnostic.stderr = bounded.split('\n').slice(-41).join('\n')
-  })
-  return child
+  }))
 }
 
 async function waitHealth(port: number): Promise<void> {
-  const deadline = Date.now() + 15000
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`)
-      if (res.ok) {
-        console.log(`[readiness] port=${port} ready_ms=${Date.now() - readiness.get(port)!.spawnedAt}`)
-        return
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 250))
-  }
-  const diagnostic = readiness.get(port)!
-  const stderrTail = diagnostic.stderr.replace(/\n$/, '').split('\n').slice(-40).join('\n')
-  const truncation = diagnostic.truncated ? `[stderr truncated; capture limit=${STDERR_MAX_CHARS} UTF-16 code units]\n` : ''
-  throw new Error(`server /health never became ready: port=${port} elapsed_ms=${Date.now() - diagnostic.spawnedAt}`
-    + ` port_free_before_spawn=${diagnostic.portFree} exit_code=${diagnostic.child.exitCode}`
-    + ` signal=${diagnostic.child.signalCode}\n${truncation}stderr_tail_40:\n${stderrTail}`)
+  return readiness.wait(port, 15000, 250)
 }
 
 function initBody(): string {
@@ -427,15 +391,7 @@ describe('spike-bot-id mode requires explicit opt-in (dev/test only)', () => {
       AUTH_TOKEN: SHARED,
       AUTH_SKIP_LOCALHOST: 'false',
     }, PORT)
-    const deadline = Date.now() + 15000
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/health`, { headers: { Authorization: `Bearer ${SHARED}` } })
-        if (res.ok) return
-      } catch {}
-      await new Promise((r) => setTimeout(r, 250))
-    }
-    throw new Error('spike-mode server never became ready')
+    await readiness.wait(PORT, 15000, 250, { headers: { Authorization: `Bearer ${SHARED}` } })
   }, 30000)
 
   afterAll(() => {

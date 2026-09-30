@@ -17,6 +17,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createReadiness } from '../helpers/readiness'
 import { createHash, randomUUID } from 'node:crypto'
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -33,8 +34,10 @@ const CANARY_CHANNEL = `${PREFIX}-channel`
 let serverProc: ChildProcess | null = null
 let pg: PgClient
 
+const readiness = createReadiness('test_http_mcp_restart_canary.test.ts')
+
 function bootServer(): ChildProcess {
-  return spawn('bun', ['run', 'server.ts'], {
+  return readiness.boot(HTTP_PORT, () => spawn('bun', ['run', 'server.ts'], {
     cwd: `${import.meta.dir}/../..`,
     env: {
       ...process.env,
@@ -50,19 +53,11 @@ function bootServer(): ChildProcess {
       DISCORD_BOT_TOKEN: '',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
-  })
+  }))
 }
 
 async function waitForHealth(timeoutMs = 15000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${HTTP_PORT}/health`)
-      if (res.ok) return
-    } catch {}
-    await new Promise((r) => setTimeout(r, 250))
-  }
-  throw new Error('server /health never became ready')
+  return readiness.wait(HTTP_PORT, timeoutMs, 250)
 }
 
 async function waitForExit(proc: ChildProcess, timeoutMs = 8000): Promise<void> {
